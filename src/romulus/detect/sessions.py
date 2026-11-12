@@ -24,6 +24,7 @@ from romulus.detect.bounded import (
     Limit,
     RecentIds,
     SpillList,
+    StateExhausted,
 )
 from romulus.detect.citing import (
     BoundStage,
@@ -451,7 +452,7 @@ class _Stitched(Playbook):
         return []           # staged on disk instead
 
 
-SERVED_ELSEWHERE = "served, other service"      # an inbound session the inbound-session rule reports
+SERVED_ELSEWHERE = "served, other service"      # an inbound session the inbound-session rule judges
 
 
 class LongExternalConnection(_Stitched):
@@ -508,7 +509,11 @@ class LongExternalConnection(_Stitched):
                 "net.long_inbound_session (every internal service except the ordinary web ports), net.external_rdp and net.vnc_session (RDP and VNC negotiation from outside), "
                 "host.ssh_login_external_source and win.rdp_external_source (host logons from outside), "
                 "net.long_unidentified_session (long data-carrying connections with no identified protocol, in "
-                "either direction) and net.protocol_port_mismatch (a protocol that does not fit its port)",
+                "either direction) and net.protocol_port_mismatch (a protocol that does not fit its port). Known "
+                "limits: a long session an outside address opened to an ordinary web port (80, 443, 8080, 8443), such "
+                "as a web shell or a tunnel over HTTPS, is not surfaced by these rules (only a cell note counts it); "
+                "and a Zeek history whose roles Zeek flipped is read with letters before each ^ taken in the earlier "
+                "roles, which assumes Zeek does not re-case them when it flips (hist_seen)",
         "research_basis": "ATT&CK Enterprise 20.0 T1071, T1095 and T1571 (network traffic flow detection); "
                           "reimplemented from the behavior. Opening and exchange semantics: Arkime "
                           "capture/parsers/tcp.c (a session is oriented by its SYN, and swapped when its first packet "
@@ -643,7 +648,8 @@ class LongExternalConnection(_Stitched):
                                  "high", evs[0].entities(), group_key=c["report_key"]))
         self._unreported.publish(self, lambda seconds: f"{seconds / 60:.0f} minutes", {SERVED_ELSEWHERE: (
             False, ("connections a recorded TCP opening shows an external address opened to an internal service other "
-                   "than the ordinary web ports (reported as inbound sessions by net.long_inbound_session)"))})
+                   "than the ordinary web ports (judged as inbound sessions by net.long_inbound_session; its own cell "
+                   "states its coverage)"))})
         return out
 
 
@@ -679,13 +685,14 @@ def _web_only(c: dict) -> bool:
 
 
 class LongInboundSession(LongExternalConnection):
-    """Long TCP sessions an outside address held open to one internal service: a record shows the outside address
+    """Long TCP sessions outside addresses held open to internal services: a record shows the outside address
     opened each, or no record shows the opening and both sides exchanged traffic with the outside address on a client
-    port facing the service port. Ordinary web ports are left out. One item per (outside address, internal address,
-    service port), counting and citing its sessions."""
+    port facing the service port. Ordinary web ports are left out. A remote-access service gets one item per (outside
+    address, internal address, port); any other service one item per exposed (internal address, port), with every
+    outside address as a member held on disk."""
     id = "net.long_inbound_session"
     version = "1"
-    title = "Long TCP sessions an outside address held to an internal service"
+    title = "Long TCP sessions outside addresses held to an internal service"
     severity, lane = "medium", "lead"
     attack = ("T1133", "T1021")
     assures_negative = False
@@ -704,8 +711,8 @@ class LongInboundSession(LongExternalConnection):
                    "the outside address (ownership, other internal hosts it reached)")
     SESSIONS_CITED = 6                  # sessions whose bounding and opening records are cited per item
     card: ClassVar[dict] = {
-        "behavior": "an outside address held one or more TCP sessions, each spanning at least 30 minutes, open to one "
-                    "service port of one internal address, read as sessions the outside address held: a record shows "
+        "behavior": "outside addresses held TCP sessions, each spanning at least 30 minutes, open to one service port "
+                    "of one internal address, read as sessions the outside address held: a record shows "
                     "the outside address opened each, or no record shows the opening, both sides sent traffic beyond "
                     "resets and handshake answers, and the outside address is on a port of 32768 or above facing the "
                     "internal port below it. Sessions to the ordinary web ports (80, 443, 8080, 8443) are not "
@@ -718,9 +725,16 @@ class LongInboundSession(LongExternalConnection):
                     "5900-5909, WinRM 5985/5986, X11 6000-6063, or a sensor's ssh, telnet, rdp, rfb or x11 "
                     "identification) is named; other services are named by port and identified protocol",
         "benign_and_cost": "administrators, vendors and partners using exposed services, jump hosts, VPN "
-                           "concentrators, exposed mail, database and directory services; one item per (outside "
-                           "address, internal address, service port), with exact session counts. Scanners and "
-                           "password guessers rarely hold a session for 30 minutes",
+                           "concentrators, exposed mail (IMAP IDLE), messaging (MQTT, XMPP), SIP, Citrix, database "
+                           "and directory services. A remote-access service gets one item per (outside address, "
+                           "internal address, port), with exact session counts. Any other service gets one item per "
+                           "exposed (internal address, port), however many clients it has: exact distinct outside "
+                           "address and session counts and the longest session; the claim names the 20 outside "
+                           "addresses with the longest (then most) sessions and how many more there are, those 20 "
+                           "are the item's ip entities, and the full outside-address list is the item's member list, "
+                           "held on disk (a spent disk budget makes the counts lower bounds, said in a note). No "
+                           "volume threshold splits a rare client out. Scanners and password guessers rarely hold a "
+                           "session for 30 minutes",
         "query_cost": "none beyond the sweep",
         "next_pivot": "the host's logon or service records for the sessions, then what was done",
         "adds": "the inbound view net.long_external_connection does not report (it reads outbound channels only). "
@@ -737,7 +751,7 @@ class LongInboundSession(LongExternalConnection):
                  "(interactive access from outside the declared site is high impact if unauthorized); medium for "
                  "other services, and for any service when the internal networks are the RFC 1918 defaults (the "
                  "item then carries the 'direction assumed' reason). A declared management host as the outside "
-                 "address keeps the lead lane, with a note",
+                 "address keeps the lead lane, with a note (for a service item, a count of such members)",
     }
 
     def wants(self, e: TypedEvent) -> bool:
@@ -769,7 +783,9 @@ class LongInboundSession(LongExternalConnection):
 
     def finalize(self):
         out = []
-        groups = KeyedStore(self, "inbound_groups", self.HOT)
+        groups = KeyedStore(self, "inbound_groups", self.HOT)       # remote access: (outside, inside, port)
+        pending: list[tuple] = []                                   # other services: member rows awaiting a write
+        self._members_partial = False
         for i, (key, c) in enumerate(self.conns.items(candidates=True)):
             if not self.candidate(c):
                 continue
@@ -777,6 +793,12 @@ class LongInboundSession(LongExternalConnection):
             if judgement is None:
                 continue
             inside, outside = _ends(c)
+            if not _remote_services(c):
+                pending.append((inside[0], inside[1], outside[0], int(judgement == OPENED_BY_OUTSIDE),
+                                c["records"], c["end"] - c["start"], c["start"], c["end"], key))
+                if len(pending) >= self.MEMBER_BATCH:
+                    self._write_members(pending)
+                continue
             g = groups.setdefault((outside[0], inside[0], inside[1]), lambda: {
                 "sessions": 0, "opened": 0, "records": 0, "first": None, "last": None, "longest": 0.0,
                 "sensors": Counter(), "protocols": set(), "services": set(), "cited": [], "latest": None,
@@ -802,12 +824,128 @@ class LongInboundSession(LongExternalConnection):
                 g["cited"] = sorted([*g["cited"], ref])[:self.SESSIONS_CITED - 1]
             if i % 10_000 == 9_999:
                 groups.trim()
+        self._write_members(pending)
         configured = current().configured
         for (outside, inside, port), g in groups.items():
             with citation_group(self, out, (outside, inside, port), g):
                 out.append(self._item(outside, inside, port, g, configured))
         groups.clear()
+        out.extend(self._services(configured))
         return out
+
+    # ---- other services: one item per exposed (internal address, port), the outside addresses as members ---------
+
+    MEMBER_BATCH = 1000                 # member rows written to disk at a time
+    MEMBERS_NAMED = 20                  # outside addresses named in a service item's claim and entities
+    _MEMBER_UPSERT = (
+        "INSERT INTO inbound_members VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?) ON CONFLICT(inside, port, outside) DO "
+        "UPDATE SET sessions=sessions+1, opened=opened+excluded.opened, records=records+excluded.records, "
+        "best=CASE WHEN excluded.longest > longest THEN excluded.best ELSE best END, "
+        "longest=max(longest, excluded.longest), first=min(first, excluded.first), last=max(last, excluded.last)")
+
+    def _write_members(self, rows: list[tuple]) -> None:
+        """Add sessions to the on-disk member table (one row per (internal address, port, outside address)): exact
+        counts, the longest session and its connection. Only the disk budget refuses, and the item then says its
+        counts are lower bounds and its member list is incomplete."""
+        if not rows:
+            return
+        try:
+            spill = self.spill()
+            if not getattr(self, "_members_ready", False):
+                spill.table("inbound_members", "inside TEXT NOT NULL, port INTEGER NOT NULL, outside TEXT NOT NULL, "
+                                               "sessions INTEGER, opened INTEGER, records INTEGER, longest REAL, "
+                                               "first REAL, last REAL, best TEXT, PRIMARY KEY(inside, port, outside)")
+                self._members_ready = True
+            spill.write(self._MEMBER_UPSERT, list(rows))
+        except StateExhausted as error:
+            self._members_partial = True
+            self.refuse("inbound_members", f"the inbound session members' disk budget is spent ({error}); those "
+                                           f"sessions are not counted", records=len(rows))
+        rows.clear()
+
+    def _services(self, configured: bool):
+        """One item per exposed internal service, read one group at a time from disk."""
+        if not getattr(self, "_members_ready", False):
+            return
+        spill = self.spill()
+        spill.flush()
+        groups = spill.db.execute(
+            "SELECT inside, port, count(*), sum(sessions), sum(opened), sum(records), max(longest), min(first), "
+            "max(last) FROM inbound_members GROUP BY inside, port ORDER BY inside, port")
+        while batch := groups.fetchmany(100):
+            for inside, port, members, sessions, opened, records, longest, first, last in batch:
+                summary = {"members": members, "sessions": sessions, "opened": opened, "records": records,
+                           "longest": longest, "first": first, "last": last}
+                out: list = []
+                with citation_group(self, out, ("service", inside, port), summary):
+                    out.append(self._service_item(inside, port, summary, configured))
+                yield from out
+
+    def _member_stream(self, inside: str, port: int):
+        """Every outside address of one service, from disk, for the item's member list."""
+        for (outside,) in self.spill().db.execute(
+                "SELECT outside FROM inbound_members WHERE inside=? AND port=? ORDER BY outside", (inside, port)):
+            yield outside, ""
+
+    def _service_item(self, inside: str, port: int, g: dict, configured: bool) -> Match:
+        top = self.spill().db.execute(
+            "SELECT outside, sessions, longest, best FROM inbound_members WHERE inside=? AND port=? "
+            "ORDER BY longest DESC, sessions DESC, outside LIMIT ?", (inside, port, self.MEMBERS_NAMED)).fetchall()
+        conns = [self.conns.peek(best) for _outside, _sessions, _longest, best in top[:self.SESSIONS_CITED]]
+        ids = []
+        for c in conns:
+            staged = c["events"]
+            ids += ([c["opener_id"]] if c["opener_id"] in staged else []) + staged[:1]
+        evs, missing = cite_with_bounds(self.load, self._events, [c["ends"] for c in conns], ids, EXAMPLE_LIMIT)
+        n, sessions, opened = g["members"], g["sessions"], g["opened"]
+        partial = self._members_partial
+        least = "at least " if partial else ""
+        protocols = sorted(set().union(*(c["protocols"] for c in conns)))
+        named = (f"identified as {', '.join(protocols)} on the cited sessions" if protocols
+                 else "no protocol identified on the cited sessions")
+        claim = (f"{least}{n} distinct outside address(es) held {least}{sessions} TCP session(s) of at least "
+                 f"{self.MIN_SECONDS // 60} minutes open to {inside} port {port} ({named}) "
+                 f"({_iso(g['first'])} – {_iso(g['last'])}); the longest lasted {g['longest'] / 60:.0f} minutes. ")
+        if opened:
+            claim += f"Records show the outside address opened {opened} of the sessions (its SYN). "
+        if sessions - opened:
+            claim += (f"{sessions - opened} have no recorded opening, but both sides sent traffic beyond resets and "
+                      f"handshake answers with the outside address on a port of {EPHEMERAL_FLOOR} or above facing port "
+                      f"{port}: the port shape of the outside address as the client. ")
+        listed = "; ".join(f"{outside} ({count} session(s), longest {length / 60:.0f} minutes)"
+                           for outside, count, length, _best in top)
+        claim += (f"The outside addresses with the longest sessions: {listed}"
+                  + (f"; and {n - len(top)} more (the item's member list holds every one)." if n > len(top) else "."))
+        claim += (f" {inside} is an internal address and the members are outside the site's configured internal "
+                  f"networks." if configured else
+                  f" The site's internal networks are not configured, so {inside} is internal and the members external "
+                  f"only by the RFC 1918 defaults.")
+        claim += " The sessions show the service was held open from outside, not who used it or what was done."
+        claim += (f" They rest on {least}{g['records']} record(s); the sessions of the first {len(conns)} listed "
+                  f"address(es) are cited." + cited_phrase(len(evs), g["records"], not missing))
+        if missing:
+            claim += " A record bounding a cited session was not kept for citation."
+        notes = [] if configured else [DIRECTION_ASSUMED_REASON]
+        if partial:
+            notes.append("the inbound session members' disk budget was spent: counts are lower bounds and the member "
+                         "list is incomplete")
+        management = getattr(self.site_facts, "management_hosts", ())
+        if management:
+            declared = sum(address_member(outside, management) for outside, _ in self._member_stream(inside, port))
+            if declared:
+                notes.append(f"{declared} of the outside addresses are declared management hosts; authorized "
+                             f"administration can produce these sessions")
+        first = evs[0]
+        preds = [pf(first, name) for name in ("source.ip", "destination.ip", "destination.port", "flow.start")
+                 if first.has(name)]
+        # the inside address, then every named member: an attacker's address stays correlatable when grouped
+        entities = list(dict.fromkeys([*(item for e in evs for item in e.entities()), ("ip", inside, "dst"),
+                                       *(("ip", outside, "src") for outside, *_rest in top)]))
+        return Match(self.id, claim, self.claim_type, evs, preds, first.ts, "medium", self.lane, "high", entities,
+                     notes, group_key=f"service|{inside}|{port}", fleet_hosts=self._member_stream(inside, port),
+                     fleet_host_count=n, fleet_hosts_complete=not partial,
+                     aggregate_summary={"outside_address_count": n, "session_count": sessions,
+                                        "longest_session_seconds": g["longest"], "members_complete": int(not partial)})
 
     def _item(self, outside: str, inside: str, port, g: dict, configured: bool) -> Match:
         refs = list(dict.fromkeys([*g["cited"], g["latest"]]))

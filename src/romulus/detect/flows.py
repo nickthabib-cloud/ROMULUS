@@ -428,7 +428,11 @@ def source_opened(event: TypedEvent) -> str | None:
 #   and 3.10.7.2), and an endpoint answers a SYN with a SYN-ACK, retransmitting it a few times when no ACK comes
 #   back; neither is evidence that the side took part in a conversation.
 #   - Arkime (non-directional flag counts): the side's packets do not exceed tcp.flags.syn + tcp.flags.syn_ack +
-#     tcp.flags.rst for the whole session, and its application bytes (client.bytes / server.bytes) are not positive.
+#     tcp.flags.rst for the whole session, and its application bytes (client.bytes / server.bytes) are 0. Without
+#     that application-byte field, a peer that sends out-of-window resets could raise the session's counts past a
+#     talking side's packets, so the side is BARE only when its packets do not exceed the reset count alone (and
+#     SPOKE when its frame bytes, source.bytes / destination.bytes estimated as for Suricata, show data); otherwise
+#     UNKNOWN.
 #   - Suricata (directional flag summaries tcp.tcp_flags_ts / tcp.tcp_flags_tc, the OR of the side's packets): the
 #     side carried no PSH, FIN or URG and no application data, and its flags are only RST (any number of packets);
 #     or SYN and RST; or SYN-ACK (with or without RST) on at most SYNACK_TRANSMISSIONS packets; or ACK and RST on a
@@ -478,16 +482,20 @@ INSIDE_HALF_ONLY = "only the internal half was recorded"
 _ZEEK_PACKET_TYPES = frozenset("SHADFR")
 
 
-def _arkime_side(packets, data, answers) -> int:
-    if packets is None:
-        return SIDE_SPOKE if data is not None and data > 0 else SIDE_UNKNOWN
+def _arkime_side(packets, data, frame_bytes, answers, resets) -> int:
+    estimate = _framed_data("tcp", frame_bytes, packets)
     if packets == 0:
         return SIDE_SILENT
-    if data is not None and data > 0:
+    if (data is not None and data > 0) or (data is None and estimate is not None and estimate >= MIN_PAYLOAD_BYTES):
         return SIDE_SPOKE
-    if answers is None:
+    if packets is None or answers is None:
         return SIDE_UNKNOWN
-    return SIDE_SPOKE if packets > answers else SIDE_BARE
+    if packets > answers:
+        return SIDE_SPOKE
+    if data is None:
+        # no application-byte count: only a side that may have sent nothing but resets is settled
+        return SIDE_BARE if packets <= resets else SIDE_UNKNOWN
+    return SIDE_BARE
 
 
 def _suricata_side(packets, data, flags) -> int:
@@ -554,8 +562,9 @@ def side_states(event: TypedEvent, view: FlowView) -> tuple[int, int]:
         counts = [_int(event.get(f"tcp.flags.{name}")) for name in ("syn", "syn_ack", "rst")]
         answers = None if None in counts else sum(counts)
         data = (_int(event.get("client.bytes")), _int(event.get("server.bytes")))
-        return (_arkime_side(_int(event.get("source.packets")), data[0], answers),
-                _arkime_side(_int(event.get("destination.packets")), data[1], answers))
+        frames = (_int(event.get("source.bytes")), _int(event.get("destination.bytes")))
+        return (_arkime_side(_int(event.get("source.packets")), data[0], frames[0], answers, counts[2]),
+                _arkime_side(_int(event.get("destination.packets")), data[1], frames[1], answers, counts[2]))
     if kind != "flow":
         return SIDE_UNKNOWN, SIDE_UNKNOWN
     packets = (_int(event.get("flow.pkts_toserver")), _int(event.get("flow.pkts_toclient")))

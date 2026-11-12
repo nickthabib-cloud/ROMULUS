@@ -141,8 +141,8 @@ def ssh(*batches, tmp_path, management=()):
 # Arkime backscatter: an outside host's SYN-ACKs to an internal address that never sent a SYN. Arkime swaps the sides
 # so the internal address is the source; it sent nothing, or one reset per SYN-ACK.
 SYN_ACKS = {"syn_ack": 3}
-BACKSCATTER_ARKIME = {"silent": {"src_pkts": 0, "dst_pkts": 3, "flags": SYN_ACKS},
-                      "reset": {"src_pkts": 3, "dst_pkts": 3, "flags": {"syn_ack": 3, "rst": 3}}}
+BACKSCATTER_ARKIME = {"silent": {"src_pkts": 0, "dst_pkts": 3, "flags": SYN_ACKS, "c2s": 0, "s2c": 0},
+                      "reset": {"src_pkts": 3, "dst_pkts": 3, "flags": {"syn_ack": 3, "rst": 3}, "c2s": 0, "s2c": 0}}
 # Suricata: the to-server side carries resets only, the to-client side SYN-ACKs; and the same record not swapped
 BACKSCATTER_SURICATA = {"swapped": {"pkts": (1, 2), "flags": ("04", "12")},
                         "silent": {"pkts": (0, 2), "flags": (None, "12")}}
@@ -152,11 +152,18 @@ BACKSCATTER_SURICATA = {"swapped": {"pkts": (1, 2), "flags": ("04", "12")},
 
 @pytest.mark.parametrize("fields,expected", [
     # Arkime: the internal source sent nothing; the outside host sent SYN-ACKs only
-    ({"source__packets": 0, "destination__packets": 3, "tcp__flags__syn": 0, "tcp__flags__syn_ack": 3, "tcp__flags__rst": 0},
-     (SIDE_SILENT, SIDE_BARE)),
+    ({"source__packets": 0, "destination__packets": 3, "tcp__flags__syn": 0, "tcp__flags__syn_ack": 3, "tcp__flags__rst": 0,
+      "client__bytes": 0, "server__bytes": 0}, (SIDE_SILENT, SIDE_BARE)),
     # ... or one reset per SYN-ACK: every packet of either side may be a reset or a SYN-ACK
-    ({"source__packets": 3, "destination__packets": 3, "tcp__flags__syn": 0, "tcp__flags__syn_ack": 3, "tcp__flags__rst": 3},
-     (SIDE_BARE, SIDE_BARE)),
+    ({"source__packets": 3, "destination__packets": 3, "tcp__flags__syn": 0, "tcp__flags__syn_ack": 3, "tcp__flags__rst": 3,
+      "client__bytes": 0, "server__bytes": 0}, (SIDE_BARE, SIDE_BARE)),
+    # without application-byte counts, only the reset count may settle a side, and frame bytes can show data
+    ({"source__packets": 3, "destination__packets": 3, "tcp__flags__syn": 0, "tcp__flags__syn_ack": 3, "tcp__flags__rst": 3,
+      "source__bytes": 162, "destination__bytes": 222}, (SIDE_BARE, SIDE_BARE)),
+    ({"source__packets": 6, "destination__packets": 3, "tcp__flags__syn": 0, "tcp__flags__syn_ack": 5, "tcp__flags__rst": 2,
+      "source__bytes": 360, "destination__bytes": 222}, (SIDE_UNKNOWN, SIDE_UNKNOWN)),
+    ({"source__packets": 6, "destination__packets": 3, "tcp__flags__syn": 0, "tcp__flags__syn_ack": 0, "tcp__flags__rst": 9,
+      "source__bytes": 3000, "destination__bytes": 162}, (SIDE_SPOKE, SIDE_BARE)),
     # mid-stream with traffic both ways: each side sent more packets than the session's SYNs, SYN-ACKs and resets
     ({"source__packets": 40, "destination__packets": 50, "tcp__flags__syn": 0, "tcp__flags__syn_ack": 0, "tcp__flags__rst": 1},
      (SIDE_SPOKE, SIDE_SPOKE)),
@@ -333,8 +340,10 @@ def test_long_inbound_session_to_any_other_service_is_reported(port, service):
     record = chunks(lambda **kw: arkime(OUTSIDE, 51000, INSIDE, port, flags={"syn": 1}, cid=f"1:{port}=",
                                         protocols=("tcp", service) if service else ("tcp",), **kw), n=10)
     [match] = run(LongInboundSession(), record)
-    assert f"{OUTSIDE} held 1 TCP session(s) of at least 30 minutes open to {INSIDE} port {port}" in match.claim
-    assert "the longest lasted 120 minutes" in match.claim
+    assert f"1 distinct outside address(es) held 1 TCP session(s) of at least 30 minutes open to {INSIDE} port {port}" \
+        in match.claim
+    assert "the longest lasted 120 minutes" in match.claim and match.group_key == f"service|{INSIDE}|{port}"
+    assert ("ip", OUTSIDE, "src") in match.entities
     assert match.severity == "medium" and match.proposed_lane == "lead"
     assert run(LongExternalConnection(), record) == []
 
@@ -342,7 +351,7 @@ def test_long_inbound_session_to_any_other_service_is_reported(port, service):
 def test_s5_mssql_two_hours_with_the_syn_recorded_is_surfaced():
     record = chunks(lambda **kw: arkime(OUTSIDE, 51000, INSIDE, 1433, flags={"syn": 1}, **kw), n=10)
     [match] = run(LongInboundSession(), record)
-    assert "port 1433 (no protocol identified)" in match.claim
+    assert "port 1433 (no protocol identified on the cited sessions)" in match.claim
 
 
 def test_remote_access_is_high_under_configured_networks_and_groups_sessions():
@@ -728,7 +737,8 @@ def test_a_large_backscatter_flood_reports_nothing_and_keeps_bounded_state(monke
                                 flow__start=(start + timedelta(minutes=15 * part)).isoformat(),
                                 flow__end=(start + timedelta(minutes=15 * part, seconds=1)).isoformat(),
                                 network__community_id=f"1:bs{k}", source__packets=0, destination__packets=2,
-                                tcp__flags__syn=0, tcp__flags__syn_ack=2, tcp__flags__rst=0))
+                                tcp__flags__syn=0, tcp__flags__syn_ack=2, tcp__flags__rst=0, client__bytes=0,
+                                server__bytes=0))
     channel = [typed("net_session", source__ip=INSIDE, source__port=51000, destination__ip=OUTSIDE,
                      destination__port=4444, network__transport="tcp", network__community_id="1:c2",
                      flow__start=(T0 + timedelta(minutes=12 * i)).isoformat(),
@@ -790,3 +800,99 @@ def test_zeek_backscatter_with_a_late_flip_is_unsolicited():
     row = zeek(INSIDE, 51000, OUTSIDE, 80, seconds=2400, history="H^R", pkts=(1, 2), payload=(0, 0), service=None)
     assert run(rule, [row]) == []
     assert any("unsolicited response packets" in note for note in rule.coverage_notes())
+
+
+# ---- net.long_inbound_session: exposed services are grouped, members kept --------------------------------------------
+
+def _clients(port, n, *, attacker=None, longest=None, protocols=("tcp",)):
+    """`n` outside clients, each holding one 40-minute session to INSIDE:port; `attacker` holds `longest` minutes."""
+    rows = []
+    for k in range(n):
+        client = f"198.51.{100 + k // 250}.{k % 250 + 1}"
+        rows.append(arkime(client, 40000 + k % 20000, INSIDE, port, first=T0 + timedelta(seconds=k), seconds=2400,
+                           flags={"syn": 1, "ack": 20, "psh": 5}, protocols=protocols, cid=f"1:{port}:{k}="))
+    if attacker is not None:
+        rows.append(arkime(attacker, 51515, INSIDE, port, first=T0, seconds=longest * 60,
+                           flags={"syn": 1, "ack": 20, "psh": 5}, protocols=protocols, cid=f"1:{port}:attacker="))
+    return rows
+
+
+def test_many_clients_of_one_exposed_service_are_one_item_with_every_member():
+    rule = LongInboundSession()
+    [match] = run(rule, _clients(993, 30, attacker="203.0.113.66", longest=300, protocols=("tcp", "imap")))
+    assert match.group_key == f"service|{INSIDE}|993" and match.severity == "medium" and match.proposed_lane == "lead"
+    assert f"31 distinct outside address(es) held 31 TCP session(s) of at least 30 minutes open to {INSIDE} port 993" \
+        in match.claim
+    assert "the longest lasted 300 minutes" in match.claim
+    assert "The outside addresses with the longest sessions: 203.0.113.66 (1 session(s), longest 300 minutes)" \
+        in match.claim
+    assert "; and 11 more (the item's member list holds every one)." in match.claim
+    # the attacker's address reaches the item's typed entities, so it can still be correlated
+    named = [value for kind, value, role in match.entities if kind == "ip" and role == "src"]
+    assert "203.0.113.66" in named and len(set(named)) >= 20
+    members = list(match.fleet_hosts)
+    assert len(members) == 31 == match.fleet_host_count and match.fleet_hosts_complete
+    assert ("203.0.113.66", "") in members
+    assert match.aggregate_summary == {"outside_address_count": 31, "session_count": 31,
+                                       "longest_session_seconds": 18000.0, "members_complete": 1}
+
+
+def test_a_member_outside_the_named_twenty_stays_in_the_member_list():
+    [match] = run(LongInboundSession(), _clients(1883, 25, attacker="203.0.113.77", longest=31))
+    assert "203.0.113.77" not in match.claim
+    assert ("203.0.113.77", "") in list(match.fleet_hosts)
+
+
+def test_one_rare_client_is_not_split_out_by_any_volume_threshold():
+    rows = _clients(5222, 1) + _clients(5223, 40)
+    found = {m.group_key: m for m in run(LongInboundSession(), rows)}
+    assert set(found) == {f"service|{INSIDE}|5222", f"service|{INSIDE}|5223"}
+    assert found[f"service|{INSIDE}|5223"].fleet_host_count == 40
+
+
+def test_remote_access_stays_one_item_per_outside_address():
+    rows = [arkime(f"203.0.113.{k}", 51000, INSIDE, 22, first=T0, seconds=2400, flags={"syn": 1}, cid=f"1:ssh{k}=")
+            for k in (5, 6)]
+    found = run(LongInboundSession(), rows)
+    assert sorted(m.group_key for m in found) == [f"203.0.113.5|{INSIDE}|22", f"203.0.113.6|{INSIDE}|22"]
+
+
+def test_service_members_scale_on_disk_with_exact_counts(monkeypatch):
+    monkeypatch.setattr(LongInboundSession, "HOT", 2)
+    monkeypatch.setattr(LongInboundSession, "MEMBER_BATCH", 50)
+    rule = LongInboundSession()
+    [match] = run(rule, _clients(10443, 3000))
+    assert rule.conns.on_disk > 0
+    assert match.fleet_host_count == 3000 and len(list(match.fleet_hosts)) == 3000
+    assert "3000 distinct outside address(es) held 3000 TCP session(s)" in match.claim
+    assert "; and 2980 more" in match.claim
+
+
+def test_a_spent_member_budget_is_honest(monkeypatch):
+    from romulus.detect import bounded as bounded_module
+    original = bounded_module.Spill.write
+
+    def refuse(self, sql, rows, **kwargs):
+        if sql.startswith("INSERT INTO inbound_members"):
+            raise bounded_module.StateExhausted("injected disk refusal")
+        return original(self, sql, rows, **kwargs)
+    monkeypatch.setattr(bounded_module.Spill, "write", refuse)
+    rule = LongInboundSession()
+    assert run(rule, _clients(1194, 3)) == []
+    assert any("inbound session members' disk budget is spent" in reason for reason in rule.limit_reasons())
+
+
+def test_a_declared_management_member_is_counted_in_a_note():
+    from dataclasses import replace
+    rule = LongInboundSession()
+    rule.site_facts = replace(absent_site_facts(), management_hosts=("198.51.100.1",))
+    [match] = run(rule, _clients(2598, 3))
+    assert match.proposed_lane == "lead"
+    assert any(note.startswith("1 of the outside addresses are declared management hosts") for note in match.notes)
+
+
+def test_the_served_elsewhere_note_names_the_inbound_rule_conditionally():
+    rule = LongExternalConnection()
+    assert run(rule, _clients(1433, 1)) == []
+    [note] = rule.coverage_notes()
+    assert "judged as inbound sessions by net.long_inbound_session; its own cell states its coverage" in note
