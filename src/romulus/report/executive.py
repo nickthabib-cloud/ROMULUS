@@ -29,6 +29,10 @@ def write(m, path, technical_name):
     if not m["integrity"]["finalizable"]:
         paragraph("Degraded report: incomplete evidence or host lists are identified in the technical report.")
     paragraph(f"Technical report: {technical_name}. This contains the full findings, citations and coverage gaps.")
+    network_coverage = m["coverage"].get("internal_networks") or {}
+    if network_coverage.get("outside") or network_coverage.get("status") == "unknown":
+        paragraph("Internal-network coverage", bold=True)
+        paragraph(network_coverage["summary"])
     if is_ranked(m):
         confirmed, reported, pool = ranked_sections(m)
         sections = (("Confirmed", "Confirmed findings, reported on their own.", confirmed),
