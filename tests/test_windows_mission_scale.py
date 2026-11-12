@@ -35,6 +35,7 @@ MAX_PEAK_BYTES = 128 * 1024 * 1024
 
 MISSION_TARGET = "logs-windows-mission"
 MISSION_HOST = "WS001.example.test"
+MISSION_AGENT = "mission-agent-ws001"
 MISSION_START = datetime(2026, 10, 20, 12, tzinfo=UTC)
 MISSION_END = MISSION_START + timedelta(minutes=10)
 MISSION_HIGH_VOLUME_IDS = (7, 10, 12, 13, 22)
@@ -183,7 +184,7 @@ class _MissionWindowsSource:
             "_id": f"sysmon-{record_id}{duplicate}",
             "_source": {
                 "@timestamp": when,
-                "agent": {"type": "winlogbeat"},
+                "agent": {"type": "winlogbeat", "id": MISSION_AGENT},
                 "event": {"dataset": "windows.sysmon_operational"},
                 "winlog": {
                     "channel": SYSMON_CHANNEL,
@@ -207,7 +208,7 @@ class _MissionWindowsSource:
             "_id": f"powershell-{record_id}",
             "_source": {
                 "@timestamp": when,
-                "agent": {"type": "winlogbeat"},
+                "agent": {"type": "winlogbeat", "id": MISSION_AGENT},
                 "event": {"dataset": "windows.powershell_operational"},
                 "winlog": {
                     "channel": POWERSHELL_CHANNEL,
@@ -233,6 +234,7 @@ class _MissionWindowsSource:
             "key": {
                 "@timestamp": text,
                 "host.name": MISSION_HOST,
+                "agent.id": MISSION_AGENT,
                 "event.channel": channel,
                 "winlog.record_id": record_id,
             },
@@ -426,6 +428,7 @@ def test_mission_scale_selective_sweep_is_bounded_complete_and_persistent(tmp_pa
         MISSION_TARGET,
         {
             "@timestamp": "date",
+            "agent.id": "keyword",
             "event.dataset": "keyword",
             "winlog.channel": "keyword",
             "winlog.provider_name": "keyword",

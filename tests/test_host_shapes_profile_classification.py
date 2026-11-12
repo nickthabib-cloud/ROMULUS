@@ -84,12 +84,13 @@ def test_mixed_layout_profile_includes_raw_only_hosts(tmp_path):
     assert set(contract.hosts) == set(profile.hosts) and contract.host_inventory_complete
 
 
-def test_real_host_link_retrieves_raw_only_host_beside_winlogbeat(tmp_path):
+@pytest.mark.parametrize("identified", [False, True])
+def test_real_host_link_retrieves_raw_only_host_beside_winlogbeat(tmp_path, identified):
     from copy import deepcopy
     from datetime import timedelta
 
     from romulus.config import Settings
-    from romulus.evidence.windows import normalize_windows
+    from romulus.evidence.windows import WINDOWS_SOURCE_IDENTITY_NOTE, normalize_windows
     from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkWindow
     from romulus.hunt.pivot import PivotExecutor
     from romulus.sources.es import ElasticClient
@@ -100,6 +101,9 @@ def test_real_host_link_retrieves_raw_only_host_beside_winlogbeat(tmp_path):
 
     rows = _mixed_documents()[:2]
     rows[0]['_source']['Event']['System']['Computer'] = 'RAW01.example.test'
+    if identified:
+        for row, agent_id in zip(rows, ('fixture-raw01', 'fixture-ws01'), strict=True):
+            row['_source'].setdefault('agent', {})['id'] = agent_id
     later = deepcopy(rows[0])
     later['_id'] = 'raw-later'
     later['_source']['Event']['System']['EventRecordID'] = 22
@@ -107,7 +111,7 @@ def test_real_host_link_retrieves_raw_only_host_beside_winlogbeat(tmp_path):
     later['_source']['@timestamp'] = stamp.isoformat()
     later['_source']['Event']['System']['TimeCreated']['#attributes']['SystemTime'] = stamp.isoformat()
     rows.append(later)
-    fields = {**types(), 'winlog.channel': 'keyword', 'winlog.provider_name': 'keyword',
+    fields = {**types(), 'agent.id': 'keyword', 'winlog.channel': 'keyword', 'winlog.provider_name': 'keyword',
               'winlog.event_id': 'long', 'winlog.computer_name': 'keyword', 'winlog.event_data': 'flattened'}
     current = contract_from_types('raw', fields)
     client = ElasticClient(Settings(es_url='http://es.invalid'),
@@ -119,7 +123,8 @@ def test_real_host_link_retrieves_raw_only_host_beside_winlogbeat(tmp_path):
     try:
         result = LinkFetcher(executor, WINDOW.start, WINDOW.end).fetch(anchor, 'host_after_anchor',
             LinkWindow(label='anchor +5 min', start=root.ts, end=root.ts+timedelta(minutes=5)))
-        assert result.status == 'complete', result.reasons
+        assert result.status == ('complete' if identified else 'partial'), result.reasons
+        assert result.reasons == ([] if identified else [WINDOWS_SOURCE_IDENTITY_NOTE])
         assert normalize_windows(later).id in result.event_ids
     finally:
         repo.engine.dispose()
