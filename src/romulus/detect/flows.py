@@ -410,6 +410,227 @@ def source_opened(event: TypedEvent) -> str | None:
     return SURICATA if suricata_source_opened(event) else None
 
 
+# ---------------------------------------------------------------------------------------------
+# who opened a connection, and whether both sides took part
+# ---------------------------------------------------------------------------------------------
+#
+# A sensor's source/destination orientation is not who initiated a connection. Arkime swaps the sides of a session
+# whose first packet is a SYN-ACK, so an unsolicited SYN-ACK from an outside host (backscatter of a reflected or
+# spoofed flood) is recorded with the internal address that never sent a SYN as its source; Suricata and Zeek orient
+# a record picked up mid-stream by whichever side spoke first. The direction-dependent rules therefore read every TCP
+# record of a connection with one meaning:
+#
+# Each side of a record is in one of four exchange states, from the record's typed per-side counters:
+# - SIDE_SILENT: the side's packet count is typed and is 0.
+# - SIDE_BARE: the side sent packets, but every one of them may be a reset or a handshake answer (a SYN-ACK). A TCP
+#   endpoint that receives a segment for no connection of its own answers with at most a reset (RFC 9293 3.10.7.1
+#   and 3.10.7.2), and an endpoint answers a SYN with a SYN-ACK; neither is evidence that the side took part in a
+#   conversation.
+#   - Arkime (non-directional flag counts): the side's packets do not exceed tcp.flags.syn + tcp.flags.syn_ack +
+#     tcp.flags.rst for the whole session, and its application bytes (client.bytes / server.bytes) are not positive.
+#   - Suricata (directional flag summaries tcp.tcp_flags_ts / tcp.tcp_flags_tc, the OR of the side's packets): the
+#     side carried no PSH, FIN or URG, no application data, and its flags are only RST; or SYN-ACK, with or
+#     without RST; or ACK and RST on a single packet.
+#   - Zeek (conn history, upper case for the originator and lower case for the responder): the side's packet types
+#     are only H (SYN-ACK) and R (reset), and it sent no payload.
+# - SIDE_SPOKE: the side demonstrably sent something beyond a reset or a handshake answer.
+#   - Any sensor: application data from the side (Arkime's client.bytes / server.bytes above 0, Zeek's payload bytes
+#     above 0, or for Suricata an estimate of at least MIN_PAYLOAD_BYTES beyond packet headers).
+#   - Arkime: the side's packets exceed the session's SYN, SYN-ACK and reset counts together, so at least one of its
+#     packets was something else (an acknowledgement, data or a FIN).
+#   - Suricata: the side's flags carry PSH, FIN or URG, or carry ACK with neither SYN nor RST (every packet it sent
+#     was an acknowledgement, data or a FIN).
+#   - Zeek: the side's history has A (a pure acknowledgement), D (data) or F (FIN).
+# - SIDE_UNKNOWN: anything else, including a record without the counters, a non-TCP record, or flag combinations the
+#   summaries cannot settle (a lone SYN from the side that did not open, or ACK and RST over several packets).
+#
+# A connection (one record, or every record of one connection, each side's state the strongest any record shows) is
+# then read by `judge_connection`:
+# - OPENED_BY_INSIDE / OPENED_BY_OUTSIDE: exactly one side is shown opening it (FlowView.opened: Arkime counted a SYN,
+#   Suricata's to-server flags carry a SYN, Zeek's history begins with the originator's SYN).
+# - OPENERS_DISAGREE: records show each side opening it (a 5-tuple reused, or sensors that disagree); the opener stays
+#   unknown.
+# - EXCHANGED: no opener recorded, and both sides spoke (SIDE_SPOKE).
+# - ONE_SIDED_INSIDE_SILENT: no opener recorded, and the internal side sent nothing, or only resets and handshake
+#   answers: unsolicited response packets, a probe or backscatter, not a connection the internal side took part in.
+# - ONE_SIDED_OUTSIDE_SILENT: no opener recorded, the internal side spoke (SIDE_SPOKE, so its packets were not a SYN
+#   the record failed to count), and the external side sent nothing beyond resets and handshake answers (an
+#   unanswered sender picked up mid-stream, or a sensor that saw one direction). An internal side whose packets the
+#   record cannot judge leaves the connection UNJUDGED: they may be the SYNs of an unanswered opening.
+# - UNJUDGED: the records lack the counters to tell.
+# The thresholds are protocol constants (one SYN, one SYN-ACK, one reset per unacceptable segment), not values tuned
+# on any network.
+SIDE_SILENT, SIDE_BARE, SIDE_UNKNOWN, SIDE_SPOKE = 0, 1, 2, 3
+TCP_FIN, TCP_RST, TCP_PSH, TCP_ACK, TCP_URG = 0x01, 0x04, 0x08, 0x10, 0x20
+OPENED_BY_INSIDE, OPENED_BY_OUTSIDE = "opened by the internal side", "opened by the external side"
+OPENERS_DISAGREE, EXCHANGED, UNJUDGED = "records disagree about the opener", "exchanged", "not judged"
+ONE_SIDED_INSIDE_SILENT = "internal side sent nothing beyond resets or handshake answers"
+ONE_SIDED_OUTSIDE_SILENT = "external side sent nothing beyond resets or handshake answers"
+_ZEEK_PACKET_TYPES = frozenset("SHADFR")
+
+
+def _arkime_side(packets, data, answers) -> int:
+    if packets is None:
+        return SIDE_SPOKE if data is not None and data > 0 else SIDE_UNKNOWN
+    if packets == 0:
+        return SIDE_SILENT
+    if data is not None and data > 0:
+        return SIDE_SPOKE
+    if answers is None:
+        return SIDE_UNKNOWN
+    return SIDE_SPOKE if packets > answers else SIDE_BARE
+
+
+def _suricata_side(packets, data, flags) -> int:
+    if packets == 0:
+        return SIDE_SILENT
+    if data is not None and data >= MIN_PAYLOAD_BYTES:
+        return SIDE_SPOKE
+    if packets is None or flags is None:
+        return SIDE_UNKNOWN
+    if flags & (TCP_PSH | TCP_FIN | TCP_URG) or (flags & TCP_ACK and not flags & (TCP_SYN | TCP_RST)):
+        return SIDE_SPOKE
+    if flags & ~(TCP_SYN | TCP_ACK | TCP_RST):
+        return SIDE_UNKNOWN
+    if (flags == TCP_RST or flags & (TCP_SYN | TCP_ACK) == TCP_SYN | TCP_ACK
+            or flags == TCP_SYN | TCP_RST or (flags == TCP_ACK | TCP_RST and packets == 1)):
+        return SIDE_BARE
+    return SIDE_UNKNOWN
+
+
+def _zeek_side(packets, data, history, originator: bool) -> int:
+    if packets == 0:
+        return SIDE_SILENT
+    if data is not None and data > 0:
+        return SIDE_SPOKE
+    if not isinstance(history, str):
+        return SIDE_UNKNOWN
+    kinds = {c.upper() for c in history if (c.isupper() if originator else c.islower())} & _ZEEK_PACKET_TYPES
+    if kinds & {"A", "D", "F"}:
+        return SIDE_SPOKE
+    if kinds and kinds <= {"H", "R"}:
+        return SIDE_BARE
+    return SIDE_UNKNOWN
+
+
+def side_states(event: TypedEvent, view: FlowView) -> tuple[int, int]:
+    """(source side, destination side) exchange states of one bidirectional TCP record (SIDE_SILENT ... SIDE_SPOKE);
+    SIDE_UNKNOWN for both on any other record. See the block above for the exact predicate."""
+    if view.transport != "tcp":
+        return SIDE_UNKNOWN, SIDE_UNKNOWN
+    kind = record_kind(event)
+    if kind == "session":
+        counts = [_int(event.get(f"tcp.flags.{name}")) for name in ("syn", "syn_ack", "rst")]
+        answers = None if None in counts else sum(counts)
+        data = (_int(event.get("client.bytes")), _int(event.get("server.bytes")))
+        return (_arkime_side(_int(event.get("source.packets")), data[0], answers),
+                _arkime_side(_int(event.get("destination.packets")), data[1], answers))
+    if kind != "flow":
+        return SIDE_UNKNOWN, SIDE_UNKNOWN
+    packets = (_int(event.get("flow.pkts_toserver")), _int(event.get("flow.pkts_toclient")))
+    if view.sensor == ZEEK:
+        payload = event.get("flow.bytes_are_payload") is True
+        data = (view.c2s_data, view.s2c_data) if payload else (None, None)
+        history = event.get("conn.history")
+        return (_zeek_side(packets[0], data[0], history, True), _zeek_side(packets[1], data[1], history, False))
+    flags = (_tcp_flags(event.get("tcp.tcp_flags_ts")), _tcp_flags(event.get("tcp.tcp_flags_tc")))
+    return (_suricata_side(packets[0], view.c2s_data, flags[0]),
+            _suricata_side(packets[1], view.s2c_data, flags[1]))
+
+
+class Opening:
+    """What the records of one connection show about its opening and its two sides: the sides shown opening it, and
+    each side's strongest exchange state. Two sides at most, so the state is a few dozen bytes."""
+    __slots__ = ("openers", "states")
+
+    def __init__(self):
+        self.openers: list[tuple] = []          # (address, port) of each side a record shows opening it
+        self.states: dict[tuple, int] = {}      # (address, port) -> strongest SIDE_* state any record shows
+
+    def add(self, event: TypedEvent, view: FlowView) -> None:
+        source, destination = (view.src, view.sport), (view.dst, view.dport)
+        if view.opened and source not in self.openers:
+            self.openers.append(source)
+        for side, state in zip((source, destination), side_states(event, view), strict=True):
+            self.states[side] = max(self.states.get(side, SIDE_SILENT), state)
+
+    def judge(self, inside: tuple, outside: tuple) -> str:
+        return judge_connection(self.openers, self.states, inside, outside)
+
+
+def judge_connection(openers, states: dict, inside: tuple, outside: tuple) -> str:
+    """How a connection between an internal (address, port) and an external one is read: OPENED_BY_INSIDE ...
+    UNJUDGED (see the block above). A side no record names is SIDE_UNKNOWN."""
+    shown = set(map(tuple, openers))
+    if len(shown) == 1:
+        return OPENED_BY_INSIDE if tuple(inside) in shown else OPENED_BY_OUTSIDE
+    if shown:
+        return OPENERS_DISAGREE
+    mine, theirs = states.get(tuple(inside), SIDE_UNKNOWN), states.get(tuple(outside), SIDE_UNKNOWN)
+    if mine == SIDE_SPOKE and theirs == SIDE_SPOKE:
+        return EXCHANGED
+    if mine in (SIDE_SILENT, SIDE_BARE):
+        return ONE_SIDED_INSIDE_SILENT
+    if mine == SIDE_SPOKE and theirs in (SIDE_SILENT, SIDE_BARE):
+        return ONE_SIDED_OUTSIDE_SILENT
+    return UNJUDGED
+
+
+def client_shaped(inside_port: int | None, outside_port: int | None) -> bool:
+    """The internal side is on an ephemeral port and the external side on a port below that range."""
+    return inside_port is not None and outside_port is not None and inside_port >= EPHEMERAL_FLOOR > outside_port
+
+
+def server_shaped(inside_port: int | None, outside_port: int | None) -> bool:
+    """The external side is on an ephemeral port and the internal side on a port below that range."""
+    return client_shaped(outside_port, inside_port)
+
+
+# How an outbound rule (a channel the internal side holds to the outside) reads a judged connection.
+OUTBOUND_OPENED = "opened inside"               # reported: a record shows the internal side opened it
+OUTBOUND_CLIENT_SHAPED = "exchanged, client-shaped"  # reported: exchanged, internal side on a client port
+OUTBOUND_UNKNOWN = "opener unknown"             # reported as before: the records cannot tell (or disagree)
+OUTBOUND_SERVED = "served"                      # note: the external side opened it, the internal side answered
+OUTBOUND_UNSOLICITED = "unsolicited"            # note: the internal side sent nothing beyond resets or answers
+OUTBOUND_NOT_CLIENT = "exchanged, not client-shaped"  # partial: exchanged, but the ports do not mark a client
+OUTBOUND_UNANSWERED = "unanswered"              # partial: only the internal side spoke, and no opening is recorded
+OUTBOUND_REPORTED = frozenset({OUTBOUND_OPENED, OUTBOUND_CLIENT_SHAPED, OUTBOUND_UNKNOWN})
+
+
+def outbound_reading(judgement: str, inside_port: int | None, outside_port: int | None) -> str:
+    """OUTBOUND_* for a connection judged by `judge_connection`: reported only when the internal side opened it, or
+    both sides exchanged traffic with the internal side on a client port; the opener-unknown readings the records
+    cannot settle stay reported with the opener stated as unknown."""
+    if judgement == OPENED_BY_INSIDE:
+        return OUTBOUND_OPENED
+    if judgement == OPENED_BY_OUTSIDE:
+        return OUTBOUND_SERVED
+    if judgement == EXCHANGED:
+        return OUTBOUND_CLIENT_SHAPED if client_shaped(inside_port, outside_port) else OUTBOUND_NOT_CLIENT
+    if judgement == ONE_SIDED_INSIDE_SILENT:
+        return OUTBOUND_UNSOLICITED
+    if judgement == ONE_SIDED_OUTSIDE_SILENT:
+        return OUTBOUND_UNANSWERED
+    return OUTBOUND_UNKNOWN
+
+
+# The window-cell wording of the connections an outbound rule did not report, and whether each makes the cell
+# partial (a channel the rule could have missed) or is informational (the records show it is not an outbound one).
+OUTBOUND_NOT_REPORTED = {
+    OUTBOUND_SERVED: (False, ("connections a recorded TCP opening shows an external address opened (inbound "
+                             "connections or probes, with the internal address on the server side)")),
+    OUTBOUND_UNSOLICITED: (False, ("unsolicited response packets, not connections: records with no recorded opening "
+                                  "in which the internal address sent nothing, or nothing beyond resets and handshake "
+                                  "answers (backscatter of a spoofed or reflected flood, or answers to probes)")),
+    OUTBOUND_NOT_CLIENT: (True, (f"connections with no recorded opening on which both sides exchanged traffic, but "
+                                f"whose ports do not mark the internal address as the client (it is not on a port "
+                                f"of {EPHEMERAL_FLOOR} or above facing a port below it)")),
+    OUTBOUND_UNANSWERED: (True, ("records with no recorded opening in which only the internal address sent traffic "
+                                "and the external address sent nothing beyond resets or handshake answers (an "
+                                "unanswered sender, or a sensor that saw one direction)")),
+}
+
+
 def _zeek_protocols(event: TypedEvent) -> tuple[frozenset[str], bool]:
     """(identified protocols, whether a service was removed) of a Zeek conn record: every service its analyzers
     confirmed (and the sole service, typed as app_proto); removed services are not identifications."""

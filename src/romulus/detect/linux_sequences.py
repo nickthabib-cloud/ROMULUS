@@ -12,14 +12,17 @@ import posixpath
 import re
 import sqlite3
 import weakref
+from collections import Counter
 from datetime import UTC, datetime
 from itertools import groupby
+from typing import ClassVar
 from urllib.parse import urlsplit
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, pf
 from romulus.detect.bounded import (
     CitationUnavailable,
     KeyedStore,
+    Limit,
     RecentIds,
     Spill,
     StateExhausted,
@@ -28,6 +31,16 @@ from romulus.detect.bounded import (
 )
 from romulus.detect.citing import uncited_positive
 from romulus.detect.correlation import canon_ip, external
+from romulus.detect.flows import (
+    OUTBOUND_CLIENT_SHAPED,
+    OUTBOUND_NOT_REPORTED,
+    OUTBOUND_OPENED,
+    OUTBOUND_UNKNOWN,
+    Opening,
+    flow_view,
+    outbound_reading,
+    record_kind,
+)
 from romulus.detect.host import INTERPRETERS, SHELLS, WEB_SERVICE_USERS, ExecLineage
 from romulus.detect.linux_argv import normalize_path, program, write_targets
 from romulus.detect.linux_direct import (
@@ -1094,16 +1107,76 @@ class InteractivePrivilegedLogin(LinuxSequence):
 # The lowest port a client's ephemeral range starts at on common systems (Linux 32768, Windows and the IANA range
 # 49152): an SSH service on a non-standard port listens below it.
 SSH_CLIENT_PORT_FLOOR = 32768
+# What a counted SSH record shows about its client, kept as the record's aux value.
+SSH_OPENED, SSH_EXCHANGED, SSH_PORTS = "opened", "client-shaped", "ports"
 
 
 class OutboundSSHExternal(LinuxSequence):
     id = "net.outbound_ssh_external"
-    version = "3"
-    title = "An internal source initiated SSH to an external destination"
+    version = "4"
+    title = "SSH from an internal source to an external destination"
     os_families = ("linux", "windows")
     families = ("net_flow", "net_session", "net_socket")
     attack = ("T1021.004", "T1572")
     direction_dependent = True
+    benign = (("administrators and automation reaching external servers over SSH (cloud hosts, code hosting, "
+              "partner systems)"),)
+    next_checks = ("the process on the internal host that owns the connection",
+                   "the SSH client's arguments on the host (port forwarding: -R, -L, -D)",
+                   "who the external destination is")
+    card: ClassVar[dict] = {
+        "behavior": "an SSH record (a sensor identified ssh, or TCP to port 22) between an internal source and an "
+                    "external destination, with the internal side as the client: a record shows it opened the "
+                    "connection; or no record shows the opening, both sides sent traffic beyond resets and "
+                    "handshake answers, and the internal side is on a port of 32768 or above facing a port below "
+                    "it; or the record lacks the per-side counters to tell, in which case the client is read from "
+                    "the SSH port (the side on 22, or on an SSH-identified port below 32768, is the server)",
+        "telemetry": "Arkime sessions (source.packets, destination.packets, client.bytes, server.bytes, "
+                     "tcp.flags.syn/syn_ack/rst, network.protocols), Suricata and Zeek flow records "
+                     "(flow.pkts_toserver/toclient, flow.bytes_toserver/toclient, tcp.tcp_flags_ts/tc, "
+                     "conn.history, tcp.opened_by_orig, network.app_proto) and host socket records: source.ip, "
+                     "destination.ip, ports, network.transport. Arkime and Suricata carry every one in the lab "
+                     "profile; host socket records carry no per-side counters and are read by the SSH port",
+        "fidelity": "a recorded connection, positive-only. The claim says per group how many records show the "
+                    "internal source opened the connection, how many were read as the client from an exchange on "
+                    "client-shaped ports, and how many from the SSH port alone",
+        "benign_and_cost": "administrative and automated SSH to external servers; context lane from a declared "
+                           "management host. Not reported, and counted on the window cell: SSH a recorded opening "
+                           "shows an outside address opened (informational), records in which the internal side "
+                           "sent nothing beyond resets and handshake answers (unsolicited answers such as "
+                           "backscatter to port 22; informational), exchanged records whose ports do not mark the "
+                           "internal client, and records in which only the internal side sent traffic with no "
+                           "opening recorded (both partial)",
+        "query_cost": "none beyond the sweep",
+        "next_pivot": "the owning process and its arguments on the internal host",
+        "adds": "the only rule that reports outbound SSH as such. Inbound SSH is judged by "
+                "net.long_inbound_remote_access (long sessions), host.ssh_login_external_source (logons from "
+                "outside) and net.arkime_ssh_reverse_shell_tag",
+        "research_basis": "ATT&CK Enterprise 20.0 T1021.004 and T1572 (network connection creation); opening and "
+                          "exchange semantics as in romulus.detect.flows (Arkime capture/parsers/tcp.c session "
+                          "orientation, Suricata EVE tcp_flags_ts/tc, Zeek conn history, RFC 9293 section 3.10.7)",
+        "retrieval": "the sweep retrieves every record of the network flow datasets, the Arkime session index and "
+                     "host socket records in each partition, a superset of what this evaluator reads",
+        "lanes": "lead, context from a declared management host; severity medium: an SSH channel is access, not "
+                 "impact",
+    }
+
+    def __init__(self):
+        super().__init__()
+        self._unreported = Counter()        # OUTBOUND_* reading -> records not reported (four keys at most)
+
+    @staticmethod
+    def _judged(e, source, sport, destination, dport) -> str:
+        """OUTBOUND_* reading of a record between an internal and an external address (romulus.detect.flows)."""
+        kind = record_kind(e)
+        view = flow_view(e, kind) if kind in ("flow", "session") else None
+        if view is None:
+            return OUTBOUND_UNKNOWN
+        inside, outside = (((source, sport), (destination, dport)) if external(destination)
+                           else ((destination, dport), (source, sport)))
+        opening = Opening()
+        opening.add(e, view)
+        return outbound_reading(opening.judge(inside, outside), inside[1], outside[1])
 
     def observe(self, e):
         source, destination = canon_ip(e.get("source.ip")), canon_ip(e.get("destination.ip"))
@@ -1116,23 +1189,85 @@ class OutboundSSHExternal(LinuxSequence):
         if not (ssh or e.get("network.transport") == "tcp" and e.get("destination.port") == 22):
             return
         sport, dport = e.get("source.port"), e.get("destination.port")
-        if (sport == 22 and dport != 22) or (ssh and isinstance(sport, int) and isinstance(dport, int)
-                                             and sport < SSH_CLIENT_PORT_FLOOR <= dport):
-            # a record oriented from the server's side (a reply, or a sensor that wrote the responder first): the
-            # client is the end on the ephemeral port
-            source, destination = destination, source
         assume_direction(self)
-        if external(source) or not external(destination):
+        if external(source) == external(destination):
+            return
+        reading = self._judged(e, source, sport, destination, dport)
+        if reading in (OUTBOUND_OPENED, OUTBOUND_CLIENT_SHAPED):
+            # the typed opening, or an exchange on client-shaped ports, names the internal side as the client
+            source, destination = (source, destination) if external(destination) else (destination, source)
+            how = SSH_OPENED if reading == OUTBOUND_OPENED else SSH_EXCHANGED
+        elif reading == OUTBOUND_UNKNOWN:
+            if (sport == 22 and dport != 22) or (ssh and isinstance(sport, int) and isinstance(dport, int)
+                                                 and sport < SSH_CLIENT_PORT_FLOOR <= dport):
+                # no counters to read the opening or the exchange: a record oriented from the server's side (a
+                # reply, or a sensor that wrote the responder first) has the client on the ephemeral port
+                source, destination = destination, source
+            if external(source) or not external(destination):
+                return
+            how = SSH_PORTS
+        else:
+            self._unreported[reading] += 1
             return
         lane = "context" if address_member(source, self.site_facts.management_hosts) else "lead"
-        self.add(e, "ssh", _key(source, destination), lane=lane)
+        self.add(e, "ssh", _key(source, destination), aux=how, lane=lane)
+
+    def _publish_unreported(self):
+        for reading, (partial, text) in OUTBOUND_NOT_REPORTED.items():
+            count = self._unreported[reading]
+            if not count:
+                continue
+            name = "not_reported_" + reading.replace(" ", "_").replace(",", "")
+            if partial:
+                self.limits[name] = _NotReportedSSH(text, records=count, hits=1)
+            else:
+                self.note_coverage(name, f"not reported (informational): {text} ({count} SSH record(s))")
+
+    @staticmethod
+    def _how(how: Counter, count: int) -> str:
+        """What the group's records show about the internal source as the client; '' when only the ports do."""
+        if not how[SSH_OPENED] and not how[SSH_EXCHANGED]:
+            return ""
+        parts = [(how[SSH_OPENED], "a recorded TCP opening shows the internal source opened the connection"),
+                 (how[SSH_EXCHANGED], (f"no opening is recorded, both sides sent traffic beyond resets and handshake "
+                                      f"answers, and the internal source used a port of {SSH_CLIENT_PORT_FLOOR} or "
+                                      f"above facing the external port below it")),
+                 (how[SSH_PORTS], ("the record cannot show who opened the connection, and the internal source is "
+                                  "read as the client from the SSH port"))]
+        return f" Of the {count} record(s): " + "; ".join(
+            f"{n} {'record' if n == 1 else 'records'}: {text}" for n, text in parts if n) + "."
 
     def finalize(self):
+        self._publish_unreported()
         if not self.ready():
             return []
-        return self.fold("SELECT key,id,NULL,NULL,lane FROM records WHERE role='ssh' ORDER BY key,ts,id", (),
-            "Recorded outbound SSH from an internal source to an external destination; connection rows may "
-            "come from more than one sensor and are counted as records.", inferred=False)
+        description = ("Recorded outbound SSH from an internal source to an external destination; connection rows "
+                       "may come from more than one sensor and are counted as records.")
+        rows = self.query("SELECT key,id,aux,lane FROM records WHERE role='ssh' ORDER BY key,ts,id")
+        for group, members in groupby(rows, key=lambda row: row[0]):
+            count, cited, last, lane, how = 0, [], [], "context", Counter()
+            for _group, event_id, aux, candidate in members:
+                count += 1
+                how[aux] += 1
+                if count <= CITE:
+                    cited.append(event_id)
+                last = [event_id]
+                if LANES[candidate] > LANES[lane]:
+                    lane = candidate
+            ids = list(dict.fromkeys(cited + last))
+            text = f"{description} {count} linked record combination(s); first and last are cited."
+            if count > CITE:
+                text += f" Bounded examples are cited ({min(count, CITE)} first combinations and the last)."
+            text += self._how(how, count)
+            yield self.finding(str(group), ids, lane, text, count)
+            self.heartbeat()
+
+
+class _NotReportedSSH(Limit):
+    """SSH records not reported because of what they show (not a state budget): the window cell is partial."""
+
+    def reason(self) -> str:
+        return f"not reported: {self.text} ({self.records} SSH record(s))"
 
 
 class AlertThenHostExecution(LinuxSequence):

@@ -21,6 +21,7 @@ from romulus.detect.bounded import (
     CitationUnavailable,
     HeldExamples,
     KeyedStore,
+    Limit,
     RecentIds,
     SpillList,
 )
@@ -35,14 +36,26 @@ from romulus.detect.citing import (
 from romulus.detect.correlation import canon_ip, external, routable_remote
 from romulus.detect.flows import (
     ARKIME,
+    EPHEMERAL_FLOOR,
+    EXCHANGED,
+    OPENED_BY_OUTSIDE,
+    OUTBOUND_CLIENT_SHAPED,
+    OUTBOUND_NOT_REPORTED,
+    OUTBOUND_REPORTED,
+    OUTBOUND_UNKNOWN,
+    SIDE_SILENT,
     SURICATA,
     ZEEK,
     ZEEK_NO_DURATION,
     _per_sensor_cited,
     _sensor_counts,
     flow_view,
+    judge_connection,
+    outbound_reading,
     record_kind,
     sensor_of,
+    server_shaped,
+    side_states,
 )
 from romulus.detect.netdef import assume_direction
 from romulus.evidence.typed import TypedEvent
@@ -91,6 +104,72 @@ def _merge_stretch(first: list, other: list) -> list:
         witnesses[sensor] = min(witnesses.get(sensor, ref), ref)
     return [min(first[0], other[0]), max(first[1], other[1]), lead[2], lead[3],
             first[4] | other[4], witnesses]
+
+
+def _ends(c: dict) -> tuple[tuple, tuple]:
+    """(internal (address, port), external (address, port)) of a held connection with one public end."""
+    first, second = (c["src"], c["sport"]), (c["dst"], c["dport"])
+    return (second, first) if _public(c["src"]) else (first, second)
+
+
+def _judgement(c: dict) -> str:
+    """romulus.detect.flows.judge_connection over every record of a held connection."""
+    return judge_connection(c["openers"], c.get("states") or {}, *_ends(c))
+
+
+def _outbound(c: dict) -> str:
+    """How an outbound rule reads a held connection (romulus.detect.flows.outbound_reading)."""
+    inside, outside = _ends(c)
+    return outbound_reading(_judgement(c), inside[1], outside[1])
+
+
+def _endpoint(side: tuple) -> str:
+    return f"{side[0]}:{side[1]}" if side[1] is not None else str(side[0])
+
+
+class _NotReported(Limit):
+    """Connections a rule did not report because of what their records show (not a state budget), named on the
+    window cell with their count; the cell is partial."""
+
+    def reason(self) -> str:
+        return f"not reported: {self.text} ({self.records} connection(s))"
+
+
+class _Unreported:
+    """The connections an outbound session rule did not report, per reading (OUTBOUND_NOT_REPORTED): a count, and the
+    LISTED largest by the rule's measure, named on the window cell. Bounded: four readings, LISTED entries each."""
+    LISTED = 10
+
+    def __init__(self):
+        self.counts: Counter = Counter()
+        self.top: dict[str, list] = {}
+
+    def add(self, reading: str, measure: float, c: dict) -> None:
+        self.counts[reading] += 1
+        inside, outside = _ends(c)
+        entry = (measure, _endpoint(inside), _endpoint(outside))
+        heap = self.top.setdefault(reading, [])
+        if len(heap) < self.LISTED:
+            heapq.heappush(heap, entry)
+        elif entry > heap[0]:
+            heapq.heapreplace(heap, entry)
+
+    def publish(self, rule: Playbook, describe) -> None:
+        """Informational readings become coverage notes; the others make the window cell partial. `describe(measure)`
+        words one listed connection's measure."""
+        for reading, (partial, text) in OUTBOUND_NOT_REPORTED.items():
+            count = self.counts[reading]
+            if not count:
+                continue
+            listed = sorted(self.top[reading], reverse=True)
+            names = "; ".join(f"{inside} and {outside}, {describe(measure)}" for measure, inside, outside in listed)
+            more = f"; and {count - len(listed)} more" if count > len(listed) else ""
+            detail = f"{text}: {names}{more}"
+            name = "not_reported_" + reading.replace(" ", "_").replace(",", "")
+            if partial:
+                rule.limits[name] = _NotReported(detail, records=count, hits=1)
+            else:
+                rule.note_coverage(name, f"not reported (informational): {detail} ({count} connection(s))")
 
 
 class _Stitched(Playbook):
@@ -229,7 +308,7 @@ class _Stitched(Playbook):
                      "report_key": key, "arkime_key": None,
                      "seq": self._seq, "parts": [], "ends": Ends(), "openers": [], "opener_id": None,
                      "opener_field": None, "flagged": False, "sensors": Counter(), "sensor_bytes": {},
-                     "span_known": False, "duration_missing": False, "closed_stretches": False}
+                     "span_known": False, "duration_missing": False, "closed_stretches": False, "states": {}}
                 if not self.conns.put(key, c):
                     self.evaluated -= 1
                     self.refuse("disk", "the connections' disk budget is spent; a record of a new connection is not "
@@ -270,6 +349,10 @@ class _Stitched(Playbook):
                     c["opener_field"] = ("tcp.flags.syn" if view.sensor == ARKIME else
                                          "tcp.opened_by_orig" if view.sensor == ZEEK else
                                          "tcp.tcp_flags_ts" if e.has("tcp.tcp_flags_ts") else "tcp.syn")
+            # each side's strongest exchange state across the connection's records (romulus.detect.flows)
+            for side, state in zip(((view.src, view.sport), (view.dst, view.dport)), side_states(e, view),
+                                   strict=True):
+                c["states"][side] = max(c["states"].get(side, SIDE_SILENT), state)
             if self.BOUNDED and not view.duration_missing:
                 # staged only once the connection can be reported; its first records are staged by `cite`
                 self.bounds.offer(key, c["ends"], start, end, e, stage=self.candidate(c))
@@ -362,8 +445,12 @@ class _Stitched(Playbook):
 
 
 class LongExternalConnection(_Stitched):
+    """A long TCP channel an internal address holds to a public one: the internal side opened it, or both sides
+    exchanged traffic with the internal side on a client port, or the records cannot say who opened it. A connection
+    an outside address opened (an internal server answering) and records of unsolicited answers are not channels the
+    internal side opened; they are counted on the window cell instead (romulus.detect.flows, outbound_reading)."""
     id = "net.long_external_connection"
-    version = "6"
+    version = "7"
     direction_dependent = True
     title = "Long-lived TCP connection between an internal and a public address"
     severity, lane = "medium", "lead"
@@ -376,24 +463,46 @@ class LongExternalConnection(_Stitched):
     BOUNDED = True
     card: ClassVar[dict] = {
         "behavior": "one TCP connection between an address inside the site and one outside it, whose records "
-                    "together span at least 30 minutes; overlapping observations by several sensors count once",
-        "telemetry": "Arkime sessions as net_session, Suricata flow and Zeek conn as net_flow: source.ip, "
-                     "destination.ip, endpoint ports, flow.start/end, network.transport, directional bytes and "
-                     "the typed opening evidence exposed by FlowView.opened",
+                    "together span at least 30 minutes (overlapping observations by several sensors count once), "
+                    "read as a channel the internal side holds: a record shows the internal side opened it; or no "
+                    "record shows the opening, both sides sent traffic beyond resets and handshake answers, and the "
+                    "internal side is on a port of 32768 or above facing a port below it; or the records lack the "
+                    "per-side counters to tell (reported with the opener stated as unknown, as are connections whose "
+                    "records disagree about the opener)",
+        "telemetry": "Arkime sessions as net_session (source.packets, destination.packets, client.bytes, "
+                     "server.bytes, tcp.flags.syn/syn_ack/rst), Suricata flow and Zeek conn as net_flow "
+                     "(flow.pkts_toserver/toclient, flow.bytes_toserver/toclient, tcp.tcp_flags_ts/tc, "
+                     "conn.history, tcp.opened_by_orig): source.ip, destination.ip, endpoint ports, flow.start/end, "
+                     "network.transport. Arkime and Suricata carry every one of these in the lab profile",
         "fidelity": "direct observation of the connection's lifetime by the sensor; says nothing about what it "
                     "carried. Bytes are given per side. A side is named the client only when a record shows the "
-                    "opening through the sensor's typed SYN flags or Zeek conn history); a "
-                    "connection picked up mid-stream or that opened before the hunt window is worded with its "
-                    "two ends and the opener stated as unknown. The cited records always include the records with "
-                    "the earliest start and the latest end, and the claim says how many records it rests on and how "
-                    "many are cited",
+                    "opening through the sensor's typed SYN flags or Zeek conn history; a connection picked up "
+                    "mid-stream or that opened before the hunt window is worded with its two ends and the opener "
+                    "stated as unknown, and when it is reported on its port shape the claim says so. The cited "
+                    "records always include the records with the earliest start and the latest end, and the claim "
+                    "says how many records it rests on and how many are cited",
         "benign_and_cost": "remote administration, VPN tunnels, push channels, long downloads; one item per "
-                           "connection",
+                           "connection. Not reported, and named on the window cell with a count and the longest "
+                           "ones: connections a recorded opening shows an outside address opened (informational), "
+                           "records in which the internal side sent nothing beyond resets and handshake answers "
+                           "(unsolicited answers such as backscatter of a spoofed flood; informational), exchanged "
+                           "connections whose ports do not mark the internal side as the client, and records in "
+                           "which only the internal side sent traffic with no opening recorded (both make the cell "
+                           "partial)",
         "query_cost": "none beyond the sweep",
         "next_pivot": "the internal host's process for the endpoint, then the connection's packets",
-        "adds": "the only rule that judges a connection's duration across the site boundary",
+        "adds": "the only rule that judges the duration of a channel an internal address holds across the site "
+                "boundary. Long sessions an outside address opened to an internal server are judged by "
+                "net.long_inbound_remote_access (remote-access services: SSH, Telnet, r-services, RDP, VNC, WinRM, "
+                "X11), net.external_rdp and net.vnc_session (RDP and VNC negotiation from outside), "
+                "host.ssh_login_external_source and win.rdp_external_source (host logons from outside), "
+                "net.long_unidentified_session (long data-carrying connections with no identified protocol, in "
+                "either direction) and net.protocol_port_mismatch (a protocol that does not fit its port)",
         "research_basis": "ATT&CK Enterprise 20.0 T1071, T1095 and T1571 (network traffic flow detection); "
-                          "reimplemented from the behavior",
+                          "reimplemented from the behavior. Opening and exchange semantics: Arkime "
+                          "capture/parsers/tcp.c (a session is oriented by its SYN, and swapped when its first packet "
+                          "is a SYN-ACK), Suricata EVE flow tcp_flags_ts/tc, Zeek conn.log history letters, "
+                          "RFC 9293 section 3.10.7 (an endpoint answers a segment for no connection with a reset)",
         "retrieval": "the existing sweep retrieves Arkime sessions and bidirectional flow records, including "
                      "Zeek overlap lookback and interim records; unidirectional netflow follows flow-rule coverage",
         "direction": "inside and outside are decided by the site's internal-network definition; under the default "
@@ -415,6 +524,14 @@ class LongExternalConnection(_Stitched):
 
     def candidate(self, conn: dict) -> bool:
         return conn["span_known"] and conn["end"] - conn["start"] >= self.MIN_SECONDS
+
+    def reading(self, c: dict) -> str | None:
+        """The reading a reportable connection is reported under, or None (counted on the window cell)."""
+        reading = _outbound(c)
+        if reading in OUTBOUND_REPORTED:
+            return reading
+        self._unreported.add(reading, c["end"] - c["start"], c)
+        return None
 
     @staticmethod
     def _sides(c: dict) -> str:
@@ -440,8 +557,23 @@ class LongExternalConnection(_Stitched):
                 f"{c['sent_src']} bytes from {c['src']}:{c['sport']} and {c['sent_dst']} bytes from "
                 f"{c['dst']}:{c['dport']}. Which side opened it is not known: {unknown}.")
 
+    @staticmethod
+    def _port_shape(client: tuple, server: tuple) -> str:
+        """Why a connection with no recorded opening is read with `client` as the client."""
+        return (f" Both sides sent traffic beyond resets and handshake answers (per-side packet counts and TCP "
+                f"flags), and {client[0]} used port {client[1]} (at or above {EPHEMERAL_FLOOR}, where common systems "
+                f"pick client ports) while {server[0]} used port {server[1]}: the port shape of {client[0]} as the "
+                f"client.")
+
+    def explain(self, c: dict, reading: str) -> str:
+        """What the claim adds about how the connection was read."""
+        if reading == OUTBOUND_CLIENT_SHAPED:
+            return self._port_shape(*_ends(c))
+        return ""
+
     def finalize(self):
         out = []
+        self._unreported = _Unreported()
         for key, parts in groupby(self._merged_stretches(), key=lambda item: item[0]):
             c = self.conns.peek(key)
             staged = set(c["events"])
@@ -451,6 +583,9 @@ class LongExternalConnection(_Stitched):
                 if count > 1 and len(leads) < self.CONN_IDS and part[3] in staged:
                     leads.append(part[3])
             if not self.candidate(c):
+                continue
+            reading = self.reading(c)
+            if reading is None:
                 continue
             with citation_group(self, out, key, c):
                 # the records bounding the span, the record showing the opening, the first record of each later stretch
@@ -464,6 +599,7 @@ class LongExternalConnection(_Stitched):
                          "The span uses the typed connection start and end, including overlapping lookback records. "
                          "Byte totals use one sensor's counters (Arkime when available, otherwise Zeek, then Suricata); "
                          "cumulative flow counters are counted once and are a lower bound when the same endpoints are reused.")
+                claim += self.explain(c, reading)
                 gaps = count - 1
                 if gaps:
                     # Arkime writes a live connection's record at least every save interval: a long silence is a
@@ -486,7 +622,107 @@ class LongExternalConnection(_Stitched):
                     preds.append(pf(by_id[c["opener_id"]], c["opener_field"]))
                 out.append(Match(self.id, claim, self.claim_type, evs, preds, evs[0].ts, self.severity, self.lane,
                                  "high", evs[0].entities(), group_key=c["report_key"]))
+        self._unreported.publish(self, lambda seconds: f"{seconds / 60:.0f} minutes")
         return out
+
+
+# Remote-access and remote-administration services, by the internal (server) side's TCP port and by the protocol a
+# sensor's parser identified: an outside client holding one of these open is interactive access to the inside.
+REMOTE_ACCESS_PORTS: dict[int, str] = {22: "SSH", 23: "Telnet", 512: "rexec", 513: "rlogin", 514: "rsh",
+                                       3389: "RDP", 5985: "WinRM over HTTP", 5986: "WinRM over HTTPS",
+                                       **{port: "VNC" for port in range(5900, 5910)},
+                                       **{port: "X11" for port in range(6000, 6064)}}
+REMOTE_ACCESS_PROTOCOLS: dict[str, str] = {"ssh": "SSH", "telnet": "Telnet", "rdp": "RDP", "rfb": "VNC",
+                                           "x11": "X11"}
+
+
+def _remote_services(c: dict) -> list[str]:
+    """The remote-access services a held connection's internal side offered, by its port and by identified protocol."""
+    inside, _outside = _ends(c)
+    names = {REMOTE_ACCESS_PROTOCOLS[p] for p in c["protocols"] if p in REMOTE_ACCESS_PROTOCOLS}
+    if inside[1] in REMOTE_ACCESS_PORTS:
+        names.add(REMOTE_ACCESS_PORTS[inside[1]])
+    return sorted(names)
+
+
+class LongInboundRemoteAccess(LongExternalConnection):
+    """A long TCP session an outside address held open to an internal remote-access service: a record shows the
+    outside address opened it, or no record shows the opening and both sides exchanged traffic with the outside
+    address on a client port facing the service port."""
+    id = "net.long_inbound_remote_access"
+    version = "1"
+    title = "Long TCP session from a public address to an internal remote-access service"
+    severity, lane = "high", "lead"
+    attack = ("T1133", "T1021")
+    assures_negative = False
+    positive_only_reason = (
+        "only connections whose records show the outside address opened them, or show both sides exchanging traffic "
+        "with the outside address on a client port, are read; a connection whose opener and exchange are not "
+        "recorded is not judged here, and a remote-access service on a port this rule does not list, with no "
+        "protocol a sensor identified, is not recognised, so the absence of a match proves nothing")
+    benign = ("administrators, vendors and partners using an exposed SSH, RDP or VNC service",
+              "VPN concentrators and jump hosts deliberately exposed to the internet")
+    next_checks = ("the logon on the internal host for this session (account, authentication method)",
+                   "what the account did on the host during the session",
+                   "the outside address (ownership, other internal hosts it reached)")
+    card: ClassVar[dict] = {
+        "behavior": "one TCP connection whose records together span at least 30 minutes, between an outside address "
+                    "and an internal one that offered a remote-access service on it (by its port: SSH 22, Telnet "
+                    "23, rexec 512, rlogin 513, rsh 514, RDP 3389, VNC 5900-5909, WinRM 5985/5986, X11 6000-6063; "
+                    "or by a protocol a sensor identified: ssh, telnet, rdp, rfb, x11), read as a session the outside "
+                    "address held: a record shows the outside address opened it, or no record shows the opening, "
+                    "both sides sent traffic beyond resets and handshake answers, and the outside address is on a "
+                    "port of 32768 or above facing the internal side's port below it",
+        "telemetry": LongExternalConnection.card["telemetry"],
+        "fidelity": "direct observation of the session's lifetime and opening by the sensor; it does not show a "
+                    "logon succeeded or what was done. The opening is stated from the sensor's typed SYN evidence "
+                    "or, when not recorded, the claim says the outside address is read as the client from the port "
+                    "shape. The service is named by port or by the sensor's protocol identification",
+        "benign_and_cost": "administrators, vendors and partners using exposed remote-access services, and jump "
+                           "hosts; one item per connection. Scanners and password guessers rarely hold a session "
+                           "for 30 minutes, so their probes do not reach this rule",
+        "query_cost": "none beyond the sweep",
+        "next_pivot": "the host's logon records for the session, then what the account did",
+        "adds": "network-side view of inbound interactive access that net.long_external_connection does not report "
+                "(it reads outbound channels only). Overlaps net.external_rdp and net.vnc_session where Zeek or "
+                "Suricata parse the negotiation; adds SSH, Telnet, r-services, WinRM and X11, and Arkime-only sites",
+        "research_basis": "ATT&CK Enterprise 20.0 T1133 (External Remote Services: network connection creation "
+                          "and session metadata) and T1021; opening and exchange semantics as for "
+                          "net.long_external_connection",
+        "retrieval": LongExternalConnection.card["retrieval"],
+        "direction": LongExternalConnection.card["direction"],
+        "lanes": "lead; severity high: interactive access to an internal host from outside is high impact if "
+                 "unauthorized",
+    }
+
+    def wants(self, e: TypedEvent) -> bool:
+        # a TCP connection with one public end whose first record names a remote-access service on the internal side,
+        # by port or by an identified protocol
+        if not super().wants(e):
+            return False
+        inside_port = e.get("destination.port") if _public(e.get("source.ip")) else e.get("source.port")
+        listed = e.get("network.protocols")
+        names = {str(p).lower() for p in (listed if isinstance(listed, list) else [listed]) if p}
+        app = e.get("network.app_proto")
+        if isinstance(app, str):
+            names.add(app.lower())
+        return inside_port in REMOTE_ACCESS_PORTS or bool(names & {"ssh", "telnet", "rdp", "rfb", "vnc", "x11"})
+
+    def reading(self, c: dict) -> str | None:
+        if not _remote_services(c):
+            return None
+        judgement = _judgement(c)
+        inside, outside = _ends(c)
+        if judgement == OPENED_BY_OUTSIDE or (judgement == EXCHANGED and server_shaped(inside[1], outside[1])):
+            return judgement
+        return None
+
+    def explain(self, c: dict, reading: str) -> str:
+        inside, outside = _ends(c)
+        services = " and ".join(_remote_services(c))
+        text = "" if reading == OPENED_BY_OUTSIDE else self._port_shape(outside, inside)
+        return (f"{text} {inside[0]} is an internal address offering {services} on the session; {outside[0]} is "
+                f"outside the site. The session shows access was held open, not that a logon succeeded.")
 
 
 class _Series:
@@ -540,7 +776,7 @@ class Beaconing(_Stitched):
     cannot hide a beacon. It absorbs millisecond truncation, ordinary sensor skew, and Arkime's back-to-back splits
     of one long UDP session."""
     id = "net.beaconing"
-    version = "7"
+    version = "8"
     direction_dependent = True
     title = "Regular, repeated connections from an internal address to one public endpoint"
     severity, lane = "medium", "lead"
@@ -559,7 +795,15 @@ class Beaconing(_Stitched):
         "telemetry": "Arkime sessions as net_session, Suricata flow and Zeek conn as net_flow: source.ip, "
                      "destination.ip, endpoint ports, network.transport, flow.start/end and identified protocols",
         "fidelity": "aggregate observation of connection start times; regularity is a deviation, not proof of "
-                    "command and control",
+                    "command and control. A connection counts when a record shows the internal address opened it, "
+                    "when no record shows the opening but both sides sent traffic beyond resets and handshake "
+                    "answers with the internal address on a port of 32768 or above facing a port below it, or when "
+                    "the records lack the per-side counters to tell (then the recorded sides are used, as the claim "
+                    "says). Connections an outside address is shown to have opened, and records in which the "
+                    "internal address sent nothing beyond resets and handshake answers (unsolicited answers such as "
+                    "backscatter), are not counted and are named on the window cell; exchanged connections whose "
+                    "ports do not mark the internal client, and records in which only the internal address sent "
+                    "traffic with no opening recorded, are named there too and make the cell partial",
         "benign_and_cost": "NTP (context lane when the parser names it), update checks, telemetry and monitoring "
                            "agents; one item per (source, destination, port, transport)",
         "query_cost": "none beyond the sweep",
@@ -649,18 +893,34 @@ class Beaconing(_Stitched):
         # as records arrive): staging exactly the records that open one keeps every possible citation.
         return opened
 
+    @staticmethod
+    def _oriented(c: dict, unreported: _Unreported) -> tuple | None:
+        """(internal source, its port, public destination, its port) of a connection the rule counts, or None. A
+        connection whose opener the records cannot settle keeps its recorded sides and counts only when they run
+        from inside to outside."""
+        reading = _outbound(c)
+        if reading not in OUTBOUND_REPORTED:
+            unreported.add(reading, c["records"], c)
+            return None
+        if reading != OUTBOUND_UNKNOWN:
+            (src, sport), (dst, dport) = _ends(c)
+            return src, sport, dst, dport
+        if _public(c["src"]) or not _public(c["dst"]):
+            return None
+        return c["src"], c["sport"], c["dst"], c["dport"]
+
     def finalize(self):
         series = KeyedStore(self, "beacon_series", self.HOT)
-        previous, c = None, None
+        unreported = _Unreported()
+        previous, c, oriented = None, None, None
         for i, (key, part) in enumerate(self._merged_stretches()):
             first = key != previous
             if first:
                 previous, c = key, self.conns.peek(key)
-            src, sport, dst, dport = c["src"], c["sport"], c["dst"], c["dport"]
-            if len(c["openers"]) == 1 and tuple(c["openers"][0]) != (src, sport):
-                src, sport, dst, dport = dst, dport, src, sport
-            if _public(src) or not _public(dst):
+                oriented = self._oriented(c, unreported)
+            if oriented is None:
                 continue
+            src, _sport, dst, dport = oriented
             s = series.setdefault((src, dst, dport, c["transport"]), _Series)
             if s is None:
                 self.refuse("disk", "the series' disk budget is spent; a connection is not evaluated")
@@ -679,6 +939,7 @@ class Beaconing(_Stitched):
                 series.trim()
         if self.starts.on_disk:
             self.starts.trim(0)
+        unreported.publish(self, lambda records: f"{records} record(s)")
         out = []
         for (src, dst, dport, transport), s in series.items():
             with citation_group(self, out, (src, dst, dport, transport), s):
@@ -708,9 +969,10 @@ class Beaconing(_Stitched):
                             f"periodic by design." if periodic else ""))
                 if not arkime_only:
                     claim += _per_sensor_cited(evs, {sensor: {"records": count} for sensor, count in s.sensors.items()})
-                    if not s.opened:
-                        claim += (" The source and destination are the recorded sides; the records do not show that the "
-                                  "source opened every connection.")
+                if not s.opened:
+                    claim += (f" The records do not show that {src} opened every connection: where no opening is "
+                              f"recorded, {src} is the side on a client port when both sides exchanged traffic, and "
+                              f"otherwise the side the sensor recorded first.")
                 if s.duration_missing:
                     claim += f" {ZEEK_NO_DURATION}; only the recorded starts are used for those records."
                 cited = next((e for e in evs if canon_ip(e.get("source.ip")) == src), evs[0])
@@ -1114,4 +1376,5 @@ class ArkimeSshReverseShellTag(Playbook):
         return out
 
 
-SESSION_PLAYBOOKS = [LongExternalConnection, Beaconing, RareClientFingerprint, ArkimeSshReverseShellTag]
+SESSION_PLAYBOOKS = [LongExternalConnection, LongInboundRemoteAccess, Beaconing, RareClientFingerprint,
+                     ArkimeSshReverseShellTag]
