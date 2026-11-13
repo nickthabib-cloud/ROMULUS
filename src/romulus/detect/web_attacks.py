@@ -565,19 +565,31 @@ def _mask_query(query, decoded_query):
     return "&".join(kept)
 
 
-def _mask_path_parameters(path):
-    """A path whose `name=value` pieces with credential names have their values masked. A piece is what `;` or
-    `&` delimits inside one segment: path parameters (/app;jsessionid=...) and parameters written into the path."""
+def _mask_path(path):
+    """A path whose `name=value` pieces with credential names are masked, and whether its last segment held one.
+    A piece is what `;` or `&` delimits inside one segment: path parameters (/app;jsessionid=...) and parameters
+    written into the path. A credential's value is taken to run to the end of its segment."""
     if "=" not in path:
-        return path
-    segments = []
+        return path, False
+    segments, masked = [], False
     for segment in path.split("/"):
-        kept = []
-        for piece in re.split("([;&])", segment) if "=" in segment else (segment,):
-            name, equals, _value = piece.partition("=")
-            kept.append(name + "=[redacted]" if equals and _has_credential_key(piece) else piece)
-        segments.append("".join(kept))
-    return "/".join(segments)
+        masked = False
+        if "=" in segment:
+            pieces, kept = re.split("([;&])", segment), []
+            for index in range(0, len(pieces), 2):
+                name, equals, _value = pieces[index].partition("=")
+                if equals and _has_credential_key(pieces[index]):
+                    kept.append(name + "=[redacted]")
+                    masked = True
+                    break
+                kept.extend(pieces[index:index + 2])
+            segment = "".join(kept)
+        segments.append(segment)
+    return "/".join(segments), masked
+
+
+def _mask_path_parameters(path):
+    return _mask_path(path)[0]
 
 
 def _redact_uri(value):
@@ -590,21 +602,33 @@ def _redact_uri(value):
     # The path ends at the first `?` or `#`; everything after it is parameters (query and fragment alike).
     found, decoded_found = _PARAMETER_START.search(value), _PARAMETER_START.search(decoded)
     path, lead, parameters = (value[:found.start()], found.group(), value[found.end():]) if found else (value, "", "")
-    if lead:
-        parameters = _mask_query(parameters, decoded[decoded_found.end():] if decoded_found else decoded)
-    path = _mask_path_parameters(path)
+    path, open_value = _mask_path(path)
     plain_path = _decode(path, MAX_URI, fold=False)[0]
     if _mask_path_parameters(plain_path) != plain_path:
         # A credential piece that only appears once decoded cannot be masked in the raw spelling.
-        path = "[redacted:encoded-path-parameters]"
+        path, open_value = "[redacted:encoded-path-parameters]", True
+    if lead:
+        parameters = _mask_query(parameters, decoded[decoded_found.end():] if decoded_found else decoded)
+        first, ampersand, rest = parameters.partition("&")
+        if open_value and "=" not in re.split("[;?#]", first, maxsplit=1)[0] and first != _REDACTED_QUERY:
+            # A credential at the end of the path, then `?` or `#` and text that names no parameter: the text is
+            # read as the rest of the credential's value, not as a parameter.
+            parameters = "[redacted]" + ampersand + rest
     retained = strip_uri_userinfo(path + lead + parameters)[0]
-    if strip_uri_userinfo(_decode(retained, MAX_URI, fold=False)[0])[1]:
+    plain = _decode(retained, MAX_URI, fold=False)[0]
+    if strip_uri_userinfo(plain)[1]:
         # Userinfo that only appears once decoded: drop the part that holds it.
         path_only = strip_uri_userinfo(path)[0]
         if lead and not strip_uri_userinfo(_decode(path_only, MAX_URI, fold=False)[0])[1]:
             retained = path_only + lead + _REDACTED_QUERY
         else:
             return "[redacted:encoded-URI-credentials]"
+    elif plain != retained and any(
+            equals and not held.startswith("[redacted") and _credential_name(name[:256])
+            for name, equals, held in (piece.partition("=") for piece in re.split("[&;?#/]", plain))):
+        # A credential name that only appears once what is kept is decoded (an entity or an escape that hides a
+        # delimiter): the raw spelling cannot be masked piece by piece, so the target is withheld.
+        return "[redacted:encoded-credential-parameters]"
     if clipped:
         retained = retained[:CITED_CHARS] + "[truncated]"
     return retained

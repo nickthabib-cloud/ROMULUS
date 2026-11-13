@@ -1164,6 +1164,29 @@ def test_a_credential_value_runs_to_the_end_of_its_parameter(attack_rule, query,
     assert value == "/app/../../../etc/passwd?" + kept
 
 
+@pytest.mark.parametrize("target,kept", [
+    # a credential in the path runs to the end of its segment
+    ("/../../etc/passwd;sig=a;TOPSECRET;x", "/../../etc/passwd;sig=[redacted]"),
+    ("/../../etc/passwd&token=a;TOPSECRET", "/../../etc/passwd&token=[redacted]"),
+    # ... and through a `?` or `#` that is followed by text naming no parameter
+    ("/../../etc/passwd;token=a?TOPSECRET", "/../../etc/passwd;token=[redacted]?[redacted]"),
+    ("/../../etc/passwd;pwd=a#TOPSECRET?=&x=1", "/../../etc/passwd;pwd=[redacted]#[redacted]&x=1"),
+    # a name that only appears once decoded: the target is withheld
+    ("/../../etc/passwd;p&#97;ssword=TOPSECRET", "[redacted:encoded-credential-parameters]"),
+    ("/../../etc/passwd%3Bpwd=a?TOPSECRET", "/../../etc/passwd%3Bpwd=[redacted]?[redacted]"),
+    ("/../../etc/x%2Fgo%3Btoken%3DTOPSECRET", "[redacted:encoded-path-parameters]"),
+    # a session path parameter does not cost the query its evidence
+    ("/../../etc/passwd;jsessionid=TOPSECRET?id=1'+or+'1'='1&x=2",
+     "/../../etc/passwd;jsessionid=[redacted]?id=1'+or+'1'='1&x=2"),
+    ("/app;jsessionid=TOPSECRET/../../../etc/passwd?debug&id=1", "/app;jsessionid=[redacted]/../../../etc/passwd?debug&id=1"),
+])
+def test_a_credential_in_the_path_is_masked_to_where_its_value_can_end(attack_rule, target, kept):
+    [match, *_others] = finish(attack_rule, [event(target)])
+    assert "TOPSECRET" not in str(match) and "TOPSECRET" not in stored_text(attack_rule)
+    [value] = [predicate.value for predicate in match.predicate if predicate.field == "url.original"]
+    assert value == kept
+
+
 def test_the_masking_note_states_what_is_masked(attack_rule):
     [match] = finish(attack_rule, [event("/../../etc/passwd")])
     [note] = [note for note in match.notes if "Request bodies are not inspected" in note]
