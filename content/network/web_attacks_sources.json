@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "implementation": "Bounded original token grammars informed by the referenced corpora; not complete CRS/Sigma parity.",
   "licenses": [
     {
@@ -11,7 +11,7 @@
     {
       "name": "DRL-1.1",
       "url": "https://github.com/SigmaHQ/Detection-Rule-License/blob/main/LICENSE.Detection.Rules.md",
-      "author": "Nasreddine Bencherchali (Nextron Systems), Tim Shelton",
+      "author": "Nasreddine Bencherchali (Nextron Systems), Tim Shelton; Florian Roth (Nextron Systems)",
       "match_attribution": true
     }
   ],
@@ -23,7 +23,7 @@
       "url": "https://github.com/coreruleset/coreruleset/blob/48092136c9cc8e154620aecde61d1bb2d1f436b0/regex-assembly/942190.ra",
       "blob_sha": "44fc6fdd9a5160633f17c3e197cb73d188ffbcf0",
       "license": "Apache-2.0",
-      "use": "Quoted SQL keyword and UNION SELECT grammar; bounded simplified adaptation."
+      "use": "Quoted SQL statement, boolean and UNION SELECT grammar, tautologies, comment termination, column counting, timing and error functions, schema tables; bounded simplified adaptation. Each verb needs the words that make it a statement."
     },
     {
       "classes": [
@@ -32,7 +32,7 @@
       "url": "https://github.com/coreruleset/coreruleset/blob/48092136c9cc8e154620aecde61d1bb2d1f436b0/rules/REQUEST-941-APPLICATION-ATTACK-XSS.conf",
       "blob_sha": "96afb1b9bd0bc00774f0fc045adce0ad24b6af26",
       "license": "Apache-2.0",
-      "use": "941110/941120 script-tag and HTML event-handler concepts."
+      "use": "941110/941120 script-tag and HTML event-handler concepts; a handler attribute on any element, or after an attribute value closed early."
     },
     {
       "classes": [
@@ -41,7 +41,15 @@
       "url": "https://github.com/coreruleset/coreruleset/blob/48092136c9cc8e154620aecde61d1bb2d1f436b0/rules/REQUEST-930-APPLICATION-ATTACK-LFI.conf",
       "blob_sha": "8c0a362738885994b6b38f6b119714f55651feed",
       "license": "Apache-2.0",
-      "use": "930100/930110 traversal and 930120 OS-file concepts; paths reaching above root plus a small sensitive-path set."
+      "use": "930100/930110 traversal, 930120 OS-file and 930130 restricted-file concepts: paths reaching above the root, parameter values climbing three levels or ending at a sensitive file, a small operating-system and dotfile set, stream wrappers, and overlong-encoded separators."
+    },
+    {
+      "classes": [
+        "path_traversal_lfi"
+      ],
+      "url": "https://www.rfc-editor.org/rfc/rfc3629#section-3",
+      "license": "Factual reference; no text copied",
+      "use": "UTF-8 forbids forms longer than the shortest one for a code point; an overlong-encoded '/', '.' or '\\' is reported as traversal."
     },
     {
       "classes": [
@@ -50,7 +58,7 @@
       "url": "https://github.com/coreruleset/coreruleset/blob/48092136c9cc8e154620aecde61d1bb2d1f436b0/rules/REQUEST-931-APPLICATION-ATTACK-RFI.conf",
       "blob_sha": "60d13dd9537a7d8866ba02d90ecb430ae262796e",
       "license": "Apache-2.0",
-      "use": "931110 vulnerable-parameter + remote scheme and 931120 remote script URL concepts; ordinary redirect URLs excluded."
+      "use": "931100 IP-literal host, 931110 vulnerable-parameter plus remote scheme and 931120 trailing question mark concepts; a remote URL in a file-like parameter counts with an IP-literal host, a trailing '?' or NUL, or a text extension (.txt, .inc, .dat, .tmp); redirect parameters and URLs on the requested server are excluded."
     },
     {
       "classes": [
@@ -59,7 +67,7 @@
       "url": "https://github.com/coreruleset/coreruleset/blob/48092136c9cc8e154620aecde61d1bb2d1f436b0/rules/REQUEST-932-APPLICATION-ATTACK-RCE.conf",
       "blob_sha": "bdf897017fb93c9d7c46861d8c93504c1f10f616",
       "license": "Apache-2.0",
-      "use": "Shell control token followed by a bounded command vocabulary; no obfuscation-complete shell parser."
+      "use": "Shell control token followed by a command from a stated list with an operand, an unambiguous command, or a command after a complete value; command substitution; the Shellshock function prefix. No obfuscation-complete shell parser."
     },
     {
       "classes": [
@@ -68,7 +76,7 @@
       "url": "https://github.com/coreruleset/coreruleset/blob/main/regex-assembly/934200.ra",
       "blob_sha": "d55f08f7a54a2a85a3249ddf8a1f9e22946e723a",
       "license": "Apache-2.0",
-      "use": "Template delimiters plus arithmetic, dunder access or dangerous object access; ordinary variable interpolation excluded."
+      "use": "Template delimiters plus multiplication or addition of literals, dunder access or dangerous object access; JNDI lookups and Java runtime execution expressions; ordinary variable interpolation, dates and ranges excluded."
     },
     {
       "classes": [
@@ -78,13 +86,25 @@
       "blob_sha": "ffee3cb3d0ed52b474dbba5c7510a46a3ee419b6",
       "license": "DRL-1.1",
       "author": "Nasreddine Bencherchali (Nextron Systems), Tim Shelton",
-      "use": "sqlmap/, Nikto/, commix/ selected with token boundaries; author attribution emitted in match notes."
+      "markers": ["sqlmap", "Nikto", "commix", "Nmap Scripting Engine", "gobuster", "Wfuzz", "ffuf", "feroxbuster", "WPScan", "WhatWeb", "Recon-ng", "zgrab"],
+      "use": "commix/, feroxbuster/, Fuzz Faster U Fool, gobuster/, Nikto/, Nmap Scripting Engine, Recon-ng/v, sqlmap/, WhatWeb/, Wfuzz/, WPScan v and zgrab/ selected with token boundaries; author attribution emitted in match notes."
+    },
+    {
+      "classes": [
+        "exploit_tool"
+      ],
+      "url": "https://github.com/SigmaHQ/sigma/blob/9d58e38bbcd23d2303d9003af38d8c0e75228d36/rules/web/proxy_generic/proxy_ua_hacktool.yml",
+      "license": "DRL-1.1",
+      "author": "Florian Roth (Nextron Systems)",
+      "markers": ["Hydra", "Arachni", "DirBuster", "masscan", "Medusa", "sqlmap", "Havij", "sqlninja", "DotDotPwn", "ZmEu", "Morfeus", "Webshag", "Grendel-Scan", "Vega"],
+      "use": "(hydra), arachni/, dirbuster, masscan, teh forest lobster, sqlmap, Havij, sqlninja, dotdotpwn, zmeu, morfeus fucking scanner, webshag, grendel-scan and vega/ selected with token boundaries; author attribution emitted in match notes."
     },
     {
       "classes": ["exploit_tool"],
       "url": "https://github.com/sqlmapproject/sqlmap/blob/be216041e2f255ae43b050d466bd5bf92681e665/lib/core/settings.py#L29",
       "blob_sha": "4c619bca9c5786535f988919c5f792c4c6a38d2b",
       "license": "Factual identifier reference; no tool source code copied",
+      "markers": ["sqlmap"],
       "use": "Tool-author confirmation of sqlmap/ in the documented default user agent."
     },
     {
@@ -92,6 +112,7 @@
       "url": "https://github.com/sullo/nikto/blob/999670cb6a939b6c93840ce666941756e4c5dcf5/program/plugins/nikto_core.plugin#L3515",
       "blob_sha": "12758ed3a85882ea406ece278028948c25a6d139",
       "license": "Factual identifier reference; no tool source code copied",
+      "markers": ["Nikto"],
       "use": "Tool-author confirmation of the Nikto/ user-agent identifier."
     },
     {
@@ -99,6 +120,7 @@
       "url": "https://github.com/commixproject/commix/blob/c7f1447371524427bb30abe731235acc7386153b/src/utils/settings.py#L281",
       "blob_sha": "623bfd1750c3ea7e2f753c66ae6481f365ea170b",
       "license": "Factual identifier reference; no tool source code copied",
+      "markers": ["commix"],
       "use": "Tool-author confirmation of the commix/ default user-agent shape."
     },
     {
@@ -108,21 +130,86 @@
       "url": "https://github.com/projectdiscovery/nuclei-docs/blob/main/docs/nuclei/get-started.md",
       "blob_sha": "0cb061bd5d5b9f0ac3d970303ad72340798bdad6",
       "license": "Factual identifier reference; no source code or prose copied",
+      "markers": ["Nuclei"],
       "use": "Explicit nuclei user-agent identifier only; custom/randomized user agents are not detectable by name."
+    },
+    {
+      "classes": ["exploit_tool"],
+      "url": "https://github.com/vanhauser-thc/thc-hydra/blob/d4116daeb80002c799efe56dfc1516c03ffbd79f/hydra-http.c",
+      "license": "Factual identifier reference; no tool source code copied",
+      "markers": ["Hydra"],
+      "use": "Tool-author confirmation of the (Hydra) token in the HTTP modules' default user agent."
+    },
+    {
+      "classes": ["exploit_tool"],
+      "url": "https://github.com/jmk-foofus/medusa/blob/11c9ce3fc6378bf17453b27eb7c6aa30203243ef/src/modsrc/http.c",
+      "license": "Factual identifier reference; no tool source code copied",
+      "markers": ["Medusa"],
+      "use": "Tool-author confirmation of the HTTP module's default user agent, Mozilla/1.22 (compatible; MSIE 10.0; Windows 3.1); the older default, Teh Forest Lobster, comes from the Sigma hack-tool rule."
+    },
+    {
+      "classes": ["exploit_tool"],
+      "url": "https://github.com/jmk-foofus/medusa/blob/11c9ce3fc6378bf17453b27eb7c6aa30203243ef/src/modsrc/web-form.c",
+      "license": "Factual identifier reference; no tool source code copied",
+      "markers": ["Medusa"],
+      "use": "Tool-author confirmation of the web-form module's default user agent, I'm not Mozilla, I'm Ming Mong."
+    },
+    {
+      "classes": ["exploit_tool"],
+      "url": "https://github.com/robertdavidgraham/masscan/blob/0e9f8110db24702f7ee19b689f3cc1a7e2e2caf3/src/proto-http.c",
+      "license": "Factual identifier reference; no tool source code copied",
+      "markers": ["masscan"],
+      "use": "Tool-author confirmation of the masscan/ token, including the ivre-masscan/ spelling of the HTTP probe."
+    },
+    {
+      "classes": ["exploit_tool"],
+      "url": "https://github.com/greenbone/openvas-scanner/blob/0a768cd7b323d98a6baf5f4e3fbe85eb75105df0/misc/user_agent.c",
+      "license": "Factual identifier reference; no tool source code copied",
+      "markers": ["OpenVAS"],
+      "use": "Tool-author confirmation of the OpenVAS-VT token in the default user agent."
+    },
+    {
+      "classes": ["exploit_tool"],
+      "url": "https://github.com/Arachni/arachni/blob/c65e69e2c3d343b43ac9b84d0a9e54bb469e5c8e/lib/arachni/option_groups/http.rb",
+      "license": "Factual identifier reference; no tool source code copied",
+      "markers": ["Arachni"],
+      "use": "Tool-author confirmation of the Arachni/v token in the default user agent."
+    },
+    {
+      "classes": ["exploit_tool"],
+      "url": "",
+      "license": "Product-name tokens; no upstream artifact pinned",
+      "markers": ["dirb", "Nessus", "Acunetix", "w3af", "ZAP"],
+      "use": "The product's own name as a user-agent token (dirb/, Nessus, Acunetix, w3af, ZAP/ or OWASP ZAP). These tools send a browser-like user agent by default, so the marker matches only a scan configured or built to announce itself; the default strings were not confirmed against a pinned upstream file."
     }
   ],
+  "attack": {
+    "request_grammars": ["T1190"],
+    "tool_markers": {
+      "T1595.002": "vulnerability scanners and exploitation frameworks",
+      "T1595.003": "wordlist scanners (gobuster, DirBuster, dirb, Wfuzz, ffuf, feroxbuster)",
+      "T1595.001": "address-block scanners (masscan, zgrab)",
+      "T1110": "password guessers (Hydra, Medusa)"
+    },
+    "login_burst": ["T1110"]
+  },
   "limitations": [
     "Encrypted HTTP and absent body content cannot be judged.",
-    "At most two percent-decoding passes; strict UTF-8 rejects overlong encodings.",
+    "At most two percent-decoding passes; a third level of encoding is not decoded.",
+    "A value is read up to 16,384 characters and a record up to 65,536; what lies beyond is not inspected and the record is counted partial.",
     "Session URI lists do not prove transaction counts or association with status or user-agent.",
     "Every class remains lead; 2xx does not establish exploitation.",
-    "Finite vocabularies do not cover every attack or tool."
+    "Finite vocabularies do not cover every attack or tool.",
+    "A bare ambiguous command name after a delimiter that follows a word (host=localhost;id) is read as a list item.",
+    "A remote script URL (.php, .jsp, .aspx) on another named host in page=, file=, path= or template= is not reported without an IP-literal host or a trailing '?' or NUL.",
+    "The login rate does not see slow guessing, guessing spread over many sources, or failure statuses on paths outside the sign-in vocabulary."
   ],
   "thresholds": {
     "uri_characters": 16384,
     "user_agent_characters": 2048,
     "total_text_characters": 65536,
-    "values_per_record": 128,
+    "pair_leads_per_endpoint": 5,
+    "members_named_per_roll_up": 10,
     "login_attempt_references": 20,
     "login_window_seconds": 300
   }
