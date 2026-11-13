@@ -727,7 +727,7 @@ def test_selective_metadata_preserves_record_id_reuse_at_distinct_timestamps(tmp
     )
 
     assert seen[0].group_by[0] == "@timestamp"
-    assert any("record_id reused (log cleared or reverted)" in reason for reason in reasons)
+    assert any("record_id reused (log cleared or reverted, or machines sharing one source identifier)" in reason for reason in reasons)
     sweep.close_stage()
 
 
@@ -777,7 +777,7 @@ def test_selective_metadata_resolves_collapsed_record_signatures(
     assert [intent.kind for intent in seen] == ["aggregate", "raw"]
     assert seen[1].purpose == "windows continuity collision signatures"
     assert seen[1].max_records < PARTITION_MAX_DOCS
-    assert any("record_id reused (log cleared or reverted)" in reason for reason in reasons) is expects_reuse
+    assert any("record_id reused (log cleared or reverted, or machines sharing one source identifier)" in reason for reason in reasons) is expects_reuse
     assert not any("continuity collision" in reason for reason in reasons)
     sweep.close_stage()
 
@@ -2119,8 +2119,9 @@ def _shipped(record_id: int, minute: int, *, host: str = "WS01.example.test", **
     return hit, document
 
 
-def _selective_sweep(tmp_path, monkeypatch, shipped, types=WINLOGBEAT_TYPES):
-    """A sweep over one selective Windows target whose continuity aggregate runs through the real executor."""
+def _selective_sweep(tmp_path, monkeypatch, shipped, types=WINLOGBEAT_TYPES, selective=True):
+    """A sweep over one Windows target. A selective target's continuity aggregate runs through the real executor;
+    a target read in full follows continuity through the records it retrieved."""
     from romulus.hunt import sweep as sweep_module
     from tests.test_sweep import _repo
 
@@ -2145,7 +2146,8 @@ def _selective_sweep(tmp_path, monkeypatch, shipped, types=WINLOGBEAT_TYPES):
     sweep.pack = [WindowsProcessRule()]
     sweep._windows_inventory[contract.target] = {lookup_event_class(SYSMON_CHANNEL, SYSMON, 1).token}
     sweep._windows_inventory_reasons[contract.target] = []
-    sweep._windows_selective.add(contract.target)
+    if selective:
+        sweep._windows_selective.add(contract.target)
     return sweep, repo, contract, cluster, len(retrieved)
 
 
@@ -2215,3 +2217,171 @@ def test_a_grouped_identifier_holding_several_values_is_honestly_incomplete(tmp_
         assert reasons == ["shipper gaps unresolved: continuity metadata incomplete: bucket_sum_mismatch"]
     finally:
         sweep.close_stage()
+
+
+# ---- record ids missing between the collection sources of one computer --------------------------------------
+
+BETWEEN_SOURCES = (f"shipper gaps: 96 records missing between collection sources on {SYSMON_CHANNEL} "
+                   "for ws01.example.test")
+SOURCE_CHANGES = {
+    # an archived log file ends, and the live file is collected from a later record on
+    "collected_files": ({"log__file__path": "C:\\Logs\\Archive-Sysmon-2026-01-01.evtx"},
+                        {"log__file__path": "C:\\Windows\\System32\\winevt\\Logs\\Sysmon.evtx"}),
+    # the agent was enrolled again and reports under a new id
+    "agent_enrolled_again": ({"agent__id": "agent-old"}, {"agent__id": "agent-new"}),
+    # records that carry only the host's addresses, which changed
+    "address_changed": ({"host__ip": ["10.0.0.5", "fe80::1"]}, {"host__ip": ["10.0.0.9", "fe80::1"]}),
+}
+
+
+def _sequence(envelope, record_ids, first_minute, **keywords):
+    return [_shipped(record_id, first_minute + 3 * step, **envelope, **keywords)
+            for step, record_id in enumerate(record_ids)]
+
+
+def _swept_cell(tmp_path, monkeypatch, shipped, selective):
+    sweep, repo, contract, _cluster, retrieved = _selective_sweep(tmp_path, monkeypatch, shipped,
+                                                                  selective=selective)
+    try:
+        sweep.run_partition(contract.target, contract, [], sweep.window, est=retrieved)
+        [cell] = repo.rule_cells("h1")
+        return cell["state"], cell["detail"].get("reasons", [])
+    finally:
+        sweep.close_stage()
+
+
+@pytest.mark.parametrize("change, selective", [
+    ("collected_files", True), ("collected_files", False),
+    ("agent_enrolled_again", True), ("agent_enrolled_again", False),
+    ("address_changed", False),
+])
+def test_record_ids_missing_between_two_sources_of_one_computer_are_reported(tmp_path, monkeypatch, change,
+                                                                             selective):
+    earlier, later = SOURCE_CHANGES[change]
+    shipped = _sequence(earlier, (1, 2, 3), 5) + _sequence(later, (100, 101, 102), 17)
+    assert _swept_cell(tmp_path, monkeypatch, shipped, selective) == ("evaluated_partial", [BETWEEN_SOURCES])
+
+
+@pytest.mark.parametrize("change, selective", [
+    ("collected_files", True), ("collected_files", False),
+    ("agent_enrolled_again", True), ("agent_enrolled_again", False),
+    ("address_changed", False),
+])
+def test_the_source_holding_the_later_ids_may_arrive_first(tmp_path, monkeypatch, change, selective):
+    # the later ids carry the earlier times (an archive indexed with its read time): they are observed first
+    earlier, later = SOURCE_CHANGES[change]
+    shipped = _sequence(later, (100, 101, 102), 5) + _sequence(earlier, (1, 2, 3), 17)
+    assert _swept_cell(tmp_path, monkeypatch, shipped, selective) == ("evaluated_partial", [BETWEEN_SOURCES])
+
+
+@pytest.mark.parametrize("change, selective", [
+    ("collected_files", True), ("collected_files", False),
+    ("agent_enrolled_again", True), ("agent_enrolled_again", False),
+    ("address_changed", False),
+])
+def test_a_source_change_that_leaves_no_hole_stays_complete(tmp_path, monkeypatch, change, selective):
+    earlier, later = SOURCE_CHANGES[change]
+    shipped = _sequence(earlier, (1, 2, 3), 5) + _sequence(later, (4, 5, 6), 17)
+    assert _swept_cell(tmp_path, monkeypatch, shipped, selective) == ("no_match_complete", [])
+
+
+@pytest.mark.parametrize("selective", [True, False])
+def test_clones_logging_at_once_overlap_and_report_nothing_between_them(tmp_path, monkeypatch, selective):
+    # two machines imaged from one: one computer name, the same record ids, their own agents
+    shipped = (_sequence({"agent__id": "clone-a"}, (1, 2, 3, 4), 5)
+               + _sequence({"agent__id": "clone-b"}, (2, 3, 4, 5), 6))
+    assert _swept_cell(tmp_path, monkeypatch, shipped, selective) == ("no_match_complete", [])
+
+
+def _records(envelope, record_ids, first_minute=5, **keywords):
+    return [hit for hit, _document in _sequence(envelope, record_ids, first_minute, **keywords)]
+
+
+def test_a_hole_between_sources_is_reported_once_in_whichever_order_they_arrive():
+    old, new = _records({"agent__id": "old"}, (1, 2, 3)), _records({"agent__id": "new"}, (100, 101, 102), 20)
+    for first, second in ((old, new), (new, old)):
+        continuity = RecordIdContinuity()
+        try:
+            assert continuity.observe("target", first) == []
+            assert continuity.observe("target", second) == [BETWEEN_SOURCES]
+            # neither source's later records repeat it
+            assert continuity.observe("target", _records({"agent__id": "new"}, (103, 104), 40)) == []
+            assert continuity.state_count == 2
+        finally:
+            continuity.close()
+    together = RecordIdContinuity()
+    try:
+        assert together.observe("target", new + old) == [BETWEEN_SOURCES]       # one hole, counted once
+    finally:
+        together.close()
+
+
+def test_every_hole_between_three_sources_is_counted_and_a_source_inside_one_splits_it():
+    continuity = RecordIdContinuity()
+    try:
+        assert continuity.observe("target", _records({"agent__id": "a"}, (1, 2, 3))) == []
+        assert continuity.observe("target", _records({"agent__id": "c"}, (200, 201), 30)) == [
+            BETWEEN_SOURCES.replace("96", "196")]
+        # a third source lands inside that hole: what is still missing on each side of it is said
+        assert continuity.observe("target", _records({"agent__id": "b"}, (100, 101, 102), 20)) == [
+            BETWEEN_SOURCES.replace("96", str(96 + 97))]
+        # a source that touches its neighbours on both sides leaves nothing more to say
+        assert continuity.observe("target", _records({"log__file__path": "/exports/rest.evtx"},
+                                                     range(4, 100), 10)) == []
+    finally:
+        continuity.close()
+
+
+def test_a_log_cleared_on_one_source_is_reported_as_before_and_is_no_hole_between_sources():
+    continuity = RecordIdContinuity()
+    try:
+        assert continuity.observe("target", _records({"agent__id": "a"}, (500, 501, 502))) == []
+        reasons = continuity.observe("target", _records({"agent__id": "a"}, (1, 2), 30))
+        assert reasons == ["shipper gaps unresolved: record_id out of order on " + SYSMON_CHANNEL
+                           + " for ws01.example.test"]
+    finally:
+        continuity.close()
+
+
+def test_a_record_with_no_source_at_all_is_compared_with_the_sourced_records_of_its_computer():
+    continuity = RecordIdContinuity()
+    try:
+        assert continuity.observe("target", _records({}, (1, 2, 3))) == []
+        assert continuity.observe("target", _records({"host__id": "machine-1"}, (100, 101, 102), 20)) == [
+            BETWEEN_SOURCES]
+        # another computer's sources, and another target's, are never laid beside this one's
+        assert continuity.observe("target", _records({"host__id": "machine-2"}, (900, 901), 20,
+                                                     host="WS02.example.test")) == []
+        assert continuity.observe("other-target", _records({"host__id": "machine-3"}, (5000, 5001), 20)) == []
+    finally:
+        continuity.close()
+
+
+def test_holes_between_sources_on_many_hosts_are_summarised():
+    records = []
+    for number in range(12):
+        host = f"WS{number:02d}.example.test"
+        records += _records({"agent__id": f"old-{number}"}, (1, 2), host=host)
+        records += _records({"agent__id": f"new-{number}"}, (10, 11), 20, host=host)
+    continuity = RecordIdContinuity()
+    try:
+        [reason] = continuity.observe("target", records)
+        assert reason.startswith(f"shipper gaps: 84 records missing between collection sources across 12 hosts "
+                                 f"on {SYSMON_CHANNEL} (sample: ws00.example.test, ")
+    finally:
+        continuity.close()
+
+
+def test_a_reused_record_id_names_every_cause_it_may_have():
+    from romulus.evidence.windows import RECORD_ID_REUSED
+
+    first, second = _records({"agent__id": "shared"}, (7, 7))
+    second["_source"]["winlog"]["event_data"]["ProcessGuid"] = "{11111111-2222-3333-4444-555555555555}"
+    continuity = RecordIdContinuity()
+    try:
+        reasons = continuity.observe("target", [first, second])
+        assert RECORD_ID_REUSED == ("record_id reused (log cleared or reverted, or machines sharing one source "
+                                    "identifier)")
+        assert f"{RECORD_ID_REUSED} on {SYSMON_CHANNEL} for ws01.example.test" in reasons
+    finally:
+        continuity.close()

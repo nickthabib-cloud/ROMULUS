@@ -349,7 +349,8 @@ def test_duplicate_partition_events_have_a_separate_not_assessed_explanation():
     )
     assert reasons[2] == "retrieved but not turned into a typed event: dataset: unsupported"
     assert reasons[1] == (
-        "typed Windows events retained separately after record_id reuse (log cleared or reverted)"
+        "typed Windows events retained separately after record_id reuse (log cleared or reverted, or machines"
+        " sharing one source identifier)"
     )
 def test_revisions_are_append_only():
     repo, cid = _repo_with_finding()

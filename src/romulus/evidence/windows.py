@@ -38,6 +38,8 @@ WINDOWS_SOURCE_ID_FIELDS = ("agent.id", "host.id", "log.file.path", "SourceFile"
 WINDOWS_SOURCE_FIELDS = (*WINDOWS_SOURCE_ID_FIELDS, "host.ip")
 # Counted, never skipped: each collection source's copy of one record is its own event.
 WINDOWS_MULTI_SOURCE_SKIP = "Windows record seen under more than one collection source"
+# One record id with two contents inside one source's sequence. The records do not say which cause it was.
+RECORD_ID_REUSED = "record_id reused (log cleared or reverted, or machines sharing one source identifier)"
 # This is already far beyond what the 64 MiB assembler can retain at normal 4104 chunk sizes, while bounding every
 # completeness vector even when hostile metadata claims billions of parts.
 SCRIPT_BLOCK_MAX_PARTS = 4_096
@@ -248,6 +250,11 @@ class RecordIdContinuity:
 
     State remains one row per (target, computer/source, channel), never one entry per record. A caller-owned directory
     puts the file under the hunt stage; standalone uses get its own private temporary directory.
+
+    Each source's record ids are followed as one sequence. The sources of one computer and channel are also read
+    together: where the id ranges they have delivered leave a hole between them, the ids in it reached this hunt
+    under no source (a collected file that ends before the next begins, an agent enrolled again, an address
+    change). Sources whose ranges touch or overlap, such as machines cloned from one image, leave none.
     """
 
     def __init__(self, directory: str | Path | None = None, *, budget: StateBudget | None = None,
@@ -264,6 +271,7 @@ class RecordIdContinuity:
             "CREATE TABLE continuity ("
             "target TEXT NOT NULL, computer TEXT NOT NULL, channel TEXT NOT NULL, "
             "last_id INTEGER NOT NULL, samples INTEGER NOT NULL, signature TEXT NOT NULL, last_time TEXT, "
+            "first_id INTEGER NOT NULL, "
             "PRIMARY KEY (target, computer, channel)) WITHOUT ROWID"
         )
         self._db.commit()
@@ -330,6 +338,8 @@ class RecordIdContinuity:
         unordered: set[tuple[str, str]] = set()
         malformed: set[tuple[str, str]] = set()
         reused: set[tuple[str, str]] = set()
+        # The sources (key column values) that delivered their first record in this call, by computer and channel.
+        started: dict[tuple[str, str], set[str]] = {}
         # Refusal reasons are controlled state-budget text, so aggregate groups by reason and retain only a sample.
         # A 5,000-host outage must not manufacture a 5,000-line in-memory coverage report.
         refused: dict[tuple[str, str], list] = {}
@@ -377,7 +387,7 @@ class RecordIdContinuity:
             except (TypeError, ValueError):
                 when = None
             row = self._db.execute(
-                "SELECT last_id, samples, signature, last_time FROM continuity "
+                "SELECT last_id, samples, signature, last_time, first_id FROM continuity "
                 "WHERE target = ? AND computer = ? AND channel = ?", key,
             ).fetchone()
             if row is None:
@@ -388,8 +398,8 @@ class RecordIdContinuity:
                     continue
                 try:
                     self._db.execute(
-                        "INSERT INTO continuity VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (*key, record_id, 1, signature, when.isoformat() if when is not None else None),
+                        "INSERT INTO continuity VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (*key, record_id, 1, signature, when.isoformat() if when is not None else None, record_id),
                     )
                 except sqlite3.OperationalError as exc:
                     self._db.rollback()
@@ -402,6 +412,7 @@ class RecordIdContinuity:
                     record_refusal(group, reason)
                     continue
                 touched[key] = group
+                started.setdefault(group, set()).add(scoped_computer)
                 new_rows += 1
                 if new_rows % 128 == 0:
                     self._checkpoint()
@@ -409,7 +420,7 @@ class RecordIdContinuity:
             if self.budget is not None and self.budget.hard:
                 record_refusal(group, self.budget.hard)
                 continue
-            prior, samples, prior_signature, prior_time_text = row
+            prior, samples, prior_signature, prior_time_text, lowest = row
             prior_time = None
             if prior_time_text:
                 try:
@@ -446,6 +457,32 @@ class RecordIdContinuity:
                 # Time-ordered source results are not record-id ordered for this group. Refuse completeness
                 # rather than retaining an event-count-sized set to reconstruct the sequence.
                 unordered.add(group)
+                if record_id < lowest:
+                    self._db.execute(
+                        "UPDATE continuity SET first_id = ? WHERE target = ? AND computer = ? AND channel = ?",
+                        (record_id, *key),
+                    )
+        # Where a source began in this call, lay the id ranges of every source of its computer and channel side by
+        # side, lowest first. A hole next to the new source is reported now, once: whichever of the two sources
+        # around a hole is seen second finds the other's range already held, so the answer does not depend on the
+        # order they arrive in. It is read after the whole call, when the new source's own range is known.
+        source_gaps: dict[tuple[str, str], int] = {}
+        for group, new_sources in started.items():
+            scoped = json.dumps([group[0]], separators=(",", ":"))[:-1] + ","       # the prefix of every scoped key
+            ranges = self._db.execute(
+                "SELECT computer, first_id, last_id FROM continuity WHERE target = ? AND channel = ? "
+                "AND (computer = ? OR (computer >= ? AND computer < ?)) ORDER BY first_id, last_id",
+                (target, group[1], group[0], scoped, scoped[:-1] + "-"),            # "-" follows "," directly
+            ).fetchall()
+            reached, reached_by_new = None, False
+            for source_key, first, last in ranges:
+                new = source_key in new_sources
+                if reached is not None and first > reached + 1 and (new or reached_by_new):
+                    source_gaps[group] = source_gaps.get(group, 0) + first - reached - 1
+                if reached is None or last > reached:
+                    reached, reached_by_new = last, new
+                elif last == reached:
+                    reached_by_new = reached_by_new or new
         self._checkpoint()
         def mapped_by_channel(values: dict) -> dict[str, list[tuple[str, object]]]:
             grouped: dict[str, list[tuple[str, object]]] = {}
@@ -472,6 +509,18 @@ class RecordIdContinuity:
                     f"shipper gaps: {sum(int(count) for _computer, count in groups):,} records missing "
                     f"across {len(groups):,} hosts on {channel} (sample: {sample})"
                 )
+        for channel, groups in sorted(mapped_by_channel(source_gaps).items()):
+            if len(groups) <= 10:
+                reasons += [
+                    f"shipper gaps: {count} records missing between collection sources on {channel} for {computer}"
+                    for computer, count in groups
+                ]
+            else:
+                sample = ", ".join(computer for computer, _count in groups[:10])
+                reasons.append(
+                    f"shipper gaps: {sum(int(count) for _computer, count in groups):,} records missing between "
+                    f"collection sources across {len(groups):,} hosts on {channel} (sample: {sample})"
+                )
         for channel, groups in sorted(mapped_by_channel(time_gaps).items()):
             if len(groups) <= 10:
                 reasons += [
@@ -488,12 +537,12 @@ class RecordIdContinuity:
         for channel, computers in sorted(groups_by_channel(reused).items()):
             if len(computers) <= 10:
                 reasons += [
-                    f"record_id reused (log cleared or reverted) on {channel} for {computer}"
+                    f"{RECORD_ID_REUSED} on {channel} for {computer}"
                     for computer in computers
                 ]
             else:
                 reasons.append(
-                    f"record_id reused (log cleared or reverted) for {len(computers):,} hosts on {channel} "
+                    f"{RECORD_ID_REUSED} for {len(computers):,} hosts on {channel} "
                     f"(sample: {', '.join(computers[:10])})"
                 )
         for label, groups, detail in (
