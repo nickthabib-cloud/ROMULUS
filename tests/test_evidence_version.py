@@ -76,9 +76,14 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # that were unsupported before change.
                    17: "baa63f719e26813a9e8a1d8f1bcce8c505ba46cb4cb5b36a7b2c052e0e0384b7",
                    # Hostless text records gain their syslog header host; all event identities use this epoch.
-                   18: "c12a186f12ffdc99937e21c6856315b0dad464e2d56811f181bfc0ebf2f13203"}
+                   # Then normalize_hits gained an optional report of each Windows event's record digest (the
+                   # record without its collection source): no output changed.
+                   18: "fd9a7ba8288929edc84aef696feeb7bae622f7d9d90b2312fe275eff9ae9bc0b"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py", "rpc_catalog.py")
 PINNED_WINDOWS = {
+    # A record's host addresses stand beside its stable source identifier, so clones that share the identifier
+    # stay apart; a record-id sequence still follows the identifier alone.
+    "windows-ecs@23": "bf70820208cb3593991184d7ffa84a088a66a0c4f5492376c8e0f31019a8baf3",
     # Stable source identity separates cloned machines while preserving same-source copies.
     "windows-ecs@22": "2deebdc059de6edd6ea01ceef343a1941a60305dcc5a4bdd6d20919f7d6b3434",
     # Shipper read time cannot replace the Windows event clock in duplicate identity.
@@ -113,8 +118,9 @@ PINNED_WINDOWS = {
 }
 # Shared path, credential and scalar cleaners are part of the eCAR producer contract.
 ECAR_EVIDENCE_FILES = ('community.py', 'ecar.py', 'ecar_catalog.py', 'raw_scrub.py', 'surrogates.py', 'windows.py')
-# Native epoch, ISO timestamps and pipeline-only exports retain ordered clock provenance.
-PINNED_ECAR = {"ecar@3": "83333025b8f9728dc47e7b864ced8408af06f6ad4016260ac5db9355385a64df",
+# Native epoch, ISO timestamps and pipeline-only exports retain ordered clock provenance. The Windows source
+# identity in windows.py is read by no eCAR record: its change moved this digest and no eCAR output.
+PINNED_ECAR = {"ecar@3": "7fd03fe76f9ec2128ded519e6070743cad1f55b5cb70ba53de655cafc03e3799",
                "ecar@2": "0b6340adce420e237b1633435c321244e88ec744ee37a7b83e7818b6d4439c75",
                "ecar@1": "539a0832b610df1dca02729b594756bb1a0ae70a9c825beec154611b0cde56cd"}
 ZEEK_EVIDENCE_FILES = ("certificates.py", "community.py", "ics_catalog.py", "rpc_catalog.py", "zeek.py", "zeek_catalog.py",
@@ -137,9 +143,10 @@ SURICATA_EVIDENCE_FILES = ("normalize.py", "suricata_protocols.py", "raw_scrub.p
                            "surrogates.py", "typed.py")
 ARKIME_EVIDENCE_FILES = ("normalize.py", "arkime_protocols.py", "raw_scrub.py", "community.py",
                         "certificates.py", "zeek_credentials.py", "surrogates.py", "typed.py")
-PINNED_SURICATA = {"suricata-eve@2": "9f733685beb2cb34b4b11790b87ea85f172942abe3a154a936548b5016ef20fc",
+# The dispatcher's optional report of Windows record digests changes no network record's output.
+PINNED_SURICATA = {"suricata-eve@2": "e94e638b7035d5f36b74c52cbe187a153609468a0e197b252c12c3d7edd79745",
                    "suricata-eve@1": "8aba0c3bbb2061eef70c0c9dd77e5ab49a42bbed9a68b01ba4b4eeffad181e38"}
-PINNED_ARKIME = {"arkime@1": "e980b8b43c68a67101a661d09290939d1544f2e013ad2eb9f0732044e87e9d55"}
+PINNED_ARKIME = {"arkime@1": "0bc2fe51c010156759c3fcdd41f77b36276be1630fc891db8362e8c51ea4be32"}
 
 
 # The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events, and TCP connections rebuilt

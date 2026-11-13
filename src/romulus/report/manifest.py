@@ -185,7 +185,11 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
     profiles = hunt_manifest.get("source_profiles") or {}
     out = []
 
-    def skip_explanation(reason: str) -> str:
+    def skip_explanation(reason: str, count: int) -> str:
+        if reason == "Windows record seen under more than one collection source":
+            # every copy became a typed event and was evaluated: the row says what a count may hold twice
+            return (f"{count:,} Windows record{' was' if count == 1 else 's were'} seen under more than one "
+                    "collection source; counts may include copies")
         if reason == "duplicate typed event across source partitions":
             return "typed event deduplicated across source partitions; its additional raw provenance was retained"
         if reason == "record_id reused (log cleared or reverted)":
@@ -255,7 +259,7 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
                 scoped_totals[reason] += count
                 out.append({"target": target, "dataset": None, "records": count,
                             "count_scope": "records retrieved in the hunt window",
-                            "reason": skip_explanation(reason)})
+                            "reason": skip_explanation(reason, count)})
         global_scoped = stats.get("skips_scoped_global")
         if isinstance(global_scoped, dict):
             scoped_totals = Counter(global_scoped)
@@ -264,12 +268,12 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
             if remainder > 0:
                 out.append({"target": "all sweep targets", "dataset": None, "records": remainder,
                             "count_scope": "records retrieved in the hunt window",
-                            "reason": skip_explanation(reason)})
+                            "reason": skip_explanation(reason, remainder)})
     else:
         for reason, count in sorted((stats.get("skips") or {}).items()):
             out.append({"target": "all sweep targets", "dataset": None, "records": count,
                         "count_scope": "records retrieved in the hunt window",
-                        "reason": skip_explanation(reason)})
+                        "reason": skip_explanation(reason, count)})
     unknown_total = 0
     unknown_datasets = set()
     unknown_prefix = "retrieved but not turned into a typed event: text line in no recognized format: "

@@ -2117,8 +2117,8 @@
      }
     },
     "host": "ws01",
-    "id": "25e51fa924d343a42dff2042",
-    "normalizer": "windows-ecs@22",
+    "id": "11779228d23a25000be63f2a",
+    "normalizer": "windows-ecs@23",
     "outcome": "success",
     "raw": [
      {
@@ -2333,8 +2333,8 @@
      }
     },
     "host": "ws01",
-    "id": "804575ef7a90bb153e9b01a9",
-    "normalizer": "windows-ecs@22",
+    "id": "3d73351ce3f3383ae93c424b",
+    "normalizer": "windows-ecs@23",
     "outcome": "success",
     "raw": [
      {
@@ -15167,8 +15167,8 @@
       }
      },
      "host": "ws01",
-     "id": "25e51fa924d343a42dff2042",
-     "normalizer": "windows-ecs@22",
+     "id": "11779228d23a25000be63f2a",
+     "normalizer": "windows-ecs@23",
      "outcome": "success",
      "raw": [
       {
@@ -15434,8 +15434,8 @@
       }
      },
      "host": "ws01",
-     "id": "25e51fa924d343a42dff2042",
-     "normalizer": "windows-ecs@22",
+     "id": "11779228d23a25000be63f2a",
+     "normalizer": "windows-ecs@23",
      "outcome": "success",
      "raw": [
       {
@@ -15694,8 +15694,8 @@
       }
      },
      "host": "ws01",
-     "id": "804575ef7a90bb153e9b01a9",
-     "normalizer": "windows-ecs@22",
+     "id": "3d73351ce3f3383ae93c424b",
+     "normalizer": "windows-ecs@23",
      "outcome": "success",
      "raw": [
       {
@@ -15963,8 +15963,8 @@
       }
      },
      "host": "ws01",
-     "id": "804575ef7a90bb153e9b01a9",
-     "normalizer": "windows-ecs@22",
+     "id": "3d73351ce3f3383ae93c424b",
+     "normalizer": "windows-ecs@23",
      "outcome": "success",
      "raw": [
       {

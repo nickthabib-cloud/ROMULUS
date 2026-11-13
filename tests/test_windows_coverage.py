@@ -2043,3 +2043,175 @@ def test_5000_host_windows_sweep_refuses_bounded_state_without_crashing(tmp_path
     assert refused > 0
     assert len(cell["detail"]["reasons"]) < 10
     sweep.close_stage()
+
+
+# ---- selective continuity through the real aggregate executor ----------------------------------------------
+
+WINLOGBEAT_TYPES = {
+    "@timestamp": "date", "event.dataset": "keyword", "agent.id": "keyword", "host.id": "keyword", "host.ip": "ip",
+    "log.file.path": "keyword", "winlog.channel": "keyword", "winlog.provider_name": "keyword",
+    "winlog.event_id": "long", "winlog.computer_name": "keyword", "winlog.record_id": "long",
+    "winlog.event_data": "flattened",
+}
+
+
+class CompositeCluster:
+    """A cluster holding flat documents that answers the composite aggregation as a cluster does: a document
+    falls in one bucket per combination of its grouped values, so a field holding several values multiplies it."""
+
+    version = "8.17.0"
+
+    def __init__(self, documents):
+        from types import SimpleNamespace
+
+        self.documents = documents
+        self.settings = SimpleNamespace(es_flavor="elasticsearch")
+        self.bodies = []
+
+    def search(self, _target, body):
+        from itertools import product
+
+        self.bodies.append(body)
+        composite = body["aggs"]["g"]["composite"]
+        fields = [(name, spec["terms"]["field"]) for source in composite["sources"] for name, spec in source.items()]
+        buckets: dict[tuple, list[datetime]] = {}
+        for document in self.documents:
+            values = [document.get(field) for _name, field in fields]
+            for combination in product(*(value if isinstance(value, list) else [value] for value in values)):
+                buckets.setdefault(combination, []).append(datetime.fromisoformat(document["@timestamp"]))
+        ordered = sorted(buckets, key=lambda combination: [(item is not None, str(item)) for item in combination])
+        after = composite.get("after")
+        start = ordered.index(tuple(after[name] for name, _field in fields)) + 1 if after else 0
+        page = ordered[start:start + composite["size"]]
+
+        def stamp(when):
+            return {"value": when.timestamp() * 1000, "value_as_string": when.isoformat()}
+
+        aggregation = {"buckets": [{
+            "key": dict(zip((name for name, _field in fields), combination, strict=True)),
+            "doc_count": len(buckets[combination]),
+            "first": stamp(min(buckets[combination])), "last": stamp(max(buckets[combination])),
+        } for combination in page]}
+        if page:
+            aggregation["after_key"] = aggregation["buckets"][-1]["key"]
+        return {"timed_out": False, "_shards": {"failed": 0},
+                "hits": {"total": {"value": len(self.documents), "relation": "eq"}},
+                "aggregations": {"g": aggregation}}
+
+
+def _shipped(record_id: int, minute: int, *, host: str = "WS01.example.test", **envelope):
+    """A Winlogbeat record and the flat document the cluster indexed from it."""
+    when = (START + timedelta(minutes=minute)).isoformat()
+    hit = _hit(record_id)
+    hit["_source"]["@timestamp"] = when
+    hit["_source"]["winlog"]["computer_name"] = host
+    hit["_source"].pop("host")
+    document = {"@timestamp": when, "winlog.computer_name": host, "winlog.channel": SYSMON_CHANNEL,
+                "winlog.record_id": record_id}
+    for name, value in envelope.items():
+        field = name.replace("__", ".")
+        document[field] = value
+        node = hit["_source"]
+        *parents, leaf = field.split(".")
+        for part in parents:
+            node = node.setdefault(part, {})
+        node[leaf] = value
+    return hit, document
+
+
+def _selective_sweep(tmp_path, monkeypatch, shipped, types=WINLOGBEAT_TYPES):
+    """A sweep over one selective Windows target whose continuity aggregate runs through the real executor."""
+    from romulus.hunt import sweep as sweep_module
+    from tests.test_sweep import _repo
+
+    cluster = CompositeCluster([document for _record, document in shipped])
+    real_execute = sweep_module.execute
+    retrieved = [hit for hit, _document in shipped if hit["_source"]["winlog"]["record_id"] != 11]
+
+    def execute(_client, intent, contract):
+        if intent.kind == "aggregate":
+            return real_execute(cluster, intent, contract)
+        return SearchOutcome(target=intent.target, fingerprint="raw", started_at=START, ended_at=START,
+                             completeness=Completeness.complete, total=len(retrieved), total_relation="eq",
+                             returned=len(retrieved), records=retrieved)
+
+    monkeypatch.setattr(sweep_module, "execute", execute)
+    contract = contract_from_types("target-name-is-irrelevant", types, role="host",
+                                   hosts=tuple(sorted({hit["_source"]["winlog"]["computer_name"].casefold()
+                                                       for hit, _document in shipped})))
+    repo = _repo()
+    sweep = Sweep(repo, None, "h1", Window(start=START, end=START + timedelta(minutes=30)),
+                  {contract.target: contract}, site_facts=_site(tmp_path), stage_dir=tmp_path)
+    sweep.pack = [WindowsProcessRule()]
+    sweep._windows_inventory[contract.target] = {lookup_event_class(SYSMON_CHANNEL, SYSMON, 1).token}
+    sweep._windows_inventory_reasons[contract.target] = []
+    sweep._windows_selective.add(contract.target)
+    return sweep, repo, contract, cluster, len(retrieved)
+
+
+def _grouped(cluster) -> list[str]:
+    return [name for source in cluster.bodies[0]["aggs"]["g"]["composite"]["sources"] for name in source]
+
+
+def test_default_winlogbeat_host_metadata_with_two_addresses_keeps_a_complete_negative(tmp_path, monkeypatch):
+    # add_host_metadata's default: every record carries the agent id, the host id and all the host's addresses
+    shipped = [_shipped(record_id, minute, agent__id="agent-1", host__id="machine-1",
+                        host__ip=["10.0.0.5", "fe80::1"])
+               for record_id, minute in ((10, 5), (11, 10), (12, 25))]
+    sweep, repo, contract, cluster, retrieved = _selective_sweep(tmp_path, monkeypatch, shipped)
+    try:
+        sweep.run_partition(contract.target, contract, [], sweep.window, est=retrieved)
+        [cell] = repo.rule_cells("h1")
+        assert cell["detail"].get("reasons", []) == []
+        assert cell["state"] == "no_match_complete"
+        assert sweep.stats["windows_continuity"][contract.target]["partial_partitions"] == 0
+        assert _grouped(cluster) == ["@timestamp", "host.name", "event.channel", "winlog.record_id",
+                                     "agent.id", "host.id", "log.file.path"]
+    finally:
+        sweep.close_stage()
+
+
+def test_a_collected_file_field_that_cannot_be_aggregated_is_left_out_of_the_continuity_view(tmp_path, monkeypatch):
+    shipped = [_shipped(record_id, minute, agent__id="agent-1", host__ip=["10.0.0.5", "fe80::1"],
+                        log__file__path="C:\\Windows\\System32\\winevt\\Logs\\Sysmon.evtx")
+               for record_id, minute in ((10, 5), (11, 10), (12, 25))]
+    sweep, repo, contract, cluster, retrieved = _selective_sweep(
+        tmp_path, monkeypatch, shipped, {**WINLOGBEAT_TYPES, "log.file.path": "text"})
+    try:
+        sweep.run_partition(contract.target, contract, [], sweep.window, est=retrieved)
+        [cell] = repo.rule_cells("h1")
+        assert cell["detail"].get("reasons", []) == [] and cell["state"] == "no_match_complete"
+        assert "log.file.path" not in _grouped(cluster) and "agent.id" in _grouped(cluster)
+    finally:
+        sweep.close_stage()
+
+
+def test_only_the_groups_without_a_single_valued_identifier_are_unresolved(tmp_path, monkeypatch):
+    identified = [_shipped(record_id, minute, agent__id="agent-1", host__ip=["10.0.0.5", "fe80::1"])
+                  for record_id, minute in ((10, 5), (11, 10), (12, 25))]
+    addresses_only = [_shipped(record_id, minute, host="WS02.example.test", host__ip=["10.0.0.6", "fe80::2"])
+                      for record_id, minute in ((10, 6), (11, 11), (12, 26))]
+    sweep, _cells, contract, cluster, _retrieved = _selective_sweep(tmp_path, monkeypatch,
+                                                                   identified + addresses_only)
+    try:
+        observed, reasons = sweep._selective_windows_continuity(contract.target, contract, sweep.window)
+        assert "host.ip" not in _grouped(cluster)
+        assert reasons == ["shipper gaps unresolved: no single-valued source identity on "
+                           + SYSMON_CHANNEL + " for ws02.example.test"]
+        assert set(observed) == {("ws01.example.test", SYSMON_CHANNEL.casefold()),
+                                 ("ws02.example.test", SYSMON_CHANNEL.casefold())}
+        assert sweep._windows_record_ids.state_count == 2     # both sequences are still followed for gaps
+    finally:
+        sweep.close_stage()
+
+
+def test_a_grouped_identifier_holding_several_values_is_honestly_incomplete(tmp_path, monkeypatch):
+    shipped = [_shipped(record_id, minute, host__id=["machine-1", "machine-1-old"])
+               for record_id, minute in ((10, 5), (11, 10), (12, 25))]
+    sweep, _cells, contract, _cluster, _retrieved = _selective_sweep(tmp_path, monkeypatch, shipped)
+    try:
+        observed, reasons = sweep._selective_windows_continuity(contract.target, contract, sweep.window)
+        assert observed == {}
+        assert reasons == ["shipper gaps unresolved: continuity metadata incomplete: bucket_sum_mismatch"]
+    finally:
+        sweep.close_stage()

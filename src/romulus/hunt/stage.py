@@ -139,6 +139,7 @@ class EventStage:
             f"{WINDOWS_STABLE_ID_MAX_CHARS})) WITHOUT ROWID"
         )
         self.windows_db.commit()
+        self.windows_multi_source = 0       # Windows records seen under more than one collection source
         self._windows_page = self.windows_db.execute("PRAGMA page_size").fetchone()[0]
         self._windows_size = 0
         self.budget = budget
@@ -665,16 +666,27 @@ class EventStage:
         self._windows_size = size
 
     @reclaiming_write
-    def unique_windows(self, events: list[TypedEvent], producers: tuple[str, ...] = ("windows-",)
-                       ) -> tuple[list[TypedEvent], list[TypedEvent]]:
+    def unique_windows(self, events: list[TypedEvent], producers: tuple[str, ...] = ("windows-",), *,
+                       records: dict[str, str] | None = None) -> tuple[list[TypedEvent], list[TypedEvent]]:
         """Deduplicate the stable ids of the given producers' events (Windows by default; Zeek's logical ids too), storing
-        no event body and no raw telemetry."""
+        no event body and no raw telemetry.
+
+        `records` maps an event id to the digest of the record it views, without its collection source. Such an
+        event's key is the digest followed by its id, so the keys of one record's copies from different sources sit
+        together in the table: finding another there is an index probe and needs no row beyond the event's own.
+        `windows_multi_source` counts the records found under a second source, each once."""
         self.windows_refused = 0
         self.windows_refusal_reason = ""
+        records = records or {}
+
+        def key_of(event: TypedEvent) -> str:
+            digest = records.get(event.id)
+            return event.id if digest is None else f"{digest}:{event.id}"
+
         windows = [event for event in events if event.normalizer.startswith(producers)]
-        if any(len(event.id) > WINDOWS_STABLE_ID_MAX_CHARS for event in windows):
+        if any(len(key_of(event)) > WINDOWS_STABLE_ID_MAX_CHARS for event in windows):
             raise ValueError("Windows stable event id exceeds the dedup table width")
-        ids = sorted({event.id for event in windows})
+        ids = sorted({key_of(event) for event in windows})
         seen: set[str] = set()
         for start in range(0, len(ids), 500):
             chunk = ids[start:start + 500]
@@ -685,16 +697,36 @@ class EventStage:
                 f"SELECT id FROM windows_seen WHERE id IN ({marks})", chunk,
             ))
         fresh, duplicates, inserts = [], [], []
+        new_digests: list[str] = []             # the record digest of each new key, in arrival order
         for event in events:
             if not event.normalizer.startswith(producers):
                 fresh.append(event)
                 continue
-            if event.id in seen:
+            key = key_of(event)
+            if key in seen:
                 duplicates.append(event)
             else:
-                seen.add(event.id)
-                inserts.append((event.id,))
+                seen.add(key)
+                inserts.append((key,))
                 fresh.append(event)
+                if event.id in records:
+                    new_digests.append(records[event.id])
+        # How many keys (up to two) the table already holds for each of those records: ":" sorts directly before
+        # ";", so the range holds exactly one record's keys. Read before this call's keys are written.
+        stored: dict[str, int] = {}
+        wanted = sorted(set(new_digests))
+        for start in range(0, len(wanted), 400):
+            chunk = wanted[start:start + 400]
+            stored.update(self.windows_db.execute(
+                f"WITH wanted(digest) AS (VALUES {','.join(['(?)'] * len(chunk))}) "
+                "SELECT digest, (SELECT count(*) FROM (SELECT 1 FROM windows_seen "
+                "WHERE id >= digest || ':' AND id < digest || ';' LIMIT 2)) FROM wanted", chunk,
+            ))
+        sources_here: dict[str, int] = {}
+        for digest in new_digests:
+            if stored[digest] + sources_here.get(digest, 0) == 1:
+                self.windows_multi_source += 1  # the record's second source; a third finds two and adds nothing
+            sources_here[digest] = sources_here.get(digest, 0) + 1
         for start in range(0, len(inserts), 500):
             chunk = inserts[start:start + 500]
             reason = (self.budget.new_key_reason(self.windows_account)

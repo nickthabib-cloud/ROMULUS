@@ -30,9 +30,14 @@ from romulus.evidence.windows_catalog import (
 if TYPE_CHECKING:
     from romulus.detect.bounded import Account, StateBudget
 
-WINDOWS_NORMALIZER = "windows-ecs@22"
+WINDOWS_NORMALIZER = "windows-ecs@23"
 WINDOWS_SOURCE_IDENTITY_NOTE = "Windows clones without source identity cannot be told apart"
-WINDOWS_SOURCE_FIELDS = ("agent.id", "host.id", "log.file.path", "SourceFile", "FileName", "path", "host.ip")
+# The envelope fields that name a record's collection source. The identifiers hold one value per record; a host
+# reports as many addresses as it has interfaces.
+WINDOWS_SOURCE_ID_FIELDS = ("agent.id", "host.id", "log.file.path", "SourceFile", "FileName", "path")
+WINDOWS_SOURCE_FIELDS = (*WINDOWS_SOURCE_ID_FIELDS, "host.ip")
+# Counted, never skipped: each collection source's copy of one record is its own event.
+WINDOWS_MULTI_SOURCE_SKIP = "Windows record seen under more than one collection source"
 # This is already far beyond what the 64 MiB assembler can retain at normal 4104 chunk sizes, while bounding every
 # completeness vector even when hostile metadata claims billions of parts.
 SCRIPT_BLOCK_MAX_PARTS = 4_096
@@ -316,7 +321,10 @@ class RecordIdContinuity:
         records: list[dict],
         *,
         liveness_tolerance=None,
+        source_fields: tuple[str, ...] | None = None,
     ) -> list[str]:
+        """Follow each source's record-id sequence through `records` and say where it breaks. `source_fields`
+        names the envelope fields the records' sources are read from, when the records hold only some of them."""
         gaps: dict[tuple[str, str], int] = {}
         time_gaps: dict[tuple[str, str], tuple[float, str, str]] = {}
         unordered: set[tuple[str, str]] = set()
@@ -357,7 +365,7 @@ class RecordIdContinuity:
             except (TypeError, ValueError):
                 malformed.add(group)
                 continue
-            identity = windows_source_identity(record)
+            identity = windows_continuity_source(record, source_fields)
             # Scope the existing private key column; no persistent schema or migration is needed.
             scoped_computer = (json.dumps([group[0], identity], separators=(",", ":"))
                                if identity is not None else group[0])
@@ -1057,28 +1065,32 @@ def _native_origin(origin: str, native_id: str, paths: dict[str, str]) -> str:
     return "".join(out)
 
 
-def windows_source_identity(hit: dict) -> str | None:
-    """A stable source discriminator, read from the indexed envelope before adapting its Windows payload.
+def _source_facts(hit: dict, fields: tuple[str, ...] | None = None,
+                  ) -> tuple[tuple[str, str] | None, list[str] | None]:
+    """A record's collection source, read from the indexed envelope before adapting its Windows payload: its
+    stable identifier and its host address set. Either is None when the record does not carry it.
 
-    An agent id takes precedence over host id, then the collected file and host addresses. An ephemeral id,
-    hostname, provider (NXLog SourceName) or input-module name does not distinguish cloned machines. File paths
-    are collection metadata, never an EventData filename. The documented evtx_dump ``path`` wrapper and NXLog's
-    ``FileName`` are accepted alongside ECS log.file.path and an export's SourceFile.
+    The identifier is the agent id, else the host id, else the collected file. An ephemeral id, hostname,
+    provider (NXLog SourceName) or input-module name does not distinguish cloned machines. File paths are
+    collection metadata, never an EventData filename. The documented evtx_dump ``path`` wrapper and NXLog's
+    ``FileName`` are accepted alongside ECS log.file.path and an export's SourceFile. The address set is the
+    record's host.ip values in canonical form, sorted, so it does not depend on their order or spelling. With
+    `fields`, only those envelope fields are read.
     """
     source = hit.get("_source") or {}
 
     def value(path: str):
+        if fields is not None and path not in fields:
+            return None
         return source[path] if path in source else _get(source, path)
 
-    def token(kind: str, item: object) -> str:
-        encoded = json.dumps([kind, item], ensure_ascii=True, separators=(",", ":"))
-        return hashlib.sha256(encoded.encode("ascii")).hexdigest()
-
+    stable = None
     for field in ("agent.id", "host.id"):
         item = value(field)
         if isinstance(item, str) and item.strip():
-            return token(field, item.strip())
-    for field in ("log.file.path", "SourceFile", "FileName", "path"):
+            stable = (field, item.strip())
+            break
+    for field in ("log.file.path", "SourceFile", "FileName", "path") if stable is None else ():
         if field == "FileName" and source.get("SourceModuleType") != "im_file":
             continue
         if field == "SourceFile" and is_nxlog_windows(source):
@@ -1089,21 +1101,52 @@ def windows_source_identity(hit: dict) -> str | None:
             # POSIX exports can have case-sensitive names; normalize Windows paths only when they say so.
             if ntpath.splitdrive(path)[0] or "\\" in path:
                 path = ntpath.normcase(ntpath.normpath(path))
-            return token("file", path)
+            stable = ("file", path)
+            break
     addresses = value("host.ip")
     if isinstance(addresses, str):
         addresses = [addresses]
+    canonical = None
     if isinstance(addresses, (list, tuple)) and 0 < len(addresses) <= 256:
-        canonical = set()
-        for address in addresses:
-            if not isinstance(address, str):
-                return None
-            try:
-                canonical.add(str(ipaddress.ip_address(address.strip())))
-            except ValueError:
-                return None
-        return token("host.ip", sorted(canonical))
-    return None
+        try:
+            canonical = sorted({str(ipaddress.ip_address(address.strip())) for address in addresses})
+        except (AttributeError, ValueError):     # a value that is not an address: the set says nothing
+            canonical = None
+    return stable, canonical
+
+
+def _source_token(stable: tuple[str, str] | None, addresses: list[str] | None) -> str:
+    encoded = json.dumps([stable, addresses], ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("ascii")).hexdigest()
+
+
+def windows_source_identity(hit: dict) -> str | None:
+    """What tells one collection source's copy of a record from another's: the stable identifier together with
+    the host address set, each when the record carries it; None when it carries neither.
+
+    The addresses stand beside the identifier, not behind it: machines cloned after their agent first ran share
+    the agent id and the host id, and differ only in their addresses. Two copies fold only when both parts are
+    equal, so one record shipped again after its host's addresses changed is kept twice, never lost.
+    """
+    stable, addresses = _source_facts(hit)
+    return None if stable is None and addresses is None else _source_token(stable, addresses)
+
+
+def windows_continuity_source(hit: dict, fields: tuple[str, ...] | None = None) -> str | None:
+    """The source whose record-id sequence a record belongs to: the stable identifier alone, so that a host
+    whose addresses change keeps one sequence; the address set only for a record with no identifier. `fields`
+    limits the envelope fields read, for records rebuilt from an aggregate that grouped by those fields."""
+    stable, addresses = _source_facts(hit, fields)
+    if stable is not None:
+        return _source_token(stable, None)
+    return None if addresses is None else _source_token(None, addresses)
+
+
+def windows_record_digest(logical_key: tuple[str, ...], signature: str) -> str:
+    """A record's identity without its collection source (computer, channel, record id and content signature):
+    every source's copy of one record has the same digest."""
+    encoded = json.dumps([*logical_key[:3], signature], ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("ascii")).hexdigest()[:20]
 
 
 def windows_identity_reasons(events: list[TypedEvent]) -> list[str]:
