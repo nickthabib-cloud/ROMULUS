@@ -181,7 +181,7 @@ def test_one_scanner_against_five_hundred_servers_is_one_sweep_per_class(tmp_pat
         assert len(final) == 3 * (PAIR_LEADS + 1) and len(live) == 3 * (PAIR_LEADS + 1)
         for name in ("cross_site_scripting", "path_traversal_lfi", "sql_injection"):
             sweep = final[f"sweep|198.51.100.7|{name}|in"]
-            assert sweep.proposed_lane == "lead" and sweep.fleet_member_kind == "host"
+            assert sweep.proposed_lane == "lead" and sweep.fleet_member_kind == "internal_address"
             assert sweep.fleet_host_count == sweep.aggregate_summary["member_count"] == 500
             assert len({address for address, _event in sweep.fleet_hosts}) == 500
     finally:
@@ -200,6 +200,8 @@ def test_two_thousand_scanners_against_fifty_servers_follow_the_servers_not_the_
         assert sum(match.aggregate_summary["record_count"] for match in fleets) == 100_000
         # 100,000 pairs: at most PAIR_LEADS own leads and PAIR_LEADS sweeps per server, whatever the scanner count
         assert len(final) <= 50 * (2 * PAIR_LEADS + 1) and len(live) <= 50 * (2 * PAIR_LEADS + 1)
+        # read in time order, what was published as records arrived is what stands at the end
+        assert {match.group_key for match in live} == set(final)
         assert all(match.proposed_lane == "lead" for match in final.values())
     finally:
         rule.close_spill()

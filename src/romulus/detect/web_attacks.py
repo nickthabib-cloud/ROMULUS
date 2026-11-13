@@ -9,9 +9,11 @@ and accompany affected findings.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import html
 import json
 import re
+import secrets
 from datetime import UTC
 from ipaddress import ip_address
 from typing import ClassVar
@@ -19,6 +21,7 @@ from urllib.parse import unquote_to_bytes, urlsplit
 
 from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.bounded import StateExhausted, register_store
+from romulus.detect.dns import registered_domain
 from romulus.detect.netdef import DIRECTION_ASSUMED_REASON, current
 from romulus.detect.network_producers import HTTP_OBSERVATIONS, ZEEK_AND_SURICATA, rule_reads
 from romulus.detect.site_roles import address_member
@@ -39,6 +42,10 @@ FLUSH_ROWS = 256            # folded observations written to disk in one stateme
 # the same class against the same endpoint is one event (a scan, or a crowd of scanners) and is reported as one
 # roll-up whose member list holds every address.
 PAIR_LEADS = 5
+# A pair's lead is published as its records arrive when the pair is, at that moment, among the earliest of both its
+# roll-ups. Records read in time order publish exactly PAIR_LEADS per roll-up this way; records that arrive out of
+# order (a second sensor read later) can publish more, and this bounds them.
+LIVE_PAIR_LEADS = 50
 MEMBERS_NAMED = 10          # members named in a roll-up's claim and entities; the member list holds every one
 REFUSED_GROUPS = 4_096      # pairs given a live lead of their own while detection state cannot grow
 URI_FIELDS = ("url.original", "url.path", "url.query")
@@ -214,14 +221,19 @@ _LFI_TARGET = re.compile(
 # A parameter whose value is a remote URL. Whether it is an inclusion is decided in `_remote_inclusion`.
 _RFI_PARAM = re.compile(
     r"(?:^|[?&])(?P<key>include|require|inc|mosconfig_absolute_path|page|file|path|template|doc|document|root)"
-    r"(?:\[[^\]=&]{0,16}\])?=(?P<url>(?:https?|ftps?)://[^\s&#\x00]{1,16384}+)(?P<nul>\x00)?(?=[\s&#]|$)")
+    r"(?:\[[^\]=&]{0,16}\])?=(?P<url>(?:(?:https?|ftps?):)?//[^\s&#\x00]{1,16384}+)(?P<nul>\x00)?(?=[\s&#]|$)")
 _RFI_CALL = re.compile(r"\b(?:include|require)(?:_once)?\s{0,8}\(\s{0,8}['\"]?(?:https?|ftps?)://")
 # Parameters named after the include statement itself: any remote URL in them is reported.
 _RFI_DIRECTIVES = frozenset({"include", "require", "inc", "mosconfig_absolute_path"})
 # For the other file-like parameters a remote URL is ordinary (a proxy, a viewer, a redirect), so one more sign is
-# needed. An include payload has to reach the victim as source text, so it is served under an extension the
-# attacker's own server does not execute: these, not .php, .jsp or .aspx.
+# needed. An include payload has to reach the victim as source text, so it is often served under an extension the
+# attacker's own server does not execute: a URL ending in one of these counts wherever it points.
 _RFI_TEXT_EXTENSIONS = re.compile(r"\.(?:txt|inc|dat|tmp)$")
+# A script URL is the classic payload and also what a proxy, a viewer or a page-view beacon carries. It counts when
+# the request goes to one of the site's own servers and the URL is on another registered domain than the requested
+# host: a beacon that carries a page's URL is sent outward to a third party, and a site's own tools name the site's
+# own hosts.
+_RFI_SCRIPT_EXTENSIONS = re.compile(r"\.(?:php[0-9]?|phtml|asp|aspx|jsp|cgi|pl)$")
 _INTEGER_HOST = re.compile(r"(?:0x[0-9a-f]{8}|[0-9]{8,10})$")
 
 # Commands seen in injection payloads. A name alone is not a command: see `_COMMAND`.
@@ -338,15 +350,21 @@ _PASSWORD_KEYS = frozenset({"password", "passwd", "pwd", "pass", "pw", "j_passwo
 # word (monkey, author, passenger) is not a match.
 _KEY_PARTS = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+")
 _CREDENTIAL_PART = re.compile(
-    r"(?:pass(?:word|wd|wort|phrase|code|key)?s?|pwd?|pswd?|secrets?|tokens?|keys?|sig|sign|signed|signature"
+    r"(?:pass(?:w|word|wd|wort|phrase|code|key)?s?|pwd?|pswd?|secrets?|tokens?|keys?|sig|sign|signed|signature"
     r"|sess|session(?:s|id|key)?|sessid|sid|auth|authn|authz|authori[sz]ation|authentication|authenticity"
-    r"|creds?|credentials?|otp|totp|hotp|mfa|pin|pincode|code|jwt|bearer|hmac|nonce"
+    r"|creds?|credentials?|otp|totp|hotp|mfa|pin|pincode|code|jwt|bearer|hmac|nonce|verifier"
+    r"|csrf|xsrf|cookies?|tickets?|assertions?|saml[a-z]{0,12}"
     r"|[a-z]{1,24}(?:password|passwd|secret|token|sessid|sessionid|signature|credentials?)"
-    r"|(?:api|private|access|license|master|encryption|app|client|user|auth|session|signing)key)$")
+    r"|(?:u|user|usr|login|admin|db|root|my|new|old)pass(?:w|word|wd)?"
+    r"|x?(?:api|private|access|secret|license|master|encryption|app|client|user|auth|session|signing)key)$")
 
 
 def _credential_name(name):
-    return any(_CREDENTIAL_PART.match(part.casefold()) for part in _KEY_PARTS.findall(name))
+    """Whether a parameter name is a credential name: by one of its parts, or by all of them read as one word
+    (pAsSwOrD, pass_word)."""
+    parts = [part.casefold() for part in _KEY_PARTS.findall(name)]
+    return (any(_CREDENTIAL_PART.match(part) for part in parts)
+            or len(parts) > 1 and bool(_CREDENTIAL_PART.match("".join(parts))))
 
 
 def _peers(event):
@@ -433,16 +451,23 @@ def _traversal(value, path):
     return False
 
 
-def _remote_inclusion(value, own):
+def _remote_inclusion(value, own, site, inbound):
+    """Whether a parameter names a remote file to include. `own` holds the requested server's host names and
+    address, `site` the registered domains of those names, and `inbound` says the server is one of the site's."""
     for found in _RFI_PARAM.finditer(value):
         url = found.group("url")
-        host, literal = _host_of(url.split("://", 1)[1].split("/", 1)[0].split("?", 1)[0])
+        host, literal = _host_of(url.split("//", 1)[1].split("/", 1)[0].split("?", 1)[0])
         # A URL on the requested server itself is not remote: nothing is fetched from another party. Its path is
-        # still read by the local-file grammars.
-        if host in own:
+        # still read by the local-file grammars. A scheme-relative value is a URL only when its host is one
+        # (//static/img is a path).
+        if host in own or url.startswith("//") and not (literal or "." in host):
             continue
+        location = url.split("?", 1)[0]
         if (found.group("key") in _RFI_DIRECTIVES or literal or found.group("nul") is not None
-                or url.endswith("?") or _RFI_TEXT_EXTENSIONS.search(url.split("?", 1)[0])):
+                or url.endswith("?") or _RFI_TEXT_EXTENSIONS.search(location)):
+            return True
+        if (inbound and _RFI_SCRIPT_EXTENSIONS.search(location)
+                and (not site or registered_domain(host) not in site)):
             return True
     return bool(_RFI_CALL.search(value))
 
@@ -453,7 +478,7 @@ def _sql(value):
     return bool(_SQL.search(value))
 
 
-def _classes(value, *, own=frozenset(), session=False, evasive=False):
+def _classes(value, *, own=frozenset(), site=frozenset(), inbound=False, session=False, evasive=False):
     """The request-target classes one decoded value matches."""
     matches = set()
     if _sql(value):
@@ -463,8 +488,13 @@ def _classes(value, *, own=frozenset(), session=False, evasive=False):
     host, path = _target(value, session)
     if evasive or _traversal(value, path) or _LFI.search(value):
         matches.add("path_traversal_lfi")
-    if "://" in value and _remote_inclusion(value, own | {host} if host else own):
-        matches.add("remote_file_inclusion")
+    if "//" in value:
+        if host:                    # the target's own host (an absolute URI, or an Arkime host prefix)
+            own = own | {host}
+            if "." in host and not _host_of(host)[1]:
+                site = site | {registered_domain(host)}
+        if _remote_inclusion(value, own, site, inbound):
+            matches.add("remote_file_inclusion")
     if _COMMAND.search(value):
         matches.add("command_injection")
     if _TEMPLATE.search(value):
@@ -521,16 +551,18 @@ def _has_credential_key(text):
 
 def _mask_query(query, decoded_query):
     """A query (and fragment) without its credential values. Each parameter whose name, decoded, is a credential
-    name keeps the name and loses the value, so the rest of the request stays readable. When a value's end is
-    ambiguous the whole of it is omitted instead."""
+    name keeps the name and loses the value, so the rest of the request stays readable. A parameter ends only at
+    `&`: a `;`, `?` or `#` inside it may belong to the credential's value, so when any name inside one is a
+    credential name the whole of that parameter's value goes. When a value's end is ambiguous the whole query is
+    omitted instead."""
     if _AMBIGUOUS_QUERY.search(query):
         credential = _has_credential_key(query) or _has_credential_key(decoded_query)
         return _REDACTED_QUERY if credential else query
     kept = []
-    for part in re.split("([&?#])", query):
+    for part in query.split("&"):
         name, equals, _value = part.partition("=")
         kept.append(name + "=[redacted]" if equals and _has_credential_key(part) else part)
-    return "".join(kept)
+    return "&".join(kept)
 
 
 def _mask_path_parameters(path):
@@ -629,7 +661,7 @@ def _when(rank):
 
 
 class WebAttacks(Playbook):
-    id, title, version = "network.web_attacks", "Attack-associated HTTP request shapes", "2"
+    id, title, version = "network.web_attacks", "Attack-associated HTTP request shapes", "3"
     families = ("http_tx", "net_session")
     required_fields = ("source.ip", "destination.ip")
     kind, claim_type, anchor_class = "aggregate", "aggregate_observation", "network_observation"
@@ -687,47 +719,66 @@ class WebAttacks(Playbook):
 
     _SCHEMA = (
         ("web_seen", ("k TEXT NOT NULL,id BLOB NOT NULL,rank TEXT,values_n INTEGER,session_n INTEGER,tools INTEGER,"
-                     "partial INTEGER,payload BLOB,src TEXT,dst TEXT,cls TEXT,p TEXT,q TEXT,PRIMARY KEY(k,id)")),
-        # One row per (source, destination, class). `p` and `q` are the two roll-ups the pair belongs to and
-        # `p_ord`, `q_ord` its arrival position in each; `own` marks a pair that keeps a lead of its own.
-        ("web_groups", ("k TEXT PRIMARY KEY,src TEXT,dst TEXT,cls TEXT,p TEXT,q TEXT,p_ord INTEGER,q_ord INTEGER,"
-                       "own INTEGER,n INTEGER,values_n INTEGER,session_n INTEGER,tools INTEGER,partial_n INTEGER,"
-                       "first_rank TEXT,last_rank TEXT,first_event BLOB,last_event BLOB")),
-        # One row per roll-up: its exact member count and, once it has more members than keep their own leads,
-        # its earliest and latest witness.
-        ("web_fans", ("g TEXT PRIMARY KEY,prim INTEGER,members INTEGER,rolled INTEGER,first_rank TEXT,"
+                     "partial INTEGER,payload BLOB,p TEXT,q TEXT,PRIMARY KEY(k,id)")),
+        # One row per (source, destination, class), keyed "source|destination|class". `p` and `q` are the two
+        # roll-ups the pair belongs to; `lead` marks a pair whose own lead was published while records arrived.
+        # A rank is the record's time (32 characters) and its identity, so text order is time order.
+        ("web_groups", ("k TEXT PRIMARY KEY,p TEXT,q TEXT,lead INTEGER,n INTEGER,values_n INTEGER,session_n INTEGER,"
+                       "tools INTEGER,partial_n INTEGER,first_rank TEXT,last_rank TEXT,first_event BLOB,"
+                       "last_event BLOB")),
+        # One row per roll-up: its exact member count, how many of its pairs had a lead published while records
+        # arrived, and its earliest and latest witness (a primary roll-up's from its first record; a secondary
+        # one's, of which there can be one per outside address, once it has more members than keep their own leads).
+        ("web_fans", ("g TEXT PRIMARY KEY,prim INTEGER,members INTEGER,leads INTEGER,rolled INTEGER,first_rank TEXT,"
                      "last_rank TEXT,first_event BLOB,last_event BLOB")),
     )
-    # One INSERT atomically records the identity, the pair's counters and witnesses, both roll-ups' member counts
-    # and witnesses. A refused write cannot inflate counts or lose old rows.
-    _STATEMENTS = (
-        "CREATE INDEX IF NOT EXISTS web_p ON web_groups(p,k)",
-        "CREATE INDEX IF NOT EXISTS web_q ON web_groups(q,k)",
-        ("CREATE TRIGGER IF NOT EXISTS web_member AFTER INSERT ON web_groups BEGIN "
-        "INSERT INTO web_fans VALUES(NEW.p,1,1,0,NULL,NULL,NULL,NULL) ON CONFLICT(g) DO UPDATE SET members=members+1; "
-        "INSERT INTO web_fans VALUES(NEW.q,0,1,0,NULL,NULL,NULL,NULL) ON CONFLICT(g) DO UPDATE SET members=members+1; "
-        "UPDATE web_groups SET p_ord=(SELECT members FROM web_fans WHERE g=NEW.p),"
-        "q_ord=(SELECT members FROM web_fans WHERE g=NEW.q) WHERE k=NEW.k; "
-        f"UPDATE web_groups SET own=(p_ord<={PAIR_LEADS} AND q_ord<={PAIR_LEADS}),"
-        f"first_event=CASE WHEN p_ord<={PAIR_LEADS} AND q_ord<={PAIR_LEADS} THEN first_event END WHERE k=NEW.k; END"),
-        ("CREATE TRIGGER IF NOT EXISTS web_fold AFTER INSERT ON web_seen BEGIN "
-        "INSERT INTO web_groups VALUES(NEW.k,NEW.src,NEW.dst,NEW.cls,NEW.p,NEW.q,0,0,0,1,NEW.values_n,NEW.session_n,"
-        "NEW.tools,NEW.partial,NEW.rank,NEW.rank,NEW.payload,NULL) "
-        "ON CONFLICT(k) DO UPDATE SET n=n+1,values_n=values_n+NEW.values_n,session_n=session_n+NEW.session_n,"
-        "tools=tools|NEW.tools,partial_n=partial_n+NEW.partial,"
-        "last_event=CASE WHEN NOT own THEN NULL WHEN NEW.rank>last_rank THEN NEW.payload "
-        "WHEN NEW.rank<first_rank AND last_event IS NULL THEN first_event ELSE last_event END,"
-        "first_event=CASE WHEN NOT own THEN NULL WHEN NEW.rank<first_rank THEN NEW.payload ELSE first_event END,"
-        "first_rank=min(first_rank,NEW.rank),last_rank=max(last_rank,NEW.rank); "
-        "UPDATE web_fans SET "
-        "last_event=CASE WHEN last_rank IS NULL OR NEW.rank>last_rank THEN NEW.payload ELSE last_event END,"
-        "first_event=CASE WHEN first_rank IS NULL OR NEW.rank<first_rank THEN NEW.payload ELSE first_event END,"
-        "first_rank=CASE WHEN first_rank IS NULL OR NEW.rank<first_rank THEN NEW.rank ELSE first_rank END,"
-        "last_rank=CASE WHEN last_rank IS NULL OR NEW.rank>last_rank THEN NEW.rank ELSE last_rank END "
-        f"WHERE g IN (NEW.p,NEW.q) AND members>{PAIR_LEADS}; "
-        "UPDATE web_seen SET rank=NULL,payload=NULL,src=NULL,dst=NULL,cls=NULL,p=NULL,q=NULL "
-        "WHERE k=NEW.k AND id=NEW.id; END"),
-    )
+
+    @staticmethod
+    def _crowded(column, group, rank):
+        """SQL: the roll-up already holds PAIR_LEADS pairs whose first record is strictly earlier than `rank`."""
+        return (f"EXISTS (SELECT 1 FROM web_groups o WHERE o.{column}={group} AND o.first_rank<substr({rank},1,32) "
+                f"LIMIT 1 OFFSET {PAIR_LEADS - 1})")
+
+    # One INSERT atomically records the identity, the pair's counters and witnesses, and both roll-ups' member
+    # counts and witnesses. A refused write cannot inflate counts or lose old rows. A pair keeps witnesses only
+    # while it is among the earliest PAIR_LEADS pairs of both its roll-ups, which every pair that ends with a lead
+    # of its own is from its first record on.
+    @classmethod
+    def _statements(cls):
+        crowded = (f"({cls._crowded('p', 'NEW.p', 'NEW.first_rank')} OR "
+                   f"{cls._crowded('q', 'NEW.q', 'NEW.first_rank')})")
+        crowded_now = f"({cls._crowded('p', 'NEW.p', 'NEW.rank')} OR {cls._crowded('q', 'NEW.q', 'NEW.rank')})"
+        return (
+            "CREATE INDEX IF NOT EXISTS web_p ON web_groups(p,first_rank,k)",
+            "CREATE INDEX IF NOT EXISTS web_q ON web_groups(q,first_rank,k)",
+            ("CREATE TRIGGER IF NOT EXISTS web_member AFTER INSERT ON web_groups BEGIN "
+            "INSERT INTO web_fans VALUES(NEW.p,1,1,0,0,NULL,NULL,NULL,NULL) "
+            "ON CONFLICT(g) DO UPDATE SET members=members+1; "
+            "INSERT INTO web_fans VALUES(NEW.q,0,1,0,0,NULL,NULL,NULL,NULL) "
+            "ON CONFLICT(g) DO UPDATE SET members=members+1; "
+            f"UPDATE web_groups SET lead=1 WHERE k=NEW.k AND NOT {crowded} "
+            f"AND (SELECT max(leads) FROM web_fans WHERE g IN (NEW.p,NEW.q))<{LIVE_PAIR_LEADS}; "
+            "UPDATE web_fans SET leads=leads+1 WHERE g IN (NEW.p,NEW.q) "
+            "AND (SELECT lead FROM web_groups WHERE k=NEW.k)=1; END"),
+            ("CREATE TRIGGER IF NOT EXISTS web_fold AFTER INSERT ON web_seen BEGIN "
+            "INSERT INTO web_groups VALUES(NEW.k,NEW.p,NEW.q,0,1,NEW.values_n,NEW.session_n,NEW.tools,NEW.partial,"
+            "NEW.rank,NEW.rank,NEW.payload,NULL) "
+            "ON CONFLICT(k) DO UPDATE SET n=n+1,values_n=values_n+NEW.values_n,session_n=session_n+NEW.session_n,"
+            "tools=tools|NEW.tools,partial_n=partial_n+NEW.partial,"
+            "last_event=CASE WHEN NEW.rank<first_rank THEN coalesce(last_event,first_event) "
+            "WHEN first_event IS NULL THEN NULL WHEN NEW.rank>last_rank THEN NEW.payload ELSE last_event END,"
+            "first_event=CASE WHEN NEW.rank<first_rank THEN NEW.payload ELSE first_event END,"
+            "first_rank=min(first_rank,NEW.rank),last_rank=max(last_rank,NEW.rank); "
+            "UPDATE web_groups SET first_event=NULL,last_event=NULL "
+            f"WHERE k=NEW.k AND first_rank=NEW.rank AND {crowded_now}; "
+            "UPDATE web_fans SET "
+            "last_event=CASE WHEN last_rank IS NULL OR NEW.rank>last_rank THEN NEW.payload ELSE last_event END,"
+            "first_event=CASE WHEN first_rank IS NULL OR NEW.rank<first_rank THEN NEW.payload ELSE first_event END,"
+            "first_rank=CASE WHEN first_rank IS NULL OR NEW.rank<first_rank THEN NEW.rank ELSE first_rank END,"
+            "last_rank=CASE WHEN last_rank IS NULL OR NEW.rank>last_rank THEN NEW.rank ELSE last_rank END "
+            f"WHERE g IN (NEW.p,NEW.q) AND (prim=1 OR members>{PAIR_LEADS}); "
+            "UPDATE web_seen SET rank=NULL,payload=NULL,p=NULL,q=NULL WHERE k=NEW.k AND id=NEW.id; END"),
+        )
 
     def _db(self):
         spill = self.spill()
@@ -742,7 +793,7 @@ class WebAttacks(Playbook):
                 if name not in self._tables:
                     spill.table(name, columns)
                     self._tables.add(name)
-            for statement in self._STATEMENTS:
+            for statement in self._statements():
                 spill.write(statement, [()], account=self._account)
             self._ready = True
         return spill
@@ -754,12 +805,16 @@ class WebAttacks(Playbook):
         reasons its inspection is partial, whether it held any inspectable text, and the raw values that matched."""
         session = event.family == "net_session"
         found, hits, issues, tools = {}, {}, set(), 0
-        own = {destination}
+        # The requested server's own names: its address, the recorded Host values, and their registered domains.
+        own, site = {destination}, set()
         hostnames = event.get("http.hostname")
         for name in (hostnames if isinstance(hostnames, list) else [hostnames])[:16]:
             if isinstance(name, str) and len(name) <= 260:
-                own.add(_host_of(name.casefold())[0])
-        own = frozenset(own)
+                host, literal = _host_of(name.casefold())
+                own.add(host)
+                if not literal and "." in host:
+                    site.add(registered_domain(host))
+        own, site, inbound = frozenset(own), frozenset(site), self._inside(destination)
         # Every value is charged against one per-record character budget (a repeat costs one), so the work one
         # record can ask for is bounded however long its lists are.
         remaining, present, raw_seen, decoded_seen = MAX_RECORD_TEXT, False, set(), set()
@@ -800,7 +855,8 @@ class WebAttacks(Playbook):
                     classes, marked = _agent_classes(decoded)
                     tools |= marked
                 else:
-                    classes = _classes(decoded, own=own, session=session, evasive=evasive)
+                    classes = _classes(decoded, own=own, site=site, inbound=inbound, session=session,
+                                       evasive=evasive)
                 if classes and len(hits.setdefault(field, [])) < CITED_VALUES:
                     hits[field].append(value)
                 for name in classes:
@@ -839,13 +895,13 @@ class WebAttacks(Playbook):
                 if blob is None:
                     self.note_limit("web_citation", "A known HTTP grammar match exceeded the bounded citation size; its positive count is retained")
                 identity = hashlib.sha256(event.id.encode("utf-8", "replace")).digest()[:16]
-                rank = event.ts.astimezone(UTC).isoformat(timespec="microseconds") + "|" + identity.hex()
+                rank = event.ts.astimezone(UTC).isoformat(timespec="microseconds") + "|" + identity.hex()[:16]
                 sides = tuple(self._inside(address) for address in peers)
                 for name, values in sorted(found.items()):
                     primary, secondary = self._roll_ups(*peers, name, *sides)
                     pending.append(("|".join((*peers, name)), identity, rank, values,
                                     int(event.family == "net_session"), tools if name == "exploit_tool" else 0,
-                                    int(bool(issues)), blob, *peers, name, primary, secondary))
+                                    int(bool(issues)), blob, primary, secondary))
                 if len(pending) >= FLUSH_ROWS:
                     yield from self._flush(pending)
             yield from self._flush(pending)
@@ -892,18 +948,15 @@ class WebAttacks(Playbook):
                 chunk = keys[offset:offset + 500]
                 known.update(key for (key,) in spill.db.execute(
                     f"SELECT k FROM web_groups WHERE k IN ({','.join('?' * len(chunk))})", chunk))
-            spill.write("INSERT OR IGNORE INTO web_seen VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", rows, account=self._account)
+            spill.write("INSERT OR IGNORE INTO web_seen VALUES(?,?,?,?,?,?,?,?,?,?)", rows, account=self._account)
             witness = {row[0]: len(row[7] or b"") for row in rows}
             self.state_budget().charge(self._account, sum(len(row[0]) + 160 for row in rows) + sum(
                 3 * len(key) + 320 + 2 * witness[key] for key in keys if key not in known))
         except StateExhausted as error:
             yield from self._refused(rows, error)
             return
-        if not publish:
-            return
-        for key in keys:
-            if key not in known:
-                yield from self._publish_new(key)
+        if publish:
+            yield from self._publish_new([key for key in keys if key not in known])
 
     def _refused(self, rows, error):
         """Detection state could not grow: every matching record is still covered by a published lead, once per
@@ -912,35 +965,49 @@ class WebAttacks(Playbook):
         whole = {row[1] for row in rows if not row[6]}        # records not already counted as partly inspected
         self.refuse("web_state", f"HTTP fold is incomplete; matching live evidence remains a lead: {error}",
                     records=len(whole))
-        for key, _identity, _rank, values, session, tools, partial, blob, _src, _dst, name, _p, _q in rows:
+        for key, _identity, _rank, values, session, tools, partial, blob, _p, _q in rows:
             if key in self._refused_keys:
                 continue
             if len(self._refused_keys) < REFUSED_GROUPS:
                 self._refused_keys.add(key)
                 yield self._pair(key, 1, values, session, tools, partial, blob, None, final=False)
-            elif name not in self._refused_classes:
+            elif (name := key.rsplit("|", 1)[1]) not in self._refused_classes:
                 self._refused_classes.add(name)
                 yield self._overflow(name, blob)
 
-    def _publish_new(self, key):
+    def _publish_new(self, keys):
+        """What a batch's new pairs make reportable now. A pair that is among the earliest of both its roll-ups is
+        published as it arrives; a primary roll-up when its members first exceed the pairs that keep their own
+        leads; a secondary roll-up when a new pair has neither. Which pairs and secondary roll-ups stand at the end
+        is decided from the whole fold by `finalize`, so it does not depend on the order records arrived in."""
         db = self._spill.db
-        row = db.execute("SELECT p,q,p_ord,q_ord,own,n,values_n,session_n,tools,partial_n,first_event,last_event "
-                         "FROM web_groups WHERE k=?", (key,)).fetchone()
-        if row is None:
-            return
-        primary, secondary, p_ord, _q_ord, own, *counts = row
-        if own:
-            yield self._pair(key, *counts, final=False)
-        elif p_ord > PAIR_LEADS:
-            if p_ord == PAIR_LEADS + 1:
+        grown = {}
+        for key in keys:
+            row = db.execute("SELECT p,q,lead,first_rank,n,values_n,session_n,tools,partial_n,first_event,last_event "
+                             "FROM web_groups WHERE k=?", (key,)).fetchone()
+            if row is None:
+                continue
+            primary, secondary, lead, rank, *counts = row
+            grown[primary] = grown.get(primary, 0) + 1
+            if lead:
+                yield self._pair(key, *counts, final=False)
+                continue
+            members, rolled = db.execute("SELECT members,rolled FROM web_fans WHERE g=?", (secondary,)).fetchone()
+            # the rule `finalize` applies: by the time of this pair's first record its primary roll-up held no
+            # more pairs than keep their own leads
+            if (not rolled and members > PAIR_LEADS and not db.execute(
+                    "SELECT 1 FROM web_groups WHERE p=? AND first_rank<=? LIMIT 1 OFFSET ?",
+                    (primary, rank, PAIR_LEADS)).fetchone()):
+                try:
+                    self._spill.write("UPDATE web_fans SET rolled=1 WHERE g=?", [(secondary,)], account=self._account)
+                except StateExhausted as error:
+                    self.note_limit("web_roll_up_mark", f"A roll-up's publication mark could not be kept, so it may "
+                                                        f"be published again with the same identity: {error}")
+                yield self._roll_up(secondary, final=False)
+        for primary, added in grown.items():
+            members = db.execute("SELECT members FROM web_fans WHERE g=?", (primary,)).fetchone()[0]
+            if members > PAIR_LEADS >= members - added:
                 yield self._roll_up(primary, final=False)
-        elif not db.execute("SELECT rolled FROM web_fans WHERE g=?", (secondary,)).fetchone()[0]:
-            try:
-                self._spill.write("UPDATE web_fans SET rolled=1 WHERE g=?", [(secondary,)], account=self._account)
-            except StateExhausted as error:
-                self.note_limit("web_roll_up_mark", f"A roll-up's publication mark could not be kept, so it may "
-                                                    f"be published again with the same identity: {error}")
-            yield self._roll_up(secondary, final=False)
 
     # -- findings --------------------------------------------------------------------------------------------------
 
@@ -1013,17 +1080,17 @@ class WebAttacks(Playbook):
                      aggregate_summary={"record_count": 1, "matching_values": 1, "session_count": 0,
                                         "count_complete": 0}, attack=self._attack(name, 0))
 
-    def _members(self, column, member, group):
-        for (address,) in self._spill.db.execute(
-                f"SELECT {member} FROM web_groups WHERE {column}=? ORDER BY k", (group,)):
-            yield address, ""
+    def _members(self, column, role, group):
+        """Every member address of a roll-up, from disk: the sources of a fleet, the destinations of a sweep."""
+        for (key,) in self._spill.db.execute(f"SELECT k FROM web_groups WHERE {column}=?", (group,)):
+            yield key.split("|")[role != "fleet"], ""
 
     def _roll_up(self, group, *, final):
         db = self._spill.db
         role, anchor, name, side = group.split("|")
         prim, first, last = db.execute(
             "SELECT prim,first_event,last_event FROM web_fans WHERE g=?", (group,)).fetchone()
-        column, member = ("p" if prim else "q"), ("src" if role == "fleet" else "dst")
+        column = "p" if prim else "q"
         members, records, values, sessions, partial_records, earliest, latest = db.execute(
             f"SELECT count(*),sum(n),sum(values_n),sum(session_n),sum(partial_n),min(first_rank),max(last_rank) "
             f"FROM web_groups WHERE {column}=?", (group,)).fetchone()
@@ -1031,8 +1098,8 @@ class WebAttacks(Playbook):
         if name == "exploit_tool":
             for (marked,) in db.execute(f"SELECT DISTINCT tools FROM web_groups WHERE {column}=?", (group,)):
                 tools |= marked or 0
-        top = db.execute(f"SELECT {member},n FROM web_groups WHERE {column}=? ORDER BY n DESC,{member} LIMIT ?",
-                         (group, MEMBERS_NAMED)).fetchall()
+        top = [(key.split("|")[role != "fleet"], count) for key, count in db.execute(
+            f"SELECT k,n FROM web_groups WHERE {column}=? ORDER BY n DESC,k LIMIT ?", (group, MEMBERS_NAMED))]
         events = self._events(first, last)
         lower = self._fold_refused
         least = "at least " if lower or not final else ""
@@ -1055,8 +1122,8 @@ class WebAttacks(Playbook):
             entities = [("ip", anchor, "src"), *(("ip", address, "dst") for address, _count in top)]
         notes = self._notes(name, tools, sessions, partial_records, lower)
         notes.append(f"This finding stands for every {'source' if role == 'fleet' else 'destination'} in its member "
-                     f"list; the first {PAIR_LEADS} pairs of an endpoint also keep leads of their own. Its two "
-                     "citations are the earliest and latest records kept for the group.")
+                     f"list; the {PAIR_LEADS} pairs of an endpoint with the earliest records also keep leads of their "
+                     "own. Its two citations are the earliest and latest records kept for the group.")
         if not current().configured:
             notes.append(DIRECTION_ASSUMED_REASON)
         management = getattr(getattr(self, "site_facts", None), "management_hosts", ())
@@ -1064,39 +1131,89 @@ class WebAttacks(Playbook):
             notes.append("The source is a site-declared management host; authorized scanning is possible and the "
                          "observation remains a lead.")
         elif management and role == "fleet":
-            declared = sum(address_member(address, management) for address, _ in self._members(column, member, group))
+            declared = sum(address_member(address, management) for address, _ in self._members(column, role, group))
             if declared:
                 notes.append(f"{declared} of the source address(es) are site-declared management hosts; authorized "
                              "scanning is possible and the observation remains a lead.")
-        # Internal members are the hunt's own machines, so they are published as the hosts the finding stands for:
-        # the ranking then counts them exactly as it counts the internal endpoint of each per-pair lead this
-        # roll-up replaces. Outside members are never hosts: they are staged as `ip` entities.
+        # Members are published as addresses of one side of the site boundary. The ranking stages an outside
+        # address as an `ip` entity and never as a host; it resolves an internal address to the host whose own
+        # telemetry carries it (else keeps the address), stages it as that host with this finding's tactics, and
+        # counts it once in the hunt's host population.
         return Match(self.id, claim, self.claim_type, events,
                      [pf(event, field) for event in events for field in event.fields],
                      events[-1].ts if events else None, self.severity, "lead", "medium", entities=entities,
                      notes=notes, group_key=group, bounded_revision=True,
                      revision_reason="Final retained HTTP observation counts" if final else "",
-                     citation_unavailable=not events, fleet_hosts=self._members(column, member, group),
+                     citation_unavailable=not events, fleet_hosts=self._members(column, role, group),
                      fleet_host_count=members, fleet_hosts_complete=final and not lower,
-                     fleet_member_kind="host" if side == "in" else "external_address",
+                     fleet_member_kind="internal_address" if side == "in" else "external_address",
                      aggregate_summary={"member_count": members, "record_count": records, "matching_values": values,
                                         "session_count": sessions,
                                         "count_complete": int(final and not lower and not partial_records)},
                      attack=self._attack(name, tools))
 
+    # -- the final decision ----------------------------------------------------------------------------------------
+    # Which pairs keep a lead of their own, and which secondary roll-ups stand, is read from the whole fold by the
+    # times of first records: the PAIR_LEADS pairs of each roll-up with the earliest first record (then the lower
+    # address) keep their leads. The same records therefore give the same findings in whatever order they arrived,
+    # and records that arrive in time order are published, as they arrive, as exactly these findings. A lead or a
+    # secondary roll-up published while records arrived out of order that does not stand here keeps its earlier
+    # publication, worded as a lower bound; it is not revised.
+
+    def _earliest(self, column, group, cache):
+        """The keys of the PAIR_LEADS pairs of a roll-up with the earliest first record time, then address."""
+        found = cache.get((column, group))
+        if found is None:
+            db = self._spill.db
+            rows = db.execute(f"SELECT k,first_rank FROM web_groups WHERE {column}=? ORDER BY first_rank LIMIT ?",
+                              (group, PAIR_LEADS)).fetchall()
+            found = {key for key, _rank in rows}
+            if len(rows) == PAIR_LEADS:
+                # Records of one instant are ordered by address, not by which arrived first.
+                instant = rows[-1][1][:32]
+                found = {key for key, rank in rows if rank[:32] < instant}
+                found.update(key for (key,) in db.execute(
+                    f"SELECT k FROM web_groups WHERE {column}=? AND first_rank>=? AND first_rank<? ORDER BY k LIMIT ?",
+                    (group, instant, instant + "~", PAIR_LEADS - len(found))))
+            if len(cache) >= 4096:
+                cache.clear()
+            cache[(column, group)] = found
+        return found
+
     def finalize(self):
         if not self._ready:
             return
         db = self._spill.db
-        for key, *counts in db.execute(
-                "SELECT k,n,values_n,session_n,tools,partial_n,first_event,last_event FROM web_groups "
-                "WHERE own=1 ORDER BY k"):
-            yield self._pair(key, *counts, final=True)
+        cache = {}
+        counts = "k,n,values_n,session_n,tools,partial_n,first_event,last_event"
+        small = "(SELECT members FROM web_fans f WHERE f.g=web_groups.{})<=?"
+        # A pair whose two roll-ups both hold no more than PAIR_LEADS pairs keeps its lead.
+        for key, *row in db.execute(f"SELECT {counts} FROM web_groups WHERE {small.format('p')} AND "
+                                    f"{small.format('q')} ORDER BY k", (PAIR_LEADS, PAIR_LEADS)):
+            yield self._pair(key, *row, final=True)
         for group, prim in db.execute("SELECT g,prim FROM web_fans WHERE members>? ORDER BY g", (PAIR_LEADS,)):
-            # A secondary roll-up is published when one of its pairs has neither its own lead nor a primary roll-up.
-            if prim or db.execute("SELECT 1 FROM web_groups WHERE q=? AND q_ord>? AND p_ord<=? LIMIT 1",
-                                  (group, PAIR_LEADS, PAIR_LEADS)).fetchone():
+            column, other = ("p", "q") if prim else ("q", "p")
+            earliest = self._earliest(column, group, cache)
+            for key in sorted(earliest):
+                (peer,) = db.execute(f"SELECT {other} FROM web_groups WHERE k=?", (key,)).fetchone()
+                crowd = db.execute("SELECT members FROM web_fans WHERE g=?", (peer,)).fetchone()[0] > PAIR_LEADS
+                # among the earliest of both roll-ups; one in two large roll-ups is reported from the primary
+                if not crowd or prim and key in self._earliest(other, peer, cache):
+                    row = db.execute(f"SELECT {counts} FROM web_groups WHERE k=?", (key,)).fetchone()
+                    yield self._pair(*row, final=True)
+            if prim:
                 yield self._roll_up(group, final=True)
+                continue
+            # A secondary roll-up stands when, at the time of one of its pairs' first record, that pair had neither
+            # a lead of its own nor a primary roll-up (its primary held no more than PAIR_LEADS pairs by then).
+            # Read in time order, that is the moment the roll-up is published.
+            for key, rank, primary in db.execute("SELECT k,first_rank,p FROM web_groups WHERE q=? ORDER BY first_rank",
+                                                 (group,)):
+                if key not in earliest and not db.execute(
+                        "SELECT 1 FROM web_groups WHERE p=? AND first_rank<=? LIMIT 1 OFFSET ?",
+                        (primary, rank, PAIR_LEADS)).fetchone():
+                    yield self._roll_up(group, final=True)
+                    break
 
     def finalize_fallback(self, reason):
         self.note_limit("web_finalize", "HTTP fold finalization is partial: " + reason)
@@ -1105,10 +1222,12 @@ class WebAttacks(Playbook):
 
 _STATUS_KEY = "#status"       # suffix of the window key that counts the same attempts by response status
 _STATUSES_NAMED = 6
+_PAIRS = "#credential-pairs"  # last element of the key of a window whose members are distinct credential pairs
+_PAIRS_KEY = '"' + _PAIRS + '"]'
 
 
 class WebLoginBurst(ZeekWindowRule):
-    id, title, version = "network.web_login_burst", "Repeated attempts at a web authentication path", "2"
+    id, title, version = "network.web_login_burst", "Repeated web sign-in requests to one path", "3"
     families, producers = ("http_tx",), ZEEK_AND_SURICATA
     required_fields = ("source.ip", "destination.ip", "http.request.method", "http.response.status_code")
     citation_fields = _FIELDS
@@ -1120,33 +1239,50 @@ class WebLoginBurst(ZeekWindowRule):
     # states the response-status mix of the window and the lane stays lead. Guessing slower than this, spread over
     # many sources, or visible only as failure statuses on other paths is not counted.
     seconds, threshold, per_sensor = 300, 20, True
+    # Away from a sign-in path, requests that carry an account and a password count only when the window holds more
+    # than one distinct credential pair: a device or service that polls with its own fixed credentials repeats one
+    # pair, and guessing or spraying does not.
+    credential_pairs = 2
     severity, lane, attack = "medium", "lead", ("T1110",)
     uses_site_facts = True
-    benign = (("Shared NAT, proxies, sign-on portals, broken clients, token refreshes and authorized testing can "
-              "generate repeated requests to an authentication path; the response-status mix separates most of them."),)
+    benign = (("Shared NAT, proxies, sign-on portals, session heartbeats, token refreshes, an administrator working "
+               "in a console whose path is a sign-in path, and authorized testing can generate repeated requests to "
+               "a sign-in path; the response-status mix separates most of them. Several users or devices behind one "
+               "address that each send their own credentials in a query give several distinct pairs."),)
     next_checks = ("Compare application authentication outcomes and account evidence; HTTP status alone cannot prove success.",)
     card: ClassVar[dict] = {
         "behavior": title,
         "telemetry": ("Zeek or Suricata HTTP transactions (http_tx: url.original or url.path, http.request.method, "
                       "http.response.status_code, optional user.name); present in the lab profile for both. Arkime "
                       "lists are excluded: their methods and statuses cannot be paired with a request."),
-        "fidelity": ("Requests shaped as authentication attempts: at a sign-in path, every answered POST and every "
-                     "401/403/429; on any path, a request carrying an account and a password parameter. Positive-only."),
+        "fidelity": ("Requests of a sign-in shape, not established attempts or outcomes: at a sign-in path, every "
+                     "answered POST, every 401/403/429 and a query with an account and a credential; on any other "
+                     "path, requests carrying an account and a password parameter with at least two distinct "
+                     "credential pairs in the window. Positive-only."),
         "benign_and_cost": benign[0] + " One lead per source, destination, path and sensor.",
         "query_cost": "Disk-backed five-minute window with late replay.",
         "next_pivot": next_checks[0],
         "research_basis": "MITRE ATT&CK T1110 (Brute Force); an original rate rule with no imported detection content.",
         "license": "original",
-        "thresholds": "20 attempt references in 300 seconds from one source to one path on one server, per sensor",
+        "thresholds": ("20 request references in 300 seconds from one source to one path on one server, per sensor; "
+                       "2 distinct credential pairs for requests counted by their query credentials alone"),
         "adds": "The only rate over web sign-in requests; host authentication rules need the server's own logs.",
         "retrieval": "Typed request path, method, response status and peers; absent body/account stays unknown.",
-        "lanes": ("Lead at 20 attempt references in 300 seconds; no promotion from network status. Severity medium: "
+        "lanes": ("Lead at 20 request references in 300 seconds; no promotion from network status. Severity medium: "
                   "a guessed password gives one account on one application."),
     }
 
     def __init__(self):
         super().__init__()
         self._emitting = None
+        self._describing = ""
+        # Accounts and credential pairs are compared by a keyed hash. The key is random, lives only in this
+        # object and is never written anywhere, so a stored label cannot be tested against a guessed password. A
+        # resumed hunt reads its records again with a new key, so its counts start again from those records.
+        self._label_key = secrets.token_bytes(32)
+
+    def _label(self, *values):
+        return hmac.new(self._label_key, "\x00".join(values).encode("utf-8", "replace"), "sha256").hexdigest()[:32]
 
     def compact(self, event):
         return super().compact(_view(event))
@@ -1187,38 +1323,40 @@ class WebLoginBurst(ZeekWindowRule):
             if not isinstance(query, str) or len(query) > MAX_URI:
                 self.refuse("web_login_query", "Web-login account inspection is partial: query shape or length")
                 query = ""
-        query_account = password = credential = False
+        query_account, password, credential = "", None, False
         for part in query.split("&"):
             key, equals, raw_value = part.partition("=")
             key = _form_value(key)
             if not equals or not key:
                 continue
             if raw_value:
-                password = password or key.casefold() in _PASSWORD_KEYS
+                if password is None and key.casefold() in _PASSWORD_KEYS:
+                    password = _form_value(raw_value) or ""
                 credential = credential or _credential_name(key)
-            if key.casefold() in _ACCOUNT_KEYS:
+            if not query_account and key.casefold() in _ACCOUNT_KEYS:
                 value = _form_value(raw_value)
                 if value and len(value) <= 256:
-                    query_account = True
-                    if not account:
-                        account = value
+                    query_account = value
+        account = account or query_account
+        sensor = event.get("observer.name")
+        sensor = sensor if isinstance(sensor, str) and len(sensor) <= 256 else "unknown-sensor"
         if _AUTH.search(path.casefold()):
             # At a sign-in path: every answered POST (a failed login is answered 200, 302, 401, 422 and more,
             # depending on the application), every refusal status, and a query that carries the credentials.
-            counted = method == "post" or status in (401, 403, 429) or query_account and (password or credential)
-        else:
-            counted = query_account and password
-        if not counted:
+            if not (method == "post" or status in (401, 403, 429)
+                    or query_account and (password is not None or credential)):
+                return None
+            member = self._label("account", account) if account else "unknown-account"
+            return (*peers, sensor, path[:1024]), member, "attempt"
+        if not query_account or password is None:
             return None
-        member = hashlib.sha256(account.encode("utf-8", "replace")).hexdigest() if account else "unknown-account"
-        sensor = event.get("observer.name")
-        sensor = sensor if isinstance(sensor, str) and len(sensor) <= 256 else "unknown-sensor"
-        return (*peers, sensor, path[:1024]), member, "attempt"
+        # Any other path: the members of the window are its distinct credential pairs.
+        return (*peers, sensor, path[:1024], _PAIRS), self._label("pair", query_account, password), "attempt"
 
     # -- the response-status mix of a window -----------------------------------------------------------------------
-    # The same attempts are counted a second time under a companion key whose members are response statuses. The
+    # The same requests are counted a second time under a companion key whose members are response statuses. The
     # window engine keeps that key's window exactly as it keeps the first, on disk, so the mix of the peak window
-    # costs one small read however many attempts the window holds.
+    # costs one small read however many requests the window holds.
 
     def _forward(self, key, event, member, role, weight):
         status = event.get("http.response.status_code")
@@ -1227,7 +1365,11 @@ class WebLoginBurst(ZeekWindowRule):
                 self.rows.advance(key + _STATUS_KEY, event, str(status), "attempt", weight)
             except StateExhausted as error:
                 self.note_limit("web_login_statuses", f"The response-status mix of a window could not be kept: {error}")
-        yield from super()._forward(key, event, member, role, weight)
+        outer, self._describing = self._describing, key
+        try:
+            yield from super()._forward(key, event, member, role, weight)
+        finally:
+            self._describing = outer
 
     def _record_episode(self, key, event, total, distinct, role, member, decision, **options):
         body, old = super()._record_episode(key, event, total, distinct, role, member, decision, **options)
@@ -1244,11 +1386,11 @@ class WebLoginBurst(ZeekWindowRule):
             if row is None:
                 return None
             body = json.loads(row[0])
-        self._emitting = body
+        outer, self._emitting, self._describing = (self._emitting, self._describing), body, key
         try:
             return super()._emit_episode(key, body=body, **options)
         finally:
-            self._emitting = None
+            self._emitting, self._describing = outer
 
     def _statuses(self, total_refs):
         body = self._emitting
@@ -1263,6 +1405,9 @@ class WebLoginBurst(ZeekWindowRule):
         return f" Of the {records} record(s) in that window, {text}."
 
     def describe(self, event, total_refs, distinct_members, role):
+        pairs = self._describing.endswith(_PAIRS_KEY)
+        if pairs and distinct_members < self.credential_pairs:
+            return None                                  # one repeated pair: a client using its own credentials
         notes = [
             _UNCERTAIN,
             ("No status is read as a failed or a successful login: an application may answer a wrong password with "
@@ -1270,11 +1415,13 @@ class WebLoginBurst(ZeekWindowRule):
             "mix shows whether the window held one repeated answer (guessing against one application) or the varied "
             "answers of many users."),
             ("Counted: at a sign-in path, every answered POST, every 401, 403 or 429, and a request whose query "
-            "carries an account with a credential parameter; on any path, a request whose query carries both an "
-            "account and a password parameter. Other requests are not counted."),
-            ("Twenty attempt references in five minutes is beyond one person's retries and below any tool's rate; "
+            "carries an account with a credential parameter; on any other path, requests whose query carries both "
+            "an account and a password parameter, when the window holds at least two distinct credential pairs. "
+            "Other requests are not counted."),
+            ("Twenty request references in five minutes is beyond one person's retries and below any tool's rate; "
             "many users behind one address can also reach it. Counts are per sensor and path."),
-            "Account labels are counted across repeated or distinct users when available; unknown accounts share one unknown bucket. Request bodies are unavailable.",
+            ("Accounts and credential pairs are compared by a keyed hash whose key is never stored; their values "
+            "are not kept. Unknown accounts share one unknown bucket. Request bodies are unavailable."),
             _MASKING,
         ]
         if _management(self, event.get("source.ip")):
@@ -1287,11 +1434,20 @@ class WebLoginBurst(ZeekWindowRule):
                     "/".join(segment.split(";", 1)[0] for segment in urlsplit(target).path.split("/")))[:256]
             except ValueError:
                 path = ""
-        where = f"path {path}" if path else "one path"
-        return "lead", (f"Source {event.get('source.ip')} has {total_refs} HTTP authentication-attempt raw "
-                        f"references to {event.get('destination.ip')} at {where} in five minutes "
-                        f"({distinct_members} account-label bucket(s), including unknown when absent)."
-                        + self._statuses(total_refs)), tuple(notes)
+        source, destination = event.get("source.ip"), event.get("destination.ip")
+        if pairs:
+            claim = (f"Source {source} sent {total_refs} recorded requests carrying an account and a password "
+                     f"parameter to {destination} at {f'path {path}' if path else 'one path'} in five minutes, with "
+                     f"{distinct_members} distinct credential pairs.{self._statuses(total_refs)} The requests, "
+                     "their statuses and the number of distinct pairs are recorded; whether any pair was accepted "
+                     "is not.")
+        else:
+            claim = (f"Source {source} sent {total_refs} recorded requests to a sign-in path of {destination}, "
+                     f"{path or 'one path'}, in five minutes ({distinct_members} account-label bucket(s), including "
+                     f"unknown when absent).{self._statuses(total_refs)} The requests and their statuses are "
+                     "recorded; that each was a login attempt (the path may also serve token refreshes, session "
+                     "checks or an administrator's work), and any login's outcome, are not.")
+        return "lead", claim, tuple(notes)
 
 
 WEB_ATTACK_PLAYBOOKS = (WebAttacks, WebLoginBurst)

