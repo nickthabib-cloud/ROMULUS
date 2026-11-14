@@ -1259,6 +1259,7 @@ class WebLoginBurst(ZeekWindowRule):
     # Arkime sessions are received only to be counted as not judged: a session lists its request targets, methods and
     # statuses as unordered values, so no request can be given its method or its answer.
     families, producers = ("http_tx", "net_session"), ZEEK_AND_SURICATA
+    context_families = ("net_session",)
     required_fields = ("source.ip", "destination.ip", "http.request.method", "http.response.status_code")
     citation_fields = _FIELDS
     # Twenty counted requests from one source address to one path on one server inside five minutes. The reasoning
@@ -1386,13 +1387,22 @@ class WebLoginBurst(ZeekWindowRule):
         return (*peers, sensor, path[:1024], _PAIRS), self._label("pair", query_account, password), "attempt"
 
     def consume(self, events):
-        unpaired = sum(1 for event in events if event.family == "net_session" and event.has("url.path"))
+        events = list(events)
+        unpaired = sum(1 for event in events
+                       if event.family == "net_session" and event.normalizer.partition("@")[0] == "arkime"
+                       and event.has("url.path"))
         if unpaired:
-            self.refuse("web_login_session_lists",
-                        "Arkime sessions carrying HTTP requests were not judged for sign-in bursts: a session lists "
-                        "its request targets, methods and statuses as unordered values, so no request can be given "
-                        "its method or its answer", unpaired)
+            self._session_lists = getattr(self, "_session_lists", 0) + unpaired
         yield from super().consume(events)
+
+    def coverage_notes(self) -> list[str]:
+        notes = super().coverage_notes()
+        count = getattr(self, "_session_lists", 0)
+        if count:
+            notes.append(f"not judged for sign-in bursts (informational): {count} Arkime session(s) carrying HTTP "
+                         "requests; a session lists its request targets, methods and statuses as unordered values, "
+                         "so no request can be given its method or its answer")
+        return notes
 
     # -- the response-status mix of a window -----------------------------------------------------------------------
     # The same requests are counted a second time under a companion key whose members are response statuses. The

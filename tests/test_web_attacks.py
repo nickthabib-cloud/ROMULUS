@@ -1507,10 +1507,12 @@ def test_arkime_http_sessions_are_counted_as_not_judged_for_sign_in_bursts(login
     rows = [event(["/login"], producer="arkime", status=[401], method=["POST"], n=n) for n in range(30)]
     rows.append(event(None, producer="arkime", n=31))                # a session with no HTTP request is not counted
     assert finish(login_rule, rows) == []
-    [reason] = login_rule.limit_reasons()
-    assert "Arkime sessions carrying HTTP requests were not judged for sign-in bursts" in reason
-    assert login_rule.capped == 30
+    # an informational note, not a limit: nothing the rule judges went unevaluated
+    assert login_rule.limit_reasons() == [] and login_rule.capped == 0
+    [note] = [n for n in login_rule.coverage_notes() if "sign-in bursts" in n]
+    assert "30 Arkime session(s) carrying HTTP requests" in note
+    assert "net_session" in login_rule.context_families
     # a Zeek request beside them is judged as before
     assert login_rule.evaluated == 0
-    list(login_rule.consume([event("/login", status=401, method="POST", n=40)]))
-    assert login_rule.evaluated == 1 and login_rule.capped == 30
+    list(login_rule.consume(iter([event("/login", status=401, method="POST", n=40)])))
+    assert login_rule.evaluated == 1
