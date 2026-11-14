@@ -196,22 +196,19 @@ class RankWorkspace:
         self._run(f"INSERT OR IGNORE INTO rk_rule_host (rule_id, host) SELECT c.rule_id, h.host {joined} "
                   f"AND {_RANKED_LANES}", {"hunt": self.hunt_id})
 
-    def _member_rules(self, members: str) -> list[tuple[str, str | None]]:
-        rows = self._run(
-            f"SELECT DISTINCT c.rule_id, json_extract(c.gate_results, '$._attack') FROM candidate c "
-            f"WHERE {self._population()} AND {_RANKED_LANES} AND {members} "
-            f"AND EXISTS (SELECT 1 FROM candidate_host h WHERE h.candidate_id = c.id) ORDER BY 1, 2",
-            {"hunt": self.hunt_id}).all()
-        return self._page([(rule_id, attack) for rule_id, attack in rows])
-
-    def external_member_rules(self) -> list[tuple[str, str | None]]:
-        """The distinct (rule, stored technique list) of ranked findings with outside-address members: bounded by
-        the rule catalog and the techniques its rules declare."""
-        return self._member_rules(_EXTERNAL_MEMBERS)
-
-    def internal_member_rules(self) -> list[tuple[str, str | None]]:
-        """The same for ranked findings whose members are internal addresses."""
-        return self._member_rules(_INTERNAL_MEMBERS)
+    def member_rules(self) -> tuple[list[tuple[str, str | None]], list[tuple[str, str | None]], bool]:
+        """The distinct (rule, stored technique list) of ranked findings with outside-address members, the same for
+        internal-address members, and whether any finding of the pass lists internal addresses at all. One query,
+        bounded by the rule catalog and the techniques its rules declare."""
+        rows = self._page(self._run(
+            f"SELECT DISTINCT {_MEMBER_KIND}, c.rule_id, json_extract(c.gate_results, '$._attack'), {_RANKED_LANES} "
+            f"FROM candidate c WHERE {self._population()} AND {_ADDRESS_MEMBERS} "
+            f"AND EXISTS (SELECT 1 FROM candidate_host h WHERE h.candidate_id = c.id) ORDER BY 1, 2, 3, 4",
+            {"hunt": self.hunt_id}).all())
+        ranked = [(kind, rule_id, attack) for kind, rule_id, attack, in_ranked_lane in rows if in_ranked_lane]
+        return ([(rule_id, attack) for kind, rule_id, attack in ranked if kind == "external_address"],
+                [(rule_id, attack) for kind, rule_id, attack in ranked if kind == "internal_address"],
+                any(row[0] == "internal_address" for row in rows))
 
     def _stage_members(self, members: str, kind: str, name: str, agent_provenance: str,
                        tactics: dict[tuple[str, str | None], tuple[str, ...]]) -> None:
