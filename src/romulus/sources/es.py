@@ -387,6 +387,19 @@ class ElasticClient:
 
     def search(self, target: str | None, body: dict) -> dict:
         path = f"/{target}/_search" if target is not None else "/_search"
+        params = {"filter_path": SEARCH_FILTER_PATH}
+        if "pit" not in body:
+            # A shard with no available copy is not counted as failed: the cluster would answer from the shards it
+            # has and report `_shards.failed` 0. Refused partial results make that an error, which every caller
+            # reports as a failed search. A point-in-time search takes no such parameter; its point in time was
+            # opened only with every shard present, and a shard lost afterwards fails in the response.
+            params["allow_partial_search_results"] = "false"
+        return self.request("POST", path, body, params=params)
+
+    def search_partial(self, target: str | None, body: dict) -> dict:
+        """A search answered from the shards the cluster has. Only for a caller that states the answer is
+        incomplete: the source inventory, so one degraded index does not stop a hunt of the healthy ones."""
+        path = f"/{target}/_search" if target is not None else "/_search"
         return self.request("POST", path, body, params={"filter_path": SEARCH_FILTER_PATH})
 
     def _open_pit(self, target: str) -> str:

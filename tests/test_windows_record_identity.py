@@ -56,7 +56,7 @@ def test_record_id_reset_keeps_both_records_and_reports_continuity_loss():
         r"C:\Windows\System32\notepad.exe", r"C:\Tools\mimikatz.exe",
     }
     assert skips == {"record_id reused (log cleared or reverted)": 1}
-    assert "record_id reused (log cleared or reverted) on Security for ws01.example.test" in reasons
+    assert "record_id reused (log cleared or reverted, or machines sharing one source identifier) on Security for ws01.example.test" in reasons
 
 
 def test_snapshot_revert_with_earlier_time_is_not_treated_as_a_copy():

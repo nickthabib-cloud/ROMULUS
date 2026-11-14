@@ -1,4 +1,5 @@
 """Synthetic native process, module and registry observations; private until part B."""
+import hashlib
 import importlib
 from datetime import UTC, datetime, timedelta
 
@@ -245,8 +246,11 @@ def test_real_sqlite_full_retains_computed_live_account_positive(tmp_path):
     rule.spill_dir = tmp_path
     rule.budget = StateBudget(tmp_path, disk_total=1024 * 1024, reserve=0)
     parent = native(process(r"C:\Users\alice\parent.exe", r"EXAMPLE\alice", 1))[0]
+    # Command lines are omitted from compact pending rows. Inflate a retained
+    # field with deterministic text that stays large after compression.
+    description = "".join(hashlib.sha256(str(n).encode()).hexdigest() for n in range(2_048))
     child = native(process(r"C:\Windows\System32\cmd.exe", r"NT AUTHORITY\SYSTEM", 2,
-                           ParentProcessGuid=parent.get("process.guid"), CommandLine="cmd.exe " + "x" * 100000), 2, offset=1)[0]
+                           ParentProcessGuid=parent.get("process.guid"), Description=description), 2, offset=1)[0]
     try:
         assert list(rule.consume([parent])) == []
         rule.rows.store().grew()

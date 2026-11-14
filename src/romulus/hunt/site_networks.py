@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from romulus.config import Settings
 from romulus.detect import netdef
@@ -13,6 +13,7 @@ from romulus.detect.netdef import EXTERNAL_SETTING, INTERNAL_SETTING, SiteNetwor
 from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.hunt.pivot import _is_network
 from romulus.sources.models import Window
+from romulus.sources.network_coverage import DOCTOR_LOOKBACK, outside_candidates
 from romulus.sources.profile import FieldContract
 
 
@@ -39,23 +40,11 @@ TERMS_SIZE = 1000                  # candidate outside addresses returned per ta
 DISTINCT_CAP = 10_000              # distinct outside addresses kept across targets; past it counts are lower bounds
 EXAMPLES = 10
 CITED_EXAMPLES = 5                 # examples named in a coverage reason
-DOCTOR_LOOKBACK = timedelta(days=7)    # doctor checks the week ending at each target's newest record
 
 
 def _ip_order(text: str):
     address = ipaddress.ip_address(text)
     return (address.version, int(address))
-
-
-def outside_candidates(field: str, definition: SiteNetworks) -> dict:
-    """A query for addresses that may be outside `definition`: not in any internal range, or in a carve-out. It
-    is a superset of what the definition reads as outside (a range nested inside a carve-out is internal again),
-    so every candidate is judged locally with the definition itself."""
-    internal = [str(n) for n in definition.effective_internal()]
-    clauses: list[dict] = [{"bool": {"must_not": [{"terms": {field: internal}}]}}]
-    if definition.external:
-        clauses.append({"terms": {field: [str(n) for n in definition.external]}})
-    return {"bool": {"should": clauses, "minimum_should_match": 1}}
 
 
 def _recent_window(client, target: str, contract: FieldContract) -> dict | None:

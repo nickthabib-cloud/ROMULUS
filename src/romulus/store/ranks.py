@@ -24,6 +24,16 @@ _TEMP_TABLES = ("rk_finding", "rk_member", "rk_tactic", "rk_pair", "rk_entity", 
 # A counted (deterministic, non-case) candidate, and one of the lanes a rule's prevalence is read from.
 _COUNTED = "c.provenance = 'deterministic' AND c.source_case_id IS NULL"
 _RANKED_LANES = "c.lane IN ('urgent', 'high', 'lead')"
+# A finding whose streamed members are addresses rather than host names (romulus.detect.base.Match.fleet_member_kind):
+# outside addresses, which are never hosts, or internal addresses, which are hosts once resolved through the hunt's
+# address map.
+_MEMBER_KIND = "json_extract(c.gate_results, '$._fleet_member_kind')"
+_EXTERNAL_MEMBERS = f"{_MEMBER_KIND} = 'external_address'"
+_INTERNAL_MEMBERS = f"{_MEMBER_KIND} = 'internal_address'"
+_ADDRESS_MEMBERS = f"{_MEMBER_KIND} IN ('external_address', 'internal_address')"
+# An internal member's host: the one host whose own telemetry carries the address in the hunt window, else the
+# address itself (the name an internal endpoint of a per-address finding is given).
+_MEMBER_HOST = "COALESCE((SELECT a.host FROM rk_address a WHERE a.address = h.host), h.host)"
 _CREATE = (
     # one row per ranked finding (confirmed and pool, agent findings included)
     """CREATE TEMP TABLE rk_finding (
@@ -34,7 +44,8 @@ _CREATE = (
     """CREATE TEMP TABLE rk_member (
         entity_kind TEXT NOT NULL, entity TEXT NOT NULL, candidate_id TEXT NOT NULL, rule_id TEXT NOT NULL, ts TEXT,
         confirmed INTEGER NOT NULL, contributes INTEGER NOT NULL, fleet INTEGER NOT NULL DEFAULT 0,
-        prior REAL NOT NULL, PRIMARY KEY (entity_kind, entity, candidate_id)) WITHOUT ROWID""",
+        prior REAL NOT NULL, listed INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (entity_kind, entity, candidate_id)) WITHOUT ROWID""",
     "CREATE INDEX temp.rk_member_time ON rk_member (entity_kind, entity, ts, rule_id, candidate_id)",
     "CREATE INDEX temp.rk_member_candidate ON rk_member (candidate_id)",
     "CREATE INDEX temp.rk_member_rule ON rk_member (rule_id)",
@@ -177,12 +188,71 @@ class RankWorkspace:
         self._many("INSERT OR IGNORE INTO rk_rule_host (rule_id, host) VALUES (:rule_id, :host)", rule_hosts)
 
     def stage_fleet_hosts(self) -> None:
-        """The full host lists of fleet-grouped findings (one finding standing for many hosts)."""
+        """The full host lists of fleet-grouped findings (one finding standing for many hosts). Members that are
+        addresses are not host names: they are staged by `stage_external_members` and `stage_internal_members`."""
         joined = (f"FROM candidate c JOIN candidate_host h ON h.candidate_id = c.id "
-                  f"WHERE {self._population()} AND {_COUNTED}")
+                  f"WHERE {self._population()} AND {_COUNTED} AND NOT COALESCE({_ADDRESS_MEMBERS}, 0)")
         self._run(f"INSERT OR IGNORE INTO rk_host (host) SELECT h.host {joined}", {"hunt": self.hunt_id})
         self._run(f"INSERT OR IGNORE INTO rk_rule_host (rule_id, host) SELECT c.rule_id, h.host {joined} "
                   f"AND {_RANKED_LANES}", {"hunt": self.hunt_id})
+
+    def member_rules(self) -> tuple[list[tuple[str, str | None]], list[tuple[str, str | None]], bool]:
+        """The distinct (rule, stored technique list) of ranked findings with outside-address members, the same for
+        internal-address members, and whether any finding of the pass lists internal addresses at all. One query,
+        bounded by the rule catalog and the techniques its rules declare."""
+        rows = self._page(self._run(
+            f"SELECT DISTINCT {_MEMBER_KIND}, c.rule_id, json_extract(c.gate_results, '$._attack'), {_RANKED_LANES} "
+            f"FROM candidate c WHERE {self._population()} AND {_ADDRESS_MEMBERS} "
+            f"AND EXISTS (SELECT 1 FROM candidate_host h WHERE h.candidate_id = c.id) ORDER BY 1, 2, 3, 4",
+            {"hunt": self.hunt_id}).all())
+        ranked = [(kind, rule_id, attack) for kind, rule_id, attack, in_ranked_lane in rows if in_ranked_lane]
+        return ([(rule_id, attack) for kind, rule_id, attack in ranked if kind == "external_address"],
+                [(rule_id, attack) for kind, rule_id, attack in ranked if kind == "internal_address"],
+                any(row[0] == "internal_address" for row in rows))
+
+    def _stage_members(self, members: str, kind: str, name: str, agent_provenance: str,
+                       tactics: dict[tuple[str, str | None], tuple[str, ...]]) -> None:
+        """One membership per streamed member of each ranked finding, and the finding's tactics for it. One SQL
+        statement, and one per (rule, techniques, tactic); nothing is held in Python."""
+        joined = (f"FROM candidate c JOIN candidate_host h ON h.candidate_id = c.id "
+                  f"WHERE {self._population()} AND {_RANKED_LANES} AND {members}")
+        params = {"hunt": self.hunt_id, "agent": agent_provenance}
+        self._run(f"INSERT OR IGNORE INTO rk_member (entity_kind, entity, candidate_id, rule_id, ts, confirmed, "
+                  f"contributes, prior, listed) SELECT '{kind}', {name}, c.id, c.rule_id, c.ts, 0, "
+                  f"CASE WHEN c.provenance != :agent AND c.source_case_id IS NULL THEN 1 ELSE 0 END, "
+                  f"c.priority, 0 {joined}", params)
+        for (rule_id, attack), counted in sorted(tactics.items(), key=lambda item: (item[0][0], item[0][1] or "")):
+            for tactic in counted:
+                self._run(f"INSERT OR IGNORE INTO rk_tactic (entity_kind, entity, rule_id, tactic) "
+                          f"SELECT '{kind}', {name}, c.rule_id, :tactic {joined} AND c.rule_id = :rule "
+                          f"AND json_extract(c.gate_results, '$._attack') IS :attack "
+                          f"AND c.provenance != :agent AND c.source_case_id IS NULL",
+                          {**params, "tactic": tactic, "rule": rule_id, "attack": attack})
+
+    def stage_external_members(self, agent_provenance: str, confirmed_lane: str,
+                               tactics: dict[tuple[str, str | None], tuple[str, ...]]) -> None:
+        """Each outside address a grouped finding streams as a member becomes an `ip` membership of that finding,
+        counted (and given the rule's tactics) exactly as a per-address finding's endpoint would be, so an address
+        named only in a group still carries the rule's evidence. They are not the finding's own ranking entities
+        (`listed` = 0): its rank reads the endpoints it names, so a page of findings stays bounded however many
+        members a group has. A member is never confirmed by the group's lane (`confirmed_lane` is not read): the
+        group names who used a service, not what each one did."""
+        self._stage_members(_EXTERNAL_MEMBERS, "ip", "h.host", agent_provenance, tactics)
+
+    def stage_internal_members(self, agent_provenance: str,
+                               tactics: dict[tuple[str, str | None], tuple[str, ...]]) -> None:
+        """Each internal address a grouped finding streams as a member becomes a `host` membership of that finding,
+        under the name a per-address finding's internal endpoint gets: the host whose own telemetry carries the
+        address, else the address. It carries the finding's tactics, is unlisted and is never confirmed by the
+        group's lane, as an outside member. The same name joins the hunt's host population and the rule's spread
+        (a counted candidate of any lane for the population, a ranked one for the spread), so a machine is counted
+        once whether a finding names it, lists it, or its own telemetry does."""
+        joined = (f"FROM candidate c JOIN candidate_host h ON h.candidate_id = c.id "
+                  f"WHERE {self._population()} AND {_COUNTED} AND {_INTERNAL_MEMBERS}")
+        self._run(f"INSERT OR IGNORE INTO rk_host (host) SELECT {_MEMBER_HOST} {joined}", {"hunt": self.hunt_id})
+        self._run(f"INSERT OR IGNORE INTO rk_rule_host (rule_id, host) SELECT c.rule_id, {_MEMBER_HOST} {joined} "
+                  f"AND {_RANKED_LANES}", {"hunt": self.hunt_id})
+        self._stage_members(_INTERNAL_MEMBERS, "host", _MEMBER_HOST, agent_provenance, tactics)
 
     # -- rule statistics (SQL aggregates) -----------------------------------------------------------------------
     def hunt_hosts(self) -> int:
@@ -300,7 +370,7 @@ class RankWorkspace:
         rows = self._run(
             "SELECT m.candidate_id, m.entity_kind, m.entity, e.score, e.reported FROM rk_member m "
             "JOIN rk_entity e ON e.entity_kind = m.entity_kind AND e.entity = m.entity "
-            "WHERE m.candidate_id >= :first AND m.candidate_id <= :last "
+            "WHERE m.candidate_id >= :first AND m.candidate_id <= :last AND m.listed = 1 "
             "ORDER BY m.candidate_id, m.entity_kind, m.entity", {"first": first, "last": last}).mappings().all()
         return self._page([dict(row) for row in rows])
 

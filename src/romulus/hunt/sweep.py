@@ -57,8 +57,14 @@ from romulus.evidence.suricata_protocols import SURICATA_PROTOCOL_FAMILIES
 from romulus.evidence.typed import TypedEvent
 from romulus.evidence.windows import (
     NXLOG_CHANNEL_SKIP,
+    WINDOWS_MULTI_SOURCE_SKIP,
+    WINDOWS_SOURCE_FIELDS,
+    WINDOWS_SOURCE_ID_FIELDS,
     RecordIdContinuity,
+    windows_continuity_source,
+    windows_identity_reasons,
     windows_record_signature,
+    windows_source_identity,
     windows_view,
 )
 from romulus.evidence.windows_catalog import (
@@ -1059,7 +1065,8 @@ class Sweep:
         from romulus.sources.profile import FieldSpec, contract_from_types
 
         raw_types = {name: spec.type for name, spec in contract.linux_fields.items()
-                     if name.startswith("Event.") or name == contract.time_field}
+                     if name.startswith("Event.") or name == contract.time_field
+                     or name in (*WINDOWS_SOURCE_FIELDS, "SourceModuleType")}
         raw = contract_from_types(contract.target, raw_types, os_family="windows",
                                   keyword_limits={name: None for name, kind in raw_types.items() if kind == "keyword"})
         raw.fields["winlog"] = FieldSpec(native="winlog", type="object", ops=["exists", "missing"], aggregatable=False)
@@ -1072,7 +1079,12 @@ class Sweep:
         partition: Window,
     ) -> tuple[dict[tuple[str, str], tuple[datetime, datetime]], list[str]]:
         """Read only host/channel/id/time metadata for all Windows records in one selective partition."""
-        group_by = ("@timestamp", "host.name", "event.channel", "winlog.record_id")
+        # One bucket per record needs keys that hold one value per record: a host's addresses (host.ip) would put
+        # a record in one bucket per address, so they are not grouped. A source identifier that cannot be
+        # aggregated is left out as well; the groups it alone would have identified are then unresolved.
+        source_fields = tuple(name for name in (*WINDOWS_SOURCE_ID_FIELDS, "SourceModuleType")
+                              if (spec := contract.spec(name)) is not None and spec.aggregatable)
+        group_by = ("@timestamp", "host.name", "event.channel", "winlog.record_id", *source_fields)
         unavailable = [
             field for field in group_by
             if (spec := contract.spec(field)) is None or not spec.aggregatable
@@ -1106,7 +1118,13 @@ class Sweep:
                     filters=[Predicate(field="winlog", op="missing"), Predicate(field="event.channel", op="exists")],
                     group_by=list(group_by), max_records=PARTITION_MAX_DOCS,
                     purpose="windows raw EVTX continuity metadata"), raw_contract)
-                outcome = outcome.model_copy(update={"buckets": [*outcome.buckets, *raw_outcome.buckets]})
+                total_exact = (outcome.total_relation == raw_outcome.total_relation == "eq"
+                               and outcome.total is not None and raw_outcome.total is not None)
+                outcome = outcome.model_copy(update={
+                    "buckets": [*outcome.buckets, *raw_outcome.buckets],
+                    "total": outcome.total + raw_outcome.total if total_exact else None,
+                    "total_relation": "eq" if total_exact else "gte",
+                })
                 if raw_outcome.completeness != Completeness.complete:
                     raw_reasons.append("shipper gaps unresolved: raw EVTX continuity metadata incomplete: " + ", ".join(
                         raw_outcome.reasons or [raw_outcome.error or "unknown"]))
@@ -1125,7 +1143,7 @@ class Sweep:
             return {}, reasons
 
         observed: dict[tuple[str, str], tuple[datetime, datetime]] = {}
-        reconstructed: list[tuple[datetime, str, str, int, int]] = []
+        reconstructed: list[tuple[datetime, str, str, int, int, dict]] = []
         collisions: list[dict] = []
         malformed_groups = 0
         malformed_times = 0
@@ -1172,7 +1190,8 @@ class Sweep:
                     "count": count,
                 })
             else:
-                reconstructed.append((first, host, channel, record_id, ordinal))
+                reconstructed.append((first, host, channel, record_id, ordinal,
+                                      {name: key.get(name) for name in source_fields}))
         if malformed_groups:
             reasons.append(
                 f"shipper gaps unresolved: {malformed_groups} continuity metadata bucket(s) lack host or channel"
@@ -1187,6 +1206,13 @@ class Sweep:
             )
         if reasons:
             return {}, reasons
+
+        # A grouped field that holds several values after all expands a record into several buckets. A scalar
+        # projection cannot prove source identity in that case. Never join those partial identities.
+        if source_fields and (outcome.total_relation != "eq" or outcome.total is None
+                              or sum(int(bucket.get("count") or 0) for bucket in outcome.buckets) != outcome.total):
+            stats["partial_partitions"] += 1
+            return observed, ["shipper gaps unresolved: source identity metadata is multi-valued or not exact"]
 
         collision_records: list[dict] = []
         if collisions:
@@ -1293,9 +1319,13 @@ class Sweep:
                 return {}, reasons
             for key in sorted(fetched):
                 copies = fetched[key]
+                source_signatures: dict[str | None, set[str]] = {}
+                for record in copies:
+                    source_signatures.setdefault(windows_source_identity(record), set()).add(
+                        windows_record_signature(record))
                 stats["collision_signature_conflicts"] = (
                     stats.get("collision_signature_conflicts", 0)
-                    + int(len({windows_record_signature(record) for record in copies}) > 1)
+                    + sum(len(signatures) > 1 for signatures in source_signatures.values())
                 )
                 for record in copies:
                     source = record.get("_source") or {}
@@ -1309,6 +1339,7 @@ class Sweep:
                 "_index": target,
                 "_id": f"continuity-{ordinal}",
                 "_source": {
+                    **source_metadata,
                     "@timestamp": first.isoformat() if first is not None else "",
                     "agent": {"type": "winlogbeat"},
                     "winlog": {
@@ -1319,7 +1350,7 @@ class Sweep:
                     },
                 },
             }
-            for first, host, channel, record_id, ordinal in sorted(reconstructed)
+            for first, host, channel, record_id, ordinal, source_metadata in sorted(reconstructed)
         ]
         records.extend(collision_records)
 
@@ -1339,8 +1370,23 @@ class Sweep:
 
         records.sort(key=continuity_order)
         if records:
+            # The grouped identifiers are all this view reads of a record's source. A host/channel group whose
+            # records carry none of them is unresolved on its own; every other group keeps its answer.
+            unidentified: dict[str, set[str]] = {}
+            for record in records:
+                if windows_continuity_source(record, source_fields) is None:
+                    winlog = windows_view(record.get("_source") or {}).get("winlog") or {}
+                    unidentified.setdefault(str(winlog.get("channel") or ""), set()).add(
+                        str(winlog.get("computer_name") or "").casefold())
+            for channel, computers in sorted(unidentified.items()):
+                detail = "shipper gaps unresolved: no single-valued source identity"
+                if len(computers) <= 10:
+                    reasons += [f"{detail} on {channel} for {computer}" for computer in sorted(computers)]
+                else:
+                    reasons.append(f"{detail} for {len(computers):,} hosts on {channel} "
+                                   f"(sample: {', '.join(sorted(computers)[:10])})")
             reasons.extend(self._windows_continuity().observe(
-                target, records, liveness_tolerance=self.windows_liveness_tolerance,
+                target, records, liveness_tolerance=self.windows_liveness_tolerance, source_fields=source_fields,
             ))
         return observed, reasons
 
@@ -1583,7 +1629,8 @@ class Sweep:
         global_keys = self._bounded_counts(self.stats["skips"], skips)
         windows_skips = {
             reason: count for reason, count in skips.items()
-            if reason == RPC_REMOTE_SCOPE_SKIP or reason.startswith(("Windows event class", "duplicate Windows event copy"))
+            if reason in (RPC_REMOTE_SCOPE_SKIP, WINDOWS_MULTI_SOURCE_SKIP)
+            or reason.startswith(("Windows event class", "duplicate Windows event copy"))
         }
         if windows_skips:
             by_target = self.stats.setdefault("skips_by_target", {}).setdefault(target, {})
@@ -2028,9 +2075,11 @@ class Sweep:
         malformed_text: dict[str, list[str]] = {}
         skip_families: dict[str, frozenset[str] | None] = {}
         shapes: dict[str, int] = {}
+        windows_records: dict[str, str] = {}
         events, skips, errors = normalize_hits(out.records, self.boots, malformed_text=malformed_text,
                                                skip_families=skip_families, rpc_remote_only=True, contract=contract,
-                                               surrogate_free=out.surrogate_free, shapes=shapes)
+                                               surrogate_free=out.surrogate_free, shapes=shapes,
+                                               windows_records=windows_records)
         if shapes:
             # the shipper shapes read, by target: Linux host shapes, the EVE event types an Elastic shipper indexed
             # without their line, and NXLog's flat Windows records with their collector clock offsets (one count
@@ -2051,13 +2100,18 @@ class Sweep:
         raw_sources = {f"{r['_index']}/{r['_id']}": r["_source"] for r in out.records}
         duplicate_events = []
         zeek_visibility_events = None
-        windows_state_reasons: list[str] = []
+        windows_state_reasons: list[str] = windows_identity_reasons(events)
         zeek_state_reasons: list[tuple[str, frozenset[str]]] = []
         script_reassembly_reasons: list[str] = []
         script_metadata_reasons: list[str] = []
         if any(event.normalizer.startswith("windows-") for event in events):
             stage = self._event_stage()
-            events, duplicate_events = stage.unique_windows(events)
+            multi_source = stage.windows_multi_source
+            events, duplicate_events = stage.unique_windows(events, records=windows_records)
+            if stage.windows_multi_source > multi_source:
+                # Each source's copy is its own event and is evaluated: nothing is lost, and the report says how
+                # many records a count may hold twice.
+                skips[WINDOWS_MULTI_SOURCE_SKIP] = stage.windows_multi_source - multi_source
             if stage.windows_refused:
                 windows_state_reasons.append(
                     f"Windows event dedup state refused {stage.windows_refused} event id(s): "

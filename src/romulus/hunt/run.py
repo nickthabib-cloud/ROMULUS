@@ -34,6 +34,7 @@ from romulus.hunt.sweep import Sweep
 from romulus.site import ensure_site_unchanged, load_site_facts
 from romulus.sources.es import ElasticClient
 from romulus.sources.models import Window
+from romulus.sources.network_coverage import check_network_addresses, unknown_coverage
 from romulus.sources.profile import build_profile
 from romulus.store.db import digest, make_engine, migrate, utcnow
 from romulus.store.repo import Repo, is_lease_lost
@@ -63,13 +64,22 @@ def ai_agent_entry(s: Settings, requested: bool | None = None) -> dict:
     return {"requested": wanted, **readiness.provenance(s)}
 
 
+def network_coverage_entry(client, contracts: dict, definition: netdef.SiteNetworks, window: Window) -> dict:
+    """The manifest's record of how the observed network addresses sit against the internal networks."""
+    try:
+        return check_network_addresses(client, contracts, definition, window)
+    except Exception as exc:      # a configuration diagnostic must never stop a hunt: it is recorded as unknown
+        log.exception("network-address coverage check failed")
+        return unknown_coverage(window, f"the network-address coverage check failed ({type(exc).__name__})")
+
+
 def create_hunt(s: Settings, start: datetime, end: datetime, created_by: str, style: str = "broad",
                 hypothesis: str = "", original_input: dict | None = None, expand: bool = True,
                 ai_agent: bool | None = None) -> str:
     repo = open_repo(s)
     window = Window(start=start, end=end)
     client = ElasticClient(s)
-    profiles, targets = {}, []
+    profiles, targets, contracts = {}, [], {}
     site_facts = load_site_facts(s.home)
     if not s.es_index_patterns:
         raise ValueError("no ES_INDEX_PATTERNS configured: nothing to hunt")
@@ -83,10 +93,13 @@ def create_hunt(s: Settings, start: datetime, end: datetime, created_by: str, st
             options = {"site_facts": site_facts} if target in (site_facts.content.get("zeek") or {}).get("plain_sources", {}) else {}
             prof, _contract = build_profile(client, target, **options)
             profiles[target] = prof.model_dump(mode="json")
+            contracts[target] = _contract
             targets.append(target)
     manifest = build_manifest(s, window, original_input or {"start": start.isoformat(), "end": end.isoformat()},
                               style, targets, profiles, hypothesis, ai_agent=ai_agent_entry(s, ai_agent),
                               site_facts=site_facts)
+    manifest["internal_networks"]["coverage"] = network_coverage_entry(
+        client, contracts, netdef.SiteNetworks.from_record(manifest["internal_networks"]), window)
     baseline = manifest["baseline"]
     baseline["store_cut_digest"] = repo.baseline_store_cut_digest(
         site=baseline["site"], targets=targets, specs=baseline["specs"],

@@ -29,6 +29,10 @@ def write(m, path, technical_name):
     if not m["integrity"]["finalizable"]:
         paragraph("Degraded report: incomplete evidence or host lists are identified in the technical report.")
     paragraph(f"Technical report: {technical_name}. This contains the full findings, citations and coverage gaps.")
+    network_coverage = m["coverage"].get("internal_networks") or {}
+    if network_coverage.get("outside") or network_coverage.get("status") == "unknown":
+        paragraph("Internal-network coverage", bold=True)
+        paragraph(network_coverage["summary"])
     if is_ranked(m):
         confirmed, reported, pool = ranked_sections(m)
         sections = (("Confirmed", "Confirmed findings, reported on their own.", confirmed),
@@ -54,8 +58,15 @@ def write(m, path, technical_name):
         paragraph(finding["claim"])
         if ref := finding.get("fleet_hosts"):
             amount = str(ref["count"]) if ref["complete"] else f"{ref['count']} of {ref['expected_count']}"
-            paragraph(f"{amount} reporting hosts retained; host list {'complete' if ref['complete'] else 'partial'}. "
-                      f"See {technical_name}, Fleet host appendix, finding {finding['id']}, for every retained host.")
+            side = {"external_address": "outside", "internal_address": "internal"}.get(
+                finding.get("fleet_member_kind"))
+            if side:
+                paragraph(f"{amount} {side} addresses retained; {side} address list "
+                          f"{'complete' if ref['complete'] else 'partial'}. See {technical_name}, Fleet host "
+                          f"appendix, finding {finding['id']}, for every retained {side} address.")
+            else:
+                paragraph(f"{amount} reporting hosts retained; host list {'complete' if ref['complete'] else 'partial'}. "
+                          f"See {technical_name}, Fleet host appendix, finding {finding['id']}, for every retained host.")
         for check in finding["next_checks"]:
             paragraph("Recommended check: "+check)
     if assessment := m.get("ai_assessment"):

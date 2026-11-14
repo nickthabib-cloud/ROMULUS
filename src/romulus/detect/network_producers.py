@@ -31,6 +31,7 @@ PROTOCOL_FAMILIES: dict[str, frozenset[str]] = {
 # matrix is in docs/detection/network-protocols.md.
 ZEEK_ONLY = ("zeek-ecs",)
 ZEEK_AND_SURICATA = ("zeek-ecs", "suricata-eve")
+HTTP_OBSERVATIONS = ("zeek-ecs", "suricata-eve", "arkime")
 SENSOR_WORDS = {"zeek-ecs": "Zeek", "suricata-eve": "Suricata"}
 
 
@@ -46,6 +47,13 @@ def rule_reads(event: TypedEvent, producers: tuple[str, ...]) -> bool:
         return False
     if producer == "zeek-ecs":
         return event.get("observer.product") == "zeek"
+    if producer == "arkime":
+        # An explicit observation consumer can inspect unordered session values.
+        # protocol_record remains transaction-only, and rate consumers never
+        # declare Arkime among their producers.
+        version = event.normalizer.partition("@")[2]
+        return (event.family == "net_session" and version.isascii() and version.isdecimal()
+                and bool(version.lstrip("0")))
     return protocol_record(event, event.family)
 
 

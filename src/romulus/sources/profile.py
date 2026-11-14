@@ -165,6 +165,29 @@ def native_field(contract, path, op='eq'):
                  if spec.native.startswith(path + '.') and op in spec.ops), None)
 
 
+SHARDS_UNANSWERED = "some shards did not answer"
+
+
+def _inventory_search(client, target: str, body: dict, notes: list[str]) -> dict:
+    """An inventory search. When the cluster refuses because a shard has no available copy (or one failed), the
+    inventory is read from the shards it has and stated as incomplete, so one degraded index does not stop a hunt of
+    the healthy ones: the sweep reads through a point in time, which names what it cannot read. Any other failure,
+    and a client with no partial search, raises as before."""
+    try:
+        return client.search(target, body)
+    except SourceError as error:
+        partial = getattr(client, "search_partial", None)
+        if partial is None:
+            raise
+        response = partial(target, body)
+        reason = " ".join(str(error).split())[:240]
+        for kind in ("ds", "hosts"):
+            note = f"{kind} inventory truncated ({SHARDS_UNANSWERED}: {reason})"
+            if not any(item.startswith(f"{kind} inventory truncated ({SHARDS_UNANSWERED}") for item in notes):
+                notes.append(note)
+        return response
+
+
 def _aggregation_field(field_types, path):
     """The native field an inventory aggregation reads for `path`: itself when aggregatable, else a reported exact
     multifield (a text field's keyword subfield), else None. Resolved on the index's own mapping, never through the
@@ -725,8 +748,8 @@ def provider_inventory(client, target: str, *, provider_field='event.provider', 
         ]}
         if after is not None:
             composite["after"] = after
-        response = client.search(target, {"size": 0, "track_total_hits": False,
-                                          "aggs": {"inventory": {"composite": composite}}})
+        response = _inventory_search(client, target, {"size": 0, "track_total_hits": False,
+                                                      "aggs": {"inventory": {"composite": composite}}}, notes)
         agg = (response.get("aggregations") or {}).get("inventory") or {}
         page = agg.get("buckets") or []
         for bucket in page:
@@ -1070,7 +1093,7 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
         body['aggs'].pop('hosts')
     host_counts: dict[str, int] = {}
     if not windows:
-        d = client.search(target, body)
+        d = _inventory_search(client, target, body, notes)
         host_agg = d.get("aggregations", {}).get("hosts", {})
         host_counts = {str(b["key"]): int(b["doc_count"]) for b in host_agg.get("buckets", [])}
         if host_agg.get("sum_other_doc_count"):
@@ -1079,7 +1102,7 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
         first = None
         host_bytes = 0
         for _page in range(HOST_INVENTORY_PAGE_LIMIT):
-            d = client.search(target, body)
+            d = _inventory_search(client, target, body, notes)
             first = first or d
             host_agg = d.get("aggregations", {}).get("hosts", {})
             host_bytes += len(json.dumps(host_agg, separators=(",", ":"), default=str).encode())

@@ -727,3 +727,22 @@ def test_a_pivot_sample_boundary_reads_the_sort_value_in_the_field_resolution(ty
     assert contract.time_field in types
     # the epoch-number source value of an Arkime-shaped record cannot stand in for the sort value
     assert _record_boundary({"_sort": sort, "_source": {"firstPacket": 1731938400000}}, contract) == expected
+
+
+def test_opensearch_refuses_partial_results_outside_a_point_in_time_only():
+    fake = FakeOpenSearch()
+    list(os_client(fake).iterate(query(), max_records=10))
+    inside = [request for request in fake.requests if request.url.path == "/_search"]
+    assert inside and all("allow_partial_search_results" not in request.url.params for request in inside)
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return recorded("root_opensearch_2.11.1") if request.url.path == "/" else httpx.Response(200, json={})
+
+    client = ElasticClient(Settings(es_url="http://os.invalid", es_flavor="opensearch"),
+                           transport=httpx.MockTransport(handler))
+    client.search(TARGET, {"size": 0})
+    assert seen[-1].url.path == f"/{TARGET}/_search"
+    assert dict(seen[-1].url.params) == {"filter_path": es_module.SEARCH_FILTER_PATH,
+                                         "allow_partial_search_results": "false"}

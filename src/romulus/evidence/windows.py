@@ -30,7 +30,16 @@ from romulus.evidence.windows_catalog import (
 if TYPE_CHECKING:
     from romulus.detect.bounded import Account, StateBudget
 
-WINDOWS_NORMALIZER = "windows-ecs@21"
+WINDOWS_NORMALIZER = "windows-ecs@23"
+WINDOWS_SOURCE_IDENTITY_NOTE = "Windows clones without source identity cannot be told apart"
+# The envelope fields that name a record's collection source. The identifiers hold one value per record; a host
+# reports as many addresses as it has interfaces.
+WINDOWS_SOURCE_ID_FIELDS = ("agent.id", "host.id", "log.file.path", "SourceFile", "FileName", "path")
+WINDOWS_SOURCE_FIELDS = (*WINDOWS_SOURCE_ID_FIELDS, "host.ip")
+# Counted, never skipped: each collection source's copy of one record is its own event.
+WINDOWS_MULTI_SOURCE_SKIP = "Windows record seen under more than one collection source"
+# One record id with two contents inside one source's sequence. The records do not say which cause it was.
+RECORD_ID_REUSED = "record_id reused (log cleared or reverted, or machines sharing one source identifier)"
 # This is already far beyond what the 64 MiB assembler can retain at normal 4104 chunk sizes, while bounding every
 # completeness vector even when hostile metadata claims billions of parts.
 SCRIPT_BLOCK_MAX_PARTS = 4_096
@@ -236,11 +245,21 @@ class WindowsRecord:
         return self.data[name].origin
 
 
+# A hole between two collection sources' record ids names both things it can be: the ids alone cannot tell a missing
+# archive from two machines that share a computer name and count separately.
+BETWEEN_SOURCES_CAUSES = "(records missing, or separate machines sharing the name)"
+
+
 class RecordIdContinuity:
     """Streaming record-id and timestamp gap state spilled to a private SQLite file.
 
-    State remains one row per (target, computer, channel), never one entry per record. A caller-owned directory
+    State remains one row per (target, computer/source, channel), never one entry per record. A caller-owned directory
     puts the file under the hunt stage; standalone uses get its own private temporary directory.
+
+    Each source's record ids are followed as one sequence. The sources of one computer and channel are also read
+    together: where the id ranges they have delivered leave a hole between them, the ids in it reached this hunt
+    under no source (a collected file that ends before the next begins, an agent enrolled again, an address
+    change). Sources whose ranges touch or overlap, such as machines cloned from one image, leave none.
     """
 
     def __init__(self, directory: str | Path | None = None, *, budget: StateBudget | None = None,
@@ -257,6 +276,7 @@ class RecordIdContinuity:
             "CREATE TABLE continuity ("
             "target TEXT NOT NULL, computer TEXT NOT NULL, channel TEXT NOT NULL, "
             "last_id INTEGER NOT NULL, samples INTEGER NOT NULL, signature TEXT NOT NULL, last_time TEXT, "
+            "first_id INTEGER NOT NULL, "
             "PRIMARY KEY (target, computer, channel)) WITHOUT ROWID"
         )
         self._db.commit()
@@ -314,12 +334,17 @@ class RecordIdContinuity:
         records: list[dict],
         *,
         liveness_tolerance=None,
+        source_fields: tuple[str, ...] | None = None,
     ) -> list[str]:
+        """Follow each source's record-id sequence through `records` and say where it breaks. `source_fields`
+        names the envelope fields the records' sources are read from, when the records hold only some of them."""
         gaps: dict[tuple[str, str], int] = {}
         time_gaps: dict[tuple[str, str], tuple[float, str, str]] = {}
         unordered: set[tuple[str, str]] = set()
         malformed: set[tuple[str, str]] = set()
         reused: set[tuple[str, str]] = set()
+        # The sources (key column values) that delivered their first record in this call, by computer and channel.
+        started: dict[tuple[str, str], set[str]] = {}
         # Refusal reasons are controlled state-budget text, so aggregate groups by reason and retain only a sample.
         # A 5,000-host outage must not manufacture a 5,000-line in-memory coverage report.
         refused: dict[tuple[str, str], list] = {}
@@ -335,7 +360,7 @@ class RecordIdContinuity:
             state[0] += 1
             if len(state[1]) < 10:
                 state[1].append(computer)
-        touched: set[tuple[str, str, str]] = set()
+        touched: dict[tuple[str, str, str], tuple[str, str]] = {}
         new_rows = 0
         self._cap()
         for record in records:
@@ -355,7 +380,11 @@ class RecordIdContinuity:
             except (TypeError, ValueError):
                 malformed.add(group)
                 continue
-            key = (target, *group)
+            identity = windows_continuity_source(record, source_fields)
+            # Scope the existing private key column; no persistent schema or migration is needed.
+            scoped_computer = (json.dumps([group[0], identity], separators=(",", ":"))
+                               if identity is not None else group[0])
+            key = (target, scoped_computer, group[1])
             signature = windows_record_signature(record)
             raw_time = winlog.get("time_created") or source.get("@timestamp")
             try:
@@ -363,7 +392,7 @@ class RecordIdContinuity:
             except (TypeError, ValueError):
                 when = None
             row = self._db.execute(
-                "SELECT last_id, samples, signature, last_time FROM continuity "
+                "SELECT last_id, samples, signature, last_time, first_id FROM continuity "
                 "WHERE target = ? AND computer = ? AND channel = ?", key,
             ).fetchone()
             if row is None:
@@ -374,8 +403,8 @@ class RecordIdContinuity:
                     continue
                 try:
                     self._db.execute(
-                        "INSERT INTO continuity VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (*key, record_id, 1, signature, when.isoformat() if when is not None else None),
+                        "INSERT INTO continuity VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (*key, record_id, 1, signature, when.isoformat() if when is not None else None, record_id),
                     )
                 except sqlite3.OperationalError as exc:
                     self._db.rollback()
@@ -387,7 +416,8 @@ class RecordIdContinuity:
                             self.budget.fail(reason)
                     record_refusal(group, reason)
                     continue
-                touched.add(key)
+                touched[key] = group
+                started.setdefault(group, set()).add(scoped_computer)
                 new_rows += 1
                 if new_rows % 128 == 0:
                     self._checkpoint()
@@ -395,7 +425,7 @@ class RecordIdContinuity:
             if self.budget is not None and self.budget.hard:
                 record_refusal(group, self.budget.hard)
                 continue
-            prior, samples, prior_signature, prior_time_text = row
+            prior, samples, prior_signature, prior_time_text, lowest = row
             prior_time = None
             if prior_time_text:
                 try:
@@ -427,11 +457,37 @@ class RecordIdContinuity:
                     (record_id, min(2, samples + 1), signature,
                      latest_time.isoformat() if latest_time is not None else None, *key),
                 )
-                touched.add(key)
+                touched[key] = group
             else:
                 # Time-ordered source results are not record-id ordered for this group. Refuse completeness
                 # rather than retaining an event-count-sized set to reconstruct the sequence.
                 unordered.add(group)
+                if record_id < lowest:
+                    self._db.execute(
+                        "UPDATE continuity SET first_id = ? WHERE target = ? AND computer = ? AND channel = ?",
+                        (record_id, *key),
+                    )
+        # Where a source began in this call, lay the id ranges of every source of its computer and channel side by
+        # side, lowest first. A hole next to the new source is reported now, once: whichever of the two sources
+        # around a hole is seen second finds the other's range already held, so the answer does not depend on the
+        # order they arrive in. It is read after the whole call, when the new source's own range is known.
+        source_gaps: dict[tuple[str, str], int] = {}
+        for group, new_sources in started.items():
+            scoped = json.dumps([group[0]], separators=(",", ":"))[:-1] + ","       # the prefix of every scoped key
+            ranges = self._db.execute(
+                "SELECT computer, first_id, last_id FROM continuity WHERE target = ? AND channel = ? "
+                "AND (computer = ? OR (computer >= ? AND computer < ?)) ORDER BY first_id, last_id",
+                (target, group[1], group[0], scoped, scoped[:-1] + "-"),            # "-" follows "," directly
+            ).fetchall()
+            reached, reached_by_new = None, False
+            for source_key, first, last in ranges:
+                new = source_key in new_sources
+                if reached is not None and first > reached + 1 and (new or reached_by_new):
+                    source_gaps[group] = source_gaps.get(group, 0) + first - reached - 1
+                if reached is None or last > reached:
+                    reached, reached_by_new = last, new
+                elif last == reached:
+                    reached_by_new = reached_by_new or new
         self._checkpoint()
         def mapped_by_channel(values: dict) -> dict[str, list[tuple[str, object]]]:
             grouped: dict[str, list[tuple[str, object]]] = {}
@@ -458,6 +514,20 @@ class RecordIdContinuity:
                     f"shipper gaps: {sum(int(count) for _computer, count in groups):,} records missing "
                     f"across {len(groups):,} hosts on {channel} (sample: {sample})"
                 )
+        for channel, groups in sorted(mapped_by_channel(source_gaps).items()):
+            if len(groups) <= 10:
+                reasons += [
+                    f"shipper gaps: {count} record ids not delivered between collection sources on {channel} for "
+                    f"{computer} {BETWEEN_SOURCES_CAUSES}"
+                    for computer, count in groups
+                ]
+            else:
+                sample = ", ".join(computer for computer, _count in groups[:10])
+                reasons.append(
+                    f"shipper gaps: {sum(int(count) for _computer, count in groups):,} record ids not delivered "
+                    f"between collection sources across {len(groups):,} hosts on {channel} "
+                    f"{BETWEEN_SOURCES_CAUSES} (sample: {sample})"
+                )
         for channel, groups in sorted(mapped_by_channel(time_gaps).items()):
             if len(groups) <= 10:
                 reasons += [
@@ -474,12 +544,12 @@ class RecordIdContinuity:
         for channel, computers in sorted(groups_by_channel(reused).items()):
             if len(computers) <= 10:
                 reasons += [
-                    f"record_id reused (log cleared or reverted) on {channel} for {computer}"
+                    f"{RECORD_ID_REUSED} on {channel} for {computer}"
                     for computer in computers
                 ]
             else:
                 reasons.append(
-                    f"record_id reused (log cleared or reverted) for {len(computers):,} hosts on {channel} "
+                    f"{RECORD_ID_REUSED} for {len(computers):,} hosts on {channel} "
                     f"(sample: {', '.join(computers[:10])})"
                 )
         for label, groups, detail in (
@@ -508,10 +578,10 @@ class RecordIdContinuity:
                 )
         short: dict[str, list[str]] = {}
         short_counts: dict[str, int] = {}
-        for _target, computer, channel in sorted(touched):
+        for key, (computer, channel) in sorted(touched.items()):
             row = self._db.execute(
                 "SELECT samples FROM continuity WHERE target = ? AND computer = ? AND channel = ?",
-                (_target, computer, channel),
+                key,
             ).fetchone()
             if row is not None and row[0] < 2:
                 short_counts[channel] = short_counts.get(channel, 0) + 1
@@ -576,6 +646,7 @@ NXLOG_ENVELOPE = frozenset({
 NXLOG_PIPELINE_FIELDS = frozenset({
     "@timestamp", "@version", "@metadata", "agent", "beat", "data_stream", "ecs", "event", "fields", "host", "input",
     "log", "message", "observer", "offset", "path", "port", "related", "tags", "type",
+    "agent.id", "agent.ephemeral_id", "host.id", "host.ip", "log.file.path",
     # a creation time some pipelines add beside EventTime; its zone is not stated, so it is never read as a time
     "TimeCreated",
 })
@@ -691,7 +762,8 @@ def nxlog_to_winlog(source: dict) -> tuple[dict, dict[str, str]]:
                 if isinstance(item, _SCALAR):
                     put(str(inner), item, f"{name}.{inner}")
             continue
-        if name in NXLOG_PIPELINE_FIELDS or name.startswith("@") or name == NXLOG_ADAPTED or (
+        if (name == "FileName" and source.get("SourceModuleType") == "im_file") or (
+                name in NXLOG_PIPELINE_FIELDS or name.startswith("@") or name == NXLOG_ADAPTED) or (
                 name in NXLOG_ENVELOPE and not _nxlog_event_data_value(name, value)):
             continue
         if not isinstance(value, _SCALAR):
@@ -1049,8 +1121,99 @@ def _native_origin(origin: str, native_id: str, paths: dict[str, str]) -> str:
     return "".join(out)
 
 
-def windows_record_key(hit: dict) -> tuple[str, str, str] | None:
-    """Logical shipper identity used to deduplicate copies without trusting index or document ids."""
+def _source_facts(hit: dict, fields: tuple[str, ...] | None = None,
+                  ) -> tuple[tuple[str, str] | None, list[str] | None]:
+    """A record's collection source, read from the indexed envelope before adapting its Windows payload: its
+    stable identifier and its host address set. Either is None when the record does not carry it.
+
+    The identifier is the agent id, else the host id, else the collected file. An ephemeral id, hostname,
+    provider (NXLog SourceName) or input-module name does not distinguish cloned machines. File paths are
+    collection metadata, never an EventData filename. The documented evtx_dump ``path`` wrapper and NXLog's
+    ``FileName`` are accepted alongside ECS log.file.path and an export's SourceFile. The address set is the
+    record's host.ip values in canonical form, sorted, so it does not depend on their order or spelling. With
+    `fields`, only those envelope fields are read.
+    """
+    source = hit.get("_source") or {}
+
+    def value(path: str):
+        if fields is not None and path not in fields:
+            return None
+        return source[path] if path in source else _get(source, path)
+
+    stable = None
+    for field in ("agent.id", "host.id"):
+        item = value(field)
+        if isinstance(item, str) and item.strip():
+            stable = (field, item.strip())
+            break
+    for field in ("log.file.path", "SourceFile", "FileName", "path") if stable is None else ():
+        if field == "FileName" and source.get("SourceModuleType") != "im_file":
+            continue
+        if field == "SourceFile" and is_nxlog_windows(source):
+            continue
+        item = value(field)
+        if isinstance(item, str) and item.strip():
+            path = item.strip()
+            # POSIX exports can have case-sensitive names; normalize Windows paths only when they say so.
+            if ntpath.splitdrive(path)[0] or "\\" in path:
+                path = ntpath.normcase(ntpath.normpath(path))
+            stable = ("file", path)
+            break
+    addresses = value("host.ip")
+    if isinstance(addresses, str):
+        addresses = [addresses]
+    canonical = None
+    if isinstance(addresses, (list, tuple)) and 0 < len(addresses) <= 256:
+        try:
+            canonical = sorted({str(ipaddress.ip_address(address.strip())) for address in addresses})
+        except (AttributeError, ValueError):     # a value that is not an address: the set says nothing
+            canonical = None
+    return stable, canonical
+
+
+def _source_token(stable: tuple[str, str] | None, addresses: list[str] | None) -> str:
+    encoded = json.dumps([stable, addresses], ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("ascii")).hexdigest()
+
+
+def windows_source_identity(hit: dict) -> str | None:
+    """What tells one collection source's copy of a record from another's: the stable identifier together with
+    the host address set, each when the record carries it; None when it carries neither.
+
+    The addresses stand beside the identifier, not behind it: machines cloned after their agent first ran share
+    the agent id and the host id, and differ only in their addresses. Two copies fold only when both parts are
+    equal, so one record shipped again after its host's addresses changed is kept twice, never lost.
+    """
+    stable, addresses = _source_facts(hit)
+    return None if stable is None and addresses is None else _source_token(stable, addresses)
+
+
+def windows_continuity_source(hit: dict, fields: tuple[str, ...] | None = None) -> str | None:
+    """The source whose record-id sequence a record belongs to: the stable identifier alone, so that a host
+    whose addresses change keeps one sequence; the address set only for a record with no identifier. `fields`
+    limits the envelope fields read, for records rebuilt from an aggregate that grouped by those fields."""
+    stable, addresses = _source_facts(hit, fields)
+    if stable is not None:
+        return _source_token(stable, None)
+    return None if addresses is None else _source_token(None, addresses)
+
+
+def windows_record_digest(logical_key: tuple[str, ...], signature: str) -> str:
+    """A record's identity without its collection source (computer, channel, record id and content signature):
+    every source's copy of one record has the same digest."""
+    encoded = json.dumps([*logical_key[:3], signature], ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("ascii")).hexdigest()[:20]
+
+
+def windows_identity_reasons(events: list[TypedEvent]) -> list[str]:
+    """Bounded coverage explanation for source-less Windows evidence, including a collapsed copy."""
+    return [WINDOWS_SOURCE_IDENTITY_NOTE] if any(
+        WINDOWS_SOURCE_IDENTITY_NOTE in event.caveats for event in events
+    ) else []
+
+
+def windows_record_key(hit: dict) -> tuple[str, ...] | None:
+    """Logical shipper identity, source-scoped when available, never based on index or document ids."""
     source = windows_view(hit.get("_source") or {})
     winlog = source.get("winlog") or {}
     computer = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
@@ -1061,7 +1224,9 @@ def windows_record_key(hit: dict) -> tuple[str, str, str] | None:
         channel = event_class.provider.casefold()
     if not computer or not channel or record_id in (None, "") or isinstance(record_id, bool):
         return None
-    return computer, channel, str(record_id)
+    key = (computer, channel, str(record_id))
+    source_identity = windows_source_identity(hit)
+    return (*key, source_identity) if source_identity is not None else key
 
 
 def _signature_time(value: object) -> object:
@@ -2813,9 +2978,11 @@ def _normalize_windows(hit: dict, raw_hit: dict) -> TypedEvent:
         f"{hit['_id']}:@timestamp",
     )
     outcome = _semantic_fields(fields, record, host)
-    logical_key = windows_record_key(hit)
+    logical_key = windows_record_key(raw_hit)
+    if windows_source_identity(raw_hit) is None:
+        record.caveats.append(WINDOWS_SOURCE_IDENTITY_NOTE)
     identity_refs = [ref] if logical_key is None else [RawRef(
-        target=f"windows:{logical_key[0]}:{logical_key[1]}:{logical_key[2]}",
+        target="windows:" + ":".join(logical_key),
         native_id=windows_record_signature(hit),
     )]
     return TypedEvent(
