@@ -156,7 +156,7 @@ def test_registered_login_rule_surfaces_a_failure_burst():
 
 
 def test_both_rules_carry_a_new_version():
-    assert wa.WebAttacks.version == "3" and wa.WebLoginBurst.version == "3"
+    assert wa.WebAttacks.version == "3" and wa.WebLoginBurst.version == "4"
 
 
 ATTACKS = [
@@ -1501,3 +1501,16 @@ def test_the_spill_holds_what_the_fold_needs_and_nothing_readable_as_a_secret(at
     assert blobs and b"MARKER" not in blobs[0]                       # compressed: a byte search proves nothing
     text = str(expand_event(blobs[0]))
     assert "MARKER" in text and "TOPSECRET" not in text
+
+
+def test_arkime_http_sessions_are_counted_as_not_judged_for_sign_in_bursts(login_rule):
+    rows = [event(["/login"], producer="arkime", status=[401], method=["POST"], n=n) for n in range(30)]
+    rows.append(event(None, producer="arkime", n=31))                # a session with no HTTP request is not counted
+    assert finish(login_rule, rows) == []
+    [reason] = login_rule.limit_reasons()
+    assert "Arkime sessions carrying HTTP requests were not judged for sign-in bursts" in reason
+    assert login_rule.capped == 30
+    # a Zeek request beside them is judged as before
+    assert login_rule.evaluated == 0
+    list(login_rule.consume([event("/login", status=401, method="POST", n=40)]))
+    assert login_rule.evaluated == 1 and login_rule.capped == 30

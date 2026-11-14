@@ -1255,8 +1255,10 @@ _PAIRS_KEY = '"' + _PAIRS + '"]'
 
 
 class WebLoginBurst(ZeekWindowRule):
-    id, title, version = "network.web_login_burst", "Repeated web sign-in requests to one path", "3"
-    families, producers = ("http_tx",), ZEEK_AND_SURICATA
+    id, title, version = "network.web_login_burst", "Repeated web sign-in requests to one path", "4"
+    # Arkime sessions are received only to be counted as not judged: a session lists its request targets, methods and
+    # statuses as unordered values, so no request can be given its method or its answer.
+    families, producers = ("http_tx", "net_session"), ZEEK_AND_SURICATA
     required_fields = ("source.ip", "destination.ip", "http.request.method", "http.response.status_code")
     citation_fields = _FIELDS
     # Twenty counted requests from one source address to one path on one server inside five minutes. The reasoning
@@ -1283,7 +1285,8 @@ class WebLoginBurst(ZeekWindowRule):
         "behavior": title,
         "telemetry": ("Zeek or Suricata HTTP transactions (http_tx: url.original or url.path, http.request.method, "
                       "http.response.status_code, optional user.name); present in the lab profile for both. Arkime "
-                      "lists are excluded: their methods and statuses cannot be paired with a request."),
+                      "sessions are not judged, and the cell counts them: their methods and statuses are unordered "
+                      "lists that cannot be paired with a request."),
         "fidelity": ("Requests of a sign-in shape, not established attempts or outcomes: at a sign-in path, every "
                      "answered POST, every 401/403/429 and a query with an account and a credential; on any other "
                      "path, requests carrying an account and a password parameter with at least twenty distinct "
@@ -1381,6 +1384,15 @@ class WebLoginBurst(ZeekWindowRule):
             return None
         # Any other path: the members of the window are its distinct credential pairs.
         return (*peers, sensor, path[:1024], _PAIRS), self._label("pair", query_account, password), "attempt"
+
+    def consume(self, events):
+        unpaired = sum(1 for event in events if event.family == "net_session" and event.has("url.path"))
+        if unpaired:
+            self.refuse("web_login_session_lists",
+                        "Arkime sessions carrying HTTP requests were not judged for sign-in bursts: a session lists "
+                        "its request targets, methods and statuses as unordered values, so no request can be given "
+                        "its method or its answer", unpaired)
+        yield from super().consume(events)
 
     # -- the response-status mix of a window -----------------------------------------------------------------------
     # The same requests are counted a second time under a companion key whose members are response statuses. The
