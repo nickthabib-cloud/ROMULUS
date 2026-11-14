@@ -1930,7 +1930,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 <a id="rule-network-web-attacks"></a>
 ### `network.web_attacks` — Attack-associated HTTP request shapes
 
-- Version: `2`; status: `active`
+- Version: `3`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1110`](https://attack.mitre.org/techniques/T1110/), [`T1190`](https://attack.mitre.org/techniques/T1190/), [`T1595.001`](https://attack.mitre.org/techniques/T1595/001/), [`T1595.002`](https://attack.mitre.org/techniques/T1595/002/), [`T1595.003`](https://attack.mitre.org/techniques/T1595/003/)
@@ -1940,15 +1940,15 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 - Positive-only reason: Finite request grammars and tool markers cannot exclude web attacks; encrypted or absent requests and bodies are not inspected.
 
 <a id="rule-network-web-login-burst"></a>
-### `network.web_login_burst` — Repeated attempts at a web authentication path
+### `network.web_login_burst` — Repeated web sign-in requests to one path
 
-- Version: `2`; status: `active`
+- Version: `3`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1110`](https://attack.mitre.org/techniques/T1110/)
 - Telemetry families: http_tx
 - Required typed fields: destination.ip<br>http.request.method<br>http.response.status_code<br>source.ip
-- Behavior: Repeated attempts at a web authentication path
+- Behavior: Repeated web sign-in requests to one path
 - Positive-only reason: Network window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
 
 <a id="rule-pcap-cleartext-interactive-shell"></a>

@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "implementation": "Bounded original token grammars informed by the referenced corpora; not complete CRS/Sigma parity.",
   "licenses": [
     {
@@ -58,7 +58,7 @@
       "url": "https://github.com/coreruleset/coreruleset/blob/48092136c9cc8e154620aecde61d1bb2d1f436b0/rules/REQUEST-931-APPLICATION-ATTACK-RFI.conf",
       "blob_sha": "60d13dd9537a7d8866ba02d90ecb430ae262796e",
       "license": "Apache-2.0",
-      "use": "931100 IP-literal host, 931110 vulnerable-parameter plus remote scheme and 931120 trailing question mark concepts; a remote URL in a file-like parameter counts with an IP-literal host, a trailing '?' or NUL, or a text extension (.txt, .inc, .dat, .tmp); redirect parameters and URLs on the requested server are excluded."
+      "use": "931100 IP-literal host, 931110 vulnerable-parameter plus remote scheme and 931120 trailing question mark concepts; a remote URL in a file-like parameter counts with an IP-literal host, a trailing '?' or NUL, or a text extension (.txt, .inc, .dat, .tmp); 931130 off-domain reference concept: a script URL (.php, .phtml, .asp, .aspx, .jsp, .cgi, .pl) counts when the request goes to one of the site's servers and the URL is on another registered domain than the requested host; redirect parameters and URLs on the requested server are excluded."
     },
     {
       "classes": [
@@ -201,7 +201,9 @@
     "Every class remains lead; 2xx does not establish exploitation.",
     "Finite vocabularies do not cover every attack or tool.",
     "A bare ambiguous command name after a delimiter that follows a word (host=localhost;id) is read as a list item.",
-    "A remote script URL (.php, .jsp, .aspx) on another named host in page=, file=, path= or template= is not reported without an IP-literal host or a trailing '?' or NUL.",
+    "A remote script URL in a file-like parameter is not reported when the request goes to a server outside the internal networks, or when the URL is on the requested host's own registered domain.",
+    "A remote image or extension-less URL in a file-like parameter is not reported without an IP-literal host or a trailing '?' or NUL.",
+    "Credential names in other languages, and short or ambiguous ones (p, k, state, hash), are not masked in retained examples.",
     "The login rate does not see slow guessing, guessing spread over many sources, or failure statuses on paths outside the sign-in vocabulary."
   ],
   "thresholds": {
@@ -209,8 +211,10 @@
     "user_agent_characters": 2048,
     "total_text_characters": 65536,
     "pair_leads_per_endpoint": 5,
+    "pair_leads_published_on_arrival_per_endpoint": 50,
     "members_named_per_roll_up": 10,
     "login_attempt_references": 20,
-    "login_window_seconds": 300
+    "login_window_seconds": 300,
+    "login_distinct_credential_pairs": 2
   }
 }
