@@ -1942,11 +1942,11 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 <a id="rule-network-web-login-burst"></a>
 ### `network.web_login_burst` — Repeated web sign-in requests to one path
 
-- Version: `3`; status: `active`
+- Version: `4`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1110`](https://attack.mitre.org/techniques/T1110/)
-- Telemetry families: http_tx
+- Telemetry families: http_tx<br>net_session
 - Required typed fields: destination.ip<br>http.request.method<br>http.response.status_code<br>source.ip
 - Behavior: Repeated web sign-in requests to one path
 - Positive-only reason: Network window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
