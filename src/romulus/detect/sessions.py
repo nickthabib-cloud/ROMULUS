@@ -919,8 +919,9 @@ class LongInboundSession(_InboundSessions):
                            "Every member is staged in the evidence ranking as an ip entity carrying this rule's "
                            "tactic. No volume threshold splits a rare client out. State: every TCP connection across "
                            "the site boundary that is not a remote-access service is held (a connection is known to "
-                           "be short only when the hunt ends), about 0.5 KB each on disk beyond the shared event "
-                           "stage",
+                           "be short only when the hunt ends): about 1 KB each in the rule's disk-backed store when "
+                           "memory is short (a million connections took about 1 GB), plus one record each in the "
+                           "shared event stage",
         "query_cost": "none beyond the sweep",
         "next_pivot": "the service's own logs for the members with the longest sessions, then the hosts behind it",
         "adds": "the inbound view of exposed services that net.long_external_connection does not report (it reads "
