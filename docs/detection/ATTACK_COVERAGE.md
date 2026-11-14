@@ -1640,13 +1640,13 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 <a id="rule-net-long-inbound-session"></a>
 ### `net.long_inbound_session` — Long TCP sessions outside addresses held to an exposed internal service
 
-- Version: `2`; status: `active`
+- Version: `3`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1133`](https://attack.mitre.org/techniques/T1133/)
 - Telemetry families: net_flow<br>net_session
 - Required typed fields: destination.ip<br>flow.start<br>source.ip
-- Behavior: outside addresses held TCP sessions, each spanning at least 30 minutes, open to one service port of one internal address (any port, the web ports 80, 443, 8080 and 8443 included), read as sessions the outside address held: a record shows the outside address opened each, or no record shows the opening, both sides sent traffic beyond resets and handshake answers, and the outside address is on a port of 32768 or above facing the internal port below it. A span that reaches 30 minutes only across silences of more than an hour (one session that slept, or a client port reused by separate visits) is counted and worded apart from the sessions held continuously. Not this rule's: remote-access services (net.long_inbound_remote_access)
+- Behavior: outside addresses held TCP sessions, each spanning at least 30 minutes, open to one service port of one internal address (any port, the web ports 80, 443, 8080 and 8443 included), read as sessions the outside address held: a record shows the outside address opened each, or no record shows the opening, both sides sent traffic beyond resets and handshake answers, and the outside address is on a port of 32768 or above facing the internal port below it. A span that reaches 30 minutes only across silences of more than an hour (one session that slept, or a client port reused by separate visits), or whose records show its client port opened more than once (openings more than 60 seconds apart; an Arkime continuation record repeats its session's opening and is not counted), is counted and worded apart from the sessions held continuously. A remote-access protocol a sensor identified on a later record of a session keeps that session here, named in the claim and cited first. Not this rule's: remote-access services identified on the connection's first record (net.long_inbound_remote_access)
 - Positive-only reason: only connections whose records show the outside address opened them, or show both sides exchanging traffic with the outside address on a client port, are read; a connection whose opener and exchange are not recorded is not judged here, and sessions to a remote-access service named by its port or by a protocol on the connection's first record are not this rule's, so the absence of a match proves nothing
 
 <a id="rule-net-long-unidentified-session"></a>

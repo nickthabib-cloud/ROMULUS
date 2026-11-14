@@ -319,7 +319,8 @@ class _Stitched(Playbook):
                      "report_key": key, "arkime_key": None,
                      "seq": self._seq, "parts": [], "ends": Ends(), "openers": [], "opener_id": None,
                      "opener_field": None, "flagged": False, "sensors": Counter(), "sensor_bytes": {},
-                     "span_known": False, "duration_missing": False, "closed_stretches": False, "states": {}}
+                     "span_known": False, "duration_missing": False, "closed_stretches": False, "states": {},
+                     "opens": None}
                 if not self.conns.put(key, c):
                     self.evaluated -= 1
                     self.refuse("disk", "the connections' disk budget is spent; a record of a new connection is not "
@@ -355,6 +356,12 @@ class _Stitched(Playbook):
             if any(e.has(field) for field in ("tcp.flags.syn", "tcp.opened_by_orig", "tcp.tcp_flags_ts", "tcp.syn")):
                 c["flagged"] = True
             if view.opened:
+                if e.get("arkime.continuation") is not True:
+                    # the earliest and latest recorded opening: a pure function of the records, two numbers per
+                    # connection (an Arkime continuation record repeats its session's opening and is not counted)
+                    opens = c.get("opens")
+                    c["opens"] = ([view.start, view.start] if opens is None
+                                  else [min(opens[0], view.start), max(opens[1], view.start)])
                 side = (view.src, view.sport)
                 if side not in c["openers"]:
                     c["openers"].append(side)
@@ -878,7 +885,7 @@ class LongInboundSession(_InboundSessions):
     services are the remote-access rule's): one item per exposed (internal address, port), every outside address a
     member and every long session a row, both held on disk."""
     id = "net.long_inbound_session"
-    version = "2"
+    version = "3"
     title = "Long TCP sessions outside addresses held to an exposed internal service"
     severity, lane = "medium", "lead"
     attack = ("T1133",)
@@ -889,8 +896,8 @@ class LongInboundSession(_InboundSessions):
     benign = (("long-lived clients of a published web site (WebSocket, streaming, long polling, keep-alive), VPN "
                "concentrators, mail (IMAP IDLE), messaging (MQTT, XMPP), SIP, Citrix, database and directory services "
                "deliberately exposed to outside clients"),
-              ("a client that reuses a source port for separate visits more than an hour apart (stated as a span "
-              "with gaps, never as a held session)"))
+              ("a client that reuses a source port for separate visits (records more than an hour apart, or the "
+               "same client port opened more than once): stated as a span with gaps, never as a held session"))
     card: ClassVar[dict] = {
         "behavior": "outside addresses held TCP sessions, each spanning at least 30 minutes, open to one service port "
                     "of one internal address (any port, the web ports 80, 443, 8080 and 8443 included), read as "
@@ -898,8 +905,12 @@ class LongInboundSession(_InboundSessions):
                     "shows the opening, both sides sent traffic beyond resets and handshake answers, and the outside "
                     "address is on a port of 32768 or above facing the internal port below it. A span that reaches "
                     "30 minutes only across silences of more than an hour (one session that slept, or a client port "
-                    "reused by separate visits) is counted and worded apart from the sessions held continuously. Not "
-                    "this rule's: remote-access services (net.long_inbound_remote_access)",
+                    "reused by separate visits), or whose records show its client port opened more than once (openings "
+                    "more than 60 seconds apart; an Arkime continuation record repeats its session's opening and is "
+                    "not counted), is counted and worded apart from the sessions held continuously. A remote-access "
+                    "protocol a sensor identified on a later record of a session keeps that session here, named in the "
+                    "claim and cited first. Not this rule's: remote-access services identified on the connection's "
+                    "first record (net.long_inbound_remote_access)",
         "telemetry": LongExternalConnection.card["telemetry"],
         "fidelity": "direct observation of the sessions' lifetime and opening by the sensors; it does not show who "
                     "used the service or what was done. The opening is stated from the sensor's typed SYN evidence or, "
@@ -938,6 +949,10 @@ class LongInboundSession(_InboundSessions):
     }
     MEMBER_BATCH = 1000                 # session rows written to disk at a time
     MEMBERS_NAMED = 20                  # outside addresses named in a service item's claim and entities
+    # seconds: openings further apart are separate connections on one client port. A client cannot reopen a closed
+    # 4-tuple inside its TIME-WAIT (60 s on Linux), and sensors whose clocks differ by up to this much still read
+    # one session's opening as one
+    REOPEN_SKEW = 60.0
 
     def wants(self, e: TypedEvent) -> bool:
         # one public end, and this record names no remote-access service on the internal side (those connections are
@@ -968,20 +983,28 @@ class LongInboundSession(_InboundSessions):
                 for part in c["parts"]:
                     self._closed(key, part)
                 gapped = True
+            # its records show the client port opened more than once: separate connections, never one held session
+            opens = c.get("opens")
+            reopened = opens is not None and opens[1] - opens[0] > self.REOPEN_SKEW
+            remote = ",".join(sorted(c["protocols"] & _REMOTE_NAMES)) or None
             pending.append((str(key), inside[0], inside[1], outside[0], span,
-                            0.0 if c["closed_stretches"] else span, 0 if c["closed_stretches"] else 1,
-                            int(judgement == OPENED_BY_OUTSIDE), c["records"], c["start"], c["end"]))
+                            0.0 if c["closed_stretches"] or reopened else span, 0 if c["closed_stretches"] else 1,
+                            int(judgement == OPENED_BY_OUTSIDE), c["records"], c["start"], c["end"], int(reopened),
+                            remote))
             if len(pending) >= self.MEMBER_BATCH:
-                self._write("INSERT OR REPLACE INTO inbound_sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", pending)
-        self._write("INSERT OR REPLACE INTO inbound_sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", pending)
+                self._write(self._INSERT, pending)
+        self._write(self._INSERT, pending)
         if gapped and getattr(self, "_sessions_ready", False):
             updates: list[tuple] = []
             for key, count, longest in self._stretch_summaries():
                 updates.append((longest, count, str(key)))
                 if len(updates) >= self.MEMBER_BATCH:
-                    self._write("UPDATE inbound_sessions SET held=?, stretches=? WHERE key=?", updates)
-            self._write("UPDATE inbound_sessions SET held=?, stretches=? WHERE key=?", updates)
+                    self._write(self._UPDATE, updates)
+            self._write(self._UPDATE, updates)
         return list(self._services(current().configured))
+
+    _INSERT = "INSERT OR REPLACE INTO inbound_sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    _UPDATE = "UPDATE inbound_sessions SET held=CASE WHEN reopened THEN 0 ELSE ? END, stretches=? WHERE key=?"
 
     def _stretch_summaries(self):
         """(connection, stretches, longest stretch in seconds) of every held connection whose records lie more than
@@ -1012,7 +1035,7 @@ class LongInboundSession(_InboundSessions):
                 spill.table("inbound_sessions",
                             "key TEXT PRIMARY KEY, inside TEXT NOT NULL, port INTEGER NOT NULL, outside TEXT NOT NULL, "
                             "seconds REAL, held REAL, stretches INTEGER, opened INTEGER, records INTEGER, first REAL, "
-                            "last REAL")
+                            "last REAL, reopened INTEGER, remote TEXT")
                 spill.write("CREATE INDEX IF NOT EXISTS inbound_sessions_service ON inbound_sessions"
                             "(inside, port, outside)", [()])
                 self._sessions_ready = True
@@ -1059,9 +1082,10 @@ class LongInboundSession(_InboundSessions):
         (the chosen (connection, outside address) rows, their connections, the record ids to cite beside the
         bounds)."""
         rows = self.spill().db.execute(
-            "SELECT key, outside FROM (SELECT key, outside, held, seconds, ROW_NUMBER() OVER (PARTITION BY outside "
-            "ORDER BY held DESC, seconds DESC, key) AS nth FROM inbound_sessions WHERE inside=? AND port=?) "
-            "ORDER BY held >= ? DESC, nth > 1, held DESC, seconds DESC, key LIMIT ?",
+            "SELECT key, outside FROM (SELECT key, outside, held, seconds, remote, ROW_NUMBER() OVER (PARTITION BY "
+            "outside ORDER BY remote IS NOT NULL DESC, held DESC, seconds DESC, key) AS nth FROM inbound_sessions "
+            "WHERE inside=? AND port=?) "
+            "ORDER BY remote IS NOT NULL DESC, held >= ? DESC, nth > 1, held DESC, seconds DESC, key LIMIT ?",
             (inside, port, self.MIN_SECONDS, EXAMPLE_LIMIT)).fetchall()
         chosen, conns, ids, needed = [], [], [], set()
         for key, outside in rows:
@@ -1093,9 +1117,10 @@ class LongInboundSession(_InboundSessions):
         named = (f"identified as {', '.join(protocols)} on the cited sessions" if protocols
                  else "no protocol identified on the cited sessions")
         when = f"{_iso(g['first'])} – {_iso(g['last'])}"
-        silence = (f"the same outside address and port were recorded again after more than {self.IDLE / 3600:.0f} "
-                   f"hour(s) without a record and no stretch of records lasted {minutes} minutes, so each is one "
-                   f"session that slept or separate visits that reused a client port")
+        silence = (f"either the same outside address and port were recorded again after more than "
+                   f"{self.IDLE / 3600:.0f} hour(s) without a record and no stretch of records lasted {minutes} "
+                   f"minutes, or the records show that client port opened more than once, so each is one session "
+                   f"that slept or separate visits that reused a client port")
         if continuous:
             claim = (f"{least}{g['members_continuous']} distinct outside address(es) held {least}{continuous} TCP "
                      f"session(s) of at least {minutes} minutes open to {inside} port {port} ({named}) ({when}); the "
@@ -1109,6 +1134,21 @@ class LongInboundSession(_InboundSessions):
             claim = (f"{least}{n} distinct outside address(es) reached {inside} port {port} ({named}) over "
                      f"{least}{gapped} span(s) of at least {minutes} minutes ({when}), none held continuously: "
                      f"{silence}; the longest span covers {g['longest_gapped'] / 60:.0f} minutes. ")
+        remote_sessions, remote_members = db.execute(
+            "SELECT COUNT(*), COUNT(DISTINCT outside) FROM inbound_sessions WHERE inside=? AND port=? AND remote IS "
+            "NOT NULL", (inside, port)).fetchone()
+        remote_named: list[str] = []
+        if remote_sessions:
+            kinds = sorted({name for (value,) in db.execute(
+                "SELECT DISTINCT remote FROM inbound_sessions WHERE inside=? AND port=? AND remote IS NOT NULL LIMIT 64",
+                (inside, port)) for name in value.split(",")})
+            remote_named = [outside for (outside,) in db.execute(
+                "SELECT outside FROM inbound_sessions WHERE inside=? AND port=? AND remote IS NOT NULL GROUP BY outside "
+                "ORDER BY MAX(seconds) DESC, outside LIMIT ?", (inside, port, self.MEMBERS_NAMED))]
+            more = remote_members - len(remote_named)
+            claim += (f"A sensor identified {', '.join(kinds)} on a later record of {remote_sessions} of these "
+                      f"session(s), from {remote_members} outside address(es) ({', '.join(remote_named)}"
+                      + (f" and {more} more" if more > 0 else "") + "); those sessions are cited first. ")
         if opened:
             claim += f"Records show the outside address opened {opened} of the {sessions} (its SYN). "
         if sessions - opened:
@@ -1166,6 +1206,7 @@ class LongInboundSession(_InboundSessions):
                  if first.has(name)]
         # the inside address, then every named member: an attacker's address stays correlatable when grouped
         entities = list(dict.fromkeys([*(item for e in evs for item in e.entities()), ("ip", inside, "dst"),
+                                       *(("ip", outside, "src") for outside in remote_named),
                                        *(("ip", outside, "src") for outside, *_rest in top)]))
         return Match(self.id, claim, self.claim_type, evs, preds, first.ts, "medium", self.lane, "high", entities,
                      notes, group_key=f"service|{inside}|{port}", fleet_hosts=self._member_stream(inside, port),

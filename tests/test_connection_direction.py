@@ -58,8 +58,9 @@ def _id(prefix):
 # ---- the three sensors' records, through their real normalizers ----------------------------------------------------
 
 def arkime(src, sport, dst, dport, *, first=T0, seconds=60.0, src_pkts=10, dst_pkts=12, flags=None, c2s=None,
-           s2c=None, protocols=("tcp",), cid=None, app_bytes=True):
-    """An Arkime SPI session. `flags` is Arkime's tcpflags counters (None: the session carries none)."""
+           s2c=None, protocols=("tcp",), cid=None, app_bytes=True, doc_id=None, root=None):
+    """An Arkime SPI session. `flags` is Arkime's tcpflags counters (None: the session carries none). `root` is the
+    rootId Arkime writes on every record of a session it saved in several pieces (the first piece's own id)."""
     doc = {"firstPacket": int(first.timestamp() * 1000),
            "lastPacket": int((first + timedelta(seconds=seconds)).timestamp() * 1000),
            "ipProtocol": 6, "node": "arkime-01",
@@ -67,6 +68,8 @@ def arkime(src, sport, dst, dport, *, first=T0, seconds=60.0, src_pkts=10, dst_p
            "source": {"ip": src, "port": sport, "bytes": 60 * src_pkts, "packets": src_pkts},
            "destination": {"ip": dst, "port": dport, "bytes": 60 * dst_pkts, "packets": dst_pkts},
            "protocol": list(protocols)}
+    if root is not None:
+        doc["rootId"] = root
     # Arkime writes application-byte counts on every session; `app_bytes=False` leaves them out (older shapes)
     if c2s is not None or app_bytes:
         doc["client"] = {"bytes": c2s or 0}
@@ -76,7 +79,8 @@ def arkime(src, sport, dst, dport, *, first=T0, seconds=60.0, src_pkts=10, dst_p
         # typed names (syn_ack) as Arkime writes them (syn-ack)
         doc["tcpflags"] = {"syn": 0, "syn-ack": 0, "ack": 0, "psh": 0, "fin": 0, "rst": 0, "urg": 0,
                            **{name.replace("_", "-"): count for name, count in flags.items()}}
-    events, skips, errors = normalize_hits([{"_id": _id("a"), "_index": "arkime_sessions3-241118", "_source": doc}])
+    events, skips, errors = normalize_hits([{"_id": doc_id or _id("a"), "_index": "arkime_sessions3-241118",
+                                             "_source": doc}])
     assert (skips, errors) == ({}, []) and len(events) == 1
     return events[0]
 
@@ -115,8 +119,11 @@ def zeek(orig, orig_p, resp, resp_p, *, first=T0, seconds=60.0, history="ShADadF
 
 
 def chunks(make, n=4, minutes=12, **kw):
-    """One connection written as `n` save-interval records (Arkime), spanning n * minutes."""
-    return [make(first=T0 + timedelta(minutes=minutes * i), seconds=minutes * 60 - 1, **kw) for i in range(n)]
+    """One connection written as `n` save-interval records (Arkime), spanning n * minutes. As Arkime writes them,
+    every piece carries the first piece's id as its rootId."""
+    root = _id("a")
+    return [make(first=T0 + timedelta(minutes=minutes * i), seconds=minutes * 60 - 1, root=root,
+                 **({"doc_id": root} if i == 0 else {}), **kw) for i in range(n)]
 
 
 def typed(family, **fields):
@@ -1188,3 +1195,78 @@ def test_a_million_short_web_connections_and_two_thousand_long_sessions(tmp_path
     rule, found, hot = _run_web_volume(1_000_000, 2_000, tmp_path)
     _assert_web_volume(rule, found, 1_000_000, 2_000)
     assert hot < 200_000                                    # the hot set stays a fraction of the million held
+
+
+# ---- a client port opened more than once ----------------------------------------------------------------------------
+
+def test_separate_visits_reusing_a_client_port_within_the_hour_are_never_a_held_session():
+    # two complete visits 45 minutes apart from one outside address and port: Arkime, then Suricata
+    arkime_visits = [_visit("198.51.100.9", 44000, 443, T0, cid="1:r="),
+                     _visit("198.51.100.9", 44000, 443, T0 + timedelta(minutes=45), cid="1:r=")]
+    suricata_visits = [suricata("198.51.100.9", 44000, INSIDE, 443, first=T0 + timedelta(minutes=45 * k), seconds=3,
+                                pkts=(6, 5), sizes=(800, 3400), flags=("1b", "1b")) for k in range(2)]
+    for visits in (arkime_visits, suricata_visits):
+        for rows in (visits, visits[::-1]):
+            [match] = run(LongInboundSession(), rows)
+            assert f"1 distinct outside address(es) reached {INSIDE} port 443" in match.claim
+            assert "none held continuously" in match.claim and " held 1 TCP session(s)" not in match.claim
+            assert "the records show that client port opened more than once" in match.claim
+            assert match.aggregate_summary["continuous_session_count"] == 0
+
+
+def test_a_chain_of_visits_never_outranks_the_session_really_held_beside_it():
+    chain = [_visit("198.51.100.20", 45000, 80, T0 + timedelta(minutes=50 * k), cid="1:chain=") for k in range(10)]
+    dev = _dev_shape("arkime")
+    for rows in (chain + dev, (dev + chain)[::-1]):
+        [match] = run(LongInboundSession(), rows)
+        assert (f"1 distinct outside address(es) held 1 TCP session(s) of at least 30 minutes open to {INSIDE} port 80"
+                in match.claim and "the longest lasted 121 minutes" in match.claim)
+        assert match.claim.index(f"{OUTSIDE} (1 session(s), longest 121 minutes)") \
+            < match.claim.index("198.51.100.20 (1 span(s) with gaps")
+        assert {dev[0].id, dev[-1].id} <= {e.id for e in match.events}
+
+
+def test_arkime_pieces_of_one_session_are_one_opening_even_when_each_shows_a_syn():
+    # each saved piece carries the first piece's rootId: a continuation repeats its session's opening
+    rows = chunks(lambda **kw: arkime(OUTSIDE, 51000, INSIDE, 1433, flags={"syn": 1}, cid="1:pieces=", **kw), n=10)
+    for order in (rows, rows[::-1]):
+        [match] = run(LongInboundSession(), order)
+        assert "held 1 TCP session(s)" in match.claim and "the longest lasted 120 minutes" in match.claim
+
+
+def test_a_held_session_on_a_client_port_that_was_opened_before_is_still_a_cited_member():
+    # the stated cost of reading openings per client port: a visit, then a session held on the same port, is worded
+    # as separate visits (never as one held session), and stays a member whose records are cited
+    rows = [_visit(OUTSIDE, 47000, 443, T0, cid="1:then="),
+            *_held(OUTSIDE, 47000, 443, start=T0 + timedelta(minutes=10), minutes=60, cid="1:then=")]
+    [match] = run(LongInboundSession(), rows)
+    assert "none held continuously" in match.claim and "opened more than once" in match.claim
+    assert list(match.fleet_hosts) == [(OUTSIDE, "")] and ("ip", OUTSIDE, "src") in match.entities
+    assert {rows[0].id, rows[-1].id} <= {e.id for e in match.events}
+
+
+def test_remote_access_identified_later_on_a_busy_service_is_named_and_cited_first():
+    later = []
+    for k in range(3):
+        later += [arkime(f"203.0.113.{k + 1}", 52000, INSIDE, 443, first=T0 + timedelta(minutes=12 * i),
+                         seconds=12 * 60 - 1, flags={"syn": int(i == 0), "ack": 20, "psh": 5}, cid=f"1:ssh{k}=",
+                         protocols=("tcp", "ssh") if i >= 2 else ("tcp",)) for i in range(4)]
+    rows = _clients(443, 200, attacker="198.51.120.1", longest=300) + later
+    [match] = run(LongInboundSession(), rows)
+    assert ("A sensor identified ssh on a later record of 3 of these session(s), from 3 outside address(es) "
+            "(203.0.113.1, 203.0.113.2, 203.0.113.3); those sessions are cited first.") in match.claim
+    cited = {e.id for e in match.events}
+    assert {later[0].id, later[4].id, later[8].id} <= cited
+    assert {("ip", f"203.0.113.{k + 1}", "src") for k in range(3)} <= set(match.entities)
+
+
+@pytest.mark.parametrize("other", ["suricata", "zeek"])
+def test_one_session_seen_by_sensors_whose_clocks_differ_by_under_a_minute_is_still_held(other):
+    pieces = chunks(lambda **kw: arkime(OUTSIDE, 51000, INSIDE, 1433, flags={"syn": 1, "ack": 20}, cid="1:skew=",
+                                        **kw), n=10)
+    twin = (suricata(OUTSIDE, 51000, INSIDE, 1433, first=T0 + timedelta(seconds=45), seconds=7200, flags=("1b", "1b"))
+            if other == "suricata" else
+            zeek(OUTSIDE, 51000, INSIDE, 1433, first=T0 - timedelta(seconds=40), seconds=7200, service=None))
+    for rows in (pieces + [twin], [twin] + pieces[::-1]):
+        [match] = run(LongInboundSession(), rows)
+        assert "held 1 TCP session(s)" in match.claim, match.claim[:300]
