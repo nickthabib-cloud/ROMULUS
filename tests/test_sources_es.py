@@ -474,3 +474,63 @@ def test_resolve_empty_pattern_is_empty_and_hunt_creation_refuses(tmp_path, monk
     with pytest.raises(ValueError, match="resolves to no index"):
         hr.create_hunt(s, W.start, W.end, created_by="t")
     assert hr.open_repo(s).list_hunts() == []
+
+
+# ---- a shard with no available copy -----------------------------------------------------------------------------
+
+def _cluster_missing_a_shard(requests: list):
+    """A cluster one of whose shards has no available copy. Asked not to answer in part, it refuses the search;
+    otherwise it answers from the shards it has and counts no failure."""
+    def handler(request: httpx.Request):
+        requests.append(request)
+        path = request.url.path
+        if path == "/":
+            return httpx.Response(200, json={"version": {"number": "8.17.0"}})
+        if path.endswith("/_pit") and request.method == "POST":
+            return httpx.Response(200, json={"id": "pit1"})
+        if path == "/_pit":
+            return httpx.Response(200, json={"succeeded": True})
+        if request.url.params.get("allow_partial_search_results") == "false":
+            return httpx.Response(503, json={"status": 503, "error": {
+                "type": "search_phase_execution_exception",
+                "reason": "Search rejected due to missing shards [[idx][1]]. Consider using "
+                          "`allow_partial_search_results` setting to bypass this error."}})
+        return httpx.Response(200, json={
+            "pit_id": "pit1", "timed_out": False, "_shards": {"failed": 0},
+            "hits": {"total": {"value": 0, "relation": "eq"}, "hits": []},
+            "aggregations": {"g": {"buckets": []}, "h": {"buckets": []}},
+        })
+    return httpx.MockTransport(handler)
+
+
+def test_only_searches_outside_a_point_in_time_refuse_partial_results():
+    requests = []
+    client = ElasticClient(Settings(es_url="http://es"), transport=_cluster_missing_a_shard(requests))
+    out = execute(client, SearchIntent(kind="raw", target="idx", window=W), C)
+    searches = [request for request in requests if request.url.path.endswith("/_search")]
+    # the raw retrieval searched inside its point in time, which takes no such parameter
+    assert [request.url.path for request in searches] == ["/_search"]
+    assert "pit" in json.loads(searches[0].content)
+    assert "allow_partial_search_results" not in searches[0].url.params
+    assert out.completeness == Completeness.complete
+    # the open and the close of the point in time carry it neither
+    assert all("allow_partial_search_results" not in request.url.params
+               for request in requests if request.url.path.endswith("/_pit"))
+    with pytest.raises(Exception, match="missing shards"):
+        client.search("idx", {"size": 0})
+    plain = requests[-1]
+    assert plain.url.path == "/idx/_search"
+    assert plain.url.params["allow_partial_search_results"] == "false"
+    assert plain.url.params["filter_path"] == SEARCH_FILTER_PATH
+
+
+@pytest.mark.parametrize("kind, extra", [("aggregate", {"group_by": ["host.name"]}),
+                                         ("histogram", {"interval_seconds": 600})])
+def test_a_search_refused_for_a_missing_shard_is_a_failed_outcome_never_a_complete_one(kind, extra):
+    requests = []
+    client = ElasticClient(Settings(es_url="http://es"), transport=_cluster_missing_a_shard(requests))
+    out = execute(client, SearchIntent(kind=kind, target="idx", window=W, **extra), C)
+    assert out.completeness == Completeness.failed and out.reasons == ["source_error"]
+    assert "missing shards" in out.error and out.buckets == []
+    [search] = [request for request in requests if request.url.path == "/idx/_search"]
+    assert search.url.params["allow_partial_search_results"] == "false"
