@@ -316,7 +316,7 @@ def test_inbound_long_session_to_an_internal_server_is_served_not_a_channel(make
     assert run(rule, record) == []
     [note] = rule.coverage_notes()
     assert note.startswith("not reported (informational): connections a recorded TCP opening shows an external "
-                           "address opened to an internal service other than the ordinary web ports")
+                           "address opened to an internal service (judged as inbound sessions by")
     assert f"{INSIDE}:22 and {OUTSIDE}:51000" in note and "(1 connection(s))" in note
     # the inbound remote-access rule reports it instead, and the grouped service rule leaves it alone
     assert run(LongInboundSession(), record) == []
@@ -330,15 +330,184 @@ def test_inbound_long_session_to_an_internal_server_is_served_not_a_channel(make
     assert "outside the site" not in match.claim and netdef.DIRECTION_ASSUMED_REASON in match.notes
 
 
-def test_inbound_long_session_to_a_web_server_is_a_routine_note():
-    record = chunks(lambda **kw: arkime(OUTSIDE, 51000, INSIDE, 443, flags={"syn": 1}, **kw))
+@pytest.mark.parametrize("port", [80, 443, 8080, 8443])
+def test_inbound_long_session_to_a_web_port_is_reported_by_the_session_rule(port):
+    record = chunks(lambda **kw: arkime(OUTSIDE, 51000, INSIDE, port, flags={"syn": 1}, **kw))
     rule = LongExternalConnection()
     assert run(rule, record) == []
-    [note] = rule.coverage_notes()
+    [note] = rule.coverage_notes()                      # one served reading, handed to the inbound rules
     assert note.startswith("not reported (informational): connections a recorded TCP opening shows an external "
-                           "address opened (inbound")
-    assert run(LongInboundSession(), record) == []
+                           "address opened to an internal service (judged as inbound sessions by")
+    [match] = run(LongInboundSession(), record)
+    assert match.group_key == f"service|{INSIDE}|{port}" and match.proposed_lane == "lead"
     assert run(LongInboundRemoteAccess(), record) == []
+
+
+def _dev_shape(sensor):
+    """An outside address held a session to the web server it had compromised: opened to inside:80 with the SYN
+    recorded, 121 minutes, about 1.4 KB from the client and 272 bytes back."""
+    if sensor == "arkime":
+        return [arkime(OUTSIDE, 35983, INSIDE, 80, first=T0 + timedelta(minutes=11 * i), seconds=11 * 60 - (i < 10),
+                       src_pkts=3, dst_pkts=2, c2s=128, s2c=25, flags={"syn": int(i == 0), "ack": 4, "psh": 1},
+                       protocols=("tcp", "http"), cid="1:dev=") for i in range(11)]
+    return [suricata(OUTSIDE, 35983, INSIDE, 80, seconds=121 * 60, pkts=(20, 12), sizes=(1409 + 66 * 20, 272 + 66 * 12),
+                     flags=("1b", "1b"), app_proto="http")]
+
+
+@pytest.mark.parametrize("sensor", ["arkime", "suricata"])
+def test_a_session_held_to_a_compromised_web_server_is_one_lead_citing_its_records(sensor):
+    records = _dev_shape(sensor)
+    [match] = run(LongInboundSession(), records)
+    assert match.playbook_id == "net.long_inbound_session" and match.proposed_lane == "lead"
+    assert f"1 distinct outside address(es) held 1 TCP session(s) of at least 30 minutes open to {INSIDE} port 80" \
+        in match.claim
+    assert "the longest lasted 121 minutes" in match.claim and "identified as http" in match.claim
+    assert "Records show the outside address opened 1 of the 1 (its SYN)." in match.claim
+    assert "Every one of the 1 session(s) is cited" in match.claim
+    cited = {e.id for e in match.events}
+    assert {records[0].id, records[-1].id} <= cited          # the session's opening and its bounding records
+    assert ("ip", OUTSIDE, "src") in match.entities and list(match.fleet_hosts) == [(OUTSIDE, "")]
+    assert not any(note.startswith("citation is partial") for note in match.notes)
+    # the outbound-channel rule hands it over, and it is not remote access
+    assert run(LongExternalConnection(), records) == [] and run(LongInboundRemoteAccess(), records) == []
+
+
+def _held(outside, sport, port, *, start=T0, minutes=48, cid=None):
+    """One continuous session of `minutes` in four Arkime save-interval records, the SYN on the first."""
+    step = minutes / 4
+    return [arkime(outside, sport, INSIDE, port, first=start + timedelta(minutes=step * i), seconds=step * 60 - 1,
+                   flags={"syn": int(i == 0), "ack": 20, "psh": 5}, cid=cid or f"1:{outside}:{sport}:{port}=")
+            for i in range(4)]
+
+
+def test_every_session_of_a_small_group_is_cited():
+    # three long sessions from one outside address
+    one = (_held(OUTSIDE, 40001, 443) + _held(OUTSIDE, 40002, 443, start=T0 + timedelta(hours=2), minutes=60)
+           + _held(OUTSIDE, 40003, 443, start=T0 + timedelta(hours=5), minutes=90))
+    [match] = run(LongInboundSession(), one)
+    assert f"1 distinct outside address(es) held 3 TCP session(s) of at least 30 minutes open to {INSIDE} port 443" \
+        in match.claim
+    assert "Every one of the 3 session(s) is cited" in match.claim
+    cited = {e.id for e in match.events}
+    for session in (one[0:4], one[4:8], one[8:12]):
+        assert {session[0].id, session[-1].id} <= cited
+    assert match.aggregate_summary["cited_session_count"] == 3
+    # two outside addresses, one session each
+    two = _held(OUTSIDE, 40001, 8443) + _held("198.51.100.7", 40001, 8443, minutes=70)
+    [match] = run(LongInboundSession(), two)
+    assert "2 distinct outside address(es) held 2 TCP session(s)" in match.claim
+    assert "Every one of the 2 session(s) is cited" in match.claim
+    assert {two[0].id, two[3].id, two[4].id, two[7].id} <= {e.id for e in match.events}
+    assert sorted(match.fleet_hosts) == [("198.51.100.7", ""), (OUTSIDE, "")]
+
+
+def test_a_member_with_more_sessions_than_the_budget_says_its_others_are_not_cited():
+    # 12 four-record sessions from one address: each cited session needs two records, so ten fit
+    rows = [e for k in range(12) for e in _held(OUTSIDE, 41000 + k, 443, start=T0 + timedelta(hours=k),
+                                                minutes=40 + k)]
+    [match] = run(LongInboundSession(), rows)
+    assert ("10 of the 12 session(s), from 1 of the 1 outside address(es), are cited by the records bounding them and "
+            "the record showing their opening: each address's longest session before any second one, longest first. "
+            "The other 2 session(s) are not cited; 1 of the cited address(es) have further long sessions that are "
+            "not cited.") in match.claim
+    assert "citation is partial: 10 of 12 sessions (1 of 1 outside addresses) are cited; the member list names " \
+           "every outside address" in match.notes
+    assert len(match.events) == 20
+    # the two not cited are the shortest
+    assert not {rows[0].id, rows[4].id} & {e.id for e in match.events}
+
+
+def test_a_busy_web_server_is_one_item_with_exact_members_and_a_stated_partial_citation(monkeypatch):
+    monkeypatch.setattr(LongInboundSession, "HOT", 2)
+    monkeypatch.setattr(LongInboundSession, "MEMBER_BATCH", 50)
+    rule = LongInboundSession()
+    [match] = run(rule, _clients(443, 3000, attacker="203.0.113.66", longest=300))
+    assert rule.conns.on_disk > 0
+    assert match.group_key == f"service|{INSIDE}|443"
+    assert match.fleet_host_count == 3001 and len(list(match.fleet_hosts)) == 3001 and match.fleet_hosts_complete
+    assert f"3001 distinct outside address(es) held 3001 TCP session(s) of at least 30 minutes open to {INSIDE} " \
+           "port 443" in match.claim
+    assert "The outside addresses with the longest sessions: 203.0.113.66 (1 session(s), longest 300 minutes)" \
+        in match.claim and "; and 2981 more (the item's member list holds every one)." in match.claim
+    assert ("20 of the 3001 session(s), from 20 of the 3001 outside address(es), are cited" in match.claim
+            and "The other 2981 session(s) are not cited; 2981 address(es) have no cited session." in match.claim)
+    assert any(note.startswith("citation is partial: 20 of 3001 sessions (20 of 3001 outside addresses)")
+               for note in match.notes)
+    assert len(match.events) == 20 and "203.0.113.66" in {str(e.get("source.ip")) for e in match.events}
+    assert match.aggregate_summary == {"outside_address_count": 3001, "session_count": 3001,
+                                       "continuous_session_count": 3001, "cited_session_count": 20,
+                                       "longest_session_seconds": 18000.0, "members_complete": 1}
+
+
+def _visit(outside, sport, port, start, *, cid):
+    """One short, complete visit (opened and closed within the record)."""
+    return arkime(outside, sport, INSIDE, port, first=start, seconds=3, src_pkts=6, dst_pkts=5, c2s=400, s2c=3000,
+                  flags={"syn": 1, "ack": 6, "psh": 2, "fin": 2}, cid=cid)
+
+
+def test_a_client_port_reused_hours_later_is_a_span_with_gaps_never_a_held_session():
+    # the same outside address and port visit inside:443 twice, three hours apart
+    visits = [_visit("198.51.100.9", 44000, 443, T0, cid="1:reuse="),
+              _visit("198.51.100.9", 44000, 443, T0 + timedelta(hours=3), cid="1:reuse=")]
+    [match] = run(LongInboundSession(), visits)
+    assert f"1 distinct outside address(es) reached {INSIDE} port 443" in match.claim
+    assert "over 1 span(s) of at least 30 minutes" in match.claim and "none held continuously" in match.claim
+    assert "one session that slept or separate visits that reused a client port" in match.claim
+    assert "the longest span covers 180 minutes" in match.claim and " held 1 TCP session(s)" not in match.claim
+    assert "198.51.100.9 (1 span(s) with gaps, longest 180 minutes)" in match.claim
+    assert match.aggregate_summary["continuous_session_count"] == 0
+    # beside a session really held, the held session is counted, named and cited first
+    held = _held(OUTSIDE, 40001, 443)
+    [match] = run(LongInboundSession(), visits + held)
+    assert f"1 distinct outside address(es) held 1 TCP session(s) of at least 30 minutes open to {INSIDE} port 443" \
+        in match.claim and "the longest lasted 48 minutes" in match.claim
+    assert "1 further span(s) of at least 30 minutes, from 1 outside address(es), were not held continuously" \
+        in match.claim and "In all 2 distinct outside addresses are members of this item." in match.claim
+    assert match.claim.index(f"{OUTSIDE} (1 session(s), longest 48 minutes)") \
+        < match.claim.index("198.51.100.9 (1 span(s) with gaps, longest 180 minutes)")
+    assert "Every one of the 2 session(s) is cited" in match.claim
+    assert sorted(match.fleet_hosts) == [("198.51.100.9", ""), (OUTSIDE, "")]
+
+
+def test_spans_with_gaps_never_take_the_citation_budget_from_held_sessions():
+    reuse = [v for k in range(30) for v in (
+        _visit(f"198.51.101.{k + 1}", 44000, 443, T0, cid=f"1:reuse{k}="),
+        _visit(f"198.51.101.{k + 1}", 44000, 443, T0 + timedelta(hours=4), cid=f"1:reuse{k}="))]
+    held = [e for k in range(3) for e in _held(f"203.0.113.{k + 1}", 40001, 443, minutes=40 + k)]
+    [match] = run(LongInboundSession(), reuse + held)
+    assert "3 distinct outside address(es) held 3 TCP session(s)" in match.claim
+    assert "30 further span(s)" in match.claim and "In all 33 distinct outside addresses" in match.claim
+    cited = {e.id for e in match.events}
+    assert {e.id for e in held if e.id in cited} >= {held[0].id, held[3].id, held[4].id, held[8].id, held[11].id}
+    assert match.aggregate_summary["continuous_session_count"] == 3
+
+
+def test_a_remote_access_protocol_identified_only_later_is_not_lost_between_the_rules():
+    # the first record of a session to inside:443 names no protocol; a later record identifies SSH
+    rows = [arkime(OUTSIDE, 51000, INSIDE, 443, first=T0 + timedelta(minutes=12 * i), seconds=12 * 60 - 1,
+                   flags={"syn": int(i == 0), "ack": 20, "psh": 5}, cid="1:late=",
+                   protocols=("tcp", "ssh") if i >= 2 else ("tcp",)) for i in range(4)]
+    assert run(LongExternalConnection(), rows) == []                # served: handed to the inbound rules
+    found = run(LongInboundSession(), rows) + run(LongInboundRemoteAccess(), rows)
+    assert found, "a served long session must be reported by at least one inbound rule"
+    assert any("identified as ssh" in m.claim and "the longest lasted 48 minutes" in m.claim for m in found)
+
+
+@pytest.mark.parametrize("port,protocols", [(80, ("tcp", "http")), (443, ("tcp",)), (443, ("tcp", "ssh")),
+                                            (22, ("tcp",)), (2222, ("tcp", "ssh")), (1433, ("tcp",)),
+                                            (51000, ("tcp",))])
+def test_every_served_long_session_is_reported_by_an_inbound_rule(port, protocols):
+    rows = chunks(lambda **kw: arkime(OUTSIDE, 52000, INSIDE, port, flags={"syn": 1}, protocols=protocols, **kw))
+    long_rule = LongExternalConnection()
+    assert run(long_rule, rows) == [] and long_rule.limit_reasons() == []
+    assert len(run(LongInboundSession(), rows)) + len(run(LongInboundRemoteAccess(), rows)) == 1
+
+
+def test_an_internal_clients_long_session_out_to_a_web_server_is_still_the_outbound_rules():
+    rows = chunks(lambda **kw: arkime(INSIDE, 51000, OUTSIDE, 443, flags={"syn": 1}, **kw))
+    [match] = run(LongExternalConnection(), rows)
+    assert f"{INSIDE}:51000 opened to {OUTSIDE}:443 (a record shows its SYN)" in match.claim
+    assert run(LongInboundSession(), rows) == [] and run(LongInboundRemoteAccess(), rows) == []
 
 
 @pytest.mark.parametrize("port,service", [(1433, None), (3306, "mysql"), (5432, None), (445, "smb"), (389, None),
@@ -399,6 +568,7 @@ def test_ssh_identified_on_a_web_port_is_reported_as_remote_access():
                                         **kw))
     [match] = run(LongInboundRemoteAccess(), record)
     assert "port 443 (SSH)" in match.claim
+    assert run(LongInboundSession(), record) == []           # never in the web server's service group
 
 
 @pytest.mark.parametrize("make", ["arkime", "suricata", "zeek"])
@@ -844,7 +1014,10 @@ def test_many_clients_of_one_exposed_service_are_one_item_with_every_member():
     assert len(members) == 31 == match.fleet_host_count and match.fleet_hosts_complete
     assert ("203.0.113.66", "") in members
     assert match.aggregate_summary == {"outside_address_count": 31, "session_count": 31,
+                                       "continuous_session_count": 31, "cited_session_count": 20,
                                        "longest_session_seconds": 18000.0, "members_complete": 1}
+    assert "20 of the 31 session(s), from 20 of the 31 outside address(es), are cited" in match.claim
+    assert any(note.startswith("citation is partial: 20 of 31 sessions") for note in match.notes)
 
 
 def test_a_member_outside_the_named_twenty_stays_in_the_member_list():
@@ -883,13 +1056,13 @@ def test_a_spent_member_budget_is_honest(monkeypatch):
     original = bounded_module.Spill.write
 
     def refuse(self, sql, rows, **kwargs):
-        if sql.startswith("INSERT INTO inbound_members"):
+        if sql.startswith("INSERT OR REPLACE INTO inbound_sessions"):
             raise bounded_module.StateExhausted("injected disk refusal")
         return original(self, sql, rows, **kwargs)
     monkeypatch.setattr(bounded_module.Spill, "write", refuse)
     rule = LongInboundSession()
     assert run(rule, _clients(1194, 3)) == []
-    assert any("inbound session members' disk budget is spent" in reason for reason in rule.limit_reasons())
+    assert any("inbound sessions' disk budget is spent" in reason for reason in rule.limit_reasons())
 
 
 def test_a_declared_management_member_is_counted_in_a_note():
@@ -934,3 +1107,84 @@ def test_arkime_sessions_without_application_bytes_are_named_on_the_cell(tmp_pat
                                    app_bytes=False)],
                            tmp_path=tmp_path)
     assert any(n.startswith("1 Arkime TCP session record(s)") for n in ssh_rule.coverage_notes())
+
+
+# ---- mission scale: inbound web traffic -------------------------------------------------------------------------------
+
+def _web_record(n, src, sport, dst, start, seconds, *, syn, fin, cid=None, packets=(6, 5)):
+    fields = {"source.ip": src, "source.port": sport, "destination.ip": dst, "destination.port": 443,
+              "network.transport": "tcp", "flow.start": start.isoformat(),
+              "flow.end": (start + timedelta(seconds=seconds)).isoformat(),
+              "network.community_id": cid or f"1:w{n}", "source.bytes": 900, "destination.bytes": 4000,
+              "source.packets": packets[0], "destination.packets": packets[1], "client.bytes": 400,
+              "server.bytes": 3500, "tcp.flags.syn": syn, "tcp.flags.syn_ack": syn, "tcp.flags.ack": 6,
+              "tcp.flags.psh": 2, "tcp.flags.fin": fin, "tcp.flags.rst": 0}
+    return TypedEvent(id=f"w{n:09d}", family="net_session", ts=start, host="arkime",
+                      fields={k: fv(v, "fixture") for k, v in fields.items()},
+                      raw=[RawRef(target="fixture", native_id=f"w{n}")], normalizer="fixture")
+
+
+def web_traffic(short, long, batch=5000):
+    """Batches of `short` short web connections from 100,000 outside addresses to 50 servers, every 5-tuple distinct,
+    then `long` 48-minute sessions (four records each) spread over the servers."""
+    rows, n = [], 0
+    for k in range(short):
+        client, turn = k % 100_000, k // 100_000
+        rows.append(_web_record(n, f"198.{18 + client // 62500}.{client // 250 % 250}.{client % 250 + 1}",
+                                32768 + turn, f"10.20.0.{k % 50 + 1}", T0 + timedelta(seconds=k * 0.6), 3,
+                                syn=1, fin=2))
+        n += 1
+        if len(rows) >= batch:
+            yield rows
+            rows = []
+    for k in range(long):
+        for part in range(4):
+            rows.append(_web_record(n, f"203.0.{113 + k // 250}.{k % 250 + 1}", 40000 + k % 20000,
+                                    f"10.20.0.{k % 50 + 1}", T0 + timedelta(seconds=k, minutes=12 * part), 12 * 60 - 1,
+                                    syn=int(part == 0), fin=2 * int(part == 3), cid=f"1:long{k}", packets=(40, 40)))
+            n += 1
+        if len(rows) >= batch:
+            yield rows
+            rows = []
+    if rows:
+        yield rows
+
+
+def _run_web_volume(short, long, tmp_path):
+    from romulus.detect.bounded import StateBudget
+    rule = LongInboundSession()
+    rule.spill_dir = tmp_path
+    rule.budget = StateBudget(tmp_path, memory_total=64 * 2**20)        # a small share of a hunt's memory
+    stage, hot = {}, 0
+    for rows in web_traffic(short, long):
+        rule.consume(rows)
+        for event in rule.drain_staged():
+            if str(event.get("network.community_id")).startswith("1:long"):
+                stage[event.id] = event                                 # the stage is on disk in a sweep
+        rule.drain_bounds()
+        hot = max(hot, len(rule.conns.hot))
+    rule.bind_loader(lambda ids: [stage[i] for i in ids if i in stage])
+    found = list(rule.finalize())
+    return rule, found, hot
+
+
+def _assert_web_volume(rule, found, short, long):
+    assert rule.limit_reasons() == []
+    assert len(found) == 50 and {m.group_key.split("|")[2] for m in found} == {"443"}
+    assert sum(m.fleet_host_count for m in found) == long
+    assert sum(m.aggregate_summary["session_count"] for m in found) == long
+    assert all(m.aggregate_summary["continuous_session_count"] == m.aggregate_summary["session_count"] for m in found)
+    assert rule.conns.on_disk > 0                           # held on disk, not in memory
+
+
+def test_inbound_web_traffic_is_held_on_disk_and_only_long_sessions_are_reported(tmp_path):
+    rule, found, hot = _run_web_volume(20_000, 200, tmp_path)
+    _assert_web_volume(rule, found, 20_000, 200)
+    assert hot < 20_000
+
+
+@pytest.mark.slow
+def test_a_million_short_web_connections_and_two_thousand_long_sessions(tmp_path):
+    rule, found, hot = _run_web_volume(1_000_000, 2_000, tmp_path)
+    _assert_web_volume(rule, found, 1_000_000, 2_000)
+    assert hot < 200_000                                    # the hot set stays a fraction of the million held
