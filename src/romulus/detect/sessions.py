@@ -906,7 +906,7 @@ class LongInboundSession(_InboundSessions):
                     "address is on a port of 32768 or above facing the internal port below it. A span that reaches "
                     "30 minutes only across silences of more than an hour (one session that slept, or a client port "
                     "reused by separate visits), or whose records show its client port opened more than once (openings "
-                    "more than 30 seconds apart; an Arkime continuation record repeats its session's opening and is "
+                    "more than 60 seconds apart; an Arkime continuation record repeats its session's opening and is "
                     "not counted), is counted and worded apart from the sessions held continuously. A remote-access "
                     "protocol a sensor identified on a later record of a session keeps that session here, named in the "
                     "claim and cited first. Not this rule's: remote-access services identified on the connection's "
@@ -949,7 +949,10 @@ class LongInboundSession(_InboundSessions):
     }
     MEMBER_BATCH = 1000                 # session rows written to disk at a time
     MEMBERS_NAMED = 20                  # outside addresses named in a service item's claim and entities
-    REOPEN_SKEW = 30.0                  # seconds: openings further apart are separate connections on one client port
+    # seconds: openings further apart are separate connections on one client port. A client cannot reopen a closed
+    # 4-tuple inside its TIME-WAIT (60 s on Linux), and sensors whose clocks differ by up to this much still read
+    # one session's opening as one
+    REOPEN_SKEW = 60.0
 
     def wants(self, e: TypedEvent) -> bool:
         # one public end, and this record names no remote-access service on the internal side (those connections are

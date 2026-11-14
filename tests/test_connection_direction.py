@@ -1258,3 +1258,15 @@ def test_remote_access_identified_later_on_a_busy_service_is_named_and_cited_fir
     cited = {e.id for e in match.events}
     assert {later[0].id, later[4].id, later[8].id} <= cited
     assert {("ip", f"203.0.113.{k + 1}", "src") for k in range(3)} <= set(match.entities)
+
+
+@pytest.mark.parametrize("other", ["suricata", "zeek"])
+def test_one_session_seen_by_sensors_whose_clocks_differ_by_under_a_minute_is_still_held(other):
+    pieces = chunks(lambda **kw: arkime(OUTSIDE, 51000, INSIDE, 1433, flags={"syn": 1, "ack": 20}, cid="1:skew=",
+                                        **kw), n=10)
+    twin = (suricata(OUTSIDE, 51000, INSIDE, 1433, first=T0 + timedelta(seconds=45), seconds=7200, flags=("1b", "1b"))
+            if other == "suricata" else
+            zeek(OUTSIDE, 51000, INSIDE, 1433, first=T0 - timedelta(seconds=40), seconds=7200, service=None))
+    for rows in (pieces + [twin], [twin] + pieces[::-1]):
+        [match] = run(LongInboundSession(), rows)
+        assert "held 1 TCP session(s)" in match.claim, match.claim[:300]
