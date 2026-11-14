@@ -218,3 +218,66 @@ def test_the_fleet_tally_is_revised_in_place_to_the_final_count():
     assert "5 process-creation record(s)" in fleet[0]["claim"] and "so far" not in fleet[0]["claim"]
     assert fleet[0]["gate_results"]["_revision"]["count"] == 1
     assert len(candidates) == 2                                       # the host's first record + the merged one
+
+
+def test_a_finding_with_a_count_summary_is_revised_like_any_other():
+    """A roll-up's summary carries member and record counts, not an episode: its final revision is published, and
+    never read as an episode summary."""
+    repo = _repo()
+    child = sysmon1(image=PS, parent_image=WINWORD, command="powershell.exe -nop")
+    live = _match([child], lane="lead", claim="At least 3 records", group_key="pair")
+    live.aggregate_summary = {"member_count": 1, "record_count": 3}
+    _publish(repo, live, child)
+    final = _match([child], lane="lead", claim="7 records", group_key="pair", reason="the hunt's final count")
+    final.aggregate_summary = {"member_count": 2, "record_count": 7}
+    assert _publish(repo, final, child) is None                       # revised in place, no error
+    [candidate] = repo.candidates("h1")
+    assert candidate["claim"] == "7 records"
+    assert candidate["gate_results"]["aggregate_summary"] == {"member_count": 2, "record_count": 7}
+
+
+def test_an_episode_summary_is_never_replaced_by_one_without_an_episode():
+    repo = _repo()
+    child = sysmon1(image=PS, parent_image=WINWORD, command="powershell.exe -nop")
+    episode = {"peak": 30, "episodes": 2, "first": 100.0, "last": 900.0}
+    live = _match([child], lane="lead", claim="30 at peak", group_key="window")
+    live.aggregate_summary = dict(episode)
+    _publish(repo, live, child)
+    replay = _match([child], lane="lead", claim="a count only", group_key="window", reason="replay")
+    replay.aggregate_summary = {"record_count": 5}
+    _publish(repo, replay, child)
+    [candidate] = repo.candidates("h1")
+    assert candidate["claim"] == "30 at peak" and candidate["gate_results"]["aggregate_summary"] == episode
+
+
+def _published_live_then_final(rule, rows):
+    repo = _repo()
+    try:
+        _drive(repo, rule, [rows])
+    finally:
+        close = getattr(rule, "close_spill", None) or getattr(rule, "release_state", None)
+        if close:
+            close()
+    return repo.candidates("h1")
+
+
+def test_a_web_attack_pair_and_roll_up_publish_their_final_revision():
+    from tests.test_web_attacks import event as request
+    from tests.test_web_attacks import rule_named
+
+    pair = [request("/item?id=1'+or+'1'='1", n=n, at=n) for n in range(3)]
+    [candidate] = _published_live_then_final(rule_named("network.web_attacks"), pair)
+    assert candidate["lane"] == "lead" and "peak" not in candidate["gate_results"]["aggregate_summary"]
+    # one scanner over many servers: pair leads and a roll-up, each revised at finalize without error
+    sweep = [request("/item?id=1'+or+'1'='1", n=n, at=n, destination=f"10.2.3.{n + 1}") for n in range(12)]
+    found = _published_live_then_final(rule_named("network.web_attacks"), sweep)
+    assert any("|" in row["group_key"] and row["group_key"].split("|")[0] in {"fleet", "sweep"} for row in found)
+    assert all(row["lane"] == "lead" for row in found)
+
+
+def test_a_service_catalog_source_publishes_its_final_revision():
+    from tests.test_service_catalog import event as lookup
+    from tests.test_web_attacks import rule_named
+
+    found = _published_live_then_final(rule_named("network.service_catalog"), [lookup(n=n) for n in range(3)])
+    assert found and all(row["lane"] == "lead" for row in found)

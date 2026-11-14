@@ -1267,10 +1267,11 @@ class WebLoginBurst(ZeekWindowRule):
     # states the response-status mix of the window and the lane stays lead. Guessing slower than this, spread over
     # many sources, or visible only as failure statuses on other paths is not counted.
     seconds, threshold, per_sensor = 300, 20, True
-    # Away from a sign-in path, requests that carry an account and a password count only when the window holds more
-    # than one distinct credential pair: a device or service that polls with its own fixed credentials repeats one
-    # pair, and guessing or spraying does not.
-    credential_pairs = 2
+    # Away from a sign-in path, requests that carry an account and a password count by their distinct credential
+    # pairs, and the same twenty applies to them: a guessing or spraying tool sends a new pair with every request,
+    # so twenty guesses are twenty pairs, while a device or service that polls with its own fixed credentials
+    # repeats one pair however often it asks, and a handful of them behind one address stay a handful.
+    credential_pairs = threshold
     severity, lane, attack = "medium", "lead", ("T1110",)
     uses_site_facts = True
     benign = (("Shared NAT, proxies, sign-on portals, session heartbeats, token refreshes, an administrator working "
@@ -1285,7 +1286,7 @@ class WebLoginBurst(ZeekWindowRule):
                       "lists are excluded: their methods and statuses cannot be paired with a request."),
         "fidelity": ("Requests of a sign-in shape, not established attempts or outcomes: at a sign-in path, every "
                      "answered POST, every 401/403/429 and a query with an account and a credential; on any other "
-                     "path, requests carrying an account and a password parameter with at least two distinct "
+                     "path, requests carrying an account and a password parameter with at least twenty distinct "
                      "credential pairs in the window. Positive-only."),
         "benign_and_cost": benign[0] + " One lead per source, destination, path and sensor.",
         "query_cost": "Disk-backed five-minute window with late replay.",
@@ -1293,7 +1294,7 @@ class WebLoginBurst(ZeekWindowRule):
         "research_basis": "MITRE ATT&CK T1110 (Brute Force); an original rate rule with no imported detection content.",
         "license": "original",
         "thresholds": ("20 request references in 300 seconds from one source to one path on one server, per sensor; "
-                       "2 distinct credential pairs for requests counted by their query credentials alone"),
+                       "20 distinct credential pairs for requests counted by their query credentials alone"),
         "adds": "The only rate over web sign-in requests; host authentication rules need the server's own logs.",
         "retrieval": "Typed request path, method, response status and peers; absent body/account stays unknown.",
         "lanes": ("Lead at 20 request references in 300 seconds; no promotion from network status. Severity medium: "
@@ -1444,7 +1445,7 @@ class WebLoginBurst(ZeekWindowRule):
             "answers of many users."),
             ("Counted: at a sign-in path, every answered POST, every 401, 403 or 429, and a request whose query "
             "carries an account with a credential parameter; on any other path, requests whose query carries both "
-            "an account and a password parameter, when the window holds at least two distinct credential pairs. "
+            "an account and a password parameter, when the window holds at least twenty distinct credential pairs. "
             "Other requests are not counted."),
             ("Twenty request references in five minutes is beyond one person's retries and below any tool's rate; "
             "many users behind one address can also reach it. Counts are per sensor and path."),

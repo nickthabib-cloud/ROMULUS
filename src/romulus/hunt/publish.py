@@ -398,7 +398,8 @@ def _fold_reach(repo: Repo, hunt_id: str, match: Match, decision, existing: dict
         notes = {note for note in notes if not note.startswith(context_notes)}
         notes |= {str(note) for note in decision.notes if str(note).startswith(context_notes)}
     gates["_notes"] = sorted(notes)
-    if (published := gates.get("aggregate_summary")) and first is not None and last is not None:
+    published = gates.get("aggregate_summary")
+    if published and "first" in published and "last" in published and first is not None and last is not None:
         gates["aggregate_summary"] = {**published, "first": min(published["first"], first),
                                       "last": max(published["last"], last)}
     entities = [list(entity) for entity in dict.fromkeys(

@@ -623,10 +623,17 @@ def test_a_spray_of_one_password_over_many_accounts_counts_its_pairs(login_rule)
     assert "Spring2025" not in str(match) and "Spring2025" not in stored_text(login_rule)
 
 
-def test_repeats_of_a_pair_do_not_add_pairs_and_two_pairs_are_stated(login_rule):
-    rows = [event(f"/svc/poll?user=dev{n % 2}&pass=fixed{n % 2}", n=n, status=200) for n in range(40)]
+@pytest.mark.parametrize("devices", [2, 19])
+def test_a_few_devices_polling_with_their_own_credentials_are_silent(login_rule, devices):
+    rows = [event(f"/svc/poll?user=dev{n % devices}&pass=fixed{n % devices}", n=n, status=200) for n in range(60)]
+    assert finish(login_rule, rows) == []
+
+
+def test_repeats_of_a_pair_do_not_add_pairs_and_the_distinct_count_is_stated(login_rule):
+    # sixty requests cycling twenty-five pairs: the pairs pass twenty only after the requests have
+    rows = [event(f"/svc/poll?user=dev{n % 25}&pass=fixed{n % 25}", n=n, status=200) for n in range(60)]
     [match] = finish(login_rule, rows)
-    assert "40 recorded requests" in match.claim and "with 2 distinct credential pairs" in match.claim
+    assert "60 recorded requests" in match.claim and "with 25 distinct credential pairs" in match.claim
 
 
 def test_credential_labels_are_keyed_per_rule_instance(login_rule):

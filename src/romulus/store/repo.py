@@ -464,6 +464,10 @@ def _unranked(hunt_id: str):
     return ~select(1).where(_rank_on(hunt_id)).exists()
 
 
+# The keys of an episode summary, the aggregate summary whose publication is monotonic.
+_EPISODE_KEYS = frozenset({"peak", "episodes", "first", "last"})
+
+
 def _on_confirmed_entity():
     """A finding rank whose entity carries a confirmed finding in the same pass."""
     entity = t.entity_rank
@@ -2117,9 +2121,13 @@ class Repo:
             # Episode summaries opt in to monotonic publication. This check is
             # inside the candidate transaction: a fresh evaluator's replay
             # prefix must not lower a finding stored by an earlier evaluator.
-            if published := previous_gates.get("aggregate_summary"):
+            # A summary of another shape (a roll-up's member and record counts) carries no episode to compare and
+            # is revised like any other finding.
+            published = previous_gates.get("aggregate_summary")
+            if published and _EPISODE_KEYS <= published.keys():
                 incoming = incoming_gates.get("aggregate_summary")
-                if (not incoming or LANE_STRENGTH[row["lane"]] < LANE_STRENGTH[existing["lane"]]
+                if (not incoming or not _EPISODE_KEYS <= incoming.keys()
+                        or LANE_STRENGTH[row["lane"]] < LANE_STRENGTH[existing["lane"]]
                         or any(incoming[name] < published[name] for name in ("peak", "episodes", "last"))
                         or incoming["first"] > published["first"]):
                     return ""
