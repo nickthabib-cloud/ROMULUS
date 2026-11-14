@@ -281,3 +281,21 @@ def test_a_service_catalog_source_publishes_its_final_revision():
 
     found = _published_live_then_final(rule_named("network.service_catalog"), [lookup(n=n) for n in range(3)])
     assert found and all(row["lane"] == "lead" for row in found)
+
+
+def test_a_re_read_that_saw_fewer_records_never_lowers_a_stored_count():
+    repo = _repo()
+    child = sysmon1(image=PS, parent_image=WINWORD, command="powershell.exe -nop")
+    final = _match([child], lane="lead", claim="7 records", group_key="pair", reason="the hunt's final count")
+    final.aggregate_summary = {"member_count": 2, "record_count": 7}
+    _publish(repo, _match([child], lane="lead", claim="live", group_key="pair"), child)
+    _publish(repo, final, child)
+    fewer = _match([child], lane="lead", claim="3 records", group_key="pair", reason="a resumed hunt's final count")
+    fewer.aggregate_summary = {"member_count": 2, "record_count": 3}
+    _publish(repo, fewer, child)
+    [candidate] = repo.candidates("h1")
+    assert candidate["claim"] == "7 records" and candidate["gate_results"]["aggregate_summary"]["record_count"] == 7
+    more = _match([child], lane="lead", claim="9 records", group_key="pair", reason="a later final count")
+    more.aggregate_summary = {"member_count": 3, "record_count": 9}
+    _publish(repo, more, child)
+    assert repo.candidates("h1")[0]["claim"] == "9 records"

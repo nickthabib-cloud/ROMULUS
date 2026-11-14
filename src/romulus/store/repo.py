@@ -466,6 +466,8 @@ def _unranked(hunt_id: str):
 
 # The keys of an episode summary, the aggregate summary whose publication is monotonic.
 _EPISODE_KEYS = frozenset({"peak", "episodes", "first", "last"})
+# The counts of a summary that is not an episode; a revision never lowers one.
+_COUNT_KEYS = ("record_count", "member_count")
 
 
 def _on_confirmed_entity():
@@ -2121,8 +2123,9 @@ class Repo:
             # Episode summaries opt in to monotonic publication. This check is
             # inside the candidate transaction: a fresh evaluator's replay
             # prefix must not lower a finding stored by an earlier evaluator.
-            # A summary of another shape (a roll-up's member and record counts) carries no episode to compare and
-            # is revised like any other finding.
+            # A summary of another shape (a roll-up's member and record counts) carries no episode to compare; the
+            # same rule holds for the counts it does carry: a re-read that saw fewer records (a failed source, an
+            # expired index) never lowers a stored count.
             published = previous_gates.get("aggregate_summary")
             if published and _EPISODE_KEYS <= published.keys():
                 incoming = incoming_gates.get("aggregate_summary")
@@ -2130,6 +2133,11 @@ class Repo:
                         or LANE_STRENGTH[row["lane"]] < LANE_STRENGTH[existing["lane"]]
                         or any(incoming[name] < published[name] for name in ("peak", "episodes", "last"))
                         or incoming["first"] > published["first"]):
+                    return ""
+            elif published:
+                incoming = incoming_gates.get("aggregate_summary") or {}
+                if any(isinstance(published.get(name), (int, float)) and isinstance(incoming.get(name), (int, float))
+                       and incoming[name] < published[name] for name in _COUNT_KEYS):
                     return ""
             if evidence_view:
                 def preference(candidate):
