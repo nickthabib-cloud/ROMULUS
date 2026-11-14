@@ -32,9 +32,10 @@
 {% endif %}
 
 {% if fleet_hosts %}
-{% set outside = gates.get('_fleet_member_kind') == 'external_address' %}
-<h2>{{ 'Outside addresses' if outside else 'Hosts' }} in this finding ({{ gates.get('_fleet_host_count', fleet_hosts | length) }})</h2>
-<table class="grid"><thead><tr><th>{{ 'Outside address' if outside else 'Host' }}</th><th>First recorded witness</th></tr></thead>
+{% set side = {'external_address': 'Outside', 'internal_address': 'Internal'}.get(gates.get('_fleet_member_kind')) %}
+{% set outside = side is not none %}
+<h2>{{ side ~ ' addresses' if side else 'Hosts' }} in this finding ({{ gates.get('_fleet_host_count', fleet_hosts | length) }})</h2>
+<table class="grid"><thead><tr><th>{{ side ~ ' address' if side else 'Host' }}</th><th>First recorded witness</th></tr></thead>
 <tbody>{% for host in fleet_hosts %}<tr><td>{{ host.host }}</td><td class="mono">{{ host.first_event_id }}</td></tr>{% endfor %}</tbody></table>
 {% if fleet_after %}<a href="/findings/{{ c.id }}">First {{ 'address' if outside else 'host' }} page</a>{% endif %}
 {% if fleet_next %}<a href="/findings/{{ c.id }}?host_after={{ fleet_next | urlencode }}">Next {{ 'address' if outside else 'host' }} page</a>{% endif %}
