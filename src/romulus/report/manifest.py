@@ -52,6 +52,9 @@ def _citations(repo: Repo, cand: dict) -> list[dict]:
     return cites
 
 
+# Counted with the skip reasons, but about records that were evaluated: reported as coverage notes, never as data
+# not assessed, and no reason to call a hunt's coverage partial.
+EVALUATED_SKIPS = frozenset({"Windows record seen under more than one collection source"})
 UNRESOLVED_STATES = (
     "planned", "executed_failed", "evaluated_partial", "match_on_partial", "positive_only_partial",
     "partial", "failed", "omitted_budget",
@@ -189,7 +192,8 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
         if reason == "duplicate typed event across source partitions":
             return "typed event deduplicated across source partitions; its additional raw provenance was retained"
         if reason == "record_id reused (log cleared or reverted)":
-            return "typed Windows events retained separately after record_id reuse (log cleared or reverted)"
+            return ("typed Windows events retained separately after record_id reuse (log cleared or reverted, or "
+                    "machines sharing one source identifier)")
         return f"retrieved but not turned into a typed event: {reason}"
     for target, retrieved in sorted((stats.get("dataset_filter") or {}).items()):
         inventory = (profiles.get(target) or {}).get("datasets")
@@ -253,6 +257,8 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
         for target, reasons in sorted(scoped_skips.items()):
             for reason, count in sorted(reasons.items()):
                 scoped_totals[reason] += count
+                if reason in EVALUATED_SKIPS:
+                    continue
                 out.append({"target": target, "dataset": None, "records": count,
                             "count_scope": "records retrieved in the hunt window",
                             "reason": skip_explanation(reason)})
@@ -261,12 +267,14 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
             scoped_totals = Counter(global_scoped)
         for reason, count in sorted((stats.get("skips") or {}).items()):
             remainder = count - scoped_totals[reason]
-            if remainder > 0:
+            if remainder > 0 and reason not in EVALUATED_SKIPS:
                 out.append({"target": "all sweep targets", "dataset": None, "records": remainder,
                             "count_scope": "records retrieved in the hunt window",
                             "reason": skip_explanation(reason)})
     else:
         for reason, count in sorted((stats.get("skips") or {}).items()):
+            if reason in EVALUATED_SKIPS:
+                continue
             out.append({"target": "all sweep targets", "dataset": None, "records": count,
                         "count_scope": "records retrieved in the hunt window",
                         "reason": skip_explanation(reason)})
@@ -289,6 +297,23 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
                     "count_scope": "summary of the per-dataset rows above; not additional records",
                     "reason": f"{unknown_total:,} lines in {len(unknown_datasets)} datasets in no recognized format"})
     return out
+
+
+def _coverage_notes(sweep_detail: dict) -> list[dict]:
+    """What a reader of the counts should know about records that were evaluated: per target, how many Windows
+    records reached the hunt under more than one collection source. Each source's copy is its own event, so a
+    count over them may hold a record twice. Nothing here is a gap or data left unassessed."""
+    stats = sweep_detail.get("stats") or {}
+    reason = "Windows record seen under more than one collection source"
+    by_target = {target: int(reasons.get(reason) or 0)
+                 for target, reasons in sorted((stats.get("skips_by_target") or {}).items())}
+    rest = int((stats.get("skips") or {}).get(reason) or 0) - sum(by_target.values())
+    counted = [(target, count) for target, count in by_target.items() if count > 0]
+    if rest > 0:
+        counted.append(("all sweep targets", rest))
+    return [{"target": target, "records": count,
+             "note": (f"{count:,} Windows record{' was' if count == 1 else 's were'} seen under more than one "
+                      "collection source; counts may include copies")} for target, count in counted]
 
 
 def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: list[str] | None = None,
@@ -375,6 +400,8 @@ def coverage_for_hunt(repo: Repo, hunt_id: str) -> dict:
                          rule_ids=sorted(pinned_rule_ids(hm)),
                          sweep_finished=finished, metadata=hunt_rule_metadata(repo, manifest=hm))
     coverage["not_assessed"] = _not_assessed(hm, detail)
+    if notes := _coverage_notes(detail):
+        coverage["notes"] = notes
     coverage["baseline"] = _baseline_coverage(repo, hunt_id, hm)
     if network_coverage := (hm.get("internal_networks") or {}).get("coverage"):
         coverage["internal_networks"] = network_coverage

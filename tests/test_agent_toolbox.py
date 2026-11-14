@@ -680,3 +680,35 @@ def test_wrong_kind_unknown_alias_extra_arguments_and_handler_failures_are_struc
     assert extra["data"]["error"]["code"] == "invalid_arguments"
     assert failed["status"] == "failed"
     assert failed["data"]["error"]["code"] == "handler_failed"
+
+
+def test_records_under_two_collection_sources_are_a_coverage_note_and_leave_coverage_complete():
+    from romulus.evidence.windows import WINDOWS_MULTI_SOURCE_SKIP
+    from romulus.report.manifest import EVALUATED_SKIPS, coverage_for_hunt
+
+    assert EVALUATED_SKIPS == {WINDOWS_MULTI_SOURCE_SKIP}
+    repo = _repo(2)
+    repo.audit("system", "hunt.sweep_summary", "h1", {"finished": True, "stats": {
+        "skips": {WINDOWS_MULTI_SOURCE_SKIP: 3},
+        "skips_by_target": {"host-index": {WINDOWS_MULTI_SOURCE_SKIP: 3}},
+        "skips_scoped_global": {WINDOWS_MULTI_SOURCE_SKIP: 3},
+    }})
+    toolbox = Toolbox(repo, "h1")
+    entity = toolbox.execute("get_finding", {"finding": "F1"})["data"]["finding"]["entities"][0]["alias"]
+
+    profile = toolbox.execute("entity_profile", {"entity": entity, "page": 1})
+    assert profile["status"] == "complete" and profile["coverage"]["counts"]["not_assessed"] == 0
+    listed = toolbox.execute("list_findings", {"page": 1})["coverage"]
+    assert listed["status"] == "complete" and listed["counts"]["not_assessed"] == 0
+    coverage = coverage_for_hunt(repo, "h1")
+    note = "3 Windows records were seen under more than one collection source; counts may include copies"
+    assert coverage["not_assessed"] == []
+    assert coverage["notes"] == [{"target": "host-index", "records": 3, "note": note}]
+
+    # a skip that did leave records unassessed still counts beside it
+    repo.audit("system", "hunt.sweep_summary", "h1", {"finished": True, "stats": {
+        "skips": {WINDOWS_MULTI_SOURCE_SKIP: 3, "dataset: unsupported": 2},
+    }})
+    profile = Toolbox(repo, "h1").execute("entity_profile", {"entity": entity, "page": 1})
+    assert profile["status"] == "partial" and profile["coverage"]["counts"]["not_assessed"] == 1
+    assert coverage_for_hunt(repo, "h1")["notes"] == [{"target": "all sweep targets", "records": 3, "note": note}]

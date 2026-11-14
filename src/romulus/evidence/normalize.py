@@ -90,6 +90,7 @@ from romulus.evidence.windows import (
     nxlog_class_families,
     nxlog_clock_offset,
     nxlog_error_tag,
+    windows_record_digest,
     windows_record_key,
     windows_record_signature,
 )
@@ -3640,9 +3641,14 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                    skip_families: dict[str, frozenset[str] | None] | None = None,
                    surrogate_free: bool = False,
                    shapes: dict[str, int] | None = None,
+                   windows_records: dict[str, str] | None = None,
                    ) -> tuple[list[TypedEvent], dict[str, int], list[tuple[str, str]]]:
     """Normalize a batch. Returns (events, skip_counts, errors[(raw_id, error)]). `audit_parse` is passed to
     `group_audit`.
+
+    `windows_records`, when given, receives for each Windows event with a logical record identity its event id
+    and the record's digest without its collection source (`windows.windows_record_digest`): the events that two
+    collection sources made of one record have different ids and the same digest.
 
     Linux host records are read by their shipper shape (`linux_catalog.LINUX_SHIPPER_DATASETS`); `shapes`, when
     given, receives the count of records of each shape, and errors name the logical dataset. A record that is plainly
@@ -3717,6 +3723,8 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                             skips["record_id reused (log cleared or reverted)"] += 1
                         windows_signatures[logical_key].add(signature)
                         windows_events[identity] = windows_event
+                        if windows_records is not None:
+                            windows_records[windows_event.id] = windows_record_digest(logical_key, signature)
                 else:
                     known = {raw.key for raw in prior.raw}
                     prior.raw.extend(raw for raw in windows_event.raw if raw.key not in known)
