@@ -130,3 +130,38 @@ def test_live_profile_compiled_sweep_query_keeps_linux_audit_records():
     auditd = {"@timestamp": "2026-01-01T01:00:00Z", "event": {"dataset": "auditd.log", "module": "auditd"},
               "host": {"name": "web01"}, "auditd": {"data": {"syscall": "execve"}}}
     assert _matches(query, auditd, "@timestamp"), "an auditd event must remain inside the sweep's retrieval query"
+
+
+class DegradedClient(ProfileClient):
+    """A cluster where a shard of the index has no available copy: a strict search is refused, a partial one
+    answers from the shards it has."""
+
+    def __init__(self, *args, partial=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.partial_searches = 0
+        if not partial:
+            self.search_partial = None
+
+    def search(self, target, body):
+        if "aggs" in body:
+            raise SourceError("HTTP 503 POST /logs-b/_search: Search rejected due to missing shards [[logs-b][1]]")
+        return super().search(target, body)
+
+    def search_partial(self, target, body):
+        self.partial_searches += 1
+        return ProfileClient.search(self, target, body)
+
+
+def test_a_degraded_index_is_inventoried_from_the_shards_it_has_and_stated_incomplete():
+    client = DegradedClient({"auditd.log": 37}, linux_marker=True)
+    profile, _contract = build_profile(client, "logs-b")
+    assert client.partial_searches >= 1
+    notes = [note for note in profile.notes if "some shards did not answer" in note]
+    assert {note.split(" ", 1)[0] for note in notes} == {"ds", "hosts"}          # both inventories are incomplete
+    assert all("missing shards [[logs-b][1]]" in note for note in notes)
+    assert profile.datasets                                                       # what the shards held is listed
+
+
+def test_a_client_with_no_partial_search_still_refuses_a_degraded_index():
+    with pytest.raises(SourceError, match="missing shards"):
+        build_profile(DegradedClient({"auditd.log": 37}, linux_marker=True, partial=False), "logs-b")

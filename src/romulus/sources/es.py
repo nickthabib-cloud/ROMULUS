@@ -396,6 +396,12 @@ class ElasticClient:
             params["allow_partial_search_results"] = "false"
         return self.request("POST", path, body, params=params)
 
+    def search_partial(self, target: str | None, body: dict) -> dict:
+        """A search answered from the shards the cluster has. Only for a caller that states the answer is
+        incomplete: the source inventory, so one degraded index does not stop a hunt of the healthy ones."""
+        path = f"/{target}/_search" if target is not None else "/_search"
+        return self.request("POST", path, body, params={"filter_path": SEARCH_FILTER_PATH})
+
     def _open_pit(self, target: str) -> str:
         if self.flavor == "opensearch":
             # a PIT missing some shards would search those shards silently never: refuse to create one

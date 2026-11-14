@@ -245,6 +245,11 @@ class WindowsRecord:
         return self.data[name].origin
 
 
+# A hole between two collection sources' record ids names both things it can be: the ids alone cannot tell a missing
+# archive from two machines that share a computer name and count separately.
+BETWEEN_SOURCES_CAUSES = "(records missing, or separate machines sharing the name)"
+
+
 class RecordIdContinuity:
     """Streaming record-id and timestamp gap state spilled to a private SQLite file.
 
@@ -512,14 +517,16 @@ class RecordIdContinuity:
         for channel, groups in sorted(mapped_by_channel(source_gaps).items()):
             if len(groups) <= 10:
                 reasons += [
-                    f"shipper gaps: {count} records missing between collection sources on {channel} for {computer}"
+                    f"shipper gaps: {count} record ids not delivered between collection sources on {channel} for "
+                    f"{computer} {BETWEEN_SOURCES_CAUSES}"
                     for computer, count in groups
                 ]
             else:
                 sample = ", ".join(computer for computer, _count in groups[:10])
                 reasons.append(
-                    f"shipper gaps: {sum(int(count) for _computer, count in groups):,} records missing between "
-                    f"collection sources across {len(groups):,} hosts on {channel} (sample: {sample})"
+                    f"shipper gaps: {sum(int(count) for _computer, count in groups):,} record ids not delivered "
+                    f"between collection sources across {len(groups):,} hosts on {channel} "
+                    f"{BETWEEN_SOURCES_CAUSES} (sample: {sample})"
                 )
         for channel, groups in sorted(mapped_by_channel(time_gaps).items()):
             if len(groups) <= 10:

@@ -2221,8 +2221,8 @@ def test_a_grouped_identifier_holding_several_values_is_honestly_incomplete(tmp_
 
 # ---- record ids missing between the collection sources of one computer --------------------------------------
 
-BETWEEN_SOURCES = (f"shipper gaps: 96 records missing between collection sources on {SYSMON_CHANNEL} "
-                   "for ws01.example.test")
+BETWEEN_SOURCES = (f"shipper gaps: 96 record ids not delivered between collection sources on {SYSMON_CHANNEL} "
+                   "for ws01.example.test (records missing, or separate machines sharing the name)")
 SOURCE_CHANGES = {
     # an archived log file ends, and the live file is collected from a later record on
     "collected_files": ({"log__file__path": "C:\\Logs\\Archive-Sysmon-2026-01-01.evtx"},
@@ -2366,8 +2366,9 @@ def test_holes_between_sources_on_many_hosts_are_summarised():
     continuity = RecordIdContinuity()
     try:
         [reason] = continuity.observe("target", records)
-        assert reason.startswith(f"shipper gaps: 84 records missing between collection sources across 12 hosts "
-                                 f"on {SYSMON_CHANNEL} (sample: ws00.example.test, ")
+        assert reason.startswith(f"shipper gaps: 84 record ids not delivered between collection sources across 12 hosts "
+                                 f"on {SYSMON_CHANNEL} (records missing, or separate machines sharing the name) "
+                                 "(sample: ws00.example.test, ")
     finally:
         continuity.close()
 

@@ -534,3 +534,13 @@ def test_a_search_refused_for_a_missing_shard_is_a_failed_outcome_never_a_comple
     assert "missing shards" in out.error and out.buckets == []
     [search] = [request for request in requests if request.url.path == "/idx/_search"]
     assert search.url.params["allow_partial_search_results"] == "false"
+
+
+def test_the_inventory_fallback_search_takes_the_shards_the_cluster_has():
+    requests = []
+    client = ElasticClient(Settings(es_url="http://es"), transport=_cluster_missing_a_shard(requests))
+    answer = client.search_partial("idx", {"size": 0})
+    assert answer["_shards"] == {"failed": 0}
+    [search] = [request for request in requests if request.url.path == "/idx/_search"]
+    assert "allow_partial_search_results" not in search.url.params
+    assert search.url.params["filter_path"] == SEARCH_FILTER_PATH

@@ -84,7 +84,7 @@ PINNED_WINDOWS = {
     # A record's host addresses stand beside its stable source identifier, so clones that share the identifier
     # stay apart; a record-id sequence still follows the identifier alone. Record ids missing between the
     # sources of one computer are reported (continuity state only: no event changed).
-    "windows-ecs@23": "e9083f6098a722b6e1e00836579a5807fa11662fd3638a3722256ea38d647e9d",
+    "windows-ecs@23": "a6a945dcc19ed5b51efb406602f972d12574dbc11d673bbb7cb55eb505339222",
     # Stable source identity separates cloned machines while preserving same-source copies.
     "windows-ecs@22": "2deebdc059de6edd6ea01ceef343a1941a60305dcc5a4bdd6d20919f7d6b3434",
     # Shipper read time cannot replace the Windows event clock in duplicate identity.
@@ -121,7 +121,7 @@ PINNED_WINDOWS = {
 ECAR_EVIDENCE_FILES = ('community.py', 'ecar.py', 'ecar_catalog.py', 'raw_scrub.py', 'surrogates.py', 'windows.py')
 # Native epoch, ISO timestamps and pipeline-only exports retain ordered clock provenance. The Windows source
 # identity in windows.py is read by no eCAR record: its change moved this digest and no eCAR output.
-PINNED_ECAR = {"ecar@3": "0c4430f27419b51a35a049dbefc76151221d2c04e911a74204a2f0621c445584",
+PINNED_ECAR = {"ecar@3": "08636b2ca33ab4ecaab6f2330f478cac762f500ff4923799be69b496a32a4079",
                "ecar@2": "0b6340adce420e237b1633435c321244e88ec744ee37a7b83e7818b6d4439c75",
                "ecar@1": "539a0832b610df1dca02729b594756bb1a0ae70a9c825beec154611b0cde56cd"}
 ZEEK_EVIDENCE_FILES = ("certificates.py", "community.py", "ics_catalog.py", "rpc_catalog.py", "zeek.py", "zeek_catalog.py",
