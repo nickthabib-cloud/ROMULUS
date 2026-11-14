@@ -33,8 +33,8 @@ def _pair(metadata, *, shape="winlogbeat"):
      {"log": {"file": {"path": "/exports/b/Security.evtx"}}}),
     ({"host": {"ip": ["192.0.2.10"]}}, {"host": {"ip": ["192.0.2.11"]}}),
     # imaged after the agent first ran: the agent id and the machine GUID are shared, the addresses are not
-    ({"agent": {"type": "winlogbeat", "id": "imaged"}, "host": {"id": "imaged-guid", "ip": ["172.31.64.10"]}},
-     {"agent": {"type": "winlogbeat", "id": "imaged"}, "host": {"id": "imaged-guid", "ip": ["172.31.64.11"]}}),
+    ({"agent": {"type": "winlogbeat", "id": "imaged"}, "host": {"id": "imaged-guid", "ip": ["172.20.64.10"]}},
+     {"agent": {"type": "winlogbeat", "id": "imaged"}, "host": {"id": "imaged-guid", "ip": ["172.20.64.11"]}}),
 ])
 def test_identical_clone_records_with_distinct_sources_survive_in_batch_and_on_disk(tmp_path, shape, metadata):
     first, second = _pair(metadata, shape=shape)
@@ -111,7 +111,7 @@ def _cloned(*addresses):
 def test_copies_whose_host_addresses_differ_never_fold_whatever_their_identifiers_say():
     from romulus.evidence.windows import windows_source_identity
 
-    first, second = _pair((_cloned("172.31.64.10"), _cloned("172.31.64.11")))
+    first, second = _pair((_cloned("172.20.64.10"), _cloned("172.20.64.11")))
     events, skips, errors = normalize_hits([first, second])
     assert errors == [] and skips == {} and len(events) == 2
     assert all(not any(NOTE in note for note in event.caveats) for event in events)
@@ -131,7 +131,7 @@ def test_host_addresses_beside_an_identifier_are_canonical_and_order_independent
 
 
 def test_an_address_set_on_one_copy_only_keeps_both_copies():
-    first, second = _pair((CLONED, _cloned("172.31.64.10")))
+    first, second = _pair((CLONED, _cloned("172.20.64.10")))
     events, skips, errors = normalize_hits([first, second])
     assert errors == [] and skips == {} and len(events) == 2
 
@@ -150,7 +150,7 @@ def test_a_host_ip_value_that_is_no_address_adds_nothing_to_a_stable_identity():
 def test_a_readdressed_host_keeps_one_record_id_sequence(tmp_path):
     from romulus.evidence.windows import windows_continuity_source
 
-    first, second = _pair((_cloned("172.31.64.10"), _cloned("172.31.64.99")))
+    first, second = _pair((_cloned("172.20.64.10"), _cloned("172.20.64.99")))
     second["_source"]["winlog"]["record_id"] = 20
     second["_source"]["winlog"]["event_data"]["CommandLine"] = "cmd.exe /c after-renewal"
     assert windows_continuity_source(first) == windows_continuity_source(second)
@@ -224,7 +224,7 @@ def test_one_source_delivering_a_record_twice_is_a_duplicate_not_a_second_source
 
 
 def test_a_record_shipped_again_after_its_host_was_readdressed_is_kept_twice_and_counted(tmp_path):
-    first, second = _pair((_cloned("172.31.64.10"), _cloned("172.31.64.99")))
+    first, second = _pair((_cloned("172.20.64.10"), _cloned("172.20.64.99")))
     stage = EventStage(tmp_path)
     try:
         for hit in (first, second):

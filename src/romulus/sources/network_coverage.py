@@ -160,13 +160,19 @@ def _summary(result):
     share = result["outside_share"]
     text = (f"Observed private network addresses: {'at least ' if result['at_least'] and outside else ''}{outside} "
             f"of {count} distinct counted addresses outside the declared internal networks"
-            + (f" ({share:.1%})" if share is not None else "") + ". ")
+            + (f" ({share:.1%})" if share is not None else ""))
+    estimate = result["outside_estimate"]
+    if estimate is not None and estimate > outside:
+        # a listing that was cut short: the cluster's own count of what it was drawn from says how short
+        text += f"; one address field alone holds about {estimate:,} that may be outside"
+    text += ". "
     if result["prefixes"]:
         text += ("Uncovered prefixes (IPv4 /16, IPv6 ULA /48): " + ", ".join(result["prefixes"])
                  + (f"; {result['prefixes_omitted']} more" if result["prefixes_omitted"] else "") + ". ")
-    if state == "unknown":
-        text += ("Coverage unknown: the bounded observation is incomplete; counts are lower bounds and its share "
-                 "describes only counted addresses. " + "; ".join(result["reasons"]) + ". ")
+    if result["reasons"]:
+        text += (("Coverage unknown: the" if state == "unknown" else "The") + " bounded observation is incomplete; "
+                 "counts are lower bounds and its share describes only counted addresses. "
+                 + "; ".join(result["reasons"]) + ". ")
     elif state == "no_private_observed":
         text += "No RFC 1918, RFC 6598 or ULA addresses were observed; this does not require declaring private ranges. "
     if outside:
@@ -202,7 +208,7 @@ def _result(window, state, *, outside=(), covered=0, reasons=(), checked=(), unc
         "targets_omitted": omitted,
         "limits": {"terms_per_field": TERMS_SIZE, "distinct_private_addresses": DISTINCT_CAP,
                    "network_targets": TARGET_LIMIT},
-        "arkime": {"status": "checked" if arkime and state != "unknown" else "unknown", "targets": list(arkime),
+        "arkime": {"status": "checked" if arkime and not reasons else "unknown", "targets": list(arkime),
                    "note": ("Arkime session indices are checked through the configured search backend."
                             if arkime else "No queryable Arkime session target was configured; viewer-only coverage is unknown.")},
     }
@@ -226,9 +232,10 @@ def check_network_addresses(client, contracts: dict[str, FieldContract | None], 
     itself. Covered addresses are counted, not listed: the share's denominator is the listed uncovered addresses
     plus the largest covered count any one field holds, a lower bound on the union across fields and targets.
 
-    More uncovered addresses than one listing returns, a missing field or a failed response makes coverage
-    unknown and every count a lower bound; the uncovered prefixes that were seen are still named. The bounded
-    diagnostic does not affect detection retention, direction semantics or site settings.
+    More uncovered addresses than one listing returns, a missing field or a failed response makes every count a
+    lower bound (`at_least`) and warns. The answer is then `uncovered` when any uncovered address was listed,
+    naming the prefixes that were seen, and `unknown` only when none was. The bounded diagnostic does not affect
+    detection retention, direction semantics or site settings.
     """
     outside, inside = set(), set()
     checked, unchecked, reasons, arkime = [], {}, [], []
@@ -327,7 +334,9 @@ def check_network_addresses(client, contracts: dict[str, FieldContract | None], 
     if omitted:
         reasons.append(f"network target cap reached; {omitted} target(s) not checked")
     reasons.extend(f"{target}: {why}" for target, why in unchecked.items())
-    state = ("unknown" if reasons else "not_applicable" if not checked else
-             "uncovered" if outside else "covered" if covered else "no_private_observed")
+    # An uncovered address that was seen is a finding whatever else is incomplete; only an incomplete observation
+    # that saw none leaves the question open.
+    state = ("uncovered" if outside else "unknown" if reasons else "not_applicable" if not checked else
+             "covered" if covered else "no_private_observed")
     return _result(window, state, outside=outside, covered=covered, reasons=reasons, checked=checked,
                    unchecked=unchecked, omitted=omitted, invalid=invalid, arkime=arkime, estimate=estimate)

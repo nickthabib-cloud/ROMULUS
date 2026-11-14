@@ -288,7 +288,8 @@ def test_global_distinct_cap_is_honest_and_retains_known_uncovered(monkeypatch):
     monkeypatch.setattr(network_coverage, "DISTINCT_CAP", 2)
     source = EndpointSource({"a": [row("10.2.0.1"), row("10.2.0.2")], "b": [row("10.2.0.3")]})
     result = _check(source)
-    assert result["status"] == "unknown" and result["private_addresses"] == 2 and result["outside"] == 2
+    assert result["status"] == "uncovered" and result["at_least"] and result["warn"]
+    assert result["private_addresses"] == 2 and result["outside"] == 2
     assert "10.2.0.0/16" in result["prefixes"]
 
 
@@ -380,7 +381,7 @@ def test_late_uncovered_address_remains_visible_when_private_address_cap_is_full
     source = EndpointSource({"a": [row("10.1.0.1"), row("10.1.0.2"), row("10.1.0.3")], "z": [row("10.9.0.1")]},
                             {"a": LISTED, "z": LISTED})
     result = _check(source)
-    assert result["status"] == "unknown" and result["outside"] == 1
+    assert result["status"] == "uncovered" and result["at_least"] and result["warn"] and result["outside"] == 1
     assert "10.9.0.0/16" in result["prefixes"]
 
 
@@ -493,14 +494,14 @@ def _site_rows(hosts, peers):
 
 
 def test_an_undeclared_private_range_is_named_however_many_internet_peers_were_seen():
-    undeclared = [f"172.31.{n // 200}.{n % 200 + 1}" for n in range(400)]
+    undeclared = [f"172.20.{n // 200}.{n % 200 + 1}" for n in range(400)]
     declared = [f"192.168.4.{n}" for n in range(1, 101)]
     source = EndpointSource({"wire": _site_rows(undeclared + declared, _peers(5000))})
     result = _check(source, SiteNetworks.from_lists(["192.168.0.0/16"]))
     assert result["status"] == "uncovered" and result["warn"] and not result["at_least"]
     assert (result["outside"], result["covered"], result["private_addresses"]) == (400, 100, 500)
-    assert result["outside_share"] == .8 and result["prefixes"] == ["172.31.0.0/16"]
-    assert "172.31.0.0/16" in result["summary"] and "80.0%" in result["summary"]
+    assert result["outside_share"] == .8 and result["prefixes"] == ["172.20.0.0/16"]
+    assert "172.20.0.0/16" in result["summary"] and "80.0%" in result["summary"]
     assert len(source.requests) == 1
 
 
@@ -571,11 +572,13 @@ def test_more_uncovered_addresses_than_one_listing_holds_are_an_honest_lower_bou
     undeclared = [f"172.{16 + n // 750}.{n % 750 // 250}.{n % 250 + 1}" for n in range(1500)]
     source = EndpointSource({"wire": _site_rows(undeclared, _peers(5000))})
     result = _check(source, SiteNetworks.from_lists(["192.168.0.0/16"]))
-    assert result["status"] == "unknown" and result["at_least"] and result["warn"]
+    assert result["status"] == "uncovered" and result["at_least"] and result["warn"]
     assert result["outside"] == 1000 and result["outside_estimate"] == 1500
     # the listing is lowest first: all of 172.16.0.0/16 and the start of 172.17.0.0/16 were seen and are named
     assert result["prefixes"] == ["172.16.0.0/16", "172.17.0.0/16"]
     assert "at least 1000 of" in result["summary"] and "terms capped" in result["summary"]
+    assert "one address field alone holds about 1,500 that may be outside" in result["summary"]
+    assert "Coverage unknown" not in result["summary"] and "observation is incomplete" in result["summary"]
     assert len(source.requests) == 1
 
 
@@ -593,8 +596,12 @@ def test_keyword_address_fields_are_listed_unselected_and_judged_here():
     assert (result["status"], result["outside"], result["covered"]) == ("uncovered", 1, 2)
     ((_, body),) = source.requests
     assert set(body["aggs"]["source"]) == {"terms"}              # no address range can select from a keyword
-    crowded = EndpointSource({"wire": _site_rows(["172.31.0.9"], _peers(5000))}, {"wire": LISTED})
-    assert _check(crowded)["status"] == "unknown"                # more values than the listing holds
+    # more values than the listing holds: an uncovered address that was listed is still a finding, a lower bound;
+    # with none listed the question stays open
+    crowded = _check(EndpointSource({"wire": _site_rows(["172.20.0.9"], _peers(5000))}, {"wire": LISTED}))
+    assert (crowded["status"], crowded["outside"], crowded["at_least"], crowded["warn"]) == ("uncovered", 1, True, True)
+    unseen = _check(EndpointSource({"wire": _site_rows(["10.1.0.9"], _peers(5000))}, {"wire": LISTED}))
+    assert (unseen["status"], unseen["outside"], unseen["warn"]) == ("unknown", 0, True)
 
 
 # ---- doctor's lookback, and a diagnostic that cannot stop a hunt -------------------------------------------
