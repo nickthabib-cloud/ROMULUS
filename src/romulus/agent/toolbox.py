@@ -39,7 +39,7 @@ from romulus.detect.metadata import is_sigma_id, pinned_rule_ids
 from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.evidence.typed import TypedEvent
 from romulus.report.incidents import build_incident_graph
-from romulus.report.manifest import coverage_for_rules
+from romulus.report.manifest import EVALUATED_SKIPS, coverage_for_rules
 from romulus.store.db import digest
 from romulus.store.repo import FINAL_RANK_PASS, Repo
 
@@ -953,7 +953,9 @@ class Toolbox:
         finished = bool(sweep and detail.get("finished", detail.get("complete")))
         stats = detail.get("stats") or {}
         profiles = manifest.get("source_profiles") or {}
-        not_assessed = sum(1 for count in (stats.get("skips") or {}).values() if count)
+        # a reason about records that were evaluated leaves nothing unassessed
+        not_assessed = sum(1 for reason, count in (stats.get("skips") or {}).items()
+                           if count and reason not in EVALUATED_SKIPS)
         for target, retrieved in (stats.get("dataset_filter") or {}).items():
             inventory = (profiles.get(target) or {}).get("datasets")
             if not isinstance(inventory, dict):

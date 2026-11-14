@@ -595,6 +595,10 @@ def _render_body(m: dict, banner: str = BANNER) -> str:
                    f"{cell(item['count_scope'])} | {cell(item['reason'])} |")
     if not unassessed:
         out.append("| none | none | 0 | none | none |")
+    if notes := m["coverage"].get("notes"):
+        out += ["", "### Coverage notes", "",
+                "About records that were retrieved and evaluated. These are not gaps.", ""]
+        out += [f"- {esc(item['target'])}: {esc(item['note'])}" for item in notes]
     out += ["", (f"Context-only items (not listed above): {m['context_items']}. They remain in the JSON manifest "
                  "and the database."), "",
             "## Versions", "", fence(json.dumps(m["versions"], indent=2, sort_keys=True), "json"), ""]

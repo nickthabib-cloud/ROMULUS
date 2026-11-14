@@ -751,3 +751,20 @@ def test_canonical_manifest_orders_context_reaches_and_coverage_states_by_conten
     first = build("hunt-one", "z-alpha", "a-beta", "z-alpha-link", "a-beta-link")
     second = build("hunt-two", "a-alpha", "z-beta", "a-alpha-link", "z-beta-link")
     assert first == second
+
+
+def test_records_under_two_collection_sources_are_rendered_as_a_coverage_note_not_as_unassessed_data():
+    reason = "Windows record seen under more than one collection source"
+    repo, _ = _repo_with_finding()
+    plain = render(publish_revision(repo, "h1", "test"))
+    assert "### Coverage notes" not in plain                    # the section exists only when there is a note
+    repo.audit("system", "hunt.sweep_summary", "h1", {"finished": True, "stats": {
+        "skips": {reason: 1}, "skips_by_target": {"idx": {reason: 1}}, "skips_scoped_global": {reason: 1}}})
+    manifest = publish_revision(repo, "h1", "test")
+    note = "1 Windows record was seen under more than one collection source; counts may include copies"
+    assert manifest["coverage"]["notes"] == [{"target": "idx", "records": 1, "note": note}]
+    assert manifest["coverage"]["not_assessed"] == []
+    report = render(manifest)
+    assert ("### Coverage notes\n\nAbout records that were retrieved and evaluated. These are not gaps.\n\n"
+            f"- idx: {note}") in report
+    assert "collection source" not in report.split("### Data not assessed")[1].split("### Coverage notes")[0]

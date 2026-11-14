@@ -267,7 +267,7 @@ def test_sweep_reports_records_under_two_sources_and_leaves_the_search_result_as
     from romulus.evidence.windows_catalog import SYSMON, lookup_event_class
     from romulus.hunt import sweep as module
     from romulus.hunt.sweep import Sweep
-    from romulus.report.manifest import _not_assessed
+    from romulus.report.manifest import _coverage_notes, _not_assessed
     from romulus.sources.models import Completeness, SearchOutcome, Window
     from tests.test_sweep import _repo
     from tests.test_windows_coverage import START, SYSMON_CHANNEL, WindowsProcessRule, _contract, _hit, _site
@@ -306,11 +306,12 @@ def test_sweep_reports_records_under_two_sources_and_leaves_the_search_result_as
     assert "Windows record seen under more than one collection source" not in alone_stats["skips"]
     assert stats["skips"]["Windows record seen under more than one collection source"] == 2
     assert (cell["state"], cell["detail"].get("reasons", [])) == (alone["state"], alone["detail"].get("reasons", []))
-    rows = [row for row in _not_assessed({}, {"stats": stats}) if "collection source" in row["reason"]]
-    assert rows == [{"target": target, "dataset": None, "records": 2,
-                     "count_scope": "records retrieved in the hunt window",
-                     "reason": "2 Windows records were seen under more than one collection source; "
-                               "counts may include copies"}]
+    # the count is a note about evaluated records, not data left unassessed
+    assert _coverage_notes({"stats": stats}) == [{
+        "target": target, "records": 2,
+        "note": "2 Windows records were seen under more than one collection source; counts may include copies"}]
+    assert not any("collection source" in row["reason"] for row in _not_assessed({}, {"stats": stats}))
+    assert _coverage_notes({"stats": alone_stats}) == []
 
 
 def test_ephemeral_id_alone_is_not_a_stable_source():
