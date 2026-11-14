@@ -356,7 +356,8 @@ _CREDENTIAL_PART = re.compile(
     r"|csrf|xsrf|cookies?|tickets?|assertions?|saml[a-z]{0,12}"
     r"|[a-z]{1,24}(?:password|passwd|secret|token|sessid|sessionid|signature|credentials?)"
     r"|(?:u|user|usr|login|admin|db|root|my|new|old)pass(?:w|word|wd)?"
-    r"|x?(?:api|private|access|secret|license|master|encryption|app|client|user|auth|session|signing)key)$")
+    r"|x?(?:aws)?(?:secret)?(?:api|private|access|secret|license|master|encryption|app|client|user|auth|session"
+    r"|signing)key)$")
 
 
 def _credential_name(name):
@@ -534,7 +535,8 @@ _REDACTED_QUERY = "[redacted:credential-query]"
 # Spellings that can put a parameter delimiter inside a value once decoded (an encoded `%`, `&`, `;`, `=`, `?` or
 # `#`, or an HTML entity). With one of them present, where a credential's value ends is not known from the raw text.
 _AMBIGUOUS_QUERY = re.compile(r"%(?:25|26|3b|3d|3f|23)|&#|&[a-z0-9]{1,10};", re.IGNORECASE)
-_PARAMETER_START = re.compile("[?#]")
+# Where the path ends: the first `?`, or the first `#` that is not inside a numeric HTML entity (&#97;).
+_PARAMETER_START = re.compile(r"\?|#(?!(?<=&#)[xX]?[0-9a-fA-F]{1,6};)")
 
 
 def _has_credential_key(text):
@@ -703,7 +705,8 @@ class WebAttacks(Playbook):
         ("A page editor or preview that carries HTML with event-handler attributes, or markdown inline code that "
         "directly follows `=` or a word (`=`id``), in a request target."),
         "A delimiter list whose item follows a number and is a command name (titles=Windows 10|Dir).",
-        "An application that includes remote text files by design (page=https://other-site/readme.txt).",
+        ("An application that includes remote text files by design (page=https://other-site/readme.txt), or one of "
+         "the site's servers that is asked by design to fetch a script URL from another domain."),
         "A template placeholder holding arithmetic on literals ({{2+2}}) left unexpanded in a link.",
     )
     next_checks = ("Verify the target application and authorization, then inspect application and host evidence.",)
@@ -727,9 +730,10 @@ class WebAttacks(Playbook):
         "lanes": ("Every class stays lead, including 2xx and declared management sources. Roll-ups stay lead. "
                   "Severity medium: a request that succeeded would give a foothold on one application, and nothing "
                   "in the request shows that it did."),
-        "grouping": f"The first {PAIR_LEADS} sources at a destination and the first {PAIR_LEADS} destinations of a "
-                    "source keep their own leads; beyond that one roll-up per (destination, class) lists the "
-                    "sources and one per (source, class) lists the destinations, with exact member counts.",
+        "grouping": f"Once an endpoint has more than {PAIR_LEADS} pairs for a class, the {PAIR_LEADS} with the "
+                    "earliest first record keep their own leads, one roll-up per (destination, class) lists the "
+                    "sources and one per (source, class) lists the destinations, with exact member counts; the "
+                    "choice is read from record times, not from arrival order.",
     }
 
     def __init__(self):

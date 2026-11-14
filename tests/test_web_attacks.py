@@ -1104,6 +1104,7 @@ CREDENTIAL_KEYS = [
     "pAsSwOrD", "PaSsWoRd", "pass_word", "pass-word", "passw", "userpass", "user_pass", "upass", "secretkey",
     "xapikey", "csrf", "_csrf", "xsrf", "csrfmiddlewaretoken", "cookie", "ticket", "SAMLResponse", "SAMLRequest",
     "assertion", "oauth_verifier", "__RequestVerificationToken", "ASP.NET_SessionId", "data[User][password]",
+    "secretaccesskey", "AWSSecretAccessKey", "AccessKeyId",
 ]
 
 
@@ -1172,7 +1173,10 @@ def test_a_credential_value_runs_to_the_end_of_its_parameter(attack_rule, query,
     ("/../../etc/passwd;token=a?TOPSECRET", "/../../etc/passwd;token=[redacted]?[redacted]"),
     ("/../../etc/passwd;pwd=a#TOPSECRET?=&x=1", "/../../etc/passwd;pwd=[redacted]#[redacted]&x=1"),
     # a name that only appears once decoded: the target is withheld
-    ("/../../etc/passwd;p&#97;ssword=TOPSECRET", "[redacted:encoded-credential-parameters]"),
+    ("/../../etc/passwd;p&#97;ssword=TOPSECRET", "[redacted:encoded-path-parameters]"),
+    ("/../../etc/passwd?x=1#p&#x61;ssword=TOPSECRET", "/../../etc/passwd?[redacted:credential-query]"),
+    # the `#` of an entity does not start a fragment, so what follows the credential stays inside its segment
+    ("/../../etc/passwd;jsessionid=q&p&#97;ssword=a&amp;TOPSECRET?x=1", "/../../etc/passwd;jsessionid=[redacted]?x=1"),
     ("/../../etc/passwd%3Bpwd=a?TOPSECRET", "/../../etc/passwd%3Bpwd=[redacted]?[redacted]"),
     ("/../../etc/x%2Fgo%3Btoken%3DTOPSECRET", "[redacted:encoded-path-parameters]"),
     # a session path parameter does not cost the query its evidence
