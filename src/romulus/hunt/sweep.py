@@ -37,6 +37,7 @@ from romulus.errors import SourceError
 from romulus.evidence.ecar import ECAR_NORMALIZER
 from romulus.evidence.ecar_catalog import ECAR_FAMILIES, ECAR_ROWS
 from romulus.evidence.linux_catalog import (
+    CONTENT_TEXT_FAMILIES,
     LINUX_LOGICAL_DATASETS,
     LINUX_SHIPPER_DATASETS,
     LOGICAL_FAMILIES,
@@ -269,7 +270,7 @@ def delivered_families(profile: dict | None, contract: FieldContract | None) -> 
         # Any Windows-shaped record is normalized, whatever dataset name the shipper gave it.
         families |= _WINDOWS_FAMILIES
     if contract is not None and contract.linux_text_mixed is not False:
-        families |= TEXT_FAMILIES
+        families |= CONTENT_TEXT_FAMILIES
     return frozenset(families)
 
 
@@ -775,7 +776,7 @@ class Sweep:
         families: set[str] = set()
         for name, _count in short:
             fed = LINUX_DATASET_FAMILIES.get(name)
-            families |= set(fed) if fed is not None else set(TEXT_FAMILIES)
+            families |= set(fed) if fed is not None else set(CONTENT_TEXT_FAMILIES)
         cells = [self._cell(pb, target, DATASET_RECONCILIATION_PARTITION, "evaluated_partial",
                             detail={"reasons": [reason]})
                  for pb in self.pack

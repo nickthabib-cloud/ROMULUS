@@ -57,10 +57,10 @@ from romulus.evidence.linux_catalog import (
     APACHE_ERROR,
     AUDIT_EVENT,
     AUDIT_RECORD,
+    CONTENT_TEXT_FAMILIES,
     JOURNAL_FIELDS,
     JOURNAL_JSON,
     SYSLOG_LINE,
-    TEXT_FAMILIES,
     WATCH_PLACEHOLDERS,
     document_dataset,
     match_shape,
@@ -3851,7 +3851,7 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
         except Skip as s:
             skips[s.reason] += 1
             if isinstance(s, TextSkip) and skip_families is not None:
-                fed = TEXT_FAMILIES | (unmatched_families(h["_source"]) or frozenset())
+                fed = CONTENT_TEXT_FAMILIES | (unmatched_families(h["_source"]) or frozenset())
                 skip_families[s.reason] = (skip_families.get(s.reason) or frozenset()) | fed
         except (ValueError, KeyError, TypeError, AttributeError, OverflowError) as e:   # malformed: an error, not a crash
             errors.append((h["_id"], f"{ds}: {e}"))

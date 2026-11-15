@@ -93,8 +93,10 @@ LINUX_LOGICAL_DATASETS: tuple[str, ...] = tuple(LINUX_SHIPPER_DATASETS)
 # and syslog lines feed sshd/sudo/useradd/systemd records; plain text lines feed the same, sudo included.
 _AUDIT_ADMIN = frozenset({"account_change", "service_change", "audit_config", "system_state"})
 TEXT_FAMILIES = frozenset({"auth", "mail_message", "vpn_session", "dns_query", "http_access", "web_error",
-                           "net_flow", "net_alert", "process_observed", "service_change", "account_change",
-                           "privilege_use"})
+                           "net_flow", "process_observed", "service_change", "account_change", "privilege_use"})
+# Content-identified text also reads native application files a journal or syslog program never writes: an IDS alert
+# file (Suricata fast.log) feeds net_alert.
+CONTENT_TEXT_FAMILIES = TEXT_FAMILIES | {"net_alert"}
 LOGICAL_FAMILIES: dict[str, frozenset[str]] = {
     "linux.audit": frozenset({"process_exec", "net_socket", "auth", "file_change", "file_access", "kernel_module",
                               "process_observed"}) | _AUDIT_ADMIN,
@@ -102,7 +104,7 @@ LOGICAL_FAMILIES: dict[str, frozenset[str]] = {
     "linux.syslog": TEXT_FAMILIES,
     "apache.access": frozenset({"http_access"}),
     "apache.error": frozenset({"web_error"}),
-    "linux.text": TEXT_FAMILIES,
+    "linux.text": CONTENT_TEXT_FAMILIES,
 }
 FAMILY_DATASETS = {name: ("linux.audit",) for name in FAMILY_FIELDS}
 # event.module values (and the journald input type) whose documents are Linux host telemetry of one logical dataset:
