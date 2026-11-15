@@ -151,7 +151,7 @@ def groups_of(repo) -> dict[str, tuple]:
 
 def assert_promote_only(repo, before: list[str], after: list[str], k: int):
     """A permutation of the deterministic order in which sections never mix and no finding moves down by more than
-    k x MAX_EXCERPTS places: the findings that now come ahead of it but came after it are at most the shown excerpts
+    k x MAX_EXCERPTS places: the findings that now come ahead of it but came after it are at most the cited excerpts
     of k promoted groups. Everything that did not move keeps its deterministic relative order."""
     assert sorted(after) == sorted(before) and len(after) == len(set(after))
     groups = groups_of(repo)
@@ -179,9 +179,8 @@ def test_attack_groups_deep_in_the_order_are_promoted_within_their_section(tmp_p
     order = exported(repo, tmp_path)["order"]
     assert_promote_only(repo, before, order, k=2)
     section_start = min(order.index(f) for f in order if groups_of(repo)[f][0] == groups_of(repo)["z-attack-0"][0])
-    attack = [order.index(f"z-attack-{i}") for i in range(3)]
-    assert attack == list(range(section_start, section_start + 3))   # the shown excerpts lead their section
-    assert order.index("z-attack-3") > section_start + 3                  # the rest keeps its deterministic place
+    assert order[section_start] == "z-attack-0"                     # the cited excerpt leads its section
+    assert all(order.index(f"z-attack-{i}") > section_start + 1 for i in (1, 2, 3))   # the rest keeps its place
     # agent proposals are never triaged and never promoted
     assert all("agent.proposal" not in json.dumps(cards_of(request)) for request in provider.requests)
     assert summary["groups"]["excluded_agent"] == 1
@@ -198,7 +197,9 @@ def test_one_huge_promoted_group_moves_only_its_shown_findings(tmp_path):
     compute_rank_pass(repo, "h1", PASS_FINAL)
     _finished(repo)
     before = deterministic(repo)
-    policy = by_rule({"r.remote"})
+    def policy(cards):                                            # the huge group cites every excerpt
+        return {"groups": [verdict(c, "likely_attack", cites=[x["finding"] for x in c["claims"]])
+                           if c["rule"]["id"] == "r.remote" else verdict(c, "likely_benign") for c in cards]}
     summary = run_triage_pass(settings(), repo, "h1", FakeTriage(policy))
     order = exported(repo, tmp_path)["order"]
     assert_promote_only(repo, before, order, k=2)
@@ -208,7 +209,7 @@ def test_one_huge_promoted_group_moves_only_its_shown_findings(tmp_path):
     group = next(g for section in view["sections"] for g in section["promoted"])
     assert (group["moved"], group["in_deterministic_place"]) == (3, 932)
     text = render({**build_manifest(repo, "h1", "test"), "revision": {"number": 1, "id": "r1", "supersedes": None}})
-    assert "932 more in deterministic place" in text
+    assert "3 moved, 932 in deterministic place" in text
 
 
 def test_the_view_rows_page_by_index_and_publish_only_inserts(tmp_path):
@@ -420,10 +421,90 @@ def test_an_adversarial_model_promoting_everything_moves_at_most_k_groups_per_se
     with repo.engine.connect() as connection:
         promoted = connection.execute(select(t.ai_triage_group.c.section, t.ai_triage_group.c.best_position).where(
             t.ai_triage_group.c.status == "promoted").order_by(t.ai_triage_group.c.position)).all()
-    # with equal assessments the deterministic position decides, never the chunk or the model's own order
+    # with equal assessments the most buried group goes first, never the chunk or the model's own order
     for section in {row[0] for row in promoted}:
         positions = [row[1] for row in promoted if row[0] == section]
-        assert positions == sorted(positions)
+        assert positions == sorted(positions, reverse=True)
+
+
+def _leads_hunt():
+    """Five lead groups on one host each, at increasing depth in the unranked order, plus an urgent finding."""
+    repo = _repo()
+    rows = [_row("u-1", "r.u", lane="urgent", host="top")]
+    for group, priority in (("a", 90.0), ("b", 70.0), ("c", 50.0), ("d", 30.0), ("e", 10.0)):
+        rows += [_row(f"{group}-{i}", f"r.{group}", lane="lead", host=f"host-{group}", priority=priority,
+                      ts=START + timedelta(minutes=i)) for i in range(4)]
+    _insert(repo, rows)
+    return _finished(repo)
+
+
+def test_selection_takes_likely_attack_first_then_the_most_buried_with_ties_by_group(tmp_path):
+    from romulus.agent.triage_order import OrderWorkspace as Workspace
+    repo = _leads_hunt()
+    tiers = {"r.a": "likely_attack", "r.b": "possible_attack", "r.c": "likely_attack", "r.d": "possible_attack",
+             "r.e": "possible_attack"}
+    policy = (lambda cards: {"groups": [verdict(c, tiers.get(c["rule"]["id"], "likely_benign")) for c in cards]})
+    run_triage_pass(settings(agent_triage_promote_per_lane=3), repo, "h1", FakeTriage(policy))
+    with repo.engine.connect() as connection:
+        promoted = [row[0] for row in connection.execute(select(t.ai_triage_group.c.rule_id).where(
+            t.ai_triage_group.c.status == "promoted").order_by(t.ai_triage_group.c.position))]
+    assert promoted == ["r.c", "r.a", "r.e"]          # likely: most buried first; then the most buried possible
+    order = exported(repo, tmp_path)["order"]
+    assert order[:4] == ["u-1", "c-0", "a-0", "e-0"]  # group by group in selection order, cited excerpts only
+    # equal depth (an impossible tie in a real order) falls back to the group number
+    with Workspace(repo, "h1", directory=str(tmp_path / "w")) as ws:
+        ws.build()
+        ws.db.execute("DROP INDEX g_section_best")
+        ws.db.execute("UPDATE g SET best = 99 WHERE group_no IN (2, 3)")
+        for number in (2, 3):
+            ws.set_verdict(number, status="assessed", assessment="likely_attack")
+        assert ws.promote(1, ("likely_attack",))[2] == [2]
+
+
+def test_only_cited_findings_move_and_a_group_citing_nothing_moves_nothing(tmp_path):
+    repo = _leads_hunt()
+    before = deterministic(repo)
+
+    def policy(cards):
+        out = []
+        for card in cards:
+            ids = [x["finding"] for x in card["claims"]]
+            if card["rule"]["id"] == "r.e":
+                out.append(verdict(card, "likely_attack", cites=[ids[2], ids[0]]))   # two of three, out of order
+            elif card["rule"]["id"] == "r.d":
+                out.append(verdict(card, "likely_attack", cites=[]))
+            else:
+                out.append(verdict(card, "likely_benign"))
+        return {"groups": out}
+    summary = run_triage_pass(settings(), repo, "h1", FakeTriage(policy))
+    assert summary["groups"]["findings_moved"]["Investigative leads"] == 2
+    order = exported(repo, tmp_path)["order"]
+    assert_promote_only(repo, before, order, k=2)
+    assert order[1:3] == ["e-0", "e-2"] and order.index("e-1") > order.index("a-3")   # cited, in deterministic order
+    assert [f for f in order if f.startswith("d-")] == ["d-0", "d-1", "d-2", "d-3"]
+    assert order.index("d-0") == before.index("d-0") + 2                                # moved nothing
+    view = build_manifest(repo, "h1", "test")["ai_triage"]
+    groups = {g["rule_id"]: g for section in view["sections"] for g in section["promoted"]}
+    assert groups["r.d"]["nothing_cited"] and groups["r.d"]["moved"] == 0
+    assert groups["r.e"]["moved_ids"] == ["e-0", "e-2"] and groups["r.e"]["in_deterministic_place"] == 2
+    text = render({**build_manifest(repo, "h1", "test"), "revision": {"number": 1, "id": "r1", "supersedes": None}})
+    assert "promoted, nothing cited" in text
+
+
+def test_a_pass_placed_under_another_version_is_stale(tmp_path):
+    repo = _leads_hunt()
+    run_triage_pass(settings(), repo, "h1", FakeTriage(by_rule({"r.e"})))
+    assert write_export(repo, "h1", tmp_path / "now.json")["placement"] == "triage-placement@3"
+    with repo.engine.begin() as connection:                       # a pass recorded under the earlier placement
+        row = connection.execute(select(t.audit_event.c.id, t.audit_event.c.detail).where(
+            t.audit_event.c.action == "hunt.ai_triage_summary")).one()
+        detail = {key: value for key, value in row.detail.items() if key != "placement"}
+        connection.execute(t.audit_event.update().where(t.audit_event.c.id == row.id).values(detail=detail))
+    with pytest.raises(StaleTriage):
+        write_export(repo, "h1", tmp_path / "old.json")
+    assert build_manifest(repo, "h1", "test")["ai_triage"]["stale"]
+    provider = FakeTriage(by_rule({"r.e"}))
+    assert not run_triage_pass(settings(), repo, "h1", provider).get("reused") and provider.requests
 
 
 def test_ids_outside_the_set_and_malformed_items_are_dropped_and_counted(tmp_path):

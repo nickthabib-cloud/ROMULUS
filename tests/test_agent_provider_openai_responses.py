@@ -175,7 +175,7 @@ def test_a_reply_outside_the_response_schema_is_invalid_json(api):
     api.post("/responses").mock(return_value=streamed(response(message('{"ok": "yes"}'))))
     p, _ = build()
     result = p.chat(ask(response_schema=TOOL.parameters))
-    assert result.status == "invalid_json" and "expected boolean" in result.error
+    assert result.status == "invalid_json" and "ok: type_mismatch" in result.error and "yes" not in result.error
 
 
 def test_secrets_are_redacted_from_every_outgoing_message(api):

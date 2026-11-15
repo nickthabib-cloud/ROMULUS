@@ -13,9 +13,16 @@ With the anthropic refusal fallback on, another model may answer a call the conf
 own prices, after the declined attempt was billed too. Each billed attempt is priced by the model that served it
 (an attempt whose model is unknown at the dearer of the two price lists), and the worst case of the next call
 reserves one full attempt at each model's prices.
+
+The token budget counts budget tokens, weighted by price: an uncached prompt token and an output token count once,
+a prompt token read from the cache counts AGENT_CACHE_READ_TOKEN_WEIGHT and one written to it
+AGENT_CACHE_WRITE_TOKEN_WEIGHT (the anthropic provider only; every other provider counts each token once, so its
+budget tokens equal its raw tokens). The raw counts are recorded as well. The worst case of the next call counts its
+whole prompt at the dearest of the three weights, since any of it may be written to the cache.
 """
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -60,6 +67,10 @@ class BudgetLimits:
     price_fallback_output_per_mtok: float = 0.0
     price_fallback_cache_read_per_mtok: float = 0.0    # 0: the fallback input price
     price_fallback_cache_write_per_mtok: float = 0.0   # 0: the fallback input price
+    # what one prompt token read from / written to the cache counts against the token budget, relative to an
+    # uncached one
+    cache_read_token_weight: float = 1.0
+    cache_write_token_weight: float = 1.0
 
     @classmethod
     def from_settings(cls, s: Settings) -> BudgetLimits:
@@ -74,7 +85,9 @@ class BudgetLimits:
                    s.agent_price_fallback_input_per_mtok if fallback else 0.0,
                    s.agent_price_fallback_output_per_mtok if fallback else 0.0,
                    s.agent_price_fallback_cache_read_per_mtok if fallback else 0.0,
-                   s.agent_price_fallback_input_per_mtok * ANTHROPIC_CACHE_WRITE_MULTIPLIER if fallback else 0.0)
+                   s.agent_price_fallback_input_per_mtok * ANTHROPIC_CACHE_WRITE_MULTIPLIER if fallback else 0.0,
+                   cache_read_token_weight=s.agent_cache_read_token_weight if anthropic else 1.0,
+                   cache_write_token_weight=s.agent_cache_write_token_weight if anthropic else 1.0)
 
     def as_dict(self) -> dict:
         out = {"max_calls": self.max_calls, "max_tokens": self.max_tokens,
@@ -91,19 +104,29 @@ class BudgetLimits:
                     "price_fallback_cache_read_per_mtok": self.price_fallback_cache_read_per_mtok,
                     "price_fallback_cache_write_per_mtok": self.price_fallback_cache_write_per_mtok}
         out.update({k: v for k, v in optional.items() if v})
+        # token weights only where they differ from counting each token once
+        out.update({k: v for k, v in (("cache_read_token_weight", self.cache_read_token_weight),
+                                      ("cache_write_token_weight", self.cache_write_token_weight)) if v != 1.0})
         return out
 
     @classmethod
     def from_dict(cls, budgets: dict, model: str = "") -> BudgetLimits:
-        """The limits a hunt manifest recorded (`as_dict`), for the configured `model`."""
+        """The limits a hunt manifest recorded (`as_dict`), for the configured `model`. A record without token
+        weights counts each token once."""
         def price(key: str) -> float:
             return float(budgets.get(key) or 0.0)
+
+        def weight(key: str) -> float:
+            value = budgets.get(key)
+            return 1.0 if value is None else float(value)
         return cls(int(budgets["max_calls"]), int(budgets["max_tokens"]), int(budgets["max_wall_seconds"]),
                    price("max_cost_usd"), price("price_input_per_mtok"), price("price_output_per_mtok"),
                    price("price_cache_read_per_mtok"), price("price_cache_write_per_mtok"), model,
                    bool(budgets.get("refusal_fallback")), price("price_fallback_input_per_mtok"),
                    price("price_fallback_output_per_mtok"), price("price_fallback_cache_read_per_mtok"),
-                   price("price_fallback_cache_write_per_mtok"))
+                   price("price_fallback_cache_write_per_mtok"),
+                   cache_read_token_weight=weight("cache_read_token_weight"),
+                   cache_write_token_weight=weight("cache_write_token_weight"))
 
     @property
     def cache_read_price(self) -> float:
@@ -158,8 +181,37 @@ class BudgetLimits:
             worst += self.fallback_prices.worst(prompt_tokens, completion_tokens)
         return worst
 
+    @property
+    def weighted(self) -> bool:
+        return self.cache_read_token_weight != 1.0 or self.cache_write_token_weight != 1.0
+
+    @property
+    def attempts_reserved(self) -> int:
+        return 2 if self.refusal_fallback else 1
+
+    def _prompt_weight(self, prompt: int, cache_read: int, cache_write: int) -> float:
+        if not self.weighted:
+            return float(prompt)
+        uncached = max(prompt - cache_read - cache_write, 0)
+        return uncached + cache_read * self.cache_read_token_weight + cache_write * self.cache_write_token_weight
+
+    def budget_prompt_tokens(self, charge: Charge) -> int:
+        """The prompt tokens of a call's charge as budget tokens, weighted by price, rounded up."""
+        items = charge.parts or (charge,)
+        return math.ceil(round(sum(self._prompt_weight(p.prompt, p.cache_read, p.cache_write) for p in items), 6))
+
+    def budget_tokens(self, charge: Charge) -> int:
+        """A call's charge as budget tokens, weighted by price: its weighted prompt tokens and its output tokens."""
+        return self.budget_prompt_tokens(charge) + charge.completion
+
+    def worst_prompt_tokens(self, prompt_tokens: int) -> int:
+        """The most budget tokens a prompt of this size can count, however it is cached, for every attempt that may
+        be billed."""
+        dearest = max(1.0, self.cache_read_token_weight, self.cache_write_token_weight)
+        return math.ceil(round(prompt_tokens * dearest, 6)) * self.attempts_reserved
+
     def worst_tokens(self, prompt_tokens: int, completion_tokens: int) -> int:
-        return (prompt_tokens + completion_tokens) * (2 if self.refusal_fallback else 1)
+        return self.worst_prompt_tokens(prompt_tokens) + completion_tokens * self.attempts_reserved
 
     @property
     def priced(self) -> bool:
@@ -235,11 +287,16 @@ def charged_tokens(result: ChatResult) -> tuple[int, int, bool]:
 
 
 class AgentBudget:
+    """`tokens` counts raw tokens; `budget_tokens` counts them weighted by price, and is what the token limit
+    holds."""
+
     def __init__(self, limits: BudgetLimits, *, calls: int = 0, tokens: int = 0, cost_usd: float = 0.0,
-                 wall_seconds_before: float = 0.0, clock: Callable[[], float] = time.monotonic):
+                 budget_tokens: int | None = None, wall_seconds_before: float = 0.0,
+                 clock: Callable[[], float] = time.monotonic):
         self.limits = limits
         self.calls = calls
         self.tokens = tokens
+        self.budget_tokens = tokens if budget_tokens is None else budget_tokens
         self.cost_usd = cost_usd
         self.estimated = False
         self.wall_seconds_before = wall_seconds_before
@@ -249,7 +306,9 @@ class AgentBudget:
     @classmethod
     def from_usage(cls, limits: BudgetLimits, usage: dict, **kwargs) -> AgentBudget:
         """Continue from `Repo.agent_usage` totals."""
-        budget = cls(limits, calls=int(usage.get("calls", 0)), tokens=int(usage.get("tokens", 0)),
+        tokens = int(usage.get("tokens", 0))
+        budget = cls(limits, calls=int(usage.get("calls", 0)), tokens=tokens,
+                     budget_tokens=int(usage.get("budget_tokens", tokens)),
                      cost_usd=float(usage.get("cost_usd", 0.0)), **kwargs)
         budget.estimated = bool(usage.get("estimated"))
         return budget
@@ -264,9 +323,9 @@ class AgentBudget:
         if self.calls + 1 > lim.max_calls:
             raise BudgetExhausted("calls", f"{self.calls} of {lim.max_calls} calls used")
         worst = lim.worst_tokens(prompt_tokens_est, max_output_tokens)
-        if self.tokens + worst > lim.max_tokens:
-            raise BudgetExhausted("tokens", f"{self.tokens} of {lim.max_tokens} tokens used; the next call "
-                                            f"could use up to {worst}")
+        if self.budget_tokens + worst > lim.max_tokens:
+            raise BudgetExhausted("tokens", f"{self.budget_tokens} of {lim.max_tokens} budget tokens (weighted by "
+                                            f"price) used; the next call could use up to {worst}")
         elapsed = self.wall_seconds()
         if elapsed >= lim.max_wall_seconds:
             raise BudgetExhausted("wall-clock", f"{elapsed:.0f} s of {lim.max_wall_seconds} s used")
@@ -278,13 +337,16 @@ class AgentBudget:
 
     def _add(self, charge: Charge) -> dict:
         cost = self.limits.charge_cost(charge)
+        weighted = self.limits.budget_tokens(charge)
         self.calls += 1
         self.tokens += charge.prompt + charge.completion
+        self.budget_tokens += weighted
         self.cost_usd += cost
         self.estimated = self.estimated or charge.estimated
         return {"prompt_tokens": charge.prompt, "completion_tokens": charge.completion,
                 "cache_read_tokens": charge.cache_read, "cache_write_tokens": charge.cache_write,
-                "cost_usd": cost, "estimated": charge.estimated, "worst_case": charge.worst_case}
+                "budget_tokens": weighted, "cost_usd": cost, "estimated": charge.estimated,
+                "worst_case": charge.worst_case}
 
     def charge(self, result: ChatResult) -> dict:
         """Record one completed call; returns what it was charged."""
@@ -295,7 +357,7 @@ class AgentBudget:
         return self._add(charge_parts(parts_of(getattr(exc, "billed", None))))
 
     def snapshot(self) -> dict:
-        return {"calls": self.calls, "tokens": self.tokens,
-                "cost_usd": round(self.cost_usd, 6) if self.limits.priced else None,
+        return {"calls": self.calls, "tokens": self.tokens, "budget_tokens": self.budget_tokens,
+                "cost_usd":round(self.cost_usd, 6) if self.limits.priced else None,
                 "wall_seconds": round(self.wall_seconds(), 1), "usage_estimated": self.estimated,
                 "limits": self.limits.as_dict()}

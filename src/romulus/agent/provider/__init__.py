@@ -204,6 +204,9 @@ def record_call(repo, provider: ChatProvider, *, hunt_id: str, purpose: str, req
                "attempts": result.attempts, "usage_estimated": charge.estimated}
     if charge.cache_read or charge.cache_write:
         options.update(cache_read_tokens=charge.cache_read, cache_write_tokens=charge.cache_write)
+    if not charge.estimated:
+        # what the call counts against the token budget: its tokens weighted by price
+        options["budget_tokens"] = limits.budget_tokens(charge)
     if charge.worst_case:
         options["usage_worst_case"] = True     # an attempt that broke off mid-reply, charged at its full allowance
     if result.details:
@@ -241,7 +244,8 @@ def record_failure(repo, provider: ChatProvider, *, hunt_id: str, purpose: str, 
         "id": call_id, "hunt_id": hunt_id, "case_id": None, "session_id": session_id,
         "purpose": purpose, "model": provider.model,
         "options": {"attempts": len(charge.parts), "usage_estimated": False,
-                    "billed_failure": type(error).__name__, "billed": [part.__dict__ for part in charge.parts]},
+                    "billed_failure": type(error).__name__, "billed": [part.__dict__ for part in charge.parts],
+                    "budget_tokens": limits.budget_tokens(charge)},
         "prompt_digest": digest({"messages": request.messages, "tools": [tool.__dict__ for tool in request.tools],
                                  "schema": request.response_schema}),
         "prompt_tokens_est": 0, "prompt_eval_count": charge.prompt, "eval_count": charge.completion,

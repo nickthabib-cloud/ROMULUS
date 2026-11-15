@@ -43,6 +43,10 @@ def parse_env_file(path: Path) -> dict[str, str]:
     return out
 
 
+# a model id as providers list them: letters, digits and . _ : / -, bounded
+MODEL_ID = re.compile(r"[A-Za-z0-9._:/-]{1,128}")
+
+
 class Settings(BaseModel):
     home: Path = Path.home() / "romulus"
     site: str = ""
@@ -151,6 +155,11 @@ class Settings(BaseModel):
     agent_price_fallback_input_per_mtok: float = Field(default=0.0, ge=0.0)
     agent_price_fallback_output_per_mtok: float = Field(default=0.0, ge=0.0)
     agent_price_fallback_cache_read_per_mtok: float = Field(default=0.0, ge=0.0)
+    # anthropic only: what one prompt token read from / written to the prompt cache counts against the token budgets
+    # (AGENT_MAX_TOKENS and the triage input budget), relative to an uncached one, as the API prices them: a cache
+    # read at about a tenth of the input price, a five-minute cache write at 1.25 times it. Output tokens count once.
+    agent_cache_read_token_weight: float = Field(default=0.1, gt=0.0, le=1.0)
+    agent_cache_write_token_weight: float = Field(default=1.25, ge=1.0, le=10.0)
     agent_max_tool_calls_per_session: int = Field(default=25, ge=1, le=500)
     agent_max_source_queries: int = Field(default=200, ge=1, le=100_000)
     agent_concurrency: int = Field(default=2, ge=1, le=16)
@@ -165,10 +174,12 @@ class Settings(BaseModel):
     # after the agent phase when the agent is enabled, or on demand with `romulus triage`. It never changes lanes,
     # ranks, the Reported set, citations or the deterministic report order. The model sees deterministic group cards
     # (one per rule and primary target in a report section) in budget-sized chunks. Within each report section at
-    # most `agent_triage_promote_per_lane` groups are promoted, and each moves ahead only the (at most three)
-    # findings the model was shown for it. Ten groups fill an analyst's first screen, and no finding moves down by
-    # more than 10 x 3 = 30 places.
+    # most `agent_triage_promote_per_lane` groups are promoted (likely attack before possible, the most buried
+    # first), and each moves ahead only the (at most three) findings the model cited for it. Ten groups fill an
+    # analyst's first screen, and no finding moves down by more than 10 x 3 = 30 places.
     agent_triage: Literal["on", "off"] = "on"
+    # the triage pass's model on the same provider; empty: AGENT_MODEL (`romulus triage --agent-model` overrides both)
+    agent_triage_model: str = ""
     agent_triage_promote_per_lane: int = Field(default=10, ge=0, le=100)
     agent_triage_max_calls: int = Field(default=100, ge=1, le=10_000)
     # totals for one triage pass, checked before each call against its worst case (prompt estimate, and the
@@ -244,6 +255,15 @@ class Settings(BaseModel):
     def _agent_refusal_fallback(cls, v: str) -> str:
         if v not in ("default", "off"):
             raise ValueError("AGENT_REFUSAL_FALLBACK must be default or off")
+        return v
+
+    @field_validator("agent_triage_model")
+    @classmethod
+    def _agent_triage_model(cls, v: str) -> str:
+        v = v.strip()
+        if v and not MODEL_ID.fullmatch(v):
+            raise ValueError("AGENT_TRIAGE_MODEL must be empty or a model id of 1 to 128 letters, digits and "
+                             ". _ : / - characters")
         return v
 
     @field_validator("model_egress", mode="before")
@@ -342,6 +362,8 @@ ENV_MAP = {
     "AGENT_PRICE_FALLBACK_INPUT_PER_MTOK": "agent_price_fallback_input_per_mtok",
     "AGENT_PRICE_FALLBACK_OUTPUT_PER_MTOK": "agent_price_fallback_output_per_mtok",
     "AGENT_PRICE_FALLBACK_CACHE_READ_PER_MTOK": "agent_price_fallback_cache_read_per_mtok",
+    "AGENT_CACHE_READ_TOKEN_WEIGHT": "agent_cache_read_token_weight",
+    "AGENT_CACHE_WRITE_TOKEN_WEIGHT": "agent_cache_write_token_weight",
     "AGENT_MAX_TOOL_CALLS_PER_SESSION": "agent_max_tool_calls_per_session",
     "AGENT_MAX_SOURCE_QUERIES": "agent_max_source_queries",
     "AGENT_CONCURRENCY": "agent_concurrency",
@@ -352,6 +374,7 @@ ENV_MAP = {
     "AGENT_MAX_FINDINGS": "agent_max_findings", "AGENT_MAX_LINKS": "agent_max_links",
     "AGENT_MAX_NOTES": "agent_max_notes",
     "AGENT_TRIAGE": "agent_triage",
+    "AGENT_TRIAGE_MODEL": "agent_triage_model",
     "AGENT_TRIAGE_PROMOTE_PER_LANE": "agent_triage_promote_per_lane",
     "AGENT_TRIAGE_MAX_CALLS": "agent_triage_max_calls",
     "AGENT_TRIAGE_MAX_INPUT_TOKENS": "agent_triage_max_input_tokens",
@@ -377,10 +400,6 @@ def load_settings(env_file: Path | None = None, environ: dict[str, str] | None =
     return Settings(**kwargs)
 
 
-# a model id as providers list them: letters, digits and . _ : / -, bounded
-MODEL_ID = re.compile(r"[A-Za-z0-9._:/-]{1,128}")
-
-
 def with_agent_model(settings: Settings, model: str | None) -> Settings:
     """`settings` with AGENT_MODEL replaced for one run (nothing is written back); unchanged when `model` is None.
     Raises ValueError for anything but a plain model id."""
@@ -389,6 +408,22 @@ def with_agent_model(settings: Settings, model: str | None) -> Settings:
     if not MODEL_ID.fullmatch(model):
         raise ValueError("--agent-model must be a model id of 1 to 128 letters, digits and . _ : / - characters")
     return settings.model_copy(update={"agent_model": model})
+
+
+def triage_model(settings: Settings, model: str | None = None) -> tuple[str, str]:
+    """The triage pass's model and where it came from: `model` (`romulus triage --agent-model`), else
+    AGENT_TRIAGE_MODEL, else AGENT_MODEL. Raises ValueError for a malformed `model`."""
+    if model is not None:
+        return with_agent_model(settings, model).agent_model, "--agent-model"
+    if settings.agent_triage_model:
+        return settings.agent_triage_model, "AGENT_TRIAGE_MODEL"
+    return settings.agent_model.strip(), "AGENT_MODEL"
+
+
+def triage_settings(settings: Settings, model: str | None = None) -> Settings:
+    """`settings` for the triage pass: AGENT_MODEL replaced by its model (`triage_model`), for that pass only."""
+    chosen, _source = triage_model(settings, model)
+    return settings if chosen == settings.agent_model else settings.model_copy(update={"agent_model": chosen})
 
 
 def short_secrets(settings: Settings) -> list[str]:

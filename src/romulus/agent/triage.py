@@ -9,9 +9,9 @@ it is length-capped, carried as escaped JSON between data markers, flagged when 
 an instruction; the output checks hold whatever it says.
 
 Within each report section at most `agent_triage_promote_per_lane` groups assessed as likely or possible attack are
-promoted, the stronger assessment first, then by deterministic position. A promoted group moves ahead only the findings
-the model was shown for it (its claim excerpts, at most MAX_EXCERPTS, the only ones it could cite); the rest of the
-group and every other finding keep their deterministic place. Nothing is removed or hidden, and no finding moves down
+promoted, the stronger assessment first, then the most buried first. A promoted group moves ahead only the findings the
+model cited for it (among its claim excerpts, at most MAX_EXCERPTS); the rest of the group and every other finding keep
+their deterministic place (`triage_order`). Nothing is removed or hidden, and no finding moves down
 by more than promote-per-lane x MAX_EXCERPTS findings.
 Agent-proposed findings are never triaged. Triage changes no lane, rank, Reported flag, candidate, citation or the
 deterministic report order, which stays authoritative.
@@ -45,8 +45,16 @@ from romulus.agent.provider import (
 )
 from romulus.agent.provider.base import estimate_tokens
 from romulus.agent.provider.budget import Charge
+from romulus.agent.refusals import reason
 from romulus.agent.safety import injection_flags
-from romulus.agent.triage_order import GROUPING_VERSION, MAX_TEXT, OrderWorkspace, StageRefused, clip
+from romulus.agent.triage_order import (
+    GROUPING_VERSION,
+    MAX_TEXT,
+    PLACEMENT_VERSION,
+    OrderWorkspace,
+    StageRefused,
+    clip,
+)
 from romulus.config import Settings
 from romulus.store.db import digest
 from romulus.store.repo import TRIAGE_FAILED, TRIAGE_PURPOSE, TRIAGE_SUMMARY, Repo, is_lease_lost
@@ -89,6 +97,17 @@ TRIAGE_SCHEMA = {
     "additionalProperties": False,
 }
 _LABEL = re.compile(LABEL_PATTERN)
+# each reason an answer item is dropped for, as the field path and error type its call row records
+# (romulus.agent.refusals): never the item's values
+DROP_REASONS = {
+    "parse_failure": "$: parse_failure", "malformed_item": "groups[]: malformed_item",
+    "unknown_group": "groups[].group_id: unknown_group", "duplicate_group": "groups[].group_id: duplicate_group",
+    "bad_assessment": "groups[].assessment: enum_mismatch",
+    "bad_incident_label": "groups[].incident_label: pattern_mismatch",
+    "missing_rationale": "groups[].rationale: missing", "overlong_rationale": "groups[].rationale: too_long",
+    "malformed_cites": "groups[].cites: type_mismatch", "too_many_cites": "groups[].cites: too_many_items",
+    "foreign_citation": "groups[].cites[]: foreign_citation",
+}
 
 
 def _prompt() -> str:
@@ -97,15 +116,17 @@ def _prompt() -> str:
 
 
 class TriageBudget(AgentBudget):
-    """The pass's own budget: calls, wall time, and prompt and output tokens counted separately. Each call is checked
-    before it starts against its worst case (its prompt estimate and the provider's full output allowance, doubled
-    when a refusal fallback may answer it too)."""
+    """The pass's own budget: calls, wall time, and prompt and output tokens counted separately. Prompt tokens count
+    as budget tokens, weighted by price (`BudgetLimits.budget_prompt_tokens`); the raw counts are kept too. Each call
+    is checked before it starts against its worst case (its prompt estimate at the dearest token weight and the
+    provider's full output allowance, doubled when a refusal fallback may answer it too)."""
 
     def __init__(self, limits: BudgetLimits, *, max_input_tokens: int, max_output_tokens: int, **kwargs):
         super().__init__(limits, **kwargs)
         self.max_input_tokens = max_input_tokens
         self.max_output_tokens = max_output_tokens
         self.input_tokens = 0
+        self.budget_input_tokens = 0
         self.output_tokens = 0
 
     @classmethod
@@ -119,21 +140,25 @@ class TriageBudget(AgentBudget):
 
     def check(self, prompt_tokens_est: int, max_output_tokens: int) -> None:
         super().check(prompt_tokens_est, max_output_tokens)
-        factor = 2 if self.limits.refusal_fallback else 1
-        if self.input_tokens + prompt_tokens_est * factor > self.max_input_tokens:
-            raise BudgetExhausted("input-tokens", f"{self.input_tokens} of {self.max_input_tokens} prompt tokens "
-                                                  f"used; the next call could use up to {prompt_tokens_est * factor}")
+        factor = self.limits.attempts_reserved
+        worst_prompt = self.limits.worst_prompt_tokens(prompt_tokens_est)
+        if self.budget_input_tokens + worst_prompt > self.max_input_tokens:
+            raise BudgetExhausted("input-tokens", f"{self.budget_input_tokens} of {self.max_input_tokens} prompt "
+                                                  "budget tokens (weighted by price) used; the next call could use "
+                                                  f"up to {worst_prompt}")
         if self.output_tokens + max_output_tokens * factor > self.max_output_tokens:
             raise BudgetExhausted("output-tokens", f"{self.output_tokens} of {self.max_output_tokens} output tokens "
                                                    f"used; the next call could use up to {max_output_tokens * factor}")
 
     def _add(self, charge: Charge) -> dict:
         self.input_tokens += charge.prompt
+        self.budget_input_tokens += self.limits.budget_prompt_tokens(charge)
         self.output_tokens += charge.completion
         return super()._add(charge)
 
     def snapshot(self) -> dict:
-        return {**super().snapshot(), "input_tokens": self.input_tokens, "output_tokens": self.output_tokens,
+        return {**super().snapshot(), "input_tokens": self.input_tokens,
+                "budget_input_tokens": self.budget_input_tokens, "output_tokens": self.output_tokens,
                 "max_input_tokens": self.max_input_tokens, "max_output_tokens": self.max_output_tokens}
 
 
@@ -303,10 +328,11 @@ def pass_digest(cards_digest: str, s: Settings, provider, system: str) -> str:
 def run_triage_pass(settings: Settings, repo: Repo, hunt_id: str, provider, *, owner_token: str | None = None,
                     heartbeat: Callable[[], None] | None = None, clock: Callable[[], float] = monotonic,
                     force: bool = False, workdir: str | None = None, max_bytes: int | None = None,
-                    reserve_bytes: int = 0) -> dict:
+                    reserve_bytes: int = 0, model_source: str | None = None) -> dict:
     """Run one triage pass and publish it (rows and summary in one transaction); return its summary. The wall budget
     starts here, so staging and card building count. A stage over its byte budget is an honest failure: recorded,
-    nothing published, the deterministic order kept."""
+    nothing published, the deterministic order kept. The pass runs on `provider.model`, its own model, which the
+    summary and the prompt digest record; `model_source` says which setting chose it."""
     heartbeat = heartbeat or (lambda: None)
     budget = TriageBudget.from_settings(settings, clock)
     system = _prompt()
@@ -319,10 +345,11 @@ def run_triage_pass(settings: Settings, repo: Repo, hunt_id: str, provider, *, o
             cards_digest, eligible, excluded = build_cards(ws, titles)
             prompt_digest = pass_digest(cards_digest, settings, provider, system)
             if (not force and previous and previous.get("prompt_digest") == prompt_digest
-                    and previous.get("status") == "complete" and previous.get("order_digest") == ws.order_digest):
+                    and previous.get("status") == "complete" and previous.get("order_digest") == ws.order_digest
+                    and previous.get("placement") == PLACEMENT_VERSION):
                 return {**previous, "reused": True}
             return _run(settings, repo, hunt_id, provider, ws, budget, system, prompt_digest, eligible, excluded,
-                        previous, owner_token, heartbeat)
+                        previous, owner_token, heartbeat, model_source)
     except StageRefused as exc:
         summary = {"label": LABEL, "status": "failed", "reason": f"stage_refused: {exc}"[:500],
                    "usage": budget.snapshot()}
@@ -331,7 +358,8 @@ def run_triage_pass(settings: Settings, repo: Repo, hunt_id: str, provider, *, o
 
 
 def _run(settings, repo, hunt_id, provider, ws: OrderWorkspace, budget: TriageBudget, system: str,
-         prompt_digest: str, eligible: int, excluded: int, previous: dict | None, owner_token, heartbeat) -> dict:
+         prompt_digest: str, eligible: int, excluded: int, previous: dict | None, owner_token, heartbeat,
+         model_source: str | None = None) -> dict:
     drops: Counter = Counter()
     assessments: Counter = Counter()
     chunks_sent = chunks_failed = failures = 0
@@ -377,14 +405,14 @@ def _run(settings, repo, hunt_id, provider, ws: OrderWorkspace, budget: TriageBu
     assessed = sum(assessments.values())
     status = ("complete" if assessed == eligible else "failed" if eligible and not assessed else "partial")
     reasons = sorted({*not_triaged, *(("dropped_output",) if drops else ())})
-    moved = {ws.section_titles[section]: sum(len(ids) for ids in ws.shown_of(numbers))
+    moved = {ws.section_titles[section]: sum(len(ids) for ids in ws.moved_of(numbers))
              for section, numbers in promoted.items()}
     count = ws.materialize_view(promoted, lambda item: _row(item, prompt_digest, model))
     summary = {
         "version": TRIAGE_VERSION, "label": LABEL, "pass": int((previous or {}).get("pass") or 0) + 1,
         "status": status, "reason": "; ".join(reasons) or None,
         "mode": "ranked" if ws.ranked else "lanes", "sections": list(ws.section_titles),
-        "prompt_digest": prompt_digest, "grouping": GROUPING_VERSION, "model": model,
+        "prompt_digest": prompt_digest, "grouping": GROUPING_VERSION, "placement": PLACEMENT_VERSION, "model": model,
         "provider": {key: described.get(key) for key in ("provider", "model", "endpoint_host", "egress")
                      if key in described},
         "settings": settings_view(settings),
@@ -400,6 +428,8 @@ def _run(settings, repo, hunt_id, provider, ws: OrderWorkspace, budget: TriageBu
         "stage_bytes": ws.size(),
         "usage": budget.snapshot(),
     }
+    if model_source:
+        summary["model_source"] = model_source         # the setting that chose the pass's model
     # the rows are finished in the stage: the write transaction only copies them
     repo.publish_triage(hunt_id, summary["pass"], ws.view_rows(), summary, owner_token=owner_token)
     return summary
@@ -430,8 +460,9 @@ def _call(settings, repo, hunt_id, provider, request, budget: TriageBudget, prom
         if not info.get("retry_available"):
             return True
         used = charge_parts(parts_of(info.get("billed")))
-        factor = 2 if limits.refusal_fallback else 1
-        if budget.input_tokens + used.prompt + prompt_est * factor > budget.max_input_tokens:
+        factor = limits.attempts_reserved
+        if (budget.budget_input_tokens + limits.budget_prompt_tokens(used) + limits.worst_prompt_tokens(prompt_est)
+                > budget.max_input_tokens):
             retry_budget.append("input-tokens")
         elif budget.output_tokens + used.completion + max_out * factor > budget.max_output_tokens:
             retry_budget.append("output-tokens")
@@ -458,10 +489,14 @@ def _call(settings, repo, hunt_id, provider, request, budget: TriageBudget, prom
     budget.charge(result)
     verdicts, chunk_drops = ({}, Counter({result.status: 1})) if not result.ok else validate(
         result.parsed, {group: shown[group] for group in numbers})
+    reasons: Counter = Counter()
+    for drop, count in chunk_drops.items():
+        reasons[DROP_REASONS.get(drop, reason("$", drop))] += count
     record_call(repo, provider, hunt_id=hunt_id, purpose=TRIAGE_PURPOSE, request=request, result=result,
                 limits=limits, validation={"ok": result.ok and not chunk_drops,
                                            "errors": ([result.error] if result.error else [])
-                                           + [f"{reason}: {count}" for reason, count in sorted(chunk_drops.items())]},
+                                           + [f"{drop}: {count}" for drop, count in sorted(chunk_drops.items())],
+                                           "reasons": dict(sorted(reasons.items()))},
                 owner_token=owner_token)
     if not result.ok:
         return result.status
