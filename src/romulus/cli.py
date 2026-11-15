@@ -243,7 +243,7 @@ def cmd_agent(args) -> int:
 def cmd_triage(args) -> int:
     """Run the AI triage pass on a finished hunt (idempotent per prompt digest) and optionally export its order."""
     from romulus.hunt.run import open_repo
-    from romulus.hunt.triage import run_triage, write_export
+    from romulus.hunt.triage import StaleTriage, run_triage, stage_limits, write_export
 
     settings = load_settings(_env_file(args))
     repo = open_repo(settings)
@@ -258,9 +258,17 @@ def cmd_triage(args) -> int:
               + ("; reused the stored pass with the same prompt digest" if summary.get("reused") else "")
               + "; the deterministic report order is authoritative. Run `romulus report` to publish it.")
     if args.export:
-        header = write_export(repo, args.hunt_id, Path(args.export), workdir=str(settings.stage_path))
+        try:
+            header = write_export(repo, args.hunt_id, Path(args.export), allow_stale=args.allow_stale,
+                                  **stage_limits(settings))
+        except StaleTriage as exc:
+            print(f"triage export refused: {exc}", file=sys.stderr)
+            return EXIT_FAIL
         print(f"triage order of {header['written']} findings written to {header['path']} "
               f"(status {header['status']}{', stale' if header['stale'] else ''})")
+        if header.get("latest_failed_attempt"):
+            print(f"the latest triage attempt failed: {header['latest_failed_attempt'].get('reason')}",
+                  file=sys.stderr)
     if summary is not None and summary.get("status") in ("skipped", "failed") and not summary.get("reused"):
         return EXIT_FAIL
     return EXIT_OK
@@ -481,6 +489,8 @@ def main(argv: list[str] | None = None) -> int:
     tp.add_argument("--export", help="write the triage order (every surfaced finding id) as JSON to this file")
     tp.add_argument("--no-run", action="store_true", help="export the stored pass without calling the model")
     tp.add_argument("--force", action="store_true", help="run a new pass even when the prompt digest is unchanged")
+    tp.add_argument("--allow-stale", action="store_true",
+                    help="export a pass whose hunt's findings or order changed after it ran")
     fp = sub.add_parser("findings", help="list candidates of a hunt, ranked by lane and priority")
     fp.add_argument("hunt_id")
     fp.add_argument("--lane", action="append", choices=["urgent", "high", "lead", "context"])
