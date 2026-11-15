@@ -301,6 +301,39 @@ Index("ix_entity_rank_score", entity_rank.c.hunt_id, entity_rank.c["pass"], enti
 Index("ix_entity_rank_position", entity_rank.c.hunt_id, entity_rank.c["pass"], entity_rank.c.position,
       unique=True)
 
+# The AI triage order: one row per deterministic finding group (rule and primary target within one report section)
+# of a hunt's latest triage pass. It is a separately labelled presentation order: nothing here changes a lane, rank,
+# Reported flag, citation or the deterministic report order. A new pass replaces the hunt's rows in one transaction
+# with its summary audit. `finding_ids` holds only the ids the model was shown (bounded); a group's full membership is
+# its key (section, rule, entity, provenance) over the stored findings. `position` is the group's place in the
+# triage view: by section, the promoted groups first, then the rest by their best deterministic position.
+ai_triage_group = Table(
+    "ai_triage_group", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("pass", Integer, nullable=False),
+    Column("group_id", String, nullable=False),
+    Column("section", Integer, nullable=False),
+    Column("position", Integer, nullable=False),
+    Column("best_position", Integer, nullable=False),
+    Column("rule_id", String, nullable=False),
+    Column("entity_kind", String),
+    Column("entity", String),
+    Column("provenance", String, nullable=False),
+    Column("finding_count", Integer, nullable=False),
+    Column("finding_ids", JSON, nullable=False),
+    Column("status", String, nullable=False),        # promoted | assessed | not_triaged | dropped | excluded
+    Column("reason", String),
+    Column("assessment", String),
+    Column("incident_label", String),
+    Column("rationale", Text),
+    Column("cites", JSON, nullable=False),
+    Column("prompt_digest", String, nullable=False),
+    Column("model", String, nullable=False),
+    PrimaryKeyConstraint("hunt_id", "pass", "group_id", name="pk_ai_triage_group"),
+)
+Index("ix_ai_triage_group_position", ai_triage_group.c.hunt_id, ai_triage_group.c["pass"],
+      ai_triage_group.c.position, unique=True)
+
 expansion_anchor = Table(
     "expansion_anchor", metadata,
     Column("id", String, primary_key=True),              # the anchored candidate id

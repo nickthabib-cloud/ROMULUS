@@ -435,6 +435,10 @@ FINAL_RANK_PASS = 2
 # -- report order over candidate snapshots ----------------------------------------------------------------------------
 # The final pass's audit summary; every publication (or failure) of the pass writes a new one.
 FINAL_RANK_SUMMARY = "hunt.rank_pass_2_summary"
+# The audit action that records each AI triage pass's summary, published with its group rows.
+TRIAGE_SUMMARY = "hunt.ai_triage_summary"
+# The model-call purpose of the triage pass: its calls are spent from its own budget, never the agent's.
+TRIAGE_PURPOSE = "triage"
 # A snapshot taken while the hunt has its final ranking lists findings in report order, as segments: ranked confirmed
 # (section 0), confirmed findings stored after the pass (lane urgent, no rank row), ranked reported (1), ranked not
 # reported (2), then every other member. Ranked members are ordered by position (`ix_finding_rank_section`), the
@@ -663,6 +667,27 @@ class Repo:
             if result.rowcount != 1:
                 raise RuntimeError(f"hunt {hunt_id} agent lease ownership lost")
             return dict(c.execute(select(t.agent_run).where(t.agent_run.c.hunt_id == hunt_id)).mappings().one())
+
+    def claim_triage_lease(self, hunt_id: str, lease_seconds: int) -> tuple[str, bool]:
+        """Claim the agent lease for a triage pass; return the owner token and whether the claim created the hunt's
+        agent record (a hunt stored before the agent phase existed). A created record is removed again on release
+        (`release_triage_lease`), so triage never makes a hunt look as if it had an agent phase."""
+        with self.engine.connect() as connection:
+            existed = connection.execute(select(t.agent_run.c.hunt_id).where(
+                t.agent_run.c.hunt_id == hunt_id)).first() is not None
+        claimed = self.claim_agent_lease(hunt_id, lease_seconds)
+        return claimed["lease_owner"], not existed and claimed["state"] == "pending" and claimed["started_at"] is None
+
+    def release_triage_lease(self, hunt_id: str, *, owner_token: str, created: bool) -> None:
+        """Release a triage pass's lease; a record the claim created is deleted rather than left pending."""
+        if not created:
+            self.release_agent_lease(hunt_id, owner_token=owner_token)
+            return
+        with write_txn(self.engine) as c:
+            self._fence_agent_lease(c, hunt_id, owner_token)
+            c.execute(t.agent_run.delete().where(
+                t.agent_run.c.hunt_id == hunt_id, t.agent_run.c.lease_owner == owner_token,
+                t.agent_run.c.state == "pending", t.agent_run.c.started_at.is_(None)))
 
     def release_agent_lease(self, hunt_id: str, *, owner_token: str | None = None) -> None:
         """Release a claimed phase while retaining its existing progress and assessment."""
@@ -961,6 +986,7 @@ class Repo:
                 t.baseline_segment.c.built_by_hunt_id == hunt_id,
             )).values(status="revoked"))
             rm("finding_ranks", t.finding_rank.delete().where(t.finding_rank.c.hunt_id == hunt_id))
+            rm("ai_triage_groups", t.ai_triage_group.delete().where(t.ai_triage_group.c.hunt_id == hunt_id))
             rm("entity_ranks", t.entity_rank.delete().where(t.entity_rank.c.hunt_id == hunt_id))
             rm("disposition_events", t.disposition_event.delete().where(t.disposition_event.c.candidate_id.in_(cand_ids)))
             rm("candidate_hosts", t.candidate_host.delete().where(t.candidate_host.c.candidate_id.in_(cand_ids)))
@@ -2818,6 +2844,63 @@ class Repo:
             self._fence_lease(connection, hunt_id, owner_token)
             for table in (t.finding_rank, t.entity_rank):
                 connection.execute(table.delete().where(table.c.hunt_id == hunt_id, table.c["pass"] == pass_no))
+
+    # -- AI triage order ---------------------------------------------------------------------------------------------
+    def reportable_page(self, hunt_id: str, *, after_id: str = "", limit: int = 1000) -> list[dict]:
+        """One keyset page (by id) of a hunt's reportable findings (urgent, high, lead) with the fields an ordering
+        and a group card need: no citations, predicate fields or gate results beyond the stored ATT&CK techniques."""
+        c = t.candidate.c
+        query = (select(c.id, c.rule_id, c.lane, c.ts, c.priority, c.provenance, c.source_case_id, c.entities,
+                        c.claim, func.json_extract(c.gate_results, "$._attack").label("attack"))
+                 .where(c.hunt_id == hunt_id, c.lane.in_(("urgent", "high", "lead")), c.id > after_id)
+                 .order_by(c.id).limit(limit))
+        with self.engine.connect() as connection:
+            rows = [dict(row) for row in connection.execute(query).mappings()]
+        for row in rows:
+            attack = row["attack"]
+            try:
+                row["attack"] = json.loads(attack) if isinstance(attack, str) else list(attack or [])
+            except ValueError:
+                row["attack"] = []
+            if not isinstance(row["attack"], list):
+                row["attack"] = []
+        return rows
+
+    def reportable_count(self, hunt_id: str) -> int:
+        return self.candidate_count_lanes(hunt_id, ("urgent", "high", "lead"))
+
+    def publish_triage(self, hunt_id: str, pass_no: int, rows: Iterable[dict], summary: dict, *,
+                       owner_token: str | None = None) -> None:
+        """Replace the hunt's triage rows with one pass's rows and record its summary, in one transaction."""
+        with write_txn(self.engine) as c:
+            self._fence_agent_lease(c, hunt_id, owner_token)
+            c.execute(t.ai_triage_group.delete().where(t.ai_triage_group.c.hunt_id == hunt_id))
+            batch: list[dict] = []
+            for row in rows:
+                batch.append({**row, "hunt_id": hunt_id, "pass": pass_no})
+                if len(batch) >= INSERT_CHUNK:
+                    c.execute(t.ai_triage_group.insert(), batch)
+                    batch = []
+            if batch:
+                c.execute(t.ai_triage_group.insert(), batch)
+            c.execute(t.audit_event.insert().values(at=utcnow(), actor="system", action=TRIAGE_SUMMARY,
+                                                    hunt_id=hunt_id, detail=summary))
+
+    def triage_groups(self, hunt_id: str, *, statuses: tuple[str, ...] | None = None, after_position: int = 0,
+                      limit: int = 500) -> list[dict]:
+        """One page of the latest triage pass's groups in triage-view order (keyset on position)."""
+        g = t.ai_triage_group.c
+        query = select(t.ai_triage_group).where(g.hunt_id == hunt_id, g.position > after_position)
+        if statuses is not None:
+            query = query.where(g.status.in_(statuses))
+        with self.engine.connect() as connection:
+            return [dict(row) for row in connection.execute(query.order_by(g.position).limit(limit)).mappings()]
+
+    def triage_status_counts(self, hunt_id: str) -> dict[str, int]:
+        g = t.ai_triage_group.c
+        with self.engine.connect() as connection:
+            return {str(status): int(count) for status, count in connection.execute(
+                select(g.status, func.count()).where(g.hunt_id == hunt_id).group_by(g.status))}
 
     def candidates_by_ids(self, ids: list[str] | str, candidate_ids: list[str] | None = None, *,
                           hunt_id: str | None = None, finding_alias: bool = False) -> list[dict]:
@@ -5862,11 +5945,16 @@ class Repo:
             ).order_by(t.agent_assessment.c.revision)).mappings()
             return [dict(row) for row in rows]
 
-    def agent_usage(self, hunt_id: str, *, group_limit: int | None = None) -> dict:
-        """Persisted spending, streamed in bounded pages; UI model breakdowns may be limited."""
+    def agent_usage(self, hunt_id: str, *, group_limit: int | None = None,
+                    exclude_purposes: tuple[str, ...] = (), purposes: tuple[str, ...] | None = None) -> dict:
+        """Persisted spending, streamed in bounded pages; UI model breakdowns may be limited. A budget counts only its
+        own calls: `exclude_purposes` leaves out other passes' calls (the agent's budget leaves out triage), and
+        `purposes` keeps only the named ones."""
         if group_limit is not None and not 1 <= group_limit <= 200:
             raise ValueError("usage group_limit must be between 1 and 200")
-        scope = (t.model_call.c.hunt_id == hunt_id, t.model_call.c.provider.is_not(None))
+        scope = (t.model_call.c.hunt_id == hunt_id, t.model_call.c.provider.is_not(None),
+                 *((t.model_call.c.purpose.not_in(exclude_purposes),) if exclude_purposes else ()),
+                 *((t.model_call.c.purpose.in_(purposes),) if purposes is not None else ()))
         calls, tokens, cost, ms, estimated = 0, 0, 0.0, 0, False
         with self.engine.connect() as c:
             after = ""
@@ -5910,10 +5998,11 @@ class Repo:
             result.update(remote_calls_more=remote_more, models_reported_more=answered_more)
         return result
 
-    def agent_elapsed_ms(self, hunt_id: str) -> int:
+    def agent_elapsed_ms(self, hunt_id: str, *, exclude_purposes: tuple[str, ...] = ()) -> int:
         with self.engine.connect() as c:
             model_ms = c.execute(select(func.coalesce(func.sum(t.model_call.c.duration_ms), 0)).where(
                 t.model_call.c.hunt_id == hunt_id,
+                *((t.model_call.c.purpose.not_in(exclude_purposes),) if exclude_purposes else ()),
             )).scalar_one()
             digests = c.execute(select(t.case_step.c.result_digest).join(
                 t.case, t.case.c.id == t.case_step.c.case_id,
