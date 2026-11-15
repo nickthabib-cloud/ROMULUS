@@ -442,6 +442,8 @@ TRIAGE_SUMMARY = "hunt.ai_triage_summary"
 TRIAGE_PURPOSE = "triage"
 # A triage attempt that failed before publishing (its previous pass, if any, stays the view).
 TRIAGE_FAILED = "hunt.ai_triage_failed"
+# A resume that continued the hunt's agent on another model than the one it recorded (--force-model): from, to.
+AGENT_MODEL_FORCED = "hunt.agent_model_forced"
 # The reason on the agent record a triage pass creates for a hunt with no agent record: terminal, removed on release.
 TRIAGE_PLACEHOLDER = "triage_lease_placeholder"
 # A snapshot taken while the hunt has its final ranking lists findings in report order, as segments: ranked confirmed
@@ -1082,6 +1084,15 @@ class Repo:
         with self.engine.connect() as c:
             row = c.execute(query).mappings().first()
             return dict(row) if row else None
+
+    def audit_trail(self, hunt_id: str, action: str, *, limit: int = 20) -> tuple[list[dict], int]:
+        """The latest `limit` audit records of one action for a hunt, oldest first, and how many there are in all."""
+        where = (t.audit_event.c.hunt_id == hunt_id, t.audit_event.c.action == action)
+        with self.engine.connect() as c:
+            rows = [dict(row) for row in c.execute(select(t.audit_event).where(*where)
+                                                   .order_by(t.audit_event.c.id.desc()).limit(limit)).mappings()]
+            total = int(c.execute(select(func.count()).select_from(t.audit_event).where(*where)).scalar_one())
+        return rows[::-1], total
 
     def create_agent_page_plan(self, hunt_id: str, cursor: str, identity: dict,
                                summary: dict, items: Iterable[dict], *, owner_token: str | None = None) -> dict:

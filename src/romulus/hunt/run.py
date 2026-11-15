@@ -37,7 +37,7 @@ from romulus.sources.models import Window
 from romulus.sources.network_coverage import check_network_addresses, unknown_coverage
 from romulus.sources.profile import build_profile
 from romulus.store.db import digest, make_engine, migrate, utcnow
-from romulus.store.repo import Repo, is_lease_lost
+from romulus.store.repo import AGENT_MODEL_FORCED, Repo, is_lease_lost
 
 log = logging.getLogger("romulus.hunt")
 HUNT_LEASE_SECONDS = 600
@@ -615,11 +615,12 @@ def recorded_agent_model(repo: Repo, hunt: dict) -> str:
                or ((hunt.get("manifest") or {}).get("ai_agent") or {}).get("model") or "")
 
 
-def _check_agent_model(s: Settings, repo: Repo, hunt: dict, force_model: bool) -> None:
+def _check_agent_model(s: Settings, repo: Repo, hunt: dict, force_model: bool) -> dict | None:
     """A resumed agent keeps the model the hunt recorded: its signed reasoning and its results belong to that model.
-    Another model is refused unless the caller forces it."""
+    Another model is refused unless the caller forces it; a forced switch is returned as {"from", "to"}, for the
+    resume to record once it holds the hunt's lease."""
     if not ((hunt.get("manifest") or {}).get("ai_agent") or {}).get("requested"):
-        return
+        return None
     recorded = recorded_agent_model(repo, hunt)
     if recorded and s.agent_model != recorded and not force_model:
         raise AgentModelMismatch(
@@ -629,6 +630,8 @@ def _check_agent_model(s: Settings, repo: Repo, hunt: dict, force_model: bool) -
     if recorded and s.agent_model != recorded:
         log.warning("hunt %s: the agent continues with model %s instead of the recorded %s (forced)",
                     hunt["id"], s.agent_model, recorded)
+        return {"from": recorded, "to": s.agent_model}
+    return None
 
 
 def resume_hunt(s: Settings, hunt_id: str, *, force_model: bool = False) -> dict:
@@ -655,7 +658,7 @@ def resume_hunt(s: Settings, hunt_id: str, *, force_model: bool = False) -> dict
         repo.set_hunt_state(hunt_id, "failed", owner_token=stale["lease_owner"],
                             stop_reason="the hunt's worker stopped before its sweep finished")
         raise RuntimeError("running hunt cannot resume because the sweep did not finish; it is now marked failed")
-    _check_agent_model(s, repo, hunt, force_model)
+    forced = _check_agent_model(s, repo, hunt, force_model)
     recorded_manifest = hunt.get("manifest") or {}
     ensure_site_unchanged(s.home, recorded_manifest.get("site"))
     recorded = recorded_manifest.get("normalizer")
@@ -711,6 +714,9 @@ def resume_hunt(s: Settings, hunt_id: str, *, force_model: bool = False) -> dict
     claimed = (repo.claim_agent_lease(hunt_id, _lease_seconds(s)) if agent_only else
                repo.claim_hunt(hunt_id, _lease_seconds(s), resume=True))
     owner_token = claimed["lease_owner"]
+    if forced is not None:
+        # recorded only now, under the lease: a refused resume switched nothing
+        repo.audit("system", AGENT_MODEL_FORCED, hunt_id, forced, owner_token=owner_token)
     hunt = repo.get_hunt(hunt_id)
     manifest = hunt["manifest"]
     if agent_only:

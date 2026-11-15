@@ -14,7 +14,14 @@ import httpx
 from romulus.agent.provider import EGRESS_SWITCH_VALUE, AgentNotReady, agent_readiness, build_provider
 from romulus.agent.provider.egress import Resolver, system_resolver
 from romulus.agent.provider.openai_responses import LONG_REASONING_EFFORTS, LONG_REASONING_TIMEOUT
-from romulus.config import FULL_ACCESS_ROLE, MIN_SECRET_LENGTH, Settings, redact_text, short_secrets
+from romulus.config import (
+    FULL_ACCESS_ROLE,
+    MIN_SECRET_LENGTH,
+    Settings,
+    redact_text,
+    short_secrets,
+    triage_settings,
+)
 from romulus.detect.netdef import INTERNAL_SETTING, SiteNetworks
 from romulus.hunt.site_networks import check_host_addresses
 from romulus.site import SiteValidationError, load_site_facts
@@ -332,6 +339,18 @@ def check_agent(s: Settings, transport: httpx.BaseTransport | None = None,
     return out
 
 
+def check_triage_model(s: Settings, transport: httpx.BaseTransport | None = None,
+                       resolver: Resolver = system_resolver) -> list[Check]:
+    """The triage pass's model, when AGENT_TRIAGE_MODEL names one other than the agent's: the agent checks again for
+    that model, reported as triage.* checks. Nothing when the triage pass uses the agent's model."""
+    triage = triage_settings(s)
+    if triage.agent_model == s.agent_model:
+        return []
+    return [Check("triage." + check.name.split(".", 1)[-1], check.status,
+                  f"AGENT_TRIAGE_MODEL={triage.agent_model}: {check.detail}")
+            for check in check_agent(triage, transport, resolver)]
+
+
 def check_secret_lengths(s: Settings) -> Check:
     """Short secrets are redacted wherever their text turns up, ordinary words included. Names only: never a
     secret or its length."""
@@ -554,6 +573,7 @@ def run_all(s: Settings, env_file: Path | None = None) -> list[Check]:
         checks.append(auth)
     checks += check_ollama(s)
     checks += check_agent(s)
+    checks += check_triage_model(s)
     checks.append(check_secret_lengths(s))
     checks.append(check_tshark(s))
     checks += check_paths(s, env_file)

@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from romulus.config import load_settings, with_agent_model
+from romulus.config import load_settings, triage_model, with_agent_model
 
 EXIT_OK, EXIT_FAIL, EXIT_USAGE = 0, 1, 2
 
@@ -276,13 +276,19 @@ def cmd_triage(args) -> int:
     from romulus.hunt.triage import StaleTriage, run_triage, stage_limits, write_export
 
     settings = load_settings(_env_file(args))
+    try:
+        # --agent-model replaces the triage model (AGENT_TRIAGE_MODEL, else AGENT_MODEL) for this run only
+        triage_model(settings, args.agent_model)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_USAGE
     repo = open_repo(settings)
     if repo.get_hunt(args.hunt_id) is None:
         print(f"unknown hunt: {args.hunt_id}", file=sys.stderr)
         return EXIT_FAIL
     summary = None
     if not args.no_run:
-        summary = run_triage(settings, repo, args.hunt_id, force=args.force)
+        summary = run_triage(settings, repo, args.hunt_id, force=args.force, model=args.agent_model)
         print(json.dumps(summary, indent=2, default=str) if args.json else
               f"AI triage: {summary.get('status')}" + (f" ({summary['reason']})" if summary.get("reason") else "")
               + ("; reused the stored pass with the same prompt digest" if summary.get("reused") else "")
@@ -528,6 +534,9 @@ def main(argv: list[str] | None = None) -> int:
     tp.add_argument("--force", action="store_true", help="run a new pass even when the prompt digest is unchanged")
     tp.add_argument("--allow-stale", action="store_true",
                     help="export a pass whose hunt's findings or order changed after it ran")
+    tp.add_argument("--agent-model", help="the triage pass's model id for this run only, in place of "
+                    "AGENT_TRIAGE_MODEL (else AGENT_MODEL), on the same provider (the .env is not changed; the "
+                    "triage summary records the model it used)")
     fp = sub.add_parser("findings", help="list candidates of a hunt, ranked by lane and priority")
     fp.add_argument("hunt_id")
     fp.add_argument("--lane", action="append", choices=["urgent", "high", "lead", "context"])

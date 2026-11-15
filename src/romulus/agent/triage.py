@@ -321,10 +321,11 @@ def pass_digest(cards_digest: str, s: Settings, provider, system: str) -> str:
 def run_triage_pass(settings: Settings, repo: Repo, hunt_id: str, provider, *, owner_token: str | None = None,
                     heartbeat: Callable[[], None] | None = None, clock: Callable[[], float] = monotonic,
                     force: bool = False, workdir: str | None = None, max_bytes: int | None = None,
-                    reserve_bytes: int = 0) -> dict:
+                    reserve_bytes: int = 0, model_source: str | None = None) -> dict:
     """Run one triage pass and publish it (rows and summary in one transaction); return its summary. The wall budget
     starts here, so staging and card building count. A stage over its byte budget is an honest failure: recorded,
-    nothing published, the deterministic order kept."""
+    nothing published, the deterministic order kept. The pass runs on `provider.model`, its own model, which the
+    summary and the prompt digest record; `model_source` says which setting chose it."""
     heartbeat = heartbeat or (lambda: None)
     budget = TriageBudget.from_settings(settings, clock)
     system = _prompt()
@@ -340,7 +341,7 @@ def run_triage_pass(settings: Settings, repo: Repo, hunt_id: str, provider, *, o
                     and previous.get("status") == "complete" and previous.get("order_digest") == ws.order_digest):
                 return {**previous, "reused": True}
             return _run(settings, repo, hunt_id, provider, ws, budget, system, prompt_digest, eligible, excluded,
-                        previous, owner_token, heartbeat)
+                        previous, owner_token, heartbeat, model_source)
     except StageRefused as exc:
         summary = {"label": LABEL, "status": "failed", "reason": f"stage_refused: {exc}"[:500],
                    "usage": budget.snapshot()}
@@ -349,7 +350,8 @@ def run_triage_pass(settings: Settings, repo: Repo, hunt_id: str, provider, *, o
 
 
 def _run(settings, repo, hunt_id, provider, ws: OrderWorkspace, budget: TriageBudget, system: str,
-         prompt_digest: str, eligible: int, excluded: int, previous: dict | None, owner_token, heartbeat) -> dict:
+         prompt_digest: str, eligible: int, excluded: int, previous: dict | None, owner_token, heartbeat,
+         model_source: str | None = None) -> dict:
     drops: Counter = Counter()
     assessments: Counter = Counter()
     chunks_sent = chunks_failed = failures = 0
@@ -418,6 +420,8 @@ def _run(settings, repo, hunt_id, provider, ws: OrderWorkspace, budget: TriageBu
         "stage_bytes": ws.size(),
         "usage": budget.snapshot(),
     }
+    if model_source:
+        summary["model_source"] = model_source         # the setting that chose the pass's model
     # the rows are finished in the stage: the write transaction only copies them
     repo.publish_triage(hunt_id, summary["pass"], ws.view_rows(), summary, owner_token=owner_token)
     return summary

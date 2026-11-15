@@ -21,12 +21,13 @@ from romulus.report.triage import LABEL as TRIAGE_LABEL
 from romulus.report.triage import triage_view
 from romulus.store import schema as t
 from romulus.store.db import digest, utcnow, write_txn
-from romulus.store.repo import Repo, raw_id
+from romulus.store.repo import AGENT_MODEL_FORCED, Repo, raw_id
 
 MANIFEST_SCHEMA = "report-manifest@1"
 REPORTABLE_LANES = ("urgent", "high", "lead")
 CONCLUDED_CASE_STATUSES = {"closed", "parked", "escalated"}
 LEGACY_AGENT_MODE_KEY = "agent_mode"
+MODEL_SWITCHES_SHOWN = 20
 
 
 def _jsonable(v):
@@ -927,7 +928,7 @@ def _ai_agent(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dict:
     limits_hit = sorted({item.strip() for item in reason.split(";")
                          if item.strip().startswith(("cap:", "budget:"))})
     anchors = repo.expansion_anchors(hunt_id)
-    return {
+    out = {
         "requested": bool(configured.get("requested", _legacy_mode_value(hunt_manifest) != "off")),
         "configured": configured,
         "phase": phase["detail"] if phase else {"status": (run or {}).get("state", "unknown")},
@@ -946,6 +947,14 @@ def _ai_agent(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dict:
                       "anchors": [row["id"] for row in anchors if row["status"] in {"unexpanded", "pending"}]},
         "assessment_revision": assessments[-1]["revision"] if assessments else None,
     }
+    # resumes that continued the agent on another model than the hunt recorded (--force-model): the latest ones
+    forced, total = repo.audit_trail(hunt_id, AGENT_MODEL_FORCED, limit=MODEL_SWITCHES_SHOWN)
+    if forced:
+        out["model_forced"] = {"switches": [{"from": (row["detail"] or {}).get("from"),
+                                             "to": (row["detail"] or {}).get("to"), "at": str(row["at"])}
+                                            for row in forced],
+                               "total": total}
+    return out
 
 
 def _legacy_mode_value(record: dict) -> str | None:
