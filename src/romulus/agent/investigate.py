@@ -31,7 +31,7 @@ from romulus.config import Settings
 from romulus.hunt.rank import place_late_findings
 from romulus.report.incidents import build_incident_graph
 from romulus.store.db import digest, utcnow
-from romulus.store.repo import Repo, is_lease_lost
+from romulus.store.repo import TRIAGE_PURPOSE, Repo, is_lease_lost
 
 log = logging.getLogger("romulus.agent")
 
@@ -596,8 +596,10 @@ def _budget(settings: Settings, manifest: dict, repo: Repo, hunt_id: str, clock)
     required = {"max_calls", "max_tokens", "max_wall_seconds"}
     limits = (BudgetLimits.from_dict(config, str((manifest.get("ai_agent") or {}).get("model") or ""))
               if required <= config.keys() else BudgetLimits.from_settings(settings))
-    return AgentBudget.from_usage(limits, repo.agent_usage(hunt_id),
-                                  wall_seconds_before=repo.agent_elapsed_ms(hunt_id) / 1000.0, clock=clock)
+    # the triage pass spends from its own budget, never the agent's
+    return AgentBudget.from_usage(limits, repo.agent_usage(hunt_id, exclude_purposes=(TRIAGE_PURPOSE,)),
+                                  wall_seconds_before=repo.agent_elapsed_ms(
+                                      hunt_id, exclude_purposes=(TRIAGE_PURPOSE,)) / 1000.0, clock=clock)
 
 
 def recover_agent_finalization(repo: Repo, hunt_id: str, *, owner_token=None) -> AgentPhaseResult | None:
