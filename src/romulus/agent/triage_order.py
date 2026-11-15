@@ -89,6 +89,46 @@ def group_key(section: int, provenance: str, rule_id: str, kind: str, value: str
     return json.dumps([section, provenance, rule_id, kind, value], ensure_ascii=False, separators=(",", ":"))
 
 
+# The stage's page cache (KiB): bounded memory whatever the hunt's size.
+CACHE_KIB = 16_384
+# Filling the order and the groups: each statement reads through an index made before the data, so no sort is needed
+# (ordinals and group numbers are the rowids, given in insertion order).
+BUILD_STATEMENTS = (
+    ("INSERT INTO o (fid, finding_id, section, gid, lane, ts, claim, is_case, tactics) SELECT fid, finding_id, "
+     "section, gid, lane, ts, claim, is_case, tactics FROM f INDEXED BY f_order "
+     "ORDER BY section, k1, k2, k3, k4, finding_id"),
+    ("INSERT INTO gt SELECT gid, MIN(ordinal), COUNT(*), SUM(is_case), MIN(section), MIN(ts), MAX(ts) "
+     "FROM o INDEXED BY o_group GROUP BY gid"),
+    ("INSERT INTO g (gid, best, n, cases, section, first_ts, last_ts) SELECT gid, best, n, cases, section, "
+     "first_ts, last_ts FROM gt INDEXED BY gt_best ORDER BY best"),
+)
+
+
+def order_key(finding: dict, ranked: bool) -> tuple:
+    """A surfaced finding's place in the deterministic report order, from the report's own fields (`lane`, `rank`,
+    `reported`, `priority`, `observed_at`, `id`). The staged order sorts on these same keys."""
+    observed = finding.get("observed_at")
+    if ranked:
+        section = (0 if finding["lane"] == rank_model.CONFIRMED_LANE else 1 if finding.get("reported") else 2)
+        return (section, 0, -float(finding.get("rank") or 0.0), int(observed is None), observed or "", finding["id"])
+    # the report's rule-estimate order compares the time as text, an unknown time as "None"
+    return (LANE_SECTION[finding["lane"]], 0, -float(finding["priority"]), 0, str(observed), finding["id"])
+
+
+def order_digest(finding_ids: Iterable[str]) -> str:
+    """The digest of a deterministic order: one shared definition for the pass, the export and the report."""
+    digest = hashlib.sha256()
+    for finding_id in finding_ids:
+        digest.update(finding_id.encode())
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def report_order_digest(findings: list[dict], ranked: bool) -> str:
+    """The deterministic order digest of the findings a report manifest holds (in any order)."""
+    return order_digest(finding["id"] for finding in sorted(findings, key=lambda item: order_key(item, ranked)))
+
+
 GROUP_COLUMNS = ("group_no", "best", "n", "cases", "section", "provenance", "rule_id", "kind", "value", "first_ts",
                  "last_ts")
 _GROUP_SELECT = ("SELECT g.group_no, g.best, g.n, g.cases, g.section, k.provenance, k.rule_id, k.kind, k.value, "
@@ -108,14 +148,32 @@ class OrderWorkspace:
         self.dir = tempfile.mkdtemp(prefix="romulus-triage-", dir=directory)
         self.path = os.path.join(self.dir, "order.db")
         self.db = sqlite3.connect(self.path)
-        self.db.executescript("""
-            PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF; PRAGMA temp_store = FILE;
+        # SQLite names one temp directory per process, never per connection, so this stage keeps its temporary
+        # structures in memory instead and never needs a large one: every index exists before its table is filled
+        # (no index build sorts), the order and the groups are read through those indexes (no ORDER BY or window sorts),
+        # and the page cache is bounded. All bulk data lives in the stage file, under the stage byte budget.
+        self.db.executescript(f"""
+            PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF; PRAGMA temp_store = MEMORY;
+            PRAGMA cache_size = -{CACHE_KIB};
             CREATE TABLE k (gid INTEGER PRIMARY KEY, gkey TEXT UNIQUE, section INTEGER, provenance TEXT,
                             rule_id TEXT, kind TEXT, value TEXT);
             CREATE TABLE f (fid INTEGER PRIMARY KEY, finding_id TEXT, section INTEGER, k1 INTEGER, k2 REAL,
                             k3 INTEGER, k4 TEXT, gid INTEGER, lane TEXT, ts TEXT, claim TEXT, is_case INTEGER,
                             tactics TEXT);
+            CREATE INDEX f_order ON f (section, k1, k2, k3, k4, finding_id);
             CREATE TABLE e (gid INTEGER, fid INTEGER, kind TEXT, value TEXT);
+            CREATE INDEX e_group ON e (gid, kind, value);
+            CREATE TABLE o (ordinal INTEGER PRIMARY KEY, fid INTEGER, finding_id TEXT, section INTEGER,
+                            gid INTEGER, lane TEXT, ts TEXT, claim TEXT, is_case INTEGER, tactics TEXT);
+            CREATE INDEX o_group ON o (gid, ordinal);
+            CREATE INDEX o_section ON o (section, ordinal);
+            CREATE UNIQUE INDEX o_finding ON o (finding_id);
+            CREATE TABLE gt (gid INTEGER PRIMARY KEY, best INTEGER, n INTEGER, cases INTEGER, section INTEGER,
+                             first_ts TEXT, last_ts TEXT);
+            CREATE UNIQUE INDEX gt_best ON gt (best);
+            CREATE TABLE g (group_no INTEGER PRIMARY KEY, gid INTEGER UNIQUE, best INTEGER, n INTEGER,
+                            cases INTEGER, section INTEGER, first_ts TEXT, last_ts TEXT);
+            CREATE UNIQUE INDEX g_section_best ON g (section, best);
             CREATE TABLE c (group_no INTEGER PRIMARY KEY, card TEXT, ids TEXT, size INTEGER);
             CREATE TABLE v (group_no INTEGER PRIMARY KEY, status TEXT, reason TEXT, assessment TEXT,
                             incident_label TEXT, rationale TEXT, cites TEXT, shown TEXT);
@@ -229,30 +287,19 @@ class OrderWorkspace:
             self.check_space()
             after = page[-1]["id"]
         self.heartbeat()
-        self.db.executescript("""
-            CREATE TABLE o (ordinal INTEGER PRIMARY KEY, fid INTEGER, finding_id TEXT, section INTEGER,
-                            gid INTEGER, lane TEXT, ts TEXT, claim TEXT, is_case INTEGER, tactics TEXT);
-            INSERT INTO o SELECT ROW_NUMBER() OVER (ORDER BY section, k1, k2, k3, k4, finding_id), fid, finding_id,
-                section, gid, lane, ts, claim, is_case, tactics FROM f;
-            DROP TABLE f;
-            CREATE INDEX o_group ON o (gid, ordinal);
-            CREATE INDEX o_section ON o (section, ordinal);
-            CREATE UNIQUE INDEX o_finding ON o (finding_id);
-            CREATE INDEX e_group ON e (gid, kind, value);
-            CREATE TABLE g (group_no INTEGER PRIMARY KEY, gid INTEGER UNIQUE, best INTEGER, n INTEGER,
-                            cases INTEGER, section INTEGER, first_ts TEXT, last_ts TEXT);
-            INSERT INTO g SELECT ROW_NUMBER() OVER (ORDER BY MIN(ordinal)), gid, MIN(ordinal), COUNT(*),
-                SUM(is_case), MIN(section), MIN(ts), MAX(ts) FROM o GROUP BY gid;
-            CREATE UNIQUE INDEX g_section_best ON g (section, best);
-        """)
+        for statement in BUILD_STATEMENTS:
+            self.db.execute(statement)
+        self.db.execute("DROP TABLE f")
         self.db.commit()
         self.check_space()
-        digest = hashlib.sha256()
-        for finding_id in self.deterministic():
-            digest.update(finding_id.encode())
-            digest.update(b"\n")
-            self.findings += 1
-        self.order_digest = digest.hexdigest()
+        counted = [0]
+
+        def ids():
+            for finding_id in self.deterministic():
+                counted[0] += 1
+                yield finding_id
+        self.order_digest = order_digest(ids())
+        self.findings = counted[0]
         return self
 
     # -- reads --------------------------------------------------------------------------------------------------------
@@ -287,7 +334,7 @@ class OrderWorkspace:
         distinct = int(self.db.execute("SELECT COUNT(*) FROM (SELECT DISTINCT kind, value FROM e WHERE gid = ?)",
                                        (gid,)).fetchone()[0])
         top = [{"kind": kind, "value": value, "findings": count} for kind, value, count in self.db.execute(
-            "SELECT kind, value, COUNT(DISTINCT fid) AS c FROM e WHERE gid = ? GROUP BY kind, value "
+            "SELECT kind, value, COUNT(*) AS c FROM e WHERE gid = ? GROUP BY kind, value "
             "ORDER BY c DESC, kind, value LIMIT ?", (gid, MAX_CARD_ENTITIES))]
         excerpts = [{"finding": finding_id, "text": claim} for finding_id, claim in self.db.execute(
             "SELECT finding_id, claim FROM o WHERE gid = ? ORDER BY ordinal LIMIT ?", (gid, MAX_EXCERPTS))]
