@@ -165,8 +165,9 @@ class Settings(BaseModel):
     # after the agent phase when the agent is enabled, or on demand with `romulus triage`. It never changes lanes,
     # ranks, the Reported set, citations or the deterministic report order. The model sees deterministic group cards
     # (one per rule and primary target in a report section) in budget-sized chunks. Within each report section at
-    # most `agent_triage_promote_per_lane` groups move ahead of the rest: ten is a page of an analyst's first
-    # screen, so every finding outside the promoted groups stays within ten groups of its deterministic place.
+    # most `agent_triage_promote_per_lane` groups are promoted, and each moves ahead only the (at most three)
+    # findings the model was shown for it. Ten groups fill an analyst's first screen, and no finding moves down by
+    # more than 10 x 3 = 30 places.
     agent_triage: Literal["on", "off"] = "on"
     agent_triage_promote_per_lane: int = Field(default=10, ge=0, le=100)
     agent_triage_max_calls: int = Field(default=100, ge=1, le=10_000)
