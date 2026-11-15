@@ -560,13 +560,41 @@ def run_hunt(s: Settings, hunt_id: str, on_candidate=None, expand: bool | None =
         pending_agent_lease_seconds=_lease_seconds(s),
         retain_budget_bytes=int(s.baseline_retain_disk_gb * 1e9),
     )
-    return _with_agent_result(result, repo, _ai_agent_phase(s, repo, hunt_id, m, agent_owner, client, contracts))
+    return _with_agent_result(result, repo, _ai_agent_phase(s, repo, hunt_id, m, agent_owner, client, contracts),
+                              settings=s, manifest=m)
 
 
-def _with_agent_result(result: dict, repo: Repo, summary: dict) -> dict:
-    """Return the result refreshed by the agent's atomic finalization without changing detection completion."""
+def _triage_after_agent(s: Settings, repo: Repo, hunt_id: str, manifest: dict, agent_summary: dict) -> dict | None:
+    """Run the AI triage pass once the agent phase has ended and released its lease, when the hunt asked for the agent,
+    triage is on and the provider is ready. A hunt with no surfaced finding makes no call. Never raises: triage only
+    orders a separate view, and its failure is recorded without touching the hunt or the agent's result."""
+    try:
+        if s.agent_triage != "on" or not (manifest.get("ai_agent") or {}).get("requested", False):
+            return None
+        if agent_summary.get("status") in (None, "skipped") or agent_summary.get("reason") == "lease_lost":
+            return None
+        readiness = agent_readiness(s)
+        if not readiness.ready:
+            return None
+        if not repo.reportable_count(hunt_id):
+            return {"status": "skipped", "reason": "no surfaced findings"}
+        from romulus.hunt.triage import run_triage
+        return run_triage(s, repo, hunt_id, readiness=readiness, build=build_provider)
+    except Exception as exc:  # triage must never change a finished hunt's result
+        log.exception("AI triage after the agent phase failed")
+        return {"status": "failed", "reason": f"triage_error: {type(exc).__name__}: {exc}"[:300]}
+
+
+def _with_agent_result(result: dict, repo: Repo, summary: dict, *, settings: Settings | None = None,
+                       manifest: dict | None = None) -> dict:
+    """Return the result refreshed by the agent's atomic finalization without changing detection completion. With
+    `settings`, the AI triage pass runs first (after the agent phase) and its summary is added."""
+    triage = (_triage_after_agent(settings, repo, result["hunt_id"], manifest or {}, summary)
+              if settings is not None else None)
     combined = {**result, "ai_agent": summary,
                 "agent": {"status": summary.get("status", "unknown"), "stop_reason": summary.get("reason")}}
+    if triage is not None:
+        combined["ai_triage"] = triage
     try:
         stored = repo.get_hunt(result["hunt_id"])
         combined.update(lanes=repo.lane_counts(result["hunt_id"]), detection_result=stored["detection_result"])
@@ -663,7 +691,7 @@ def resume_hunt(s: Settings, hunt_id: str) -> dict:
             with _agent_heartbeat(repo, hunt_id, owner_token, _lease_seconds(s)):
                 recovered = recover_agent_finalization(repo, hunt_id, owner_token=owner_token)
             if recovered is not None:
-                return _with_agent_result(base_result, repo, recovered.as_dict())
+                return _with_agent_result(base_result, repo, recovered.as_dict(), settings=s, manifest=manifest)
         except Exception as exc:  # noqa: BLE001 - recovery errors stay inside the independent agent phase.
             reason = "lease_lost" if is_lease_lost(exc) else f"agent_error: {type(exc).__name__}"
             summary = {"status": "partial" if is_lease_lost(exc) else "failed", "reason": reason}
@@ -686,7 +714,7 @@ def resume_hunt(s: Settings, hunt_id: str) -> dict:
         if not wanted or not readiness.ready:
             summary = _ai_agent_phase(s, repo, hunt_id, manifest, owner_token, None, {},
                                       readiness_snapshot=readiness)
-            return _with_agent_result(base_result, repo, summary)
+            return _with_agent_result(base_result, repo, summary, settings=s, manifest=manifest)
     window = Window(
         start=datetime.fromisoformat(manifest["window"]["start"]),
         end=datetime.fromisoformat(manifest["window"]["end"]),
@@ -720,7 +748,8 @@ def resume_hunt(s: Settings, hunt_id: str) -> dict:
         return _with_agent_result({"hunt_id": hunt_id, "execution_state": hunt["execution_state"],
                 "stats": sweep_summary.get("stats") or {}, "lanes": repo.lane_counts(hunt_id),
                 "detection_result": hunt.get("detection_result"), "agent": ai_agent_summary,
-                "ai_agent": ai_agent_summary, "baseline": {}, "expansion": {}}, repo, ai_agent_summary)
+                "ai_agent": ai_agent_summary, "baseline": {}, "expansion": {}}, repo, ai_agent_summary,
+                settings=s, manifest=manifest)
     packet_audit = repo.latest_audit(hunt_id, "hunt.packet_summary")
     packet_summary = dict(packet_audit["detail"]) if packet_audit else {}
     if not packet_summary.get("finished"):
@@ -760,4 +789,5 @@ def resume_hunt(s: Settings, hunt_id: str) -> dict:
         retain_budget_bytes=int(s.baseline_retain_disk_gb * 1e9),
     )
     return _with_agent_result(result, repo, _ai_agent_phase(
-        s, repo, hunt_id, manifest, agent_owner, client, contracts, resuming=True, previous_run=agent_run))
+        s, repo, hunt_id, manifest, agent_owner, client, contracts, resuming=True, previous_run=agent_run),
+        settings=s, manifest=manifest)
