@@ -177,6 +177,7 @@ class OrderWorkspace:
             CREATE TABLE c (group_no INTEGER PRIMARY KEY, card TEXT, ids TEXT, size INTEGER);
             CREATE TABLE v (group_no INTEGER PRIMARY KEY, status TEXT, reason TEXT, assessment TEXT,
                             incident_label TEXT, rationale TEXT, cites TEXT, shown TEXT);
+            CREATE INDEX v_status ON v (status, reason);
             CREATE TABLE vr (position INTEGER PRIMARY KEY, row TEXT);
         """)
         self.ranked = repo.has_rank_pass(hunt_id, PASS_FINAL)
@@ -374,11 +375,14 @@ class OrderWorkspace:
                         (group_no, status, reason, assessment, incident_label, rationale, json.dumps(list(cites)),
                          json.dumps(list(shown))))
 
-    def mark_rest(self, reason: str) -> int:
-        """Every carded group with no verdict yet is not triaged, for `reason` (one statement, no card is rebuilt)."""
-        cursor = self.db.execute(
-            "INSERT INTO v (group_no, status, reason, cites, shown) SELECT c.group_no, 'not_triaged', ?, '[]', c.ids "
-            "FROM c LEFT JOIN v ON v.group_no = c.group_no WHERE v.group_no IS NULL", (reason,))
+    MARK_REST = ("INSERT INTO v (group_no, status, reason, cites, shown) SELECT group_no, 'not_triaged', ?, '[]', ids "
+                 "FROM c WHERE group_no > ? ORDER BY group_no")
+    REASONS = "SELECT reason, COUNT(*) FROM v INDEXED BY v_status WHERE status = 'not_triaged' GROUP BY reason"
+
+    def mark_rest(self, reason: str, after: int) -> int:
+        """Every carded group after `after` is not triaged, for `reason`. Cards go out in group order, so these are
+        exactly the groups never sent: one statement that never reads the verdicts and rebuilds no card."""
+        cursor = self.db.execute(self.MARK_REST, (reason, after))
         self.db.commit()
         return cursor.rowcount
 
@@ -386,8 +390,7 @@ class OrderWorkspace:
         self.db.commit()
 
     def not_triaged_reasons(self) -> dict[str, int]:
-        return {str(reason): int(count) for reason, count in self.db.execute(
-            "SELECT reason, COUNT(*) FROM v WHERE status = 'not_triaged' GROUP BY reason ORDER BY reason")}
+        return dict(sorted((str(reason), int(count)) for reason, count in self.db.execute(self.REASONS)))
 
     def promote(self, per_section: int, tiers: tuple[str, ...]) -> dict[int, list[int]]:
         """Choose the promoted groups: in each section at most `per_section` deterministic groups the model assessed in

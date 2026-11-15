@@ -336,6 +336,7 @@ def _run(settings, repo, hunt_id, provider, ws: OrderWorkspace, budget: TriageBu
     assessments: Counter = Counter()
     chunks_sent = chunks_failed = failures = 0
     stop: str | None = None
+    done = 0                             # the last group number with a verdict (cards go out in group order)
     for cards, shown in _chunks(ws, settings, system):
         numbers = {card["group"]: int(card["group"][1:]) for card in cards}
         heartbeat()
@@ -362,12 +363,13 @@ def _run(settings, repo, hunt_id, provider, ws: OrderWorkspace, budget: TriageBu
                 stop = reason
         else:
             failures = 0
+        done = max(numbers.values())
         ws.commit()
         heartbeat()
         if stop is not None:
             break
     if stop is not None:
-        ws.mark_rest(stop)               # one statement: no card is rebuilt for the groups never sent
+        ws.mark_rest(stop, done)         # one statement: no card is rebuilt for the groups never sent
     promoted = ws.promote(settings.agent_triage_promote_per_lane, PROMOTING)
     not_triaged = ws.not_triaged_reasons()
     model = getattr(provider, "model", "") or ""
