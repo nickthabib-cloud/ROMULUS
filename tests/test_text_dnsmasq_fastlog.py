@@ -62,14 +62,36 @@ def test_fast_line_types_every_alert_field_the_alert_rules_read():
     assert ("host", "ids1", "observer") in event.entities()       # the sensor is an observer, never an endpoint
 
 
+def test_fast_alert_equals_the_eve_alert_on_every_field_the_alert_rules_read():
+    import json
+
+    eve = {"timestamp": "2024-11-18T14:00:03.123456+0000", "event_type": "alert", "src_ip": "203.0.113.9",
+           "src_port": 4444, "dest_ip": "10.0.0.10", "dest_port": 1433, "proto": "TCP",
+           "alert": {"action": "allowed", "gid": 1, "signature_id": 2010935, "rev": 3,
+                     "signature": "ET POLICY Suspicious inbound to MSSQL port 1433",
+                     "category": "Potentially Bad Traffic", "severity": 2}}
+    hit = {"_index": "i", "_id": "e1", "_source": {"@timestamp": "2024-11-18T14:00:03Z", "message": json.dumps(eve),
+                                                   "event": {"dataset": "suricata.eve.alert"}}}
+    [from_eve], skips, errors = normalize_hits([hit])
+    assert not skips and not errors and from_eve.family == "net_alert"
+    [from_fast], _skips = _typed(FAST)
+    read = ("alert.signature", "alert.signature_id", "alert.category", "alert.severity", "alert.action",
+            "source.ip", "source.port", "destination.ip", "destination.port", "network.transport",
+            "network.community_id")
+    assert {name: from_fast.get(name) for name in read} == {name: from_eve.get(name) for name in read}
+
+
 @pytest.mark.parametrize("parts,expected", [
     ({"action": "[Drop] "}, {"alert.action": "blocked"}),
     ({"action": "[wDrop] "}, {"alert.action": "allowed"}),
     ({"proto": "UDP", "dst": "10.0.0.10:53"}, {"network.transport": "udp", "destination.port": 53}),
     ({"proto": "ICMP", "src": "203.0.113.9:8", "dst": "10.0.0.10:0"},
      {"network.transport": "icmp", "icmp.type": 8, "icmp.code": 0}),
-    ({"proto": "IPV6-ICMP", "src": "2001:db8::9:128", "dst": "2001:db8::10:0"},
-     {"source.ip": "2001:db8::9", "destination.ip": "2001:db8::10", "icmp.type": 128}),
+    # util-proto-name.c names protocol 58 "IPv6-ICMP"; PrintInetIPv6 writes the full, uncompressed form
+    ({"proto": "IPv6-ICMP", "src": "2001:0db8:0000:0000:0000:0000:0000:0009:128",
+      "dst": "2001:0db8:0000:0000:0000:0000:0000:0010:0"},
+     {"source.ip": "2001:db8::9", "destination.ip": "2001:db8::10", "icmp.type": 128,
+      "network.transport": "ipv6-icmp"}),
     ({"src": "2001:db8::9:4444", "dst": "2001:db8::10:443"},
      {"source.ip": "2001:db8::9", "source.port": 4444, "destination.port": 443}),
     ({"proto": "PROTO:047", "src": "203.0.113.9:0", "dst": "10.0.0.10:0"}, {"network.iana_number": "47"}),
@@ -80,7 +102,7 @@ def test_fast_line_forms(parts, expected):
     parsed = parse_service(*identify_service(_fast(**parts)))
     assert parsed is not None and parsed.family == "net_alert"
     assert {key: parsed.fields.get(key) for key in expected} == expected
-    if parts.get("proto") in ("ICMP", "IPV6-ICMP", "PROTO:047"):
+    if parts.get("proto") in ("ICMP", "IPv6-ICMP", "PROTO:047"):
         assert "network.community_id" not in parsed.fields and (
             "source.port" not in parsed.fields or parts["proto"] == "PROTO:047")
 
@@ -189,6 +211,10 @@ def _e2e_docs():
     for octet in range(1, 40):
         add("dnsmasq.log", f"Nov 18 14:00:00 dnsmasq[123]: query[PTR] {octet}.0.0.10.in-addr.arpa from 10.0.0.5")
     add("dnsmasq.log", "Nov 18 14:00:00 dnsmasq[123]: reply 1.0.0.10.in-addr.arpa is NXDOMAIN")
+    add("dnsmasq.log", "Nov 18 14:00:00 dnsmasq[123]: forwarded 1.0.0.10.in-addr.arpa to 192.0.2.53")
+    # a wordlist run against one domain from one client: the subdomain enumeration rule's positive
+    for index in range(120):
+        add("dnsmasq.log", f"Nov 18 14:00:01 dnsmasq[123]: query[A] w{index:03d}.target.example from 10.0.0.6")
     return {tf.HOST_TARGET: builder.host, tf.NETWORK_TARGET: [], tf.ARKIME_TARGET: []}
 
 
@@ -205,7 +231,23 @@ def test_fast_and_dnsmasq_records_reach_the_alert_and_dns_rules_through_the_swee
         snapshot = tf.run_stack(tmp_path, docs=docs, profiles={tf.HOST_TARGET: _profile(FILEBEAT_TYPES, lines)})
     stats = snapshot["stats"]
     assert stats["records"] == len(in_window)                   # the window-end alert is outside the window
-    assert stats["linux_shapes"][tf.HOST_TARGET] == {"linux.text:dnsmasq.log": 40, "linux.text:suricata-fast.log": 4}
+    assert stats["linux_shapes"][tf.HOST_TARGET] == {"linux.text:dnsmasq.log": 161,
+                                                     "linux.text:suricata-fast.log": 4}
+    # Per DNS rule on dnsmasq lines (the host target's partition cell): question rules read every query line
+    # (client and name); the forwarded line (dnsmasq's own upstream query) and the reply line (no client by port,
+    # no flow) are counted missing, never a clean negative. The zone-transfer rule needs the server address, which
+    # dnsmasq does not log; the NXDOMAIN rule needs a reply oriented by its DNS port, which dnsmasq does not log.
+    host = {row["rule_id"]: row for row in snapshot["rule_cells"]
+            if row["target"] == tf.HOST_TARGET and row["rule_id"].startswith("net.dns_")}
+    expected = {"net.dns_reverse_lookup_sweep": (159, 2), "net.dns_tunnel_shape": (159, 2),
+                "net.dns_zone_transfer_or_any_request": (0, 161), "net.dns_nxdomain_burst": (0, 1)}
+    for rule, (evaluated, missing) in expected.items():
+        assert host[rule]["state"] == "evaluated_partial"
+        assert (host[rule]["evaluated"], host[rule]["detail"]["missing_required"]) == (evaluated, missing)
+    found = {row["rule_id"] for row in snapshot["candidates"]}
+    assert {"net.dns_subdomain_enumeration", "net.dns_reverse_lookup_sweep"} <= found
+    enumeration = next(row for row in snapshot["candidates"] if row["rule_id"] == "net.dns_subdomain_enumeration")
+    assert "10.0.0.6" in enumeration["claim"] and "target.example" in enumeration["claim"]
     assert not stats["skips"] and "dataset_reconciliation" not in stats
     alerts = [row for row in snapshot["candidates"] if row["rule_id"] == "net.suricata_alert_stack"]
     assert {(row["lane"]) for row in alerts} == {"high"}               # priority 1 alerts, as from EVE
@@ -213,5 +255,5 @@ def test_fast_and_dnsmasq_records_reach_the_alert_and_dns_rules_through_the_swee
     assert "203.0.113.9 to 10.0.0.10" in claims and "ET TEST at the start" in claims
     assert "ET TEST at the end" not in claims
     cells = {(row["rule_id"], row["target"]): row for row in snapshot["rule_cells"] if row["partition"] == "window"}
-    assert cells[("net.dns_reverse_lookup_sweep", "*")]["evaluated"] == 39   # the PTR questions; the answer is not
+    assert cells[("net.dns_reverse_lookup_sweep", "*")]["evaluated"] == 159  # every question line; reply and forward are not
     assert cells[("corr.alert_then_host_execution", "*")]["state"] != "not_applicable_no_events"

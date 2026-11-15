@@ -45,8 +45,10 @@ def _profile(types, datasets, *, extra_inventory=None):
     """The preflight profile build_profile writes for this index: real inventory, real bounded samples."""
     inventory = {name: len(lines) for name, lines in datasets.items()}
     inventory.update(extra_inventory or {})
-    samples = [_sample(lines, name) for name, lines in datasets.items()]
-    samples += [_sample([], name, total=count) for name, count in (extra_inventory or {}).items()]
+    # preflight samples the inventory in name order
+    lines_of = {**{name: [] for name in extra_inventory or {}}, **datasets}
+    samples = [_sample(lines_of[name], name, total=None if lines_of[name] else inventory[name])
+               for name in sorted(inventory)]
     client = ProfileClient(inventory, [*samples, _sample([], "", total=0)], fields=dict(types))
     profile, _contract = build_profile(client, "logs")
     data = profile.model_dump(mode="json")
@@ -108,6 +110,38 @@ def test_records_without_the_payload_of_a_selected_dataset_are_stated_with_count
     assert cells and all(cell["state"] == "evaluated_partial" and cell["target"] == tf.HOST_TARGET for cell in cells)
     assert {"auth.password_guessing", "net.dns_nxdomain_burst"} <= {cell["rule_id"] for cell in cells}
     assert "host.kernel_module_load" not in {cell["rule_id"] for cell in cells}   # reads no text family
+
+
+def test_dataset_whose_sample_has_no_payload_is_stated_with_count(tmp_path, monkeypatch):
+    """(iii) literally: the bounded sample of a dataset shows no text payload, so it is not selected; the report names
+    it with its count and the sample reason, and the sweep's window count names nothing twice."""
+    datasets = {"dnsmasq.log": DNSMASQ}
+    docs = _docs(datasets, without_payload=["custom.state", "custom.state"])
+    profile = _profile(FILEBEAT_TYPES, datasets, extra_inventory={"custom.state": 2})
+    snapshot, _summary, rows = _run(tmp_path, monkeypatch, FILEBEAT_TYPES, datasets, docs=docs, profile=profile)
+    [row] = [row for row in rows if row["dataset"] == "custom.state"]
+    assert row["records"] == 2 and row["reason"] == "not retrieved: sample incomplete"
+    assert snapshot["stats"]["records"] == 3 and not _reconciliation_cells(snapshot)
+
+
+def test_reconciliation_rows_render_counts_zero_and_not_counted():
+    from romulus.report.manifest import publish_revision
+    from romulus.report.markdown import render
+    from tests.test_report import _repo_with_finding
+
+    repo, _ = _repo_with_finding()
+    manifest = publish_revision(repo, "h1", "test")
+    manifest["coverage"]["not_assessed"] = [
+        {"target": "logs", "dataset": "dnsmasq.log", "records": 0, "reason": "selected for retrieval, but none",
+         "count_scope": "records in the hunt window by @timestamp; the whole index held 3 at source preflight"},
+        {"target": "logs", "dataset": "horde.log", "records": None, "reason": "not retrieved: selected",
+         "count_scope": "not counted: the hunt window's records were not counted by dataset"},
+        {"target": "logs", "dataset": "(records naming no dataset)", "records": 4, "reason": "not retrieved by the sweep",
+         "count_scope": "records in the hunt window by @timestamp"}]
+    section = render(manifest).split("### Data not assessed", 1)[1].split("###", 1)[0]
+    assert "| logs | dnsmasq.log | 0 | records in the hunt window by @timestamp; the whole index held 3" in section
+    assert "| logs | horde.log | unknown | not counted: the hunt window's records were not counted" in section
+    assert "| logs | (records naming no dataset) | 4 |" in section
 
 
 def test_payload_mapped_in_an_unsearchable_type_is_stated_not_silent(tmp_path, monkeypatch):
