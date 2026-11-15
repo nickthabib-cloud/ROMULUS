@@ -78,7 +78,11 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # Hostless text records gain their syslog header host; all event identities use this epoch.
                    # Then normalize_hits gained an optional report of each Windows event's record digest (the
                    # record without its collection source): no output changed.
-                   18: "fd9a7ba8288929edc84aef696feeb7bae622f7d9d90b2312fe275eff9ae9bc0b"}
+                   18: "fd9a7ba8288929edc84aef696feeb7bae622f7d9d90b2312fe275eff9ae9bc0b",
+                   # Suricata fast.log alert lines are typed net_alert records, and dnsmasq lines gain their query
+                   # serial, requester, transport and the documented answer forms; every other record normalizes as
+                   # before.
+                   19: "e17c2bfc19a5c8db2e267419a48d421dcfaee0dd092a6539f1389d3b86ee3bd5"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py", "rpc_catalog.py")
 PINNED_WINDOWS = {
     # A record's host addresses stand beside its stable source identifier, so clones that share the identifier
@@ -144,10 +148,11 @@ SURICATA_EVIDENCE_FILES = ("normalize.py", "suricata_protocols.py", "raw_scrub.p
                            "surrogates.py", "typed.py")
 ARKIME_EVIDENCE_FILES = ("normalize.py", "arkime_protocols.py", "raw_scrub.py", "community.py",
                         "certificates.py", "zeek_credentials.py", "surrogates.py", "typed.py")
-# The dispatcher's optional report of Windows record digests changes no network record's output.
-PINNED_SURICATA = {"suricata-eve@2": "e94e638b7035d5f36b74c52cbe187a153609468a0e197b252c12c3d7edd79745",
+# The dispatcher's optional report of Windows record digests changes no network record's output. Neither does the
+# typing of text alert lines and the evidence version that types them: EVE and Arkime records are read as before.
+PINNED_SURICATA = {"suricata-eve@2": "e1e2045cf4c9ef96225705947960b878247eab2ad0208fca89ffda471ab2f1be",
                    "suricata-eve@1": "8aba0c3bbb2061eef70c0c9dd77e5ab49a42bbed9a68b01ba4b4eeffad181e38"}
-PINNED_ARKIME = {"arkime@1": "0bc2fe51c010156759c3fcdd41f77b36276be1630fc891db8362e8c51ea4be32"}
+PINNED_ARKIME = {"arkime@1": "6dac683bbcd20b0c5f227229a009e3f749875382897a4b9cac628f48c0eaaf60"}
 
 
 # The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events, and TCP connections rebuilt
