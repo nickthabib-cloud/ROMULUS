@@ -87,6 +87,8 @@ class OrderWorkspace:
     def __init__(self, repo: Repo, hunt_id: str, *, directory: str | None = None,
                  heartbeat: Callable[[], None] = lambda: None, page: int = PAGE):
         self.repo, self.hunt_id, self.heartbeat, self.page = repo, hunt_id, heartbeat, page
+        if directory is not None:
+            os.makedirs(directory, mode=0o700, exist_ok=True)
         self.dir = tempfile.mkdtemp(prefix="romulus-triage-", dir=directory)
         self.db = sqlite3.connect(os.path.join(self.dir, "order.db"))
         self.db.executescript("""

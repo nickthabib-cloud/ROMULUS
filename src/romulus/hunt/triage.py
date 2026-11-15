@@ -43,7 +43,9 @@ def run_triage(s: Settings, repo: Repo, hunt_id: str, *, provider=None, readines
         with _agent_heartbeat(repo, hunt_id, owner, _lease_seconds(s)) as heartbeat:
             if provider is None:
                 provider = (build or build_provider)(s, readiness=readiness)
-            summary = run_triage_pass(s, repo, hunt_id, provider, owner_token=owner, heartbeat=heartbeat, force=force)
+            # staged beside the sweep's stages, on the disk the site sized for per-hunt state
+            summary = run_triage_pass(s, repo, hunt_id, provider, owner_token=owner, heartbeat=heartbeat, force=force,
+                                      workdir=str(s.stage_path))
     except Exception as exc:
         if is_lease_lost(exc):
             return {"status": "partial", "reason": "lease_lost"}
@@ -62,7 +64,7 @@ def run_triage(s: Settings, repo: Repo, hunt_id: str, *, provider=None, readines
     return summary
 
 
-def write_export(repo: Repo, hunt_id: str, path: Path) -> dict:
+def write_export(repo: Repo, hunt_id: str, path: Path, *, workdir: str | None = None) -> dict:
     """Write the latest triage pass's order as JSON: every surfaced finding id, in triage order, rebuilt from the
     stored findings and the pass's promoted groups (with no pass, or nothing promoted, it is the deterministic order).
     The file is streamed, so memory stays bounded whatever the hunt's size. Returns the export's header."""
@@ -74,7 +76,7 @@ def write_export(repo: Repo, hunt_id: str, path: Path) -> dict:
             promoted.setdefault(int(row["section"]), []).append(group_key(
                 int(row["section"]), row["provenance"], row["rule_id"], row["entity_kind"], row["entity"] or ""))
         after = page[-1]["position"]
-    with OrderWorkspace(repo, hunt_id) as ws:
+    with OrderWorkspace(repo, hunt_id, directory=workdir) as ws:
         ws.build()
         header = {"schema": EXPORT_SCHEMA, "label": LABEL, "hunt_id": hunt_id, "pass": summary.get("pass"),
                   "status": summary.get("status") or "not_run", "reason": summary.get("reason"),

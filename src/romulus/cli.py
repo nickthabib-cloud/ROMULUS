@@ -258,7 +258,7 @@ def cmd_triage(args) -> int:
               + ("; reused the stored pass with the same prompt digest" if summary.get("reused") else "")
               + "; the deterministic report order is authoritative. Run `romulus report` to publish it.")
     if args.export:
-        header = write_export(repo, args.hunt_id, Path(args.export))
+        header = write_export(repo, args.hunt_id, Path(args.export), workdir=str(settings.stage_path))
         print(f"triage order of {header['written']} findings written to {header['path']} "
               f"(status {header['status']}{', stale' if header['stale'] else ''})")
     if summary is not None and summary.get("status") in ("skipped", "failed") and not summary.get("reused"):

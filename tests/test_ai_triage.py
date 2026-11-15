@@ -18,7 +18,7 @@ from romulus.config import Settings
 from romulus.hunt.rank import PASS_FINAL, compute_rank_pass
 from romulus.hunt.triage import run_triage, write_export
 from romulus.report.manifest import build_manifest, canonical_manifest
-from romulus.report.markdown import render
+from romulus.report.markdown import ranked_sections, render
 from romulus.store import schema as t
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import TRIAGE_PURPOSE, Repo
@@ -77,16 +77,27 @@ def by_rule(attack_rules, other="likely_benign"):
     return policy
 
 
+_STAGE: list = []
+
+
+@pytest.fixture(autouse=True)
+def _stage(tmp_path):
+    """Every pass stages under the test's own directory, never the user's home."""
+    _STAGE[:] = [tmp_path / "stage"]
+    yield
+
+
 def settings(**overrides) -> Settings:
     return Settings(**{"agent_triage_promote_per_lane": 2, "agent_triage_call_input_tokens": 4000,
-                       "agent_triage_call_output_tokens": 2048, **overrides})
+                       "agent_triage_call_output_tokens": 2048, "stage_dir": _STAGE[0], **overrides})
 
 
 # -- a hunt store ---------------------------------------------------------------------------------------------------
-def _repo() -> Repo:
-    engine = make_engine(":memory:")
-    migrate(engine)
-    repo = Repo(engine)
+def _repo(repo: Repo | None = None) -> Repo:
+    if repo is None:
+        engine = make_engine(":memory:")
+        migrate(engine)
+        repo = Repo(engine)
     repo.create_hunt("h1", {"window": {"start": START.isoformat(), "end": END.isoformat()}, "style": "sweep",
                             "original_input": "", "targets": [], "ai_agent": {"requested": True},
                             "pack": {"version": "p"}, "normalizer": "n", "policy": "d", "model": {},
@@ -101,9 +112,9 @@ def _finished(repo: Repo) -> Repo:
     return repo
 
 
-def _hunt(filler=60, *, ranked=True, attack_rows=True, agent=True) -> Repo:
+def _hunt(filler=60, *, ranked=True, attack_rows=True, agent=True, repo: Repo | None = None) -> Repo:
     """Many groups; the attack activity (rule r.attack on host victim) sits deep in the deterministic order."""
-    repo = _repo()
+    repo = _repo(repo)
     rows = [_row("c-urgent", "r.confirmed", lane="urgent", host="quiet"),
             _row("c-urgent2", "r.confirmed", lane="urgent", host="loud", ts=START + timedelta(minutes=3))]
     rows += [_row(f"f-{index:04}", f"r.f{index % 7}", lane=("high", "lead")[index % 2], host=f"fill-{index % 11}",
@@ -305,6 +316,20 @@ def test_an_unranked_hunt_triages_within_lanes(tmp_path):
     assert order[len(before) - len(leads)] == "z-attack-0"                   # the first lead after it
 
 
+def report_order(repo) -> list[str]:
+    manifest = build_manifest(repo, "h1", "test")
+    if "entities" not in manifest:
+        return [finding["id"] for finding in manifest["findings"]]
+    confirmed, reported, pool = ranked_sections(manifest)
+    return [finding["id"] for finding in (*confirmed, *reported, *pool)]
+
+
+@pytest.mark.parametrize("ranked", [True, False])
+def test_the_deterministic_order_is_the_reports_own_order(ranked):
+    repo = _hunt(ranked=ranked)                       # ranked: with an agent finding stored after the final pass
+    assert deterministic(repo) == report_order(repo)
+
+
 # -- the report, the canonical projection, the agent's budget -----------------------------------------------------
 def test_the_view_is_its_own_labelled_section_and_the_deterministic_report_is_unchanged():
     repo = _hunt()
@@ -371,7 +396,7 @@ def test_triage_refuses_a_hunt_that_is_still_running():
 
 def test_an_unready_provider_is_skipped_without_writes():
     repo = _hunt(filler=5)
-    summary = run_triage(Settings(), repo, "h1")
+    summary = run_triage(Settings(stage_dir=_STAGE[0]), repo, "h1")
     assert summary["status"] == "skipped" and "provider_not_ready" in summary["reason"]
     assert repo.latest_audit("h1", "hunt.ai_triage_summary") is None
 
@@ -423,6 +448,37 @@ def test_the_web_page_renders_the_view_labelled_and_escaped(web_setup):
     assert "/hunts/h1/triage" in client.get("/hunts/h1").text
 
 
+def test_the_cli_runs_reuses_and_exports(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from romulus import cli
+    from romulus.agent import provider as provider_port
+    from romulus.hunt.run import open_repo
+    for name in ("ROMULUS_HOME", "ROMULUS_STAGE_DIR", "AGENT_TRIAGE_PROMOTE_PER_LANE"):
+        monkeypatch.delenv(name, raising=False)
+    home = tmp_path / "home"
+    env = tmp_path / "test.env"
+    env.write_text(f"ROMULUS_HOME={home}\nAGENT_TRIAGE_PROMOTE_PER_LANE=2\n", encoding="utf-8")
+    repo = _hunt(filler=10, repo=open_repo(Settings(home=home)))
+    plain = tmp_path / "plain.json"
+    assert cli.main(["--env-file", str(env), "triage", "h1", "--no-run", "--export", str(plain)]) == cli.EXIT_OK
+    assert json.loads(plain.read_text())["order"] == deterministic(repo)
+    assert cli.main(["--env-file", str(env), "triage", "h1"]) == cli.EXIT_FAIL       # no provider configured
+    provider = FakeTriage(by_rule({"r.attack"}))
+    monkeypatch.setattr(provider_port, "agent_readiness", lambda *_a: SimpleNamespace(ready=True))
+    monkeypatch.setattr(provider_port, "build_provider", lambda *_a, **_kw: provider)
+    assert cli.main(["--env-file", str(env), "triage", "h1"]) == cli.EXIT_OK
+    calls = len(provider.requests)
+    triaged = tmp_path / "t.json"
+    assert calls and cli.main(["--env-file", str(env), "--json", "triage", "h1", "--export", str(triaged)]) \
+        == cli.EXIT_OK
+    assert len(provider.requests) == calls                                         # reused: same prompt digest
+    exported_order = json.loads(triaged.read_text())
+    assert exported_order["status"] == "complete" and not exported_order["stale"]
+    assert exported_order["promoted_groups"] and exported_order["order"] != deterministic(repo)
+    assert sorted(exported_order["order"]) == sorted(deterministic(repo))
+
+
 def test_the_migration_round_trips(tmp_path):
     engine = make_engine(tmp_path / "triage.sqlite")
     with engine.begin() as connection:
@@ -462,6 +518,7 @@ def test_triage_on_the_throughput_stack_changes_no_evidence_or_decision(tmp_path
 
     before = frozen()
     order_before = deterministic(repo)
+    assert order_before == report_order(repo)
     assert len(order_before) > 5
     seen = set()
 
