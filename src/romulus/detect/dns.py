@@ -229,11 +229,25 @@ def endpoints(event: TypedEvent, record_role: str | None = None) -> tuple[str | 
     return None, None
 
 
-def logging_server(event: TypedEvent) -> str | None:
-    """The server of a question its DNS server logged itself without naming its own address: the record's host
-    ("host <name>"), or None for any other record."""
-    if event.get("dns.server_logged") is True and isinstance(event.host, str) and event.host.strip():
-        return f"host {event.host}"
+SERVER_FROM = {"header": "the host named in the log line's syslog header",
+               "shipper": "the host that shipped the log"}
+
+
+def logging_server(event: TypedEvent) -> tuple[str, str] | None:
+    """The server of a question its DNS server logged itself without naming its own address, as ("host <name>",
+    where the name came from), or None for any other record. The log line's own syslog header names the host that
+    wrote it; without one, the host that shipped the log is the server (a central collector shipping another host's
+    file is then named, and the claim says so)."""
+    if event.get("dns.server_logged") is not True:
+        return None
+    header = event.get("log.syslog.hostname")
+    if isinstance(header, str):
+        name = header.strip().rstrip(".").lower()
+        if name and name not in ("-", "localhost") and not name.startswith("localhost."):
+            return f"host {name}", "header"
+    for value in (event.get("host.hostname"), event.host):
+        if isinstance(value, str) and value.strip():
+            return f"host {value.strip()}", "shipper"
     return None
 
 
@@ -578,7 +592,7 @@ class _ZoneGroup:
     """One (client, server, transfer zone or ANY) group of the zone-transfer rule."""
 
     __slots__ = ("any_names", "asked_by_flow", "deciding", "ends", "examples", "named", "records", "replies",
-                 "requests", "span", "transports")
+                 "requests", "server_from", "span", "transports")
 
     def __init__(self):
         self.ends = Ends()                          # the records bounding the span
@@ -593,6 +607,7 @@ class _ZoneGroup:
         self.deciding: tuple[datetime, str] | None = None
         self.asked_by_flow: dict = {}
         self.examples = _Examples()
+        self.server_from: set[str] = set()          # where a host server's name came from (SERVER_FROM keys)
 
 
 class DnsZoneTransferOrAnyRequest(_DnsAggregate):
@@ -661,8 +676,9 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
                 continue
             record_role = role(event)
             client, server = endpoints(event, record_role) if record_role else (None, None)
+            server_from = None
             if server is None and client is not None and record_role in ("query", "transaction"):
-                server = logging_server(event)
+                server, server_from = logging_server(event) or (None, None)
             question_type = qtype(event.get("dns.question.type"))
             if record_role is None or client is None or server is None or question_type is None:
                 why = self._unread(event, record_role) if client is None else None
@@ -674,14 +690,15 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
             if question_type not in self.REQUEST_TYPES:
                 continue
             counted: set = set()            # the groups this record is already counted in
-            added = [self._add(event, record_role, client, server, question_type, name, counted)
+            added = [self._add(event, record_role, client, server, question_type, name, counted, server_from)
                      for name in question_names(event) or [""]]
             if not all(added):
                 self._disk_full()
         self._trim()
         return []
 
-    def _add(self, event, record_role, client, server, question_type, name, counted: set) -> bool:
+    def _add(self, event, record_role, client, server, question_type, name, counted: set,
+             server_from: str | None = None) -> bool:
         if question_type in self.TRANSFER_TYPES:
             key = (client, server, "transfer", name)
         else:
@@ -692,6 +709,8 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
         if key not in counted:
             counted.add(key)
             group.records += 1
+        if server_from is not None:
+            group.server_from.add(server_from)
         if question_type not in self.TRANSFER_TYPES and name:
             self._named(group.named, name, event)
         if question_type not in self.TRANSFER_TYPES and name and name not in group.any_names:
@@ -748,10 +767,11 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
                 if asked:
                     claim = (f"{client} sent {sum(asked.values())} DNS question record(s) ({_tally(asked)}) {subject} "
                              f"to {server} ({group.span.text()}).")
-                    if server.startswith("host "):
-                        claim += (" The server is the host whose own DNS log recorded the questions; that log names "
-                                  "no server address and writes its answers without their question type, so the "
-                                  "answers are not tied to these questions.")
+                    if group.server_from:
+                        claim += (f" The server is {' and '.join(SERVER_FROM[k] for k in sorted(group.server_from))}: "
+                                  f"the DNS server's own log recorded the questions, names no server address and "
+                                  f"writes its answers without their question type, so the answers are not tied to "
+                                  f"these questions.")
                 else:
                     claim = (f"{client} received {sum(replies.values())} answer record(s) from {server} to "
                              f"{'/'.join(types)} question(s) {subject} ({group.span.text()}); the question records "
@@ -765,7 +785,7 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
                                   "answer records do not show how many zone records were sent.")
                     elif all(c in ("REFUSED", "NOTAUTH", "NOTIMP") for (_t, c) in replies):
                         claim += " The server refused or did not implement every answered question."
-                elif server.startswith("host "):
+                elif group.server_from:
                     claim += " Whether the server answered is not established."
                 else:
                     claim += (" No answer record for these questions was retrieved, so whether the server answered is "

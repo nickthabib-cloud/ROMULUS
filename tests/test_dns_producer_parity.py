@@ -196,13 +196,34 @@ def test_zone_transfer_and_any_on_dnsmasq_name_the_logging_host_as_the_server():
         assert items(found) == host
         transfer = next(m for m in found if m.group_key.endswith("corp-example.test"))
         assert "sent 1 DNS question record(s) (AXFR x1)" in transfer.claim
-        assert "own DNS log recorded the questions" in transfer.claim
+        # dnsmasq's own log file has no syslog header: the host that shipped it is the server, and the claim says so
+        assert "The server is the host that shipped the log" in transfer.claim
         assert "was retrieved" not in transfer.claim
         # the forwarded and reply lines (no question type) are counted missing, not read as questions, and say why
         assert rule.evaluated == 2
         why = DnsZoneTransferOrAnyRequest.WHY
         assert set(rule.partition_coverage_notes()) == {
             why["forwarded"], why["untyped_answer"] if producer == "dnsmasq-extra" else why["unoriented"]}
+
+
+@pytest.mark.parametrize("line,server,words", [
+    # a syslog-wrapped line: its header names the resolver host, not the collector that shipped it
+    ("Nov 18 14:00:01 dns1 dnsmasq[812]: query[AXFR] corp-example.test from 10.20.0.15", "host dns1",
+     "the host named in the log line's syslog header"),
+    # dnsmasq's own file names no host: the collector that shipped it is all the record says
+    ("Nov 18 14:00:01 dnsmasq[812]: query[AXFR] corp-example.test from 10.20.0.15", "host log-collector-01",
+     "the host that shipped the log"),
+])
+def test_a_collector_shipped_resolver_log_names_the_server_from_the_line_header(line, server, words):
+    hit = {"_index": "i", "_id": "c1", "_source": {
+        "@timestamp": "2024-11-18T14:00:01Z", "message": line, "event": {"dataset": "dnsmasq.log"},
+        "host": {"name": "log-collector-01"}, "input": {"type": "log"}}}
+    events, skips, errors = normalize_hits([hit])
+    assert not skips and not errors
+    _rule, [match] = evaluate(DnsZoneTransferOrAnyRequest, events)
+    assert match.group_key == f"{CLIENT}|{server}|corp-example.test"
+    assert f"to {server} " in match.claim and f"The server is {words}" in match.claim
+    assert match.proposed_lane == "lead"
 
 
 def test_an_external_axfr_logged_by_dnsmasq_stays_a_lead():
