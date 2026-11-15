@@ -347,6 +347,44 @@ def test_the_stage_reads_its_order_and_groups_through_indexes_never_a_temp_sort(
         assert ws.findings == len(deterministic(repo))
 
 
+def test_a_budget_stop_marks_the_rest_without_reading_verdicts_or_growing_memory(tmp_path):
+    """At a million groups, a budget stop and the reasons count use no ephemeral table and stay bounded in memory."""
+    from tests.test_smb_impact_scale import _rss
+    repo = _hunt(filler=5)
+    with OrderWorkspace(repo, "h1", directory=str(tmp_path)) as ws:
+        for statement in (ws.MARK_REST, ws.REASONS):
+            program = " ".join(str(row[1]) for row in ws.db.execute("EXPLAIN " + statement, ("r", 0)[:statement.count("?")]))
+            plan = " ".join(str(row[-1]) for row in ws.db.execute("EXPLAIN QUERY PLAN " + statement,
+                                                                    ("r", 0)[:statement.count("?")]))
+            assert "OpenEphemeral" not in program and "TEMP B-TREE" not in plan, (statement, plan)
+        groups = 1_000_000
+        for start in range(1, groups + 1, 50_000):
+            ws.db.executemany("INSERT INTO c VALUES (?, '{}', '[\"f\"]', 10)",
+                              ((number,) for number in range(start, min(start + 50_000, groups + 1))))
+        for number in range(1, 101):
+            ws.set_verdict(number, status="not_triaged", reason="no valid answer")
+        ws.commit()
+        before = _rss()
+        assert ws.mark_rest("budget:calls", 100) == groups - 100
+        assert ws.not_triaged_reasons() == {"budget:calls": groups - 100, "no valid answer": 100}
+        assert _rss() - before < 100 * 2**20
+
+
+def test_lease_checks_see_a_triage_pass_that_readers_do_not():
+    from datetime import UTC, datetime
+
+    from romulus.hunt.baseline_writer import _lease_active
+    repo = _repo()
+    _insert(repo, [_row("a", "r.a", host="x")])
+    repo.set_hunt_state("h1", "running")
+    repo.set_hunt_state("h1", "completed_within_scope")
+    owner, _created = repo.claim_triage_lease("h1", 600)
+    assert repo.agent_run("h1") is None
+    lease = repo.agent_lease("h1")
+    assert lease["lease_owner"] == owner
+    assert _lease_active(repo.get_hunt("h1"), datetime.now(UTC), lease)
+
+
 def test_cases_cost_and_a_stale_export(tmp_path):
     repo = _hunt(filler=10)
     with repo.engine.begin() as connection:
