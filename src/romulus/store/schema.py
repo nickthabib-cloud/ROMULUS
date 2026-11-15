@@ -241,6 +241,11 @@ Index("ix_candidate_finding_order", candidate.c.hunt_id,
 Index("ix_candidate_provenance_order", candidate.c.hunt_id, candidate.c.provenance,
       literal_column("CASE lane WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'lead' THEN 2 ELSE 3 END"),
       candidate.c.priority.desc(), literal_column("coalesce(ts, '~')"), candidate.c.id)
+# lane counts per provenance, and one rule's findings in the same importance order as ix_candidate_finding_order
+Index("ix_candidate_hunt_provenance_lane", candidate.c.hunt_id, candidate.c.provenance, candidate.c.lane)
+Index("ix_candidate_rule_order", candidate.c.hunt_id, candidate.c.rule_id,
+      literal_column("CASE lane WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'lead' THEN 2 ELSE 3 END"),
+      candidate.c.priority.desc(), literal_column("coalesce(ts, '~')"), candidate.c.id)
 
 candidate_host = Table(
     "candidate_host", metadata,
@@ -463,6 +468,7 @@ model_call = Table(
     Column("finish_reason", String),
     Column("cost_usd_est", Float),
 )
+Index("ix_model_call_hunt_egress", model_call.c.hunt_id, model_call.c.egress)
 
 case_step = Table(
     "case_step", metadata,
