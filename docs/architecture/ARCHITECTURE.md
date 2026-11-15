@@ -106,7 +106,12 @@ scheduler observations and account changes use the existing `auth`, `dns_query`,
 `net_alert`, `process_observed`, `service_change` and `account_change` families. A `fast.log` alert carries the
 fields an EVE alert does except its flow id, application protocol and signature metadata; its community ID is
 computed from its 5-tuple. dnsmasq lines are typed one at a time: with `log-queries=extra` each line keeps its query
-serial and requester, and lines are never joined. Authentication sessions are distinguished from authentication decisions. Firewall
+serial and requester, and lines are never joined. A question the resolver logged names its host as the server, a
+reply line in `extra` mode names the requester as its client, and the forwarded line's requester is never read as a
+client of that upstream question, so one lookup is counted once. dnsmasq DHCP acknowledgements are
+`address_assignment` records. OpenVPN's own log file is read in both of its time formats; certificate checks, TLS
+handshake failures and packet authentication failures are typed with their own authentication phase, never as password
+decisions. Recognized lines of these programs that carry no event are counted with a named reason. Authentication sessions are distinguished from authentication decisions. Firewall
 log records do not invent connection counters, and a cron command log does not claim a kernel-observed exec.
 Two additional families preserve information that those contracts cannot express:
 

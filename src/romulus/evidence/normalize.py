@@ -69,7 +69,7 @@ from romulus.evidence.linux_catalog import (
     text_payload,
     unmatched_families,
 )
-from romulus.evidence.linux_service_text import parse_service
+from romulus.evidence.linux_service_text import parse_service, service_skip_reason
 from romulus.evidence.linux_text import TextLine, classify, inline_time
 from romulus.evidence.linux_text_types import WRITER_MISMATCH_CAVEAT
 from romulus.evidence.raw_scrub import clean_source, might_be_zeek
@@ -3565,7 +3565,9 @@ def normalize_text(hit: dict) -> list[TypedEvent]:
         except Skip as error:
             records = _program_events(hit, parsed.program, parsed.message, origin, journal=journal)
             if not records:
-                reason = f"text format {parsed.format}, program {parsed.program!r} is not normalized: {dataset}"
+                detail = service_skip_reason(parsed.program, parsed.message)
+                reason = (f"text format {parsed.format}, program {parsed.program!r} is not normalized"
+                          + (f" ({detail})" if detail else "") + f": {dataset}")
                 raise Skip(reason[:256]) from error
             for record in records:
                 _text_provenance(record, parsed, origin)

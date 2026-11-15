@@ -93,7 +93,8 @@ LINUX_LOGICAL_DATASETS: tuple[str, ...] = tuple(LINUX_SHIPPER_DATASETS)
 # and syslog lines feed sshd/sudo/useradd/systemd records; plain text lines feed the same, sudo included.
 _AUDIT_ADMIN = frozenset({"account_change", "service_change", "audit_config", "system_state"})
 TEXT_FAMILIES = frozenset({"auth", "mail_message", "vpn_session", "dns_query", "http_access", "web_error",
-                           "net_flow", "process_observed", "service_change", "account_change", "privilege_use"})
+                           "net_flow", "process_observed", "service_change", "account_change", "privilege_use",
+                           "address_assignment"})
 # Content-identified text also reads native application files a journal or syslog program never writes: an IDS alert
 # file (Suricata fast.log) feeds net_alert.
 CONTENT_TEXT_FAMILIES = TEXT_FAMILIES | {"net_alert"}
