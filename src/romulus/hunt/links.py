@@ -551,6 +551,25 @@ class LinkFetcher:
         self._cache[fetch_key] = result
         return result
 
+    def followable(self, anchor: LinkAnchor, link_type: LinkType, window: LinkWindow) -> bool:
+        """Whether `fetch` would plan any work for this anchor and kind: a search by a typed key the anchor's records
+        carry, or an honest partial over targets that cannot be searched by it. False exactly when `fetch` would
+        answer unsupported without a query. Planning issues no source query."""
+        if link_type not in self._PLANNED:
+            return False
+        plan_window = self._effective_window(anchor, link_type, window) if link_type == "service_process" else window
+        _key, _strength, intents, _retain, _select, unsupported_reason, planning_coverage = self._plan(
+            anchor, link_type, plan_window,
+        )
+        return bool(intents) or (unsupported_reason is None and bool(planning_coverage))
+
+    # the kinds `_plan` builds searches for itself (the Zeek joins plan theirs as they run)
+    _PLANNED = frozenset({
+        "process_lineage", "login_session", "network_flow", "flow_host_side", "source_ip", "account",
+        "host_after_anchor", "process_activity", "process_session", "kerberos_logon", "remote_logon_source",
+        "service_process",
+    })
+
     @staticmethod
     def _fetch_key(anchor: LinkAnchor, link_type: LinkType, window: LinkWindow, key: dict) -> str:
         payload = {
