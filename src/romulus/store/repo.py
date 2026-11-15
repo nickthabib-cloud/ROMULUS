@@ -5697,8 +5697,15 @@ class Repo:
                     table.c.hunt_id == hunt_id, table.c[key].in_(chunk))).mappings())
         return rows
 
+    def agent_lease(self, hunt_id: str) -> dict | None:
+        """The agent lease on a hunt, whoever holds it (a triage pass's placeholder included): for lease checks."""
+        with self.engine.connect() as connection:
+            row = connection.execute(select(t.agent_run.c.lease_owner, t.agent_run.c.lease_until).where(
+                t.agent_run.c.hunt_id == hunt_id)).mappings().first()
+            return dict(row) if row else None
+
     def agent_run(self, hunt_id: str) -> dict | None:
-        """The hunt's agent record; a triage pass's placeholder is no agent record."""
+        """The hunt's agent record; a triage pass's placeholder is no agent record (lease checks use `agent_lease`)."""
         with self.engine.connect() as connection:
             row = connection.execute(select(t.agent_run).where(t.agent_run.c.hunt_id == hunt_id)).mappings().first()
             return dict(row) if row and not is_triage_placeholder(row) else None
