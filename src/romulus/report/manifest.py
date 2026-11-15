@@ -17,6 +17,7 @@ from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.hunt.publish import subject_event_ids
 from romulus.hunt.rank import PASS_FINAL, rank_summary, rank_unranked
 from romulus.report.incidents import build_incident_graph, incident_narrative
+from romulus.report.triage import LABEL as TRIAGE_LABEL
 from romulus.report.triage import triage_view
 from romulus.store import schema as t
 from romulus.store.db import digest, utcnow, write_txn
@@ -788,8 +789,13 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
     }
     if ranking is not None:
         m["ranking"], m["entities"] = ranking
-    # the AI triage order: a separately labelled view after the deterministic findings, present once a pass ran
-    triage = triage_view(repo, hunt_id)
+    # the AI triage order: a separately labelled view after the deterministic findings, present once a pass ran. It
+    # is optional: a failure to build it leaves it unverified and never blocks the authoritative report.
+    try:
+        triage = triage_view(repo, hunt_id, findings=findings)
+    except Exception as exc:  # noqa: BLE001 - an optional AI view never blocks the authoritative report
+        triage = {"label": TRIAGE_LABEL, "status": "unverified", "stale": None, "order_verified": False,
+                  "verification_error": f"{type(exc).__name__}: {exc}"[:300], "sections": []}
     if triage is not None:
         m["ai_triage"] = triage
     lists = hm.get('indicator_lists') or {}

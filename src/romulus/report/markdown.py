@@ -270,7 +270,10 @@ def _triage_section(m: dict) -> list[str]:
             f"{esc(view.get('model') or 'unknown')} · pass {esc(view.get('pass'))} · prompt digest "
             f"`{esc(str(view.get('prompt_digest') or '')[:16])}`"), ""]
     if view.get("stale"):
-        out += ["> **Stale:** the hunt's findings or final ranking changed after this triage pass.", ""]
+        out += ["> **Stale:** the hunt's findings or order changed after this triage pass.", ""]
+    if view.get("verification_error"):
+        out += [(f"> **Unverified:** this view could not be checked against the hunt "
+                 f"({cell(view['verification_error'])}); the deterministic order above is authoritative."), ""]
     if (view.get("last_attempt") or {}).get("status") == "failed":
         out += [f"> **A later triage attempt failed:** {cell(view['last_attempt'].get('reason') or '')}", ""]
     for section in view.get("sections") or []:

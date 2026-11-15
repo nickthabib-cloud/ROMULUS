@@ -47,7 +47,7 @@ def register_agent_routes(app, repo, need, page):
         from romulus.report.triage import triage_view
         user = need(request)
         h = hunt(hunt_id)
-        return page(request, "triage.html", user, h=h, view=triage_view(repo, hunt_id, verify_order=False))
+        return page(request, "triage.html", user, h=h, view=triage_view(repo, hunt_id))
 
     @app.get("/hunts/{hunt_id}/hypotheses/{hid}", response_class=HTMLResponse)
     def hypothesis(request: Request, hunt_id: str, hid: str):

@@ -4,12 +4,15 @@ It is its own labelled section, after the deterministic findings: the promoted g
 their assessment, incident label, rationale and cited findings, the findings each one moved (its shown excerpts; the
 rest of the group keeps its deterministic place), and the pass's counts, reasons, usage and digest. It never reorders,
 hides or relabels a deterministic finding. The view is stale when the hunt's deterministic order no longer matches the
-pass's: the report verifies that with the export's own order digest.
+pass's. The report checks that without staging anything: the finding count and final ranking first, then the order
+digest of the findings the manifest already holds, ordered by the same key the pass staged them by (the export
+re-stages the order). A check that cannot run leaves the view unverified; it never blocks the report.
 """
 from __future__ import annotations
 
 from romulus.agent.triage import LABEL, latest_failure
-from romulus.agent.triage_order import SECTIONS_LANES, SECTIONS_RANKED, OrderWorkspace
+from romulus.agent.triage_order import SECTIONS_LANES, SECTIONS_RANKED, report_order_digest
+from romulus.hunt.rank import PASS_FINAL
 from romulus.store.repo import TRIAGE_FAILED, TRIAGE_SUMMARY, Repo
 
 FAILED_ACTION = TRIAGE_FAILED
@@ -17,21 +20,20 @@ SUMMARY_KEYS = ("status", "reason", "pass", "mode", "prompt_digest", "grouping",
                 "groups", "dropped", "calls", "usage", "findings")
 
 
-def _stale(repo: Repo, hunt_id: str, summary: dict, verify_order: bool) -> bool:
-    """Whether the stored pass no longer describes the hunt. Cheap checks first (finding count, final ranking); with
-    `verify_order`, the deterministic order digest the export compares, staged as the pass staged it."""
+def _stale(repo: Repo, hunt_id: str, summary: dict, findings: list[dict] | None) -> bool:
+    """Whether the stored pass no longer describes the hunt: the finding count or final ranking changed, or (given
+    the report's surfaced findings) their deterministic order digest differs from the pass's."""
     if summary.get("findings") != repo.reportable_count(hunt_id) or summary.get("rank_state") != repo.rank_state(
             hunt_id):
         return True
-    if not verify_order:
+    if findings is None:
         return False
-    with OrderWorkspace(repo, hunt_id) as ws:
-        ws.build()
-        return ws.order_digest != summary.get("order_digest")
+    return report_order_digest(findings, repo.has_rank_pass(hunt_id, PASS_FINAL)) != summary.get("order_digest")
 
 
-def triage_view(repo: Repo, hunt_id: str, *, verify_order: bool = True) -> dict | None:
-    """The hunt's AI triage view, or None when no triage pass was ever attempted (the report is then unchanged)."""
+def triage_view(repo: Repo, hunt_id: str, *, findings: list[dict] | None = None) -> dict | None:
+    """The hunt's AI triage view, or None when no triage pass was ever attempted (the report is then unchanged).
+    `findings` are the report's surfaced findings, with their ranks: given them, the whole order is verified."""
     audit = repo.latest_audit(hunt_id, TRIAGE_SUMMARY)
     failure = latest_failure(repo, hunt_id)
     if audit is None and failure is None:
@@ -41,8 +43,11 @@ def triage_view(repo: Repo, hunt_id: str, *, verify_order: bool = True) -> dict 
     view = {"label": LABEL, **{key: summary.get(key) for key in SUMMARY_KEYS}}
     if not audit:
         view.update(status="failed", reason=failure["reason"])
-    view["stale"] = bool(audit) and _stale(repo, hunt_id, summary, verify_order)
-    view["order_verified"] = bool(audit) and verify_order
+    view["order_verified"] = bool(audit) and findings is not None
+    try:
+        view["stale"] = bool(audit) and _stale(repo, hunt_id, summary, findings)
+    except Exception as exc:  # noqa: BLE001 - the check is advisory: the view is shown unverified
+        view.update(stale=None, order_verified=False, verification_error=f"{type(exc).__name__}: {exc}"[:300])
     if audit and failure:
         view["last_attempt"] = failure
     sections = [{"section": index, "title": title, "promoted": []} for index, title in enumerate(titles)]

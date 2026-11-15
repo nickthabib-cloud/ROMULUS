@@ -8,7 +8,8 @@
 <h1>{{ view.label }}</h1>
 <p class="warn">AI-generated and unconfirmed. A model proposed which finding groups to review first; only the findings it was shown for each promoted group (at most three) move ahead in the triage order. Lanes, ranks, the Reported set, citations and the deterministic report order are unchanged.</p>
 {% if not view.order_verified %}<p>Staleness here is checked by finding count and final ranking; the report and the export verify the whole order.</p>{% endif %}
-{% if view.stale %}<p class="warn"><b>Stale:</b> the hunt's findings or final ranking changed after this triage pass.</p>{% endif %}
+{% if view.stale %}<p class="warn"><b>Stale:</b> the hunt's findings or order changed after this triage pass.</p>{% endif %}
+{% if view.verification_error %}<p class="warn"><b>Unverified:</b> {{ view.verification_error }}</p>{% endif %}
 {% if view.last_attempt %}<p class="warn"><b>A later triage attempt failed:</b> {{ view.last_attempt.reason }}</p>{% endif %}
 <table class="grid"><tbody>
 <tr><th>Status</th><td>{{ view.status }}{% if view.reason %} ({{ view.reason }}){% endif %}</td></tr>
