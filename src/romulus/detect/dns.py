@@ -401,8 +401,24 @@ class _DnsAggregate(Playbook):
     families = ("dns_query",)
     staged = True
 
+    # Why a record the rule could not evaluate was not evaluated, for the records whose producer cannot show what the
+    # rule needs (a fixed set of texts, so the cell's reasons stay bounded).
+    WHY: ClassVar[dict[str, str]] = {
+        "forwarded": "question records that name a server but no client address were not evaluated: a resolver's own "
+                     "upstream (forwarded) question, whose client is the resolver itself (dnsmasq does not log its own "
+                     "address)",
+        "unoriented": "answer records whose ports do not show which end is the client, and that name no client.ip, "
+                      "were not attributed to a client (dnsmasq writes its reply lines this way without "
+                      "log-queries=extra)",
+        "unpaired": "answer records with no flow identity were not tied to a retrieved question (a resolver's log "
+                    "writes its answers apart from their questions)",
+        "untyped_answer": "answer records that omit the question type were not evaluated (a resolver's log writes an "
+                          "answer without its question's type)",
+    }
+
     def __init__(self):
         super().__init__()
+        self._why: dict[str, str] = {}
         self._prev_query_flows: set = set()
         self._pending: dict[str, TypedEvent] = {}
         self.bounds = BoundStage()      # the records bounding each group's span, held while they bound it
@@ -411,6 +427,24 @@ class _DnsAggregate(Playbook):
 
     def retained_events(self) -> list[TypedEvent]:
         return []
+
+    def _missing(self, why: str | None = None) -> None:
+        """Count a record the rule could not evaluate, and name why when its producer cannot show what is needed."""
+        self.missing_required += 1
+        if why is not None:
+            self._why[why] = self.WHY[why]
+            self.note_coverage(why, self.WHY[why])
+
+    def _unread(self, event: TypedEvent, record_role: str | None) -> str | None:
+        """The reason a question or answer has no client, when it is one of the producer shapes named in WHY."""
+        if record_role == "answer":
+            return "unoriented" if event.get("client.ip") in (None, "") else None
+        if record_role == "query" and event.get("source.ip") in (None, "") and event.get("destination.ip"):
+            return "forwarded"
+        return None
+
+    def partition_coverage_notes(self) -> list[str]:
+        return list(self._why.values())
 
     def drain_staged(self) -> list[TypedEvent]:
         out, self._pending = list(self._pending.values()) + self.bounds.drain() + self.holds.drain(), {}
@@ -510,6 +544,7 @@ class _DnsAggregate(Playbook):
         name, question type, DNS id) matches a query record of this batch or the one before is that query's reply
         and is skipped; any other answer record is counted as missing (its question is not in the retrieved
         telemetry as a query record)."""
+        self._why = {}
         batch = [e for e in events if e.family in self.families]
         asked: set[tuple] = set()
         for event in batch:
@@ -524,7 +559,7 @@ class _DnsAggregate(Playbook):
                 names = question_names(event)
                 keys = transaction_keys(event, names) if names else None
                 if not keys or any(key not in known for key in keys):
-                    self.missing_required += 1
+                    self._missing("unpaired" if flow_key(event) is None else None)
                 continue
             if record_role is None:
                 self.missing_required += 1
@@ -532,7 +567,7 @@ class _DnsAggregate(Playbook):
             client, server = endpoints(event, record_role)
             names = question_names(event)
             if client is None or names is None:
-                self.missing_required += 1
+                self._missing(self._unread(event, record_role) if client is None else None)
                 continue
             self.evaluated += 1
             yield event, client, server, names
@@ -620,6 +655,7 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
         return []
 
     def consume(self, events):
+        self._why = {}
         for event in events:
             if event.family not in self.families:
                 continue
@@ -629,7 +665,10 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
                 server = logging_server(event)
             question_type = qtype(event.get("dns.question.type"))
             if record_role is None or client is None or server is None or question_type is None:
-                self.missing_required += 1
+                why = self._unread(event, record_role) if client is None else None
+                if why is None and record_role == "answer" and question_type is None:
+                    why = "untyped_answer"
+                self._missing(why)
                 continue
             self.evaluated += 1
             if question_type not in self.REQUEST_TYPES:
@@ -1285,6 +1324,7 @@ class DnsNxdomainBurst(_DnsAggregate):
         return []
 
     def consume(self, events):
+        self._why = {}
         batch = [e for e in events if e.family in self.families]
         has_answers = any(role(e) == "answer" for e in batch)
         for event in batch:
@@ -1300,7 +1340,7 @@ class DnsNxdomainBurst(_DnsAggregate):
             client, server = endpoints(event, record_role)
             code = rcode(event.get("dns.response_code"))
             if client is None or code is None:
-                self.missing_required += 1
+                self._missing(self._unread(event, record_role) if client is None and code is not None else None)
                 continue
             self.evaluated += 1
             state = self.addresses.setdefault(client, _Address)

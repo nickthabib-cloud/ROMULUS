@@ -225,8 +225,9 @@ DNSMASQ_ANSWER_CAVEAT = "DNS answer line omits the question type and is not join
 DNSMASQ_FORWARD_CAVEAT = ("DNS forwarding line: dnsmasq's own upstream query, without the question type; its client is "
                           "the dnsmasq host, whose address the line does not name, and the requesting client is the "
                           "query line's")
-DNSMASQ_REVERSE_CAVEAT = ("Reverse-lookup answer line: dnsmasq writes the looked-up address in place of the name; the "
-                          "question name is that address's reverse-lookup name")
+DNSMASQ_REVERSE_CAVEAT = ("Reverse-lookup answer line: dnsmasq writes the looked-up address in place of the name, so "
+                          "the question name is read as that address's reverse-lookup name (a forward question for an "
+                          "address literal would be written the same way)")
 # A question a DNS server logged itself: the server that received it is the host that wrote the log, which names no
 # address of its own. Rules that need the server read the record's host then.
 SERVER_LOGGED = "dns.server_logged"
@@ -511,20 +512,22 @@ _OPENVPN_PEER = re.compile(r"(?:[^\s/]+/)?(?:\[AF_INET6?\])?(?:\[[0-9A-Fa-f:.]+\
 _OPENVPN_OTHER = (
     (re.compile(r"SENT CONTROL \[[^\]]*\]: 'AUTH_FAILED"),
      "OpenVPN AUTH_FAILED notice sent to the client (the decision is its TLS Auth Error line)"),
+    # openers no other program writes
     (re.compile(r"(?:\[[^\]]+\] )?(?:OpenVPN \d|library versions:|Initialization Sequence Completed|Diffie-Hellman|"
-                r"TUN/TAP device|net_(?:route|addr|iface|link)|/s?bin/ip |UDPv[46] link|TCPv[46]_SERVER link|"
-                r"TCP connection established|Listening for incoming|Socket Buffers:|MULTI: |MULTI_sva:|"
-                r"IFCONFIG POOL|ifconfig_pool|Control Channel:|Data Channel:|Outgoing Data Channel:|"
+                r"TUN/TAP device|net_(?:route|addr|iface|link)_|UDPv[46] link|TCPv[46]_SERVER link|MULTI: |"
+                r"MULTI_sva:|IFCONFIG POOL|Control Channel:|Data Channel:|Outgoing Data Channel:|"
                 r"Incoming Data Channel:|Outgoing Static Key|Incoming Static Key|VERIFY (?:KU|EKU|SCRIPT|X509NAME) OK|"
                 r"VERIFY OK: depth=[1-9]|PUSH: |SENT CONTROL \[|peer info:|TLS: (?:soft reset|tls_|move_session|"
-                r"new session|Username/Password authentication)|NOTE: |Note: |DEPRECATED OPTION|"
-                r"Connection reset|Re-using SSL/TLS context|LZO compression|OPTIONS IMPORT|Expected Remote Options|"
-                r"Local Options|Validating certificate|PLUGIN_|AUTH-PAM:|Authenticate/Decrypt packet error|"
-                r"Restart pause|Closing TUN|Exiting due to|SIG(?:TERM|USR1|USR2|HUP|INT)\[|event_wait|"
-                r"Data Channel MTU|Timers:|Outgoing Control Channel|Incoming Control Channel|MANAGEMENT:|"
-                r"Preserving recently used|GDG6?:|ROUTE6?:|client-instance|Fatal TLS error)"),
+                r"new session|Username/Password authentication)|Re-using SSL/TLS context|PLUGIN_|AUTH-PAM:|"
+                r"Authenticate/Decrypt packet error|Data Channel MTU|Outgoing Control Channel|"
+                r"Incoming Control Channel|MANAGEMENT:|Fatal TLS error)"),
      "OpenVPN status, channel or configuration line (not an authentication decision or session boundary)"),
 )
+# Generic openers that identify OpenVPN only behind a server's client-context prefix.
+_OPENVPN_PEER_ONLY = re.compile(r"(?:\[[^\]]+\] )?(?:NOTE: |Note: |WARNING: |Connection reset|LZO compression|"
+                                r"OPTIONS IMPORT|Expected Remote Options|Local Options|Validating certificate|"
+                                r"Restart pause|SIG(?:TERM|USR1|USR2|HUP|INT)\[|Timers:|Preserving recently used|"
+                                r"GDG6?:|ROUTE6?:|client-instance|TCP connection established|Socket Buffers:)")
 
 
 def openvpn_skip_reason(message: str) -> str | None:
@@ -534,6 +537,8 @@ def openvpn_skip_reason(message: str) -> str | None:
     for pattern, reason in _OPENVPN_OTHER:
         if pattern.match(body):
             return reason
+    if peer and _OPENVPN_PEER_ONLY.match(body):
+        return _OPENVPN_OTHER[1][1]
     return None
 
 

@@ -156,6 +156,8 @@ def test_question_and_reply_rules_report_the_same_items_on_every_producer(behavi
         # Without log-queries=extra a reply line names no requester and no port tells the roles: the rule cannot
         # attribute an answer to a client, so every reply line is counted missing (partial, never a negative).
         assert found == [] and rule.evaluated == 0 and rule.missing_required == 80
+        assert rule.partition_coverage_notes() == [DnsNxdomainBurst.WHY["unoriented"]]
+        assert rule.coverage_notes() == [DnsNxdomainBurst.WHY["unoriented"]]
         return
     assert items(found) == SENSOR_ITEMS[behaviour]
 
@@ -196,8 +198,11 @@ def test_zone_transfer_and_any_on_dnsmasq_name_the_logging_host_as_the_server():
         assert "sent 1 DNS question record(s) (AXFR x1)" in transfer.claim
         assert "own DNS log recorded the questions" in transfer.claim
         assert "was retrieved" not in transfer.claim
-        # the forwarded and reply lines (no question type) are counted missing, not read as questions
+        # the forwarded and reply lines (no question type) are counted missing, not read as questions, and say why
         assert rule.evaluated == 2
+        why = DnsZoneTransferOrAnyRequest.WHY
+        assert set(rule.partition_coverage_notes()) == {
+            why["forwarded"], why["untyped_answer"] if producer == "dnsmasq-extra" else why["unoriented"]}
 
 
 def test_an_external_axfr_logged_by_dnsmasq_stays_a_lead():
@@ -326,10 +331,21 @@ def test_dnsmasq_dhcpack_is_an_address_assignment_and_other_dhcp_lines_are_named
     assert second.get("dhcp.transaction_id") == 1234567 and second.get("dhcp.hostname") is None
     assert any("DHCPINFORM" in caveat for caveat in first.caveats)
     assert skips == {
-        "text format application, program 'dnsmasq-dhcp' is not normalized (dnsmasq DHCP packet line other than "
-        "an IPv4 DHCPACK with a hardware address): dnsmasq.log": 2,
-        "text format application, program 'dnsmasq-dhcp' is not normalized (dnsmasq lifecycle, configuration or "
-        "DHCP option detail line): dnsmasq.log": 1}
+        "text format application, program 'dnsmasq-dhcp' (dnsmasq DHCP packet line other than an IPv4 DHCPACK "
+        "with a hardware address) is not normalized: dnsmasq.log": 2,
+        "text format application, program 'dnsmasq-dhcp' (dnsmasq lifecycle, configuration or DHCP option detail "
+        "line) is not normalized: dnsmasq.log": 1}
+
+
+def test_a_syslog_wrapped_dhcpack_is_typed_without_a_writer_mismatch():
+    hit = {"_index": "i", "_id": "s1", "_source": {
+        "@timestamp": "2024-11-18T14:00:00Z", "event": {"dataset": "custom.syslog"}, "host": {"name": DNS_HOST},
+        "message": "Nov 18 14:00:00 dns1 dnsmasq-dhcp[812]: DHCPACK(eth0) 10.0.0.31 52:54:00:ab:cd:ef laptop",
+        "journald": {"process": {"name": "dnsmasq"}}, "input": {"type": "log"}}}
+    [event], skips, errors = normalize_hits([hit])
+    assert not skips and not errors and event.family == "address_assignment"
+    assert event.get("dhcp.client_address") == "10.0.0.31"
+    assert not any("Writer identity" in caveat for caveat in event.caveats)
 
 
 @pytest.mark.parametrize("line,reason", [
@@ -348,7 +364,7 @@ def test_dnsmasq_dhcpack_is_an_address_assignment_and_other_dhcp_lines_are_named
 def test_dnsmasq_non_query_lines_are_counted_skips_with_precise_reasons(line, reason):
     events, skips = typed([line])
     assert not events
-    assert skips == {f"text format application, program 'dnsmasq' is not normalized ({reason}): dnsmasq.log": 1}
+    assert skips == {f"text format application, program 'dnsmasq' ({reason}) is not normalized: dnsmasq.log": 1}
 
 
 def test_an_unknown_dnsmasq_message_keeps_the_generic_reason():

@@ -243,6 +243,8 @@ def test_fast_and_dnsmasq_records_reach_the_alert_and_dns_rules_through_the_swee
             if row["target"] == tf.HOST_TARGET and row["rule_id"].startswith("net.dns_")}
     expected = {"net.dns_reverse_lookup_sweep": (159, 2), "net.dns_tunnel_shape": (159, 2),
                 "net.dns_zone_transfer_or_any_request": (159, 2), "net.dns_nxdomain_burst": (0, 1)}
+    from romulus.detect.dns import DnsNxdomainBurst
+    assert DnsNxdomainBurst.WHY["unoriented"] in host["net.dns_nxdomain_burst"]["detail"]["reasons"]
     for rule, (evaluated, missing) in expected.items():
         assert host[rule]["state"] == "evaluated_partial"
         assert (host[rule]["evaluated"], host[rule]["detail"]["missing_required"]) == (evaluated, missing)

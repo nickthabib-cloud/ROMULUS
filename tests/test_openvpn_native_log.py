@@ -106,7 +106,7 @@ def test_a_packet_authentication_failure_names_its_sender():
 def test_other_openvpn_lines_are_counted_skips_with_precise_reasons(line, reason):
     events, skips = typed([line])
     assert not events
-    assert skips == {f"text format application, program 'openvpn' is not normalized ({reason}): openvpn.log": 1}
+    assert skips == {f"text format application, program 'openvpn' ({reason}) is not normalized: openvpn.log": 1}
 
 
 @pytest.mark.parametrize("line", [
@@ -122,8 +122,17 @@ def test_mentions_are_never_vpn_or_auth_events(line):
     assert not [e for e in events if e.family in ("vpn_session", "auth")]
 
 
-def test_an_unrelated_iso_line_is_not_identified_as_openvpn():
-    assert classify(f"{ISO} worker[3]: job finished").format == "unknown"
+@pytest.mark.parametrize("line", [f"{ISO} worker[3]: job finished", f"{ISO} Connection reset by peer",
+                                  f"{ISO} NOTE: the cache was rebuilt", f"{CTIME} Timers: 3 pending"])
+def test_unrelated_stamped_lines_are_not_identified_as_openvpn(line):
+    # generic openers identify OpenVPN only behind its client-context prefix
+    assert classify(line).format == "unknown"
+
+
+def test_a_generic_opener_behind_the_client_prefix_is_an_openvpn_skip():
+    _events, skips = typed([f"{ISO} alice-laptop/{PEER}:51234 Connection reset, restarting [0]"])
+    assert list(skips) == [("text format application, program 'openvpn' (OpenVPN status, channel or configuration "
+                            "line (not an authentication decision or session boundary)) is not normalized: openvpn.log")]
 
 
 def test_a_timeout_and_its_signal_close_one_session():

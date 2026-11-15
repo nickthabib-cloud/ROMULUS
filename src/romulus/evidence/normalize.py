@@ -3433,6 +3433,9 @@ def _new_writer_identity(program: str, journal: dict | None) -> tuple[str, list[
         names, units = frozenset({name, name.rsplit("/", 1)[-1]}), frozenset({"postfix"})
     elif name == "openvpn" or name.startswith("openvpn-"):
         names, units = frozenset({name, "openvpn"}), frozenset({name, "openvpn", "openvpn-server", "openvpn-client"})
+    elif name in ("dnsmasq-dhcp", "dnsmasq-tftp", "dnsmasq-script"):
+        # dnsmasq tags its DHCP, TFTP and script messages itself; the writing process is dnsmasq
+        names, units = frozenset({name, "dnsmasq"}), frozenset({"dnsmasq"})
     journal = journal or {}
     present = [field for field in _TRUSTED_WRITER_PATHS if field in journal]
     verified, disagreeing = False, []
@@ -3566,8 +3569,9 @@ def normalize_text(hit: dict) -> list[TypedEvent]:
             records = _program_events(hit, parsed.program, parsed.message, origin, journal=journal)
             if not records:
                 detail = service_skip_reason(parsed.program, parsed.message)
-                reason = (f"text format {parsed.format}, program {parsed.program!r} is not normalized"
-                          + (f" ({detail})" if detail else "") + f": {dataset}")
+                # the detail precedes " is not normalized: ", after which the report reads the dataset
+                reason = (f"text format {parsed.format}, program {parsed.program!r}" + (f" ({detail})" if detail else "")
+                          + f" is not normalized: {dataset}")
                 raise Skip(reason[:256]) from error
             for record in records:
                 _text_provenance(record, parsed, origin)

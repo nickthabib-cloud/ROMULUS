@@ -81,7 +81,8 @@ what each producer can show:
 | `network.service_catalog` | The row's name and source | The query record's name and source | The query line's name and client; forwarded and reply lines have no client address and are counted missing |
 | `ioc.indicator_match`, Sigma `dns` rules | The question name on the row | The name on query and answer records | The name on every line: a lookup's query, forwarded and reply lines are each a record that names it |
 
-`dns.server_logged` marks a question written by the server that received it. dnsmasq writes an answer to a reverse
+The rules read in `detect/dns.py` name each of these producer limits on the coverage cell of the partition where
+they occurred. `dns.server_logged` marks a question written by the server that received it. dnsmasq writes an answer to a reverse
 lookup with the looked-up address in place of the name; its question name is that address's reverse-lookup name.
 A reply code without a mnemonic is written as a number and typed as its name. The baseline of external destinations
 reads sensor datasets only, and a resolver log names no server address, so it does not read dnsmasq lines.
