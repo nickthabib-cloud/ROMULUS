@@ -580,6 +580,8 @@ agent_tool_call = Table(
     Column("result_digest", String, nullable=False),
     Column("model_call_id", String, ForeignKey("model_call.id")),
     Column("created_at", DateTime(timezone=True), nullable=False),
+    # a refused call: why, as `<path>: <type>` reasons (romulus.agent.refusals), never an argument value
+    Column("refusal_reasons", JSON),
     UniqueConstraint("session_id", "seq", name="uq_agent_tool_call_seq"),
 )
 Index("ix_agent_tool_call_hunt_id", agent_tool_call.c.hunt_id)

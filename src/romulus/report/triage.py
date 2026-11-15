@@ -41,6 +41,8 @@ def triage_view(repo: Repo, hunt_id: str, *, findings: list[dict] | None = None)
     summary = dict(audit["detail"]) if audit else {}
     titles = summary.get("sections") or list(SECTIONS_RANKED if summary.get("mode") == "ranked" else SECTIONS_LANES)
     view = {"label": LABEL, **{key: summary.get(key) for key in SUMMARY_KEYS}}
+    if summary.get("model_source"):
+        view["model_source"] = summary["model_source"]     # the setting that chose the triage model
     if not audit:
         view.update(status="failed", reason=failure["reason"])
     view["order_verified"] = bool(audit) and findings is not None

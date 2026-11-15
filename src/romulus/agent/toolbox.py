@@ -33,6 +33,7 @@ from romulus.agent.dossier import (
 )
 from romulus.agent.models import EntityRef, PivotResult
 from romulus.agent.provider.base import Tool
+from romulus.agent.refusals import validation_reasons
 from romulus.agent.safety import injection_flags
 from romulus.decide.policy import LANE_ORDER
 from romulus.detect.metadata import is_sigma_id, pinned_rule_ids
@@ -389,6 +390,8 @@ class Toolbox:
             return _result("refused", data={"error": {
                 "code": "invalid_arguments", "message": "tool arguments failed strict validation",
                 "details": exc.errors(include_url=False, include_input=False),
+                "reasons": validation_reasons(exc.errors(include_url=False, include_input=False,
+                                                         include_context=False)),
             }})
         except AliasKindMismatch as exc:
             return _result("refused", data={"error": {"code": "alias_kind", "message": str(exc)}})

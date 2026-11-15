@@ -78,6 +78,7 @@ from romulus.agent.provider.openai_compatible import (
     probe_results,
     strict_ok,
 )
+from romulus.agent.refusals import bounded
 from romulus.config import redact_text
 
 OPENAI_HOST = "api.openai.com"
@@ -506,7 +507,7 @@ class OpenAIResponsesProvider(ChatProvider):
             result.status, result.error = "invalid_tool_call", "the model called a tool where none was allowed"
         if result.ok and result.parsed is not None and request.response_schema is not None \
                 and not strict_schema_problems(request.response_schema):
-            problems = instance_problems(result.parsed, request.response_schema)
+            problems = bounded(instance_problems(result.parsed, request.response_schema))
             if problems:
                 result.status, result.parsed = "invalid_json", None
                 result.error = "the reply does not match the requested schema: " + "; ".join(problems[:5])
@@ -521,10 +522,11 @@ class OpenAIResponsesProvider(ChatProvider):
         call = parse_tool_arguments(call_id, name, raw)
         tool = next((t for t in request.tools if t.name == name), None)
         if call.arguments is not None and tool is not None and not strict_schema_problems(tool.parameters):
-            problems = instance_problems(call.arguments, tool.parameters)
+            problems = bounded(instance_problems(call.arguments, tool.parameters))
             if problems:
                 return ToolCall(call_id, name, None, call.raw_arguments,
-                                "arguments do not match the tool's schema: " + "; ".join(problems[:5]))
+                                "arguments do not match the tool's schema: " + "; ".join(problems[:5]),
+                                problems=tuple(problems))
         return call
 
     # ---- doctor -----------------------------------------------------------------------------------------------

@@ -339,5 +339,5 @@ def test_the_retry_after_a_bad_reply_names_what_was_wrong():
         AssessmentBody.model_validate({"overall": [{"text": "t", "cites": ["E1"], "kind": "fact"}]})
     except ValidationError as exc:
         summary = _validation_summary(exc, None)
-    assert "overall.0.kind" in summary and "key_steps: Field required" in summary
-    assert len(summary) < 1000 and "fact" not in summary          # paths and messages, never the values
+    assert "overall[].kind: literal_error" in summary and "key_steps: missing" in summary
+    assert len(summary) < 1000 and "fact" not in summary          # paths and error types, never the values

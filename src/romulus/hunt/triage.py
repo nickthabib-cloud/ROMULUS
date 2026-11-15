@@ -15,7 +15,7 @@ from pathlib import Path
 
 from romulus.agent.triage import LABEL, latest_failure, latest_summary, run_triage_pass
 from romulus.agent.triage_order import OrderWorkspace
-from romulus.config import Settings
+from romulus.config import Settings, triage_model, triage_settings
 from romulus.store.db import utcnow
 from romulus.store.repo import TRIAGE_FAILED, Repo, is_lease_lost
 
@@ -35,14 +35,18 @@ def stage_limits(s: Settings) -> dict:
 
 
 def run_triage(s: Settings, repo: Repo, hunt_id: str, *, provider=None, readiness=None, force: bool = False,
-               build: Callable | None = None) -> dict:
+               build: Callable | None = None, model: str | None = None) -> dict:
     """Claim the agent lease, run one triage pass and release the lease. Never raises for a provider, budget or
-    validation problem: the summary says what happened. `build(settings, readiness=...)` constructs the provider
-    when none is given."""
+    validation problem: the summary says what happened. The pass runs on its own model (`config.triage_model`:
+    `model`, else AGENT_TRIAGE_MODEL, else AGENT_MODEL) on the agent's provider. `build(settings, readiness=...)`
+    constructs the provider when none is given; a `readiness` for another model is checked again."""
     from romulus.hunt.run import _agent_heartbeat, _lease_seconds
+    _chosen, source = triage_model(s, model)
+    s = triage_settings(s, model)
     if provider is None:
         from romulus.agent.provider import agent_readiness, build_provider
-        readiness = readiness if readiness is not None else agent_readiness(s)
+        if readiness is None or getattr(readiness, "model", s.agent_model.strip()) != s.agent_model.strip():
+            readiness = agent_readiness(s)
         if not readiness.ready:
             return {"status": "skipped", "reason": f"provider_not_ready: {readiness.message()}"}
     try:
@@ -55,7 +59,7 @@ def run_triage(s: Settings, repo: Repo, hunt_id: str, *, provider=None, readines
             if provider is None:
                 provider = (build or build_provider)(s, readiness=readiness)
             summary = run_triage_pass(s, repo, hunt_id, provider, owner_token=owner, heartbeat=heartbeat, force=force,
-                                      **stage_limits(s))
+                                      model_source=source, **stage_limits(s))
     except Exception as exc:
         if is_lease_lost(exc):
             return summary

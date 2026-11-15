@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from romulus.agent.aliases import AliasBook, AliasError
 from romulus.agent.claims import supports_claim_kind
+from romulus.agent.refusals import reason
 from romulus.agent.safety import injection_flags
 from romulus.agent.toolbox import RegisteredTool, Toolbox, _result
 from romulus.catalog.attack import ICS_ATTACK_BUNDLE, ICS_PINNED_JSON_SHA256, load_attack_bundle
@@ -114,8 +115,31 @@ def _ok(data: dict) -> dict:
     return _result("complete", counts={"returned": 1, "total": 1}, data=data)
 
 
-def _refused(message: str, *, code: str = "validation") -> dict:
-    result = _result("refused", data={"error": {"code": code, "message": message}})
+class Refusal(ValueError):
+    """A refused proposal: the message the model reads, and the field and error type it is recorded by (never a
+    value: see romulus.agent.refusals)."""
+
+    def __init__(self, message: str, field: str = "$", kind: str = "validation"):
+        super().__init__(message)
+        self.field = field
+        self.kind = kind
+
+
+_ALIAS_ERROR_KINDS = {"UnknownAlias": "unknown_alias", "AliasKindMismatch": "alias_kind",
+                      "AliasFromOtherHunt": "other_hunt_alias"}
+
+
+def _reason_of(exc: Exception, field: str = "$") -> str:
+    if isinstance(exc, Refusal):
+        return reason(exc.field, exc.kind)
+    if isinstance(exc, AliasError):
+        return reason(field, _ALIAS_ERROR_KINDS.get(type(exc).__name__, "alias"))
+    return reason("$", "cap" if "limit reached" in str(exc) else "validation")
+
+
+def _refused(message: str, *, code: str = "validation", why: str | None = None) -> dict:
+    result = _result("refused", data={"error": {"code": code, "message": message,
+                                                "reasons": [why or reason("$", code)]}})
     result["errors"] = [message]
     return result
 
@@ -244,26 +268,32 @@ class AgentAdmission:
         for attack_id in ids:
             entry = index.get(attack_id)
             if entry is None:
-                raise ValueError(f"unknown ATT&CK technique {attack_id}")
+                raise Refusal(f"unknown ATT&CK technique {attack_id}", "techniques[]", "unknown_technique")
             technique, knowledge = entry
             if technique.revoked or technique.deprecated:
                 replacement = knowledge.replacement(attack_id)
                 suffix = f"; use replacement {replacement}" if replacement else ""
-                raise ValueError(f"ATT&CK technique {attack_id} is revoked or deprecated{suffix}")
+                raise Refusal(f"ATT&CK technique {attack_id} is revoked or deprecated{suffix}", "techniques[]",
+                              "revoked_technique")
             accepted.append(attack_id)
         return list(dict.fromkeys(accepted))
 
-    def _resolve_many(self, aliases: list[str], kinds: set[str]) -> list[tuple[str, str]]:
+    def _resolve_many(self, aliases: list[str], kinds: set[str], field: str = "$") -> list[tuple[str, str]]:
+        """`field` is the argument the aliases came from, which a refusal is recorded by."""
         resolved = []
         for alias in aliases:
             if alias not in self.issued_aliases:
-                raise ValueError(f"alias {alias!r} was not issued to this session")
+                raise Refusal(f"alias {alias!r} was not issued to this session", field, "alias_not_issued")
             row = self.repo.agent_alias(self.hunt_id, alias)
             if row is None:
-                raise ValueError(f"unknown alias {alias!r} in this hunt")
+                raise Refusal(f"unknown alias {alias!r} in this hunt", field, "unknown_alias")
             if row["kind"] not in kinds:
-                raise ValueError(f"alias {alias!r} has kind {row['kind']}; expected {', '.join(sorted(kinds))}")
-            resolved.append((row["kind"], self.aliases.resolve(alias, {row["kind"]})))
+                raise Refusal(f"alias {alias!r} has kind {row['kind']}; expected {', '.join(sorted(kinds))}", field,
+                              "alias_kind")
+            try:
+                resolved.append((row["kind"], self.aliases.resolve(alias, {row["kind"]})))
+            except AliasError as exc:
+                raise Refusal(str(exc), field, _ALIAS_ERROR_KINDS.get(type(exc).__name__, "alias")) from None
         return resolved
 
     def issue_aliases(self, value: object, *, source: str = "tool", tool_name: str | None = None) -> None:
@@ -279,22 +309,25 @@ class AgentAdmission:
         if alias is None:
             return self.hypothesis_id
         if alias not in self.issued_aliases:
-            raise ValueError(f"alias {alias!r} was not issued to this session")
-        return self.aliases.resolve(alias, {"H"})
+            raise Refusal(f"alias {alias!r} was not issued to this session", "hypothesis", "alias_not_issued")
+        try:
+            return self.aliases.resolve(alias, {"H"})
+        except AliasError as exc:
+            raise Refusal(str(exc), "hypothesis", _ALIAS_ERROR_KINDS.get(type(exc).__name__, "alias")) from None
 
     def _event_cites(self, aliases: list[str]) -> tuple[list[str], list[dict]]:
-        resolved = self._resolve_many(aliases, {"E"})
+        resolved = self._resolve_many(aliases, {"E"}, "cites[]")
         ids = list(dict.fromkeys(target for _, target in resolved))
         rows = self.repo.citation_events(self.hunt_id, ids)
         by_id = {row["event"]["id"]: row for row in rows}
         if len(by_id) != len(ids):
-            raise ValueError("one or more evidence aliases are not retained by this hunt")
+            raise Refusal("one or more evidence aliases are not retained by this hunt", "cites[]", "not_retained")
         return ids, [by_id[item] for item in ids]
 
     def _save_note(self, target_kind: str, target_id: str, text: str, cites: list[str], suspicious: bool) -> str:
         if self._count("agent_note") >= self.settings.agent_max_notes:
             self.limits_hit.add("cap:notes")
-            raise ValueError("agent note limit reached")
+            raise Refusal("agent note limit reached", "$", "cap")
         note_id = _id("an")
         row = {
             "id": note_id, "hunt_id": self.hunt_id, "session_id": self.session_id,
@@ -329,8 +362,8 @@ class AgentAdmission:
                     self.limits_hit.add("cap:initial_hypotheses")
                     return _refused("initial hypothesis limit reached", code="cap")
             techniques = self._check_techniques(args.techniques)
-            entities = self._resolve_many(args.entities, {"N"})
-            supporting = self._resolve_many(args.supporting, {"F", "E", "L", "A"})
+            entities = self._resolve_many(args.entities, {"N"}, "entities[]")
+            supporting = self._resolve_many(args.supporting, {"F", "E", "L", "A"}, "supporting[]")
             statement = args.statement.strip()
             support_key = {(kind, target) for kind, target in supporting}
             for existing in self.repo.agent_hypotheses(self.hunt_id):
@@ -369,7 +402,7 @@ class AgentAdmission:
         except (ValueError, AliasError) as exc:
             if "hypothesis limit reached" in str(exc):
                 self.limits_hit.add("cap:hypotheses")
-            return _refused(str(exc))
+            return _refused(str(exc), why=_reason_of(exc))
 
     def create_controller_hypothesis(self, statement: str, *, finding_id: str, alias: str) -> str:
         now = utcnow()
@@ -393,21 +426,22 @@ class AgentAdmission:
     def update_hypothesis(self, args: UpdateHypothesisArgs) -> dict:
         try:
             if not args.note.strip():
-                raise ValueError("note must contain non-whitespace text")
+                raise Refusal("note must contain non-whitespace text", "note", "blank")
             hypothesis_id = self._hypothesis_id(args.hypothesis)
             current = self.repo.agent_hypothesis(self.hunt_id, hypothesis_id)
             if current is None:
-                raise ValueError("hypothesis is not in this hunt")
-            support = self._resolve_many(args.add_support, {"F", "E", "L", "A"})
-            contradiction = self._resolve_many(args.add_contradiction, {"F", "E", "L", "A"})
+                raise Refusal("hypothesis is not in this hunt", "hypothesis", "unknown_hypothesis")
+            support = self._resolve_many(args.add_support, {"F", "E", "L", "A"}, "add_support[]")
+            contradiction = self._resolve_many(args.add_contradiction, {"F", "E", "L", "A"}, "add_contradiction[]")
             existing = self.repo.agent_hypothesis_cites(hypothesis_id=hypothesis_id)
             supports_after = any(row["role"] == "support" for row in existing) or bool(support)
             contradictions_after = any(row["role"] == "contradiction" for row in existing) or bool(contradiction)
             status = args.status or current["status"]
             if status == "supported" and not supports_after:
-                raise ValueError("supported requires at least one support citation")
+                raise Refusal("supported requires at least one support citation", "status", "needs_support_citation")
             if status == "refuted" and not contradictions_after:
-                raise ValueError("refuted requires at least one contradiction citation")
+                raise Refusal("refuted requires at least one contradiction citation", "status",
+                              "needs_contradiction_citation")
             changes = {"updated_at": utcnow()}
             payload = {"note": args.note.strip()}
             if args.status is not None:
@@ -445,19 +479,20 @@ class AgentAdmission:
             return _ok({"hypothesis": args.hypothesis, "status": status, "added_support": len(support),
                         "added_contradiction": len(contradiction)})
         except (ValueError, AliasError) as exc:
-            return _refused(str(exc))
+            return _refused(str(exc), why=_reason_of(exc))
 
     def propose_finding(self, args: ProposeFindingArgs) -> dict:
         try:
             if args.lane == "context":
-                raise ValueError("agent findings cannot be context")
+                raise Refusal("agent findings cannot be context", "lane", "context_refused")
             if self._count("agent_finding") >= self.settings.agent_max_findings:
                 self.limits_hit.add("cap:findings")
-                raise ValueError("agent finding limit reached")
+                raise Refusal("agent finding limit reached", "$", "cap")
             evidence_ids, rows = self._event_cites(args.cites)
             events = [TypedEvent.model_validate(row["event"]) for row in rows]
             if not any(supports_claim_kind(event.family, args.claim_kind) for event in events):
-                raise ValueError(f"cited event families do not support a {args.claim_kind} claim")
+                raise Refusal(f"cited event families do not support a {args.claim_kind} claim", "claim_kind",
+                              "unsupported_by_cites")
             techniques = self._check_techniques(args.techniques)
             hypothesis_id = self._hypothesis_id(args.hypothesis)
             claim_type = {"mention": "mention", "network": "network_observation"}.get(
@@ -528,16 +563,17 @@ class AgentAdmission:
         except (ValueError, AliasError) as exc:
             if "agent finding limit reached" in str(exc):
                 self.limits_hit.add("cap:findings")
-            return _refused(str(exc), code="cap" if "limit reached" in str(exc) else "validation")
+            return _refused(str(exc), code="cap" if "limit reached" in str(exc) else "validation",
+                            why=_reason_of(exc))
 
     def propose_link(self, args: ProposeLinkArgs) -> dict:
         try:
             if self._count("agent_link") >= self.settings.agent_max_links:
                 self.limits_hit.add("cap:links")
-                raise ValueError("agent link limit reached")
-            source_kind, source_id = self._resolve_many([args.from_], {"F", "N"})[0]
-            target_kind, target_id = self._resolve_many([args.to], {"F", "N"})[0]
-            cites = self._resolve_many(args.cites, {"E", "F", "L"})
+                raise Refusal("agent link limit reached", "$", "cap")
+            source_kind, source_id = self._resolve_many([args.from_], {"F", "N"}, "from")[0]
+            target_kind, target_id = self._resolve_many([args.to], {"F", "N"}, "to")[0]
+            cites = self._resolve_many(args.cites, {"E", "F", "L"}, "cites[]")
             hypothesis_id = self.hypothesis_id
             link_id = _id("alink")
             self.repo.save_agent_output("agent_link", {
@@ -553,12 +589,13 @@ class AgentAdmission:
         except (ValueError, AliasError) as exc:
             if "agent link limit reached" in str(exc):
                 self.limits_hit.add("cap:links")
-            return _refused(str(exc), code="cap" if "limit reached" in str(exc) else "validation")
+            return _refused(str(exc), code="cap" if "limit reached" in str(exc) else "validation",
+                            why=_reason_of(exc))
 
     def add_note(self, args: AddNoteArgs) -> dict:
         try:
-            target_kind, target_id = self._resolve_many([args.target], {"F", "I", "N", "H", "A"})[0]
-            resolved_cites = self._resolve_many(args.cites, {"E", "F", "L", "A", "H"})
+            target_kind, target_id = self._resolve_many([args.target], {"F", "I", "N", "H", "A"}, "target")[0]
+            resolved_cites = self._resolve_many(args.cites, {"E", "F", "L", "A", "H"}, "cites[]")
             citations = [{"kind": kind, "id": target} for kind, target in resolved_cites]
             evidence_ids = [target for kind, target in resolved_cites if kind == "E"]
             finding_ids = [target for kind, target in resolved_cites if kind == "F"]
@@ -572,14 +609,15 @@ class AgentAdmission:
                                       citations, suspicious)
             return _ok({"note_id": note_id, "suspicious_content": suspicious})
         except (ValueError, AliasError) as exc:
-            return _refused(str(exc), code="cap" if "limit reached" in str(exc) else "validation")
+            return _refused(str(exc), code="cap" if "limit reached" in str(exc) else "validation",
+                            why=_reason_of(exc))
 
     def request_rule(self, args: RequestRuleArgs) -> dict:
         try:
             if self._count("agent_rule_request") >= 50:
                 self.limits_hit.add("cap:rule_requests")
-                raise ValueError("agent rule request limit reached")
-            resolved = self._resolve_many(args.cites, {"E", "F"})
+                raise Refusal("agent rule request limit reached", "$", "cap")
+            resolved = self._resolve_many(args.cites, {"E", "F"}, "cites[]")
             row = {"id": _id("arr"), "hunt_id": self.hunt_id, "session_id": self.session_id,
                    "hypothesis_id": self.hypothesis_id, "pattern_description": args.pattern_description.strip(),
                    "cites": [{"kind": kind, "id": target} for kind, target in resolved], "created_at": utcnow()}
@@ -588,7 +626,8 @@ class AgentAdmission:
         except (ValueError, AliasError) as exc:
             if "agent rule request limit reached" in str(exc):
                 self.limits_hit.add("cap:rule_requests")
-            return _refused(str(exc), code="cap" if "limit reached" in str(exc) else "validation")
+            return _refused(str(exc), code="cap" if "limit reached" in str(exc) else "validation",
+                            why=_reason_of(exc))
 
     @staticmethod
     def finish_session(args: FinishSessionArgs) -> dict:

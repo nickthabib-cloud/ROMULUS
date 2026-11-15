@@ -147,7 +147,9 @@ def panel(repo, hunt, usage):
             "wall_seconds": repo.agent_elapsed_ms(hunt["id"]) / 1000,
             "limits": sorted(set(limit_items)), "counts": counts(repo, hunt["id"]),
             "assessment": assessment_view(repo, hunt["id"]),
-            "refusal": repo.agent_reassessment_refusal(hunt["id"])}
+            "refusal": repo.agent_reassessment_refusal(hunt["id"]),
+            # why the model's tool calls and assessment answers were refused: counts by tool and reason
+            "refused_calls": repo.agent_refusal_counts(hunt["id"])}
 
 
 def hypotheses_page(repo, hunt_id, after=""):

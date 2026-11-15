@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 import uuid
 from collections.abc import Iterable, Iterator
@@ -441,6 +442,8 @@ TRIAGE_SUMMARY = "hunt.ai_triage_summary"
 TRIAGE_PURPOSE = "triage"
 # A triage attempt that failed before publishing (its previous pass, if any, stays the view).
 TRIAGE_FAILED = "hunt.ai_triage_failed"
+# A resume that continued the hunt's agent on another model than the one it recorded (--force-model): from, to.
+AGENT_MODEL_FORCED = "hunt.agent_model_forced"
 # The reason on the agent record a triage pass creates for a hunt with no agent record: terminal, removed on release.
 TRIAGE_PLACEHOLDER = "triage_lease_placeholder"
 # A snapshot taken while the hunt has its final ranking lists findings in report order, as segments: ranked confirmed
@@ -1081,6 +1084,15 @@ class Repo:
         with self.engine.connect() as c:
             row = c.execute(query).mappings().first()
             return dict(row) if row else None
+
+    def audit_trail(self, hunt_id: str, action: str, *, limit: int = 20) -> tuple[list[dict], int]:
+        """The latest `limit` audit records of one action for a hunt, oldest first, and how many there are in all."""
+        where = (t.audit_event.c.hunt_id == hunt_id, t.audit_event.c.action == action)
+        with self.engine.connect() as c:
+            rows = [dict(row) for row in c.execute(select(t.audit_event).where(*where)
+                                                   .order_by(t.audit_event.c.id.desc()).limit(limit)).mappings()]
+            total = int(c.execute(select(func.count()).select_from(t.audit_event).where(*where)).scalar_one())
+        return rows[::-1], total
 
     def create_agent_page_plan(self, hunt_id: str, cursor: str, identity: dict,
                                summary: dict, items: Iterable[dict], *, owner_token: str | None = None) -> dict:
@@ -5918,6 +5930,50 @@ class Repo:
         with self.engine.connect() as connection:
             return [dict(row) for row in connection.execute(query).mappings()]
 
+    def agent_refusal_counts(self, hunt_id: str, *, group_limit: int = 200) -> dict:
+        """Why the agent's tool calls and assessment answers were refused, as counts by tool and reason: refused tool
+        calls by tool name, and assessment answers that failed validation under "assessment". Rows are read in bounded
+        pages; at most `group_limit` (tool, reason) groups are kept, and `more` counts the refusals in groups past it.
+        Reasons are field paths and error types (romulus.agent.refusals checks their shape before they are stored),
+        never values."""
+        counts: dict[str, dict[str, int]] = {}
+        groups, more = 0, 0
+
+        def add(tool: str, reasons) -> None:
+            nonlocal groups, more
+            tool = tool if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", tool or "") else "?"
+            for item in reasons if isinstance(reasons, list) else []:
+                key = item if isinstance(item, str) and len(item) <= 200 else "?: invalid"
+                by_tool = counts.setdefault(tool, {})
+                if key not in by_tool:
+                    if groups >= group_limit:
+                        more += 1
+                        continue
+                    groups += 1
+                by_tool[key] = by_tool.get(key, 0) + 1
+
+        reasons = func.json_extract(t.model_call.c.validation, "$.reasons")
+        sources = (
+            (t.agent_tool_call, t.agent_tool_call.c.name, t.agent_tool_call.c.refusal_reasons,
+             t.agent_tool_call.c.refusal_reasons.is_not(None)),
+            (t.model_call, literal("assessment"), t.model_call.c.validation,
+             and_(t.model_call.c.purpose == "assess", reasons.is_not(None))),
+        )
+        with self.engine.connect() as c:
+            for table, name, column, condition in sources:
+                after = ""
+                while True:
+                    rows = c.execute(select(table.c.id, name, column).where(
+                        table.c.hunt_id == hunt_id, condition, table.c.id > after,
+                    ).order_by(table.c.id).limit(500)).all()
+                    for _row_id, tool, value in rows:
+                        add(str(tool), value.get("reasons") if isinstance(value, dict) else value)
+                    if len(rows) < 500:
+                        break
+                    after = rows[-1][0]
+        out = {tool: dict(sorted(by_reason.items())) for tool, by_reason in sorted(counts.items()) if by_reason}
+        return {"by_tool": out, "more": more} if more else {"by_tool": out}
+
     def _agent_rows(self, table, hunt_id: str) -> list[dict]:
         with self.engine.connect() as connection:
             rows = connection.execute(select(table).where(table.c.hunt_id == hunt_id).order_by(table.c.id)).mappings()
@@ -5984,13 +6040,16 @@ class Repo:
                     exclude_purposes: tuple[str, ...] = (), purposes: tuple[str, ...] | None = None) -> dict:
         """Persisted spending, streamed in bounded pages; UI model breakdowns may be limited. A budget counts only its
         own calls: `exclude_purposes` leaves out other passes' calls (the agent's budget leaves out triage), and
-        `purposes` keeps only the named ones."""
+        `purposes` keeps only the named ones. `tokens` counts raw tokens; `budget_tokens` counts them weighted by
+        price as each call recorded it (a call recorded without that weighting, or with estimated usage, counts its
+        raw tokens)."""
         if group_limit is not None and not 1 <= group_limit <= 200:
             raise ValueError("usage group_limit must be between 1 and 200")
         scope = (t.model_call.c.hunt_id == hunt_id, t.model_call.c.provider.is_not(None),
                  *((t.model_call.c.purpose.not_in(exclude_purposes),) if exclude_purposes else ()),
                  *((t.model_call.c.purpose.in_(purposes),) if purposes is not None else ()))
-        calls, tokens, cost, ms, estimated = 0, 0, 0.0, 0, False
+        calls, tokens, budget_tokens, cost, ms, estimated = 0, 0, 0, 0.0, 0, False
+        weighted = func.json_extract(t.model_call.c.options, "$.budget_tokens")
         with self.engine.connect() as c:
             after = ""
             while True:
@@ -6000,14 +6059,16 @@ class Repo:
                     t.model_call.c.prompt_tokens_est, t.model_call.c.prompt_eval_count, t.model_call.c.eval_count,
                     case((or_(t.model_call.c.prompt_eval_count.is_(None), t.model_call.c.eval_count.is_(None)),
                           t.model_call.c.raw_response), else_=None),
-                    t.model_call.c.cost_usd_est, t.model_call.c.duration_ms,
+                    t.model_call.c.cost_usd_est, t.model_call.c.duration_ms, weighted,
                 ).where(*scope, t.model_call.c.id > after).order_by(t.model_call.c.id).limit(200)).all()
-                for call_id, prompt_est, prompt, completion, raw, row_cost, duration in rows:
+                for call_id, prompt_est, prompt, completion, raw, row_cost, duration, row_budget in rows:
                     if prompt is None or completion is None:
                         estimated = True
-                        prompt, completion = prompt_est or 0, int(len(raw or "") / 3.2) + 8
+                        prompt, completion, row_budget = prompt_est or 0, int(len(raw or "") / 3.2) + 8, None
                     calls += 1
                     tokens += int(prompt) + int(completion)
+                    budget_tokens += (int(row_budget) if isinstance(row_budget, (int, float))
+                                      else int(prompt) + int(completion))
                     cost += float(row_cost or 0.0)
                     ms += int(duration or 0)
                 if len(rows) < 200:
@@ -6027,7 +6088,7 @@ class Repo:
                 ("endpoint_host", "model"), or_(t.model_call.c.egress.is_(None), t.model_call.c.egress != "local"))
             answered, answered_more = groups((t.model_call.c.model, t.model_call.c.model_reported),
                 ("model", "model_reported"), and_(t.model_call.c.model_reported.is_not(None), t.model_call.c.model_reported != ""))
-        result = {"calls": calls, "tokens": tokens, "cost_usd": cost, "model_ms": ms, "estimated": estimated,
+        result = {"calls": calls, "tokens": tokens, "budget_tokens": budget_tokens, "cost_usd": cost, "model_ms": ms, "estimated": estimated,
                   "remote_calls": remote, "models_reported": answered}
         if group_limit is not None:
             result.update(remote_calls_more=remote_more, models_reported_more=answered_more)

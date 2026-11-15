@@ -1304,7 +1304,8 @@ def test_with_the_fallback_on_the_worst_case_reserves_a_declined_attempt_and_a_f
     assert limits.refusal_fallback and limits.price_fallback_cache_write_per_mtok == pytest.approx(6.25)
     est, out = 200_000, 64_096
     assert limits.worst_cost(est, out) == pytest.approx((est * 5 + out * 20 + est * 6.25 + out * 25) / 1e6)
-    assert limits.worst_tokens(est, out) == 2 * (est + out)
+    # every attempt's whole prompt at the dearest token weight: a cache write, at 1.25
+    assert limits.worst_tokens(est, out) == 2 * (est * 5 // 4 + out)
     budget = AgentBudget(limits, cost_usd=50 - (est * 5 + out * 20) / 1e6, clock=lambda: 0.0)
     with pytest.raises(BudgetExhausted):      # one configured-model attempt would fit; with the fallback it does not
         budget.check(est, out)
