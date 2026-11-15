@@ -9,9 +9,9 @@ from tests import throughput_fixture as tf
 # evidence version set back to 16 the digest is the earlier one).
 # Discovery and transfer executions already cited by a folded alert are not repeated as context.
 # Shared execution and lineage state keep the 4 MiB candidate result identical to larger budgets.
-CANDIDATE_GOLDENS = {4: (40, 'b82f3f718272cee5cb8a5342b8c60d9ce3b68d597ae6606b0fdbc673486d4427'),
- 8: (40, 'b82f3f718272cee5cb8a5342b8c60d9ce3b68d597ae6606b0fdbc673486d4427'),
- 16: (40, 'b82f3f718272cee5cb8a5342b8c60d9ce3b68d597ae6606b0fdbc673486d4427')}
+CANDIDATE_GOLDENS = {4: (40, 'b17164f5bb822c3041bfbc40776af93fcd748c314575f18d4a97b6f0083fa847'),
+ 8: (40, 'b17164f5bb822c3041bfbc40776af93fcd748c314575f18d4a97b6f0083fa847'),
+ 16: (40, 'b17164f5bb822c3041bfbc40776af93fcd748c314575f18d4a97b6f0083fa847')}
 
 
 @pytest.mark.parametrize("mib", CANDIDATE_GOLDENS)
@@ -34,5 +34,5 @@ def test_linux_stack_candidates_at_physical_byte_budget(mib, tmp_path, monkeypat
     assert persistence and {row["rule_version"] for row in persistence} == {"9"}
     previous = tf.with_prior_versions(snapshot)
     assert tf.deterministic_golden_digests(previous)["candidates"] == (
-        "92949429da38e7264503af4b49cc8cf85f8aa4ecd527b70bfbc41c1dbb085115")
+        "11b53998d57696f13f3941c13cd33a360d5dd3960b0f2498b38fec94be748400")
     assert (len(snapshot["candidates"]), tf.deterministic_golden_digests(snapshot)["candidates"]) == CANDIDATE_GOLDENS[mib]

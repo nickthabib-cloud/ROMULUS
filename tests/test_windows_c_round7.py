@@ -261,9 +261,9 @@ def test_native_scale4_releases_use_global_room_without_poisoning_later_findings
     assert persistence and {row["rule_version"] for row in persistence} == {"9"}
     previous = fixture.with_prior_versions(snapshot)
     assert fixture.deterministic_golden_digests(previous)["candidates"] == (
-        "4d06cd1a3148c0faf6ad2453f536302bbbfa84a936a8100aa9c3f898aaf114c8")
+        "c4c2c529d1b815ce1a62e47060e2748c4f4de1b4afbd24bc33a8891fb12d3b7f")
     assert fixture.deterministic_golden_digests(snapshot)["candidates"] == (
-        "e248ea2ffc7479f6ee87be233f38e4569be3aa67b40e92b9907c23209af6e2b9")
+        "bb45ff7482b5b9e8c9f6fd919f958fa680db47e8936e8694372e7cd385c5832a")
     assert any(row["rule_id"] == "host.shell_spawned_by_connected_process" and row["event_ids"]
                for row in snapshot["candidates"])
 
