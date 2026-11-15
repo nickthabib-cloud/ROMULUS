@@ -1,27 +1,27 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>Hunts</h1>
-{% if deleted %}<p class="ok">Hunt {{ deleted }} was permanently deleted.</p>{% endif %}
-{% if compaction_failed %}<p class="warn">Database compaction failed after deletion. The hunt was deleted; disk space may still need to be reclaimed. Details are recorded in the audit log.</p>{% endif %}
-{% if request.query_params.get('started') %}<p class="ok">Hunt started in the background. It appears below within a few seconds.</p>{% endif %}
-<table class="grid">
-<thead><tr><th>Hunt</th><th>Created</th><th>By</th><th>Execution</th><th>Result</th><th>AI</th><th>Urgent</th><th>High</th><th>Leads</th></tr></thead>
+<div class="page-head"><h1>Hunts</h1><div class="end"><a class="btn" href="/hunts/new">New hunt</a></div></div>
+{% if deleted %}<div class="notice ok"><span>Hunt <span class="mono">{{ deleted }}</span> was permanently deleted.</span></div>{% endif %}
+{% if compaction_failed %}<div class="notice warn"><span>Database compaction failed after deletion. The hunt was deleted; disk space may still need to be reclaimed. Details are recorded in the audit log.</span></div>{% endif %}
+{% if request.query_params.get('started') %}<div class="notice ok"><span>Hunt started in the background. It appears below within a few seconds.</span></div>{% endif %}
+<div class="table-wrap"><table class="grid">
+<thead><tr><th>Hunt</th><th>Created</th><th>By</th><th>Execution</th><th>Result</th><th>AI</th><th class="n">Urgent</th><th class="n">High</th><th class="n">Leads</th></tr></thead>
 <tbody>
 {% for h in hunts %}
 <tr>
-  <td><a href="/hunts/{{ h.id }}">{{ h.id }}</a></td>
-  <td>{{ h.created_at.strftime('%Y-%m-%d %H:%M') if h.created_at else '' }}</td>
+  <td class="mono"><a href="/hunts/{{ h.id }}">{{ h.id }}</a></td>
+  <td class="mono small nowrap">{{ h.created_at.strftime('%Y-%m-%d %H:%M') if h.created_at else '' }}</td>
   <td>{{ h.created_by }}</td>
   <td><span class="state s-{{ h.execution_state }}">{{ h.execution_state }}</span></td>
-  <td>{{ h.detection_result or '—' }}</td><td>{{ h.ai_state or '' }}</td>
+  <td>{{ h.detection_result or '—' }}</td><td>{% if h.ai_state %}<span class="ai-label">{{ h.ai_state }}</span>{% endif %}</td>
   <td class="n urgent">{{ h.lanes.get('urgent', 0) }}</td>
   <td class="n high">{{ h.lanes.get('high', 0) }}</td>
-  <td class="n">{{ h.lanes.get('lead', 0) }}</td>
+  <td class="n lead">{{ h.lanes.get('lead', 0) }}</td>
 </tr>
 {% else %}
-<tr><td colspan="9">No hunts yet. <a href="/hunts/new">Start one</a>.</td></tr>
+<tr><td colspan="9" class="empty">No hunts yet. <a href="/hunts/new">Start one</a>.</td></tr>
 {% endfor %}
 </tbody>
-</table>
-{% if more %}<p>Page limit: 50. {{ more }} more · <a href="{{ next_url }}">Next hunts →</a></p>{% endif %}
+</table></div>
+{% if more %}<div class="pager"><span>Page limit: 50. {{ more }} more</span><span class="links"><a class="btn ghost sm" href="{{ next_url }}">Next hunts →</a></span></div>{% endif %}
 {% endblock %}
