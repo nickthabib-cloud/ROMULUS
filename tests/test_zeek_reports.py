@@ -128,9 +128,10 @@ def test_one_native_hunt_visibility_certificate_and_all_renderers_after_reopen(t
         assert '30 day certificate lookback' in rendered
     password=secrets.token_urlsafe(20);create_user(fresh.engine,'reader',password,'analyst')
     web=TestClient(create_app(settings));web.post('/login',data={'username':'reader','password':password})
-    page=web.get('/hunts/zeek')
+    page=web.get('/hunts/zeek/coverage')
     assert page.status_code==200
-    assert expected in page.text and 'have no smb_* records in scope' in page.text and 'certificate' in page.text
+    assert expected in page.text and 'have no smb_* records in scope' in page.text
+    assert '<b>certificate</b> (observed), complete' in web.get('/hunts/zeek/run').text
     ref=manifest['coverage']['zeek_visibility']['snapshot']
     response=web.get('/reports/zeek/'+ref['filename'])
     assert response.status_code==200

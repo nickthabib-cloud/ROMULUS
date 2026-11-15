@@ -1,0 +1,53 @@
+{% extends "hunt_base.html" %}
+{% block tab_title %}AI assessment · {% endblock %}
+{% block tab %}
+{% set url = head.hunt_url %}
+{% if not ai_panel %}
+<section class="panel"><div class="panel-body">
+  <p><b>No AI assessment.</b> This hunt ran without the AI agent. The deterministic findings, their lanes and the report order are complete on their own.</p>
+</div></section>
+{% else %}
+<div class="cols">
+  <div class="stack">
+    <section class="panel ai-surface" id="ai-assessment">
+      <div class="panel-head"><h2>AI assessment</h2><span class="ai-label">AI-generated · unconfirmed</span>
+        {% if ai_panel.assessment and ai_panel.assessment.revision %}<div class="end help">revision {{ ai_panel.assessment.revision }}</div>{% endif %}</div>
+      <div class="panel-body">
+        {% include 'assessment_body.html' %}
+      </div>
+    </section>
+  </div>
+  <div class="stack">
+    <section class="panel">
+      <div class="panel-head"><h2>AI agent</h2><div class="end"><a href="{{ url(h.id, '/run') }}#ai-agent">Usage and limits →</a></div></div>
+      <div class="panel-body">
+        <dl class="kv">
+          <dt>State</dt><dd><span class="ai-label">{{ ai_panel.state }}</span></dd>
+          <dt>Model</dt><dd class="mono small">{{ ai_panel.provider }}/{{ ai_panel.model }}</dd>
+          <dt>Calls</dt><dd>{{ ai_panel.usage.calls }} / {{ ai_panel.budgets.max_calls or 'not recorded' }}</dd>
+        </dl>
+        {% if user.r == 'lead' %}
+        {% if ai_panel.refusal %}<p class="help small">Re-run assessment unavailable: {{ ai_panel.refusal }}</p>{% else %}
+        <form method="post" action="/hunts/{{ h.id | urlencode }}/agent/reassess"><input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="sm ghost">Re-run assessment</button></form>{% endif %}
+        {% endif %}
+      </div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>AI outputs</h2><span class="help small">not confirmed by an analyst</span></div>
+      <div class="table-wrap"><table class="grid small"><tbody>
+        <tr><th>Hypotheses</th><td class="n"><a href="/hunts/{{ h.id | urlencode }}/hypotheses">{{ ai_panel.counts.hypotheses }} hypotheses</a></td></tr>
+        {% for name in ['findings', 'links', 'notes', 'requests'] %}
+        <tr><th>{{ 'Rule requests' if name == 'requests' else name | capitalize }}</th><td class="n"><a href="/hunts/{{ h.id | urlencode }}/agent/{{ name }}">{{ ai_panel.counts[name] }} agent {{ 'rule requests' if name == 'requests' else name }}</a></td></tr>
+        {% endfor %}
+      </tbody></table></div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>AI agent activity</h2></div>
+      <div class="panel-body"><p class="help small">Newest 50 live updates. Complete history is retained in the <a href="/hunts/{{ h.id | urlencode }}/hypotheses">hypothesis pages</a>.</p>
+        <ul id="agent-activity" class="activity"></ul></div>
+    </section>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

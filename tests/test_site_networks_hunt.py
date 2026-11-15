@@ -125,4 +125,4 @@ def test_the_web_hunt_page_shows_one_line(tmp_path):
     client.post("/login", data={"username": "analyst1", "password": password})
     page = client.get("/hunts/h1")
     assert page.status_code == 200
-    assert '<span class="label">Internal networks</span> configured (2 ranges, 1 carve-out)' in page.text
+    assert '<dt>Internal networks</dt><dd>configured (2 ranges, 1 carve-out)' in page.text

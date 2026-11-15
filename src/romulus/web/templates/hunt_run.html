@@ -1,0 +1,147 @@
+{% extends "hunt_base.html" %}
+{% from 'ui_macros.html' import blob, detail_table %}
+{% block tab_title %}Run details · {% endblock %}
+{% block tab %}
+{% set url = head.hunt_url %}
+<p class="help small">Operator detail for this run: why it stopped, the network definition it used, where model calls went, budgets and usage, the investigator's accounting, search tasks and the recorded hunt manifest. Long values open in place.</p>
+
+<div class="cols">
+<div class="stack">
+<section class="panel" id="run">
+  <div class="panel-head"><h2>Run</h2></div>
+  <div class="table-wrap"><table class="grid small"><tbody>
+    <tr><th>Hunt</th><td class="mono">{{ h.id }}</td></tr>
+    <tr><th>Execution</th><td><span class="state s-{{ h.execution_state }}">{{ h.execution_state }}</span></td></tr>
+    <tr><th>Result</th><td>{{ h.detection_result or '—' }}</td></tr>
+    <tr id="stop-reason"><th>Stop reason</th><td>{% if h.stop_reason %}{{ blob(stop_reason) }}{% else %}—{% endif %}</td></tr>
+    <tr><th>Window (UTC)</th><td class="mono">{{ h.manifest.window.start }} → {{ h.manifest.window.end }}</td></tr>
+    <tr><th>Sources</th><td>{{ h.manifest.targets | join(', ') }}</td></tr>
+    <tr><th>Created</th><td>{{ h.created_by }}{% if h.created_at %} · <span class="mono">{{ h.created_at }}</span>{% endif %}</td></tr>
+    <tr><th>Started / ended</th><td class="mono">{{ h.started_at or 'not recorded' }} / {{ h.ended_at or 'not recorded' }}</td></tr>
+    <tr><th>Manifest digest</th><td class="mono small">{{ h.manifest_digest }}</td></tr>
+  </tbody></table></div>
+</section>
+
+<section class="panel" id="internal-networks">
+  <div class="panel-head"><h2>Internal networks</h2></div>
+  <div class="panel-body">
+    <p>{{ (internal_networks.line or internal_networks.summary) | replace('Internal networks: ', '', 1) }}</p>
+    {% if internal_networks.warning %}<div class="notice warn"><span><b>Internal networks:</b> {{ internal_networks.warning }}</span></div>{% endif %}
+  </div>
+  {{ detail_table(network_rows) }}
+</section>
+
+<section class="panel" id="model-egress">
+  <div class="panel-head"><h2>Model egress</h2></div>
+  <div class="panel-body">
+    {% for egress in egress_banners %}<div class="notice"><span><b>Model egress:</b> {{ blob(egress) }}</span></div>
+    {% else %}<p class="help">No telemetry was sent to a remote model endpoint in this hunt.</p>{% endfor %}
+  </div>
+</section>
+
+<section class="panel" id="investigations">
+  <div class="panel-head"><h2>{% if investigations.summary.mode == 'deterministic_expansion' %}Expansion accounting{% else %}Model investigator{% endif %}</h2></div>
+  <div class="panel-body">
+  {% if investigations.summary.mode == 'deterministic_expansion' %}
+    <p><b>{{ investigations.summary.status }}</b> · {{ investigations.summary.anchors or 0 }} anchor(s)
+      · {{ investigations.anchor_accounting.expanded_complete | length }} expanded complete
+      · {{ investigations.anchor_accounting.expanded_partial | length }} expanded partial
+      · {{ investigations.anchor_accounting.unexpanded | length }} unexpanded
+      · {{ investigations.anchor_accounting.pending | length }} pending
+      · {{ investigations.summary.links or 0 }} link(s)
+      · {{ investigations.summary.partial_links or 0 }} incomplete link(s)</p>
+    <p class="help small">The incident graph (which findings connect, by which links, and every open end) is in the
+      technical report until this page draws it.</p>
+    {% for link in investigations.get('link_accounting', []) %}
+    {% if link.link_type in ['zeek_uid', 'zeek_file', 'certificate', 'address_host'] %}
+    <p class="small"><b>{{ link.link_type }}</b> ({{ link.strength }}), {{ link.status }}: {{ link.reasons | join('; ') }}.
+    Evidence: <span class="mono">{{ link.evidence_ids | join(', ') }}</span></p>
+    {% endif %}{% endfor %}
+  {% elif agent %}
+    <p><b>{{ agent.status }}</b> · Mode {{ investigations.summary.mode }} · {{ agent.unworked_count or 0 }} unworked seed(s)
+      · {{ agent.model_calls or 0 }} model call(s) · {{ agent.pivots or 0 }} pivot(s)
+      · {{ agent.partial_pivots or 0 }} partial pivot(s)
+      · {{ investigations.summary.deterministic_fallbacks or 0 }} deterministic fallback(s)
+      · {{ investigations.summary.menu_hidden_options or 0 }} hidden option(s)</p>
+    {% if agent.stop_reason %}<p class="help">{{ agent.stop_reason }}</p>{% endif %}
+    {% if agent.analyst_flags %}
+    <h3>Analyst review required</h3>
+    <ul>{% for flag in agent.analyst_flags %}<li><b>{{ flag.case_id }}</b>: {{ flag.message or flag.reason }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% for case in investigations.cases %}
+    <details><summary><b>{{ case.id }} choices</b> <span class="help small">{{ case.menu_cap.hidden_options }} hidden option(s) across {{ case.menu_cap.steps_capped }} capped step(s)</span></summary>
+    <ul>
+      {% for choice in case.chosen_options %}
+      <li><b>{{ choice.id }}</b>: {{ choice.description }}{% if choice.deterministic_fallback %} (deterministic fallback){% endif %}
+        {% if choice.fallback_note %}<br><span class="help">{{ choice.fallback_note }}</span>{% endif %}</li>
+      {% endfor %}
+    </ul></details>
+    {% endfor %}
+  {% else %}<p class="help">No investigator ran for this hunt.</p>{% endif %}
+  </div>
+</section>
+</div>
+
+<div class="stack">
+<section class="panel" id="ai-agent">
+  <div class="panel-head"><h2>AI agent</h2>{% if ai_panel %}<span class="ai-label">{{ ai_panel.state }}</span>{% endif %}</div>
+  {% if ai_panel %}
+  <div class="table-wrap"><table class="grid small"><tbody>
+    <tr><th>State</th><td>{{ ai_panel.state }}</td></tr>
+    {% if ai_panel.reason %}<tr><th>Reason</th><td>{{ blob({'summary': ai_panel.reason | truncate(140), 'more': ai_panel.reason | length > 140, 'full': ai_panel.reason}) }}</td></tr>{% endif %}
+    <tr><th>Requested provider/model</th><td class="mono">{{ ai_panel.provider }}/{{ ai_panel.model }}</td></tr>
+    {% if answered_by %}<tr><th>Answered by</th><td>{% for r in answered_by %}{{ r.model_reported }} ({{ r.calls }} calls; configured {{ r.model }}){% if not loop.last %}, {% endif %}{% endfor %}</td></tr>{% endif %}
+    <tr><th>Started / ended</th><td class="mono">{{ ai_panel.run.started_at or 'not started' }} / {{ ai_panel.run.ended_at or 'not recorded' }}</td></tr>
+  </tbody></table></div>
+  <h3 class="panel-body">Budgets and usage</h3>
+  <div class="table-wrap"><table class="grid small">
+    <thead><tr><th>Measure</th><th class="n">Used</th><th class="n">Budget</th></tr></thead><tbody>
+    <tr><th>Model calls</th><td class="n">{{ ai_panel.usage.calls }}</td><td class="n">{{ ai_panel.budgets.max_calls or 'not recorded' }}</td></tr>
+    <tr><th>Budget tokens (weighted by price){% if ai_panel.usage.estimated %} (estimated){% endif %}</th><td class="n">{{ ai_panel.usage.budget_tokens }}</td><td class="n">{{ ai_panel.budgets.max_tokens or 'not recorded' }}</td></tr>
+    <tr><th>Raw tokens</th><td class="n">{{ ai_panel.usage.tokens }}</td><td class="n">—</td></tr>
+    <tr><th>Wall time (s)</th><td class="n">{{ ai_panel.wall_seconds }}</td><td class="n">{{ ai_panel.budgets.max_wall_seconds or 'not recorded' }}</td></tr>
+    <tr><th>Source queries</th><td class="n">{{ ai_panel.source_queries }}</td><td class="n">{{ ai_panel.budgets.max_source_queries or 'not recorded' }}</td></tr>
+    {% if ai_panel.budgets.price_input_per_mtok or ai_panel.budgets.max_cost_usd %}
+    <tr><th>Estimated cost (USD)</th><td class="n">{{ ai_panel.usage.cost_usd }}</td><td class="n">{{ ai_panel.budgets.max_cost_usd or 'no cost budget' }}</td></tr>
+    {% endif %}
+  </tbody></table></div>
+  <div class="panel-body">
+  {% if ai_panel.limits %}<h3>Limits reached</h3><ul>{% for limit in ai_panel.limits %}<li class="mono small">{{ limit }}</li>{% endfor %}</ul>{% endif %}
+  {% if ai_panel.refused_calls and ai_panel.refused_calls.by_tool %}<h3>Refused model calls</h3>
+  <p class="help small">Tool calls and assessment answers that validation refused, by tool and reason (field and error type).</p>
+  <table class="grid small"><thead><tr><th>Tool</th><th>Reason</th><th>Count</th></tr></thead><tbody>
+  {% for tool, reasons in ai_panel.refused_calls.by_tool.items() %}{% for why, count in reasons.items() %}<tr><td>{{ tool }}</td><td><code>{{ why }}</code></td><td>{{ count }}</td></tr>{% endfor %}{% endfor %}
+  </tbody></table>{% if ai_panel.refused_calls.more %}<p>{{ ai_panel.refused_calls.more }} more refusals in further groups.</p>{% endif %}{% endif %}
+  {% if ai_panel.usage.models_reported_more %}<p class="small">{{ ai_panel.usage.models_reported_more }} more reported model groups; <a href="{{ url(h.id) }}#reports">complete usage in the report</a>.</p>{% endif %}
+  {% if ai_panel.usage.remote_calls_more %}<p class="small">{{ ai_panel.usage.remote_calls_more }} more remote model groups; <a href="{{ url(h.id) }}#reports">complete usage in the report</a>.</p>{% endif %}
+  </div>
+  {% else %}
+  <div class="panel-body">
+    {% if ai_agent %}<p>{{ ai_agent.status }}{% if ai_agent.reason %}: {{ ai_agent.reason }}{% endif %}</p>{% else %}<p class="help">This hunt ran without the AI agent.</p>{% endif %}
+    {% if answered_by %}<p>Answered by: {% for r in answered_by %}{{ r.model_reported }} ({{ r.calls }} calls; configured {{ r.model }}){% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
+  </div>
+  {% endif %}
+</section>
+
+<section class="panel" id="tasks">
+  <div class="panel-head"><h2>Search tasks</h2><div class="end help">{{ tasks.total }} in total{% for state, n in tasks.states.items() %} · {{ n }} {{ state }}{% endfor %}</div></div>
+  <div class="table-wrap"><table class="grid small">
+  <thead><tr><th>Task</th><th>Kind</th><th>State</th><th class="n">Attempts</th><th>Outcome</th></tr></thead>
+  <tbody>
+  {% for t in tasks.rows %}
+  <tr><td class="mono">{{ t.id }}</td><td>{{ t.kind }}</td><td>{{ t.state }}</td><td class="n">{{ t.attempts }}</td>
+  <td class="mono">{% if t.outcome %}{{ t.outcome.completeness }} {{ t.outcome.returned }}/{{ t.outcome.total }} {{ t.outcome.reasons | join(',') }}{% endif %}{% if t.error %} {{ t.error | truncate(120) }}{% endif %}</td></tr>
+  {% else %}<tr><td colspan="5" class="empty">No search tasks.</td></tr>{% endfor %}
+  </tbody></table></div>
+  <div class="pager panel-body"><span>Page limit: 50. {% if tasks.more %}{{ tasks.more }} more{% else %}no more tasks after this page{% endif %}.</span>
+    <span class="links">{% if tasks.first_url %}<a class="btn ghost sm" href="{{ tasks.first_url }}">← First page</a>{% endif %}{% if tasks.next_url %}<a class="btn ghost sm" href="{{ tasks.next_url }}">Next tasks →</a>{% endif %}</span></div>
+</section>
+
+<section class="panel" id="manifest">
+  <div class="panel-head"><h2>Hunt manifest</h2><span class="help small">recorded at the start; immutable</span></div>
+  <div class="panel-body"><p class="help small">Each value opens to escaped JSON, up to 16 KiB; the report's JSON manifest carries every value in full.</p></div>
+  {{ detail_table(manifest_rows) }}
+</section>
+</div>
+</div>
+{% endblock %}

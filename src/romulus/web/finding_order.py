@@ -184,6 +184,24 @@ def _ranked_cursor(values):
     raise ValueError("invalid findings cursor")
 
 
+def _segment_sizes(connection, hunt_id, pass_no):
+    """How many findings each report-order segment holds, from two grouped counts on indexed columns."""
+    rank, candidate = t.finding_rank, t.candidate
+    sections = dict(connection.execute(select(rank.c.section, func.count()).where(
+        rank.c.hunt_id == hunt_id, rank.c["pass"] == pass_no).group_by(rank.c.section)).all())
+    lanes = dict(connection.execute(select(candidate.c.lane, func.count()).where(
+        candidate.c.hunt_id == hunt_id, candidate.c.lane.in_(RANKED_LANES)).group_by(candidate.c.lane)).all())
+    return [sections.get(0, 0), max(0, lanes.get("urgent", 0) - sections.get(0, 0)), sections.get(1, 0),
+            sections.get(2, 0), max(0, lanes.get("high", 0) + lanes.get("lead", 0)
+                                    - sections.get(1, 0) - sections.get(2, 0))]
+
+
+def segment_sizes(repo, hunt_id, *, pass_no):
+    """The size of each `SEGMENTS` entry for a ranked hunt, in the same order as `SEGMENT_TITLES`."""
+    with repo.engine.connect() as connection:
+        return _segment_sizes(connection, hunt_id, pass_no)
+
+
 def ranked_finding_page(repo, hunt_id, *, pass_no, after="", limit=50, columns=None):
     """One page of a hunt's reportable findings in report order (`SEGMENTS`): ranked segments seek
     `ix_finding_rank_section`, late ones `ix_candidate_finding_order` bounded to their lanes. Returns (rows, remaining,
@@ -231,13 +249,7 @@ def ranked_finding_page(repo, hunt_id, *, pass_no, after="", limit=50, columns=N
         rows = rows[:limit]
         if not rows:
             return rows, 0, None
-        sections = dict(connection.execute(select(rank.c.section, func.count()).where(*ranked_where)
-                                           .group_by(rank.c.section)).all())
-        lanes = dict(connection.execute(select(candidate.c.lane, func.count()).where(
-            candidate.c.hunt_id == hunt_id, candidate.c.lane.in_(RANKED_LANES)).group_by(candidate.c.lane)).all())
-        sizes = [sections.get(0, 0), max(0, lanes.get("urgent", 0) - sections.get(0, 0)), sections.get(1, 0),
-                 sections.get(2, 0), max(0, lanes.get("high", 0) + lanes.get("lead", 0)
-                                         - sections.get(1, 0) - sections.get(2, 0))]
+        sizes = _segment_sizes(connection, hunt_id, pass_no)
         last = rows[-1]
         kind, section = SEGMENTS[last["segment"]]
         if kind == "r":

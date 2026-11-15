@@ -360,7 +360,7 @@ def test_the_web_hunt_page_shows_the_warning(tmp_path, monkeypatch):
     create_user(hunt_run.open_repo(settings).engine, "analyst1", password, "analyst")
     client = TestClient(app)
     client.post("/login", data={"username": "analyst1", "password": password})
-    page = client.get("/hunts/h1")
+    page = client.get("/hunts/h1/run")
     assert page.status_code == 200
     assert "<b>Internal networks:</b> 3 distinct host.ip address(es)" in page.text
     assert "Ranges: 10.0.0.0/8, 198.51.100.0/24; carve-outs: 10.50.0.0/16" in page.text

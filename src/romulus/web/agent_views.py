@@ -127,7 +127,7 @@ def assessment_view(repo, hunt_id):
     return result
 
 
-def panel(repo, hunt, usage):
+def panel(repo, hunt, usage, *, with_assessment=True):
     run = repo.agent_run(hunt["id"])
     if run is None:
         return None
@@ -146,7 +146,7 @@ def panel(repo, hunt, usage):
             "source_queries": repo.agent_source_queries(hunt["id"]),
             "wall_seconds": repo.agent_elapsed_ms(hunt["id"]) / 1000,
             "limits": sorted(set(limit_items)), "counts": counts(repo, hunt["id"]),
-            "assessment": assessment_view(repo, hunt["id"]),
+            "assessment": assessment_view(repo, hunt["id"]) if with_assessment else None,
             "refusal": repo.agent_reassessment_refusal(hunt["id"]),
             # why the model's tool calls and assessment answers were refused: counts by tool and reason
             "refused_calls": repo.agent_refusal_counts(hunt["id"])}

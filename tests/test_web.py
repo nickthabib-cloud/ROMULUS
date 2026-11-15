@@ -104,7 +104,7 @@ def test_hunt_page_names_a_model_that_answered_in_place_of_the_configured_one(cl
                               "endpoint_host": "api.provider.example", "egress": "remote",
                               "model_reported": answered})
     _login(c, pw)
-    page = c.get("/hunts/h1").text
+    page = c.get("/hunts/h1/run").text
     assert "Answered by" in page and "model-b-fallback (1 calls; configured model-a)" in page
 
 
@@ -112,7 +112,7 @@ def test_hunt_page_shows_latest_agent_status_and_unworked_count(client):
     c, pw, _ = client
     _login(c, pw)
 
-    page = c.get("/hunts/h1")
+    page = c.get("/hunts/h1/run")
 
     assert page.status_code == 200
     assert "completed_within_scope" in page.text
@@ -158,7 +158,7 @@ def test_hunt_page_shows_expansion_accounting_instead_of_seed_wording(tmp_path):
     client = TestClient(app)
     _login(client, password)
 
-    page = client.get("/hunts/h1")
+    page = client.get("/hunts/h1/run")
 
     assert page.status_code == 200
     assert "Expansion accounting" in page.text

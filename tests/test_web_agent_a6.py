@@ -179,12 +179,18 @@ def test_assessment_panel_validates_cites_and_crashed_run(setup):
         "body": {"overall": [{"text": "<script>hostile</script>", "kind": "hypothesis", "cites": [
             {"kind": "F", "id": cid}, {"kind": "E", "id": "ev1"}, {"kind": "F", "id": "javascript:bad"}]}]},
         "checker": {"removed": [{"reason": "no cites"}]}, "created_at": now})
-    body = client.get("/hunts/h1").text
-    assert "interrupted (lease expired)" in body and "cap:notes" in body
+    body = client.get("/hunts/h1/assessment").text
+    assert "interrupted (lease expired)" in body
     assert "Re-run assessment" in body and "AI-generated hypothesis" in body
     assert f'/findings/{cid}' in body and '#evidence-ev1' in body and "unresolved cite" in body
-    assert "javascript:bad" not in body and "<script>" not in body
+    assert "javascript:bad" not in body and "<script>" not in body and "&lt;script&gt;hostile" in body
     assert "Checker changes and labels" in body and "no cites" in body
+    run = client.get("/hunts/h1/run").text
+    assert "interrupted (lease expired)" in run and "cap:notes" in run
+    # the overview carries the overall statements with their label, kind and citations, escaped
+    overview = client.get("/hunts/h1").text
+    assert "AI-generated hypothesis" in overview and "(hypothesis)" in overview and "&lt;script&gt;hostile" in overview
+    assert f'/findings/{cid}' in overview and "javascript:bad" not in overview and "<script>" not in overview
     assert client.get(f"/findings/{cid}?event=ev1").status_code == 200
     assert client.get(f"/findings/{cid}?event=not-cited").status_code == 404
     with repo.engine.begin() as connection:
@@ -335,8 +341,13 @@ def test_hunt_list_and_agent_findings_pages_are_keyset_bounded(setup, monkeypatc
         calls.append(args)
         return old_candidates(*args, **kwargs)
     monkeypatch.setattr(repo, "candidates", candidates)
-    detail = client.get("/hunts/h1").text
+    detail = client.get("/hunts/h1/findings").text
     assert "2 more" in detail and "Next findings" in detail
+    # the overview and findings tabs page by index and never read every candidate
+    assert client.get("/hunts/h1").status_code == 200
+    assert calls == []
+    # Run details still reads the legacy discovery rows for the investigator accounting, once
+    assert client.get("/hunts/h1/run").status_code == 200
     assert len(calls) == 1
 
 
@@ -368,6 +379,7 @@ def test_persisted_assessment_target_ids_resolve_to_scoped_citation_links(setup,
     if source == "agent":
         assert any(link and "#evidence-ev1" in link for link in links)
     assert "unresolved cite" not in client.get("/hunts/h1").text
+    assert "unresolved cite" not in client.get("/hunts/h1/assessment").text
     repo.create_hunt("other", {}, "d", "test")
     other = {**repo.candidate(cid), "id": "foreign", "hunt_id": "other", "event_ids": []}
     other.pop("created_at")

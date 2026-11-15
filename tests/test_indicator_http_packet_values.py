@@ -65,7 +65,7 @@ def test_report_and_web_render_positive_only_indicator_search_gaps(request):
                            {'reasons': [note]})
         assert note in render(publish_revision(repo, 'h1', 'test'))
         login()
-        response = client.get('/hunts/h1')
+        response = client.get('/hunts/h1/coverage')
         assert response.status_code == 200 and note in response.text
     finally:
         owner.release_state()

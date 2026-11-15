@@ -1,0 +1,119 @@
+{% extends "hunt_base.html" %}
+{% from 'agent_macros.html' import cites %}
+{% from 'ui_macros.html' import lane_bar, finding_claim %}
+{% block tab %}
+{% set url = head.hunt_url %}
+{% if h.stop_reason and h.execution_state not in ('completed_within_scope', 'running', 'planned') %}
+{% set stop = h.stop_reason | replace('\n', ' ') %}
+<div class="notice warn"><span><b>Stopped:</b> {{ stop | truncate(160) }}</span><a class="end" href="{{ url(h.id, '/run') }}#stop-reason">Run details</a></div>
+{% endif %}
+{% if internal_networks.warning %}<div class="notice warn"><span><b>Internal networks:</b> the host-address check reported a warning.</span><a class="end" href="{{ url(h.id, '/run') }}#internal-networks">Run details</a></div>{% endif %}
+{% if (h.manifest.ai_agent or {}).egress == 'remote' and (h.manifest.ai_agent or {}).requested %}<div class="notice"><span><b>Model egress:</b> the AI agent was configured with a remote model endpoint.</span><a class="end" href="{{ url(h.id, '/run') }}#model-egress">Run details</a></div>{% endif %}
+{% if ov.analyst_flags %}
+<div class="notice warn"><div><b>Analyst review required</b>
+  <ul>{% for flag in ov.analyst_flags %}<li><b>{{ flag.case_id }}</b>: {{ flag.message }}</li>{% endfor %}</ul>
+  {% if ov.analyst_flags_more %}{{ ov.analyst_flags_more }} more flags on <a href="{{ url(h.id, '/run') }}#investigations">Run details</a>.{% endif %}</div></div>
+{% endif %}
+
+<div class="tiles">
+  {% for ln in ['urgent', 'high', 'lead', 'context'] %}
+  <a class="tile l-{{ ln }}" href="{{ url(h.id, '/findings', lane=ln) }}"><div class="t-label">{{ ln }}</div><div class="t-value">{{ head.lanes.get(ln, 0) }}</div><div class="t-sub">{% if ln == 'context' %}context only{% else %}rule estimate{% endif %}</div></a>
+  {% endfor %}
+  {% if ov.ranked %}
+  <a class="tile" href="{{ url(h.id, '/findings') }}"><div class="t-label">Reported</div><div class="t-value">{{ ov.reported_total }}</div><div class="t-sub">{% for s in ov.sections %}{{ s.count }} {{ s.title }}{% if not loop.last %} · {% endif %}{% endfor %}</div></a>
+  {% else %}
+  <div class="tile"><div class="t-label">Suppressed</div><div class="t-value">{{ head.lanes.get('suppressed', 0) }}</div><div class="t-sub">not reported</div></div>
+  {% endif %}
+</div>
+{{ lane_bar(head.lanes) }}
+
+<div class="cols">
+  <div class="stack">
+    <section class="panel">
+      <div class="panel-head"><h2>{% if ov.ranked %}Top Reported findings{% else %}Top findings{% endif %}</h2>
+        <span class="help small">{% if ov.ranked %}report order{% else %}rule estimate order; this hunt has no final ranking{% endif %}</span>
+        <div class="end">{% if ov.top_more %}{{ ov.top_more }} more · {% endif %}<a href="{{ url(h.id, '/findings') }}">All findings →</a></div></div>
+      <div class="table-wrap"><table class="grid">
+        <thead><tr><th>Lane</th><th>Time (UTC)</th><th>Entity</th><th>Finding</th></tr></thead>
+        <tbody>
+        {% for c in ov.top %}
+        <tr class="row-{{ c.lane }}">
+          <td><span class="pill l-{{ c.lane }}">{{ c.lane }}</span></td>
+          <td class="mono nowrap">{{ c.ts.strftime('%m-%d %H:%M:%S') if c.ts is not none else 'Not recorded' }}</td>
+          <td class="mono small">{{ c.entity_label or '' }}</td>
+          <td class="claim-cell">{{ finding_claim(c, h) }}<div class="mono small help">{{ c.rule_id }}</div></td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4" class="empty">No reportable findings.</td></tr>
+        {% endfor %}
+        </tbody></table></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>Timeline preview</h2><span class="help small">the findings above, in time order</span>
+        <div class="end"><a href="{{ url(h.id, '/timeline') }}">Full timeline and attack path →</a></div></div>
+      <div class="panel-body">
+        {% if ov.chronological %}
+        <ol class="chrono">
+          {% for c in ov.chronological %}
+          <li class="l-{{ c.lane }}">
+            <span class="t">{% if c.ts is not none %}{{ c.ts.strftime('%H:%M:%S') }}<small>{{ c.ts.strftime('%Y-%m-%d') }}</small>{% else %}time<small>not recorded</small>{% endif %}</span>
+            <span class="node" aria-hidden="true"></span>
+            <div class="what"><a href="/findings/{{ c.id }}">{{ c.claim | truncate(160) }}</a>
+              <div class="meta">{{ c.lane }} · {{ c.rule_id }}{% if c.entity_label %} · {{ c.entity_label }}{% endif %}{% if c.provenance == 'agent' %} · <span class="ai-label">AI agent · unconfirmed</span>{% endif %}</div></div>
+          </li>
+          {% endfor %}
+        </ol>
+        {% else %}<p class="help">Nothing to place on the timeline yet.</p>{% endif %}
+      </div>
+    </section>
+  </div>
+
+  <div class="stack">
+    <section class="panel ai-surface">
+      <div class="panel-head"><h2>AI assessment</h2><span class="ai-label">AI-generated · unconfirmed</span>
+        <div class="end"><a href="{{ url(h.id, '/assessment') }}">Full assessment →</a></div></div>
+      <div class="panel-body">
+        {% if ov.assessment %}
+        <p class="small"><b>{{ ov.assessment.header }}</b></p>
+        {% if ov.overall %}
+        <ul class="statements">
+          {% for sentence in ov.overall.sentences %}<li>{{ sentence.text }} <span class="cites">{{ cites(sentence.cites) }}</span> <span class="kind">({{ sentence.kind }})</span>{% if sentence.suspicious_content %} <b class="flag">Cites only content flagged as possible prompt injection.</b>{% endif %}{% if sentence.cites_more %} <span class="help small">{{ sentence.cites_more }} more citations</span>{% endif %}</li>{% endfor %}
+        </ul>
+        {% if ov.overall.more %}<p class="help small">{{ ov.overall.more }} more overall statements · <a href="{{ url(h.id) }}#reports">Complete report</a></p>{% endif %}
+        {% else %}<p class="help">The assessment has no overall statements; its other sections are on the AI assessment tab.</p>{% endif %}
+        {% if ov.assessment.confidence %}<p class="small">Confidence: <b>{{ ov.assessment.confidence }}</b></p>{% endif %}
+        {% elif head.has_agent %}<p class="help">No AI assessment has been stored for this hunt yet (AI agent: {{ head.ai_state }}).</p>
+        {% else %}<p class="help">No AI assessment: this hunt ran without the AI agent. The deterministic findings and report order are complete on their own.</p>{% endif %}
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>Hunt</h2><div class="end"><a href="{{ url(h.id, '/run') }}">Run details →</a></div></div>
+      <div class="panel-body">
+        <dl class="kv">
+          <dt>Execution</dt><dd><span class="state s-{{ h.execution_state }}">{{ h.execution_state }}</span></dd>
+          <dt>Result</dt><dd>{{ h.detection_result or '—' }}</dd>
+          <dt>Window (UTC)</dt><dd class="mono small">{{ h.manifest.window.start }} → {{ h.manifest.window.end }}</dd>
+          <dt>Sources</dt><dd>{{ h.manifest.targets | join(', ') }}</dd>
+          <dt>Style</dt><dd>{{ h.manifest.style or '—' }}</dd>
+          {% if h.manifest.hypothesis %}<dt>Hypothesis</dt><dd>{{ h.manifest.hypothesis }}</dd>{% endif %}
+          <dt>Started by</dt><dd>{{ h.created_by }}{% if h.created_at %} · <span class="mono small">{{ h.created_at.strftime('%Y-%m-%d %H:%M') }}</span>{% endif %}</dd>
+          <dt>Internal networks</dt><dd>{{ ((internal_networks.line or internal_networks.summary) | replace('Internal networks: ', '', 1)) | truncate(120) }}</dd>
+        </dl>
+      </div>
+    </section>
+
+    <section class="panel" id="reports">
+      <div class="panel-head"><h2>Reports</h2>
+        <div class="end"><form method="post" action="/hunts/{{ h.id }}/report" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="sm">Publish new report revision</button></form></div></div>
+      <div class="table-wrap"><table class="grid small"><tbody>
+        {% for r in reports %}
+        <tr><th>r{{ r.revision }}</th><td class="mono nowrap">{{ r.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+          <td><a href="/reports/{{ h.id }}/{{ r.id }}.md">technical (Markdown)</a> · <a href="/reports/{{ h.id }}/{{ r.id }}.docx">executive (Word)</a> · <a href="/reports/{{ h.id }}/{{ r.id }}.json">manifest (JSON)</a></td></tr>
+        {% else %}<tr><td class="empty">No report revisions yet.</td></tr>{% endfor %}
+      </tbody></table></div>
+    </section>
+  </div>
+</div>
+{% endblock %}

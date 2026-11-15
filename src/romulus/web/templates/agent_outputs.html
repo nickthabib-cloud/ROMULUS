@@ -1,7 +1,7 @@
-{% extends 'base.html' %}
+{% extends 'hunt_base.html' %}
 {% from 'agent_macros.html' import cites, more as pages %}
-{% block content %}
-<p><a href="/hunts/{{ h.id | urlencode }}">← hunt {{ h.id }}</a></p>
+{% block tab %}
+<p class="crumbs"><a href="/hunts/{{ h.id | urlencode }}/assessment">AI assessment</a> /</p>
 <h1>AI-generated {{ 'rule requests' if kind == 'requests' else kind }}</h1>
 <p>Not confirmed by an analyst.</p>
 <ul>{% for row in rows %}<li>
