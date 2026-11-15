@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from romulus.evidence.linux_catalog import TEXT_FAMILIES
+from romulus.evidence.linux_catalog import CONTENT_TEXT_FAMILIES
 from romulus.evidence.linux_text import classify
 from romulus.evidence.normalize import normalize_hits
 from romulus.sources.compile import compile_es
@@ -59,7 +59,8 @@ def test_bad_or_overlong_lines_remain_honest_skips(line):
     assert not events and not errors and sum(skips.values()) == 1
     assert next(iter(skips)).startswith("text line too long" if len(line) > 65_536
                                         else "text line in no recognized format")
-    assert list(fed.values()) == [TEXT_FAMILIES]
+    # an unrecognized content-identified line could be any text family, an IDS alert line among them
+    assert list(fed.values()) == [CONTENT_TEXT_FAMILIES]
 
 
 def test_raw_access_and_syslog_keep_pipeline_time_and_shipper_host():

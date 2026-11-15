@@ -6,7 +6,7 @@ import pytest
 from romulus.detect.base import Playbook
 from romulus.detect.mail import MailOutboundBurst
 from romulus.detect.service_auth import ServicePasswordGuessing
-from romulus.evidence.linux_catalog import LOGICAL_FAMILIES, TEXT_FAMILIES
+from romulus.evidence.linux_catalog import CONTENT_TEXT_FAMILIES, LOGICAL_FAMILIES
 from romulus.evidence.normalize import normalize_hits
 from romulus.hunt import sweep as sw
 from romulus.report.manifest import _not_assessed
@@ -39,8 +39,8 @@ def test_unrecognized_linux_text_is_partial_only_for_text_families(contract, mes
     events, skips, errors = normalize_hits([_hit(message)], contract=contract, skip_families=fed)
     assert events == [] and errors == []
     assert len(skips) == 1 and next(iter(skips)).startswith(prefix)
-    assert list(fed.values()) == [TEXT_FAMILIES]
-    assert sw.Sweep._unsupported_families(sw.Sweep._unsupported_skips(skips), fed) == (TEXT_FAMILIES, {})
+    assert list(fed.values()) == [CONTENT_TEXT_FAMILIES]
+    assert sw.Sweep._unsupported_families(sw.Sweep._unsupported_skips(skips), fed) == (CONTENT_TEXT_FAMILIES, {})
 
 
 @pytest.mark.parametrize("contract", [None, _contract(), _contract("network", "unknown"), _contract("host", "windows")])
