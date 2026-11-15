@@ -440,6 +440,38 @@ def test_invalid_tool_arguments_consume_the_per_session_call_budget(tmp_path):
     engine.dispose()
 
 
+@pytest.mark.parametrize("second", ["corrected", "refused_again"])
+def test_a_refused_wrap_up_finish_gets_one_corrected_call(tmp_path, second):
+    engine = make_engine(tmp_path / "agent-finish-retry.sqlite")
+    migrate(engine)
+    repo = Repo(engine)
+    repo.create_hunt("h1", {"window": {}, "targets": [], "ai_agent": {"requested": True}}, "d", "test")
+    _detection_finished(repo, "h1")
+    settings = Settings(home=tmp_path, agent_max_tool_calls_per_session=1)
+    opened = ToolCall("open", "open_hypothesis", {"statement": "Review this bounded wrap-up hypothesis"}, "{}")
+    too_long = ToolCall("f1", "finish_session", {"summary": "s" * 2001}, "{}")
+    fixed = ToolCall("f2", "finish_session", {"summary": "The orientation opened one hypothesis."}, "{}")
+    provider = ScriptedProvider([response(tool_calls=[opened]), response(tool_calls=[too_long]),
+                                 response(tool_calls=[fixed if second == "corrected" else too_long])])
+    budget = AgentBudget.from_usage(BudgetLimits.from_settings(settings), repo.agent_usage("h1"), clock=lambda: 0.0)
+
+    outcome = _run_session(settings, repo, "h1", provider, _BudgetGate(budget, settings),
+                           lambda session: Toolbox(repo, "h1", session_id=session), _prompt_set(), purpose="orient")
+
+    statuses = [row["status"] for row in repo.agent_tool_calls("h1")]
+    if second == "corrected":
+        assert outcome["state"] == "finished" and outcome["summary"] == "The orientation opened one hypothesis."
+        assert statuses == ["complete", "refused", "complete"]
+    else:
+        assert outcome["state"] == "capped" and outcome["reason"] == "wrap_up_not_finished"
+        assert statuses == ["complete", "refused", "refused"]
+    retry = provider.requests[2].messages[-1]["content"]
+    assert "finish_session was refused" in retry
+    # the refusal the model saw names the bound it missed
+    assert "2000" in provider.requests[2].messages[-2]["content"]
+    engine.dispose()
+
+
 def test_investigation_reserve_exhaustion_goes_to_assess_with_budget_reason(tmp_path):
     engine = make_engine(tmp_path / "agent-investigate-budget.sqlite")
     migrate(engine)

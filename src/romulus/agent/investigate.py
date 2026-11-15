@@ -344,6 +344,7 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
     tool_count = 0
     no_tool_misses = 0
     wrap_up_sent = False
+    finish_retried = False
     context_wrap_sent = False
     call_seq = 0
     provider_unavailable = False
@@ -549,6 +550,13 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
             if not wrap_up_sent and tool_count >= settings.agent_max_tool_calls_per_session:
                 messages.append({"role": "user", "content": "Tool-call limit reached. Call finish_session now with a summary."})
                 wrap_up_sent = True
+                continue
+            if wrap_up_sent and not finish_retried and any(
+                    call.name == "finish_session" for call in allowed_calls):
+                # the wrap-up's finish_session was refused (its result says why): one corrected call is allowed
+                messages.append({"role": "user", "content": "finish_session was refused; its result says why. "
+                                 "Call finish_session once more with a corrected summary."})
+                finish_retried = True
                 continue
             if wrap_up_sent:
                 return finish("capped", _deterministic_tool_summary(tool_history, hypothesis_changes),

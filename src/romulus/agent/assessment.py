@@ -24,7 +24,7 @@ from romulus.agent.provider import (
 )
 from romulus.agent.provider.base import estimate_tokens
 from romulus.agent.safety import injection_flags
-from romulus.agent.toolbox import _strict_schema
+from romulus.agent.toolbox import argument_schema
 from romulus.report.incidents import build_incident_graph
 from romulus.report.manifest import coverage_for_hunt
 from romulus.store.db import digest, utcnow
@@ -36,33 +36,50 @@ class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+# The stored assessment's bounds. A reply is validated for its shape (exactly the schema the model is given); the
+# checker then applies these, dropping what is past them and counting each drop in the checker record.
+TEXT_LIMIT = 500
+CITE_LIMIT = 20
+SECTION_LIMITS = {"overall": 8, "key_steps": 30, "reasons": 10, "alternatives": 10, "gaps": 10, "next_checks": 10}
+
+
+def _section(what: str, limit: int) -> str:
+    return f"{what} At most {limit}; any past {limit} are dropped and counted."
+
+
 class Sentence(_Strict):
-    text: Annotated[str, Field(min_length=1, max_length=500)]
-    cites: list[Alias] = Field(max_length=20)
-    kind: Literal["observed", "inferred", "hypothesis"]
+    text: str = Field(description=(
+        f"One concise sentence, at most {TEXT_LIMIT} characters; an empty or longer one is dropped and counted."))
+    cites: list[Alias] = Field(description=(
+        f"Aliases supplied for this hunt that support the sentence, at most {CITE_LIMIT} (the rest are dropped). "
+        "A sentence without a citation, or with an alias not issued in this hunt, is dropped."))
+    kind: Literal["observed", "inferred", "hypothesis"] = Field(description=(
+        "observed: recorded in the cited records; inferred: reasoned from them; hypothesis: proposed, unconfirmed."))
 
 
 class KeyStep(_Strict):
-    time: datetime | None
-    tactic: str | None
+    time: datetime | None = Field(description="When the step happened (RFC 3339 with a UTC offset), or null.")
+    tactic: str | None = Field(description="The ATT&CK tactic, or null.")
     sentence: Sentence
 
 
 class Confidence(_Strict):
     overall: Literal["low", "medium", "high"]
-    reasons: list[Sentence] = Field(max_length=10)
+    reasons: list[Sentence] = Field(description=_section("Why.", SECTION_LIMITS["reasons"]))
 
 
 class AssessmentBody(_Strict):
-    overall: list[Sentence] = Field(max_length=8)
-    key_steps: list[KeyStep] = Field(max_length=30)
+    overall: list[Sentence] = Field(description=_section("The overall assessment.", SECTION_LIMITS["overall"]))
+    key_steps: list[KeyStep] = Field(description=_section("The attack path's key steps, in time order.",
+                                                          SECTION_LIMITS["key_steps"]))
     confidence: Confidence
-    alternatives: list[Sentence] = Field(max_length=10)
-    gaps: list[Sentence] = Field(max_length=10)
-    next_checks: list[Sentence] = Field(max_length=10)
+    alternatives: list[Sentence] = Field(description=_section("Benign or other explanations.",
+                                                              SECTION_LIMITS["alternatives"]))
+    gaps: list[Sentence] = Field(description=_section("Coverage gaps and open questions.", SECTION_LIMITS["gaps"]))
+    next_checks: list[Sentence] = Field(description=_section("Checks for the analyst.", SECTION_LIMITS["next_checks"]))
 
 
-ASSESSMENT_SCHEMA = _strict_schema(AssessmentBody)
+ASSESSMENT_SCHEMA = argument_schema(AssessmentBody)
 @dataclass(frozen=True)
 class AbsencePhrase:
     """A bounded token phrase; gap counts intervening words between its two endpoints."""
@@ -198,25 +215,44 @@ def _non_observed_alias(aliases: AliasBook, alias_row: dict) -> bool:
 
 
 def check_assessment(repo, hunt_id: str, body: dict, *, owner_token=None) -> tuple[dict, dict]:
-    """Check support, label flagged-only citations, and replace aliases with real IDs."""
+    """Check support, label flagged-only citations, apply the stored bounds, and replace aliases with real IDs.
+    Every sentence dropped or trimmed is counted by reason."""
     checked = AssessmentBody.model_validate(body).model_dump(mode="json")
     aliases = AliasBook(repo, hunt_id, owner_token=owner_token)
     counts = {"removed_uncited": 0, "removed_unknown_alias": 0, "downgraded_observed": 0,
-              "removed_absence_claim": 0, "labelled_suspicious_only": 0}
+              "removed_absence_claim": 0, "labelled_suspicious_only": 0, "removed_empty": 0,
+              "removed_over_length": 0, "trimmed_citations": 0, "dropped_over_cap": 0}
     suspicious_cache: dict[str, bool] = {}
 
     def check(sentence: dict, section: str) -> dict | None:
-        return _map_sentence(_sentence(sentence), aliases, counts, section, suspicious_cache)
+        sentence = _sentence(sentence)
+        if not sentence["text"].strip():
+            counts["removed_empty"] += 1
+            return None
+        if len(sentence["text"]) > TEXT_LIMIT:
+            counts["removed_over_length"] += 1
+            return None
+        if len(sentence["cites"]) > CITE_LIMIT:
+            counts["trimmed_citations"] += len(sentence["cites"]) - CITE_LIMIT
+            sentence["cites"] = sentence["cites"][:CITE_LIMIT]
+        return _map_sentence(sentence, aliases, counts, section, suspicious_cache)
 
-    checked["overall"] = [value for item in checked["overall"] if (value := check(item, "overall")) is not None]
-    checked["key_steps"] = [
+    def capped(items: list, section: str) -> list:
+        limit = SECTION_LIMITS[section]
+        counts["dropped_over_cap"] += max(0, len(items) - limit)
+        return items[:limit]
+
+    checked["overall"] = capped([value for item in checked["overall"]
+                                 if (value := check(item, "overall")) is not None], "overall")
+    checked["key_steps"] = capped([
         {"time": item.get("time"), "tactic": item.get("tactic"), "sentence": value}
         for item in checked["key_steps"] if (value := check(item["sentence"], "key_steps")) is not None
-    ]
-    checked["confidence"]["reasons"] = [value for item in checked["confidence"]["reasons"]
-                                         if (value := check(item, "confidence")) is not None]
+    ], "key_steps")
+    checked["confidence"]["reasons"] = capped([value for item in checked["confidence"]["reasons"]
+                                               if (value := check(item, "confidence")) is not None], "reasons")
     for section in ("alternatives", "gaps", "next_checks"):
-        checked[section] = [value for item in checked[section] if (value := check(item, section)) is not None]
+        checked[section] = capped([value for item in checked[section]
+                                   if (value := check(item, section)) is not None], section)
     return checked, {key: value for key, value in counts.items() if value}
 
 
@@ -486,15 +522,27 @@ def run_assessment(settings, repo, hunt_id: str, provider, budget: AgentBudget, 
                                       owner_token=owner_token)
             return {"session_id": session_id, "model_call_id": call_id, "revision": revision,
                     "body": checked, "checker": checker, "prompt_digests": prompt_digests}
-        except (ValidationError, ValueError, TypeError):
+        except (ValidationError, ValueError, TypeError) as exc:
             if attempt + 1 >= max_calls:
                 break
             messages += [result.assistant_message(),
-                         {"role": "user", "content": "The previous assessment failed schema validation. "
-                          "Return one corrected ai-assessment@1 JSON response; follow the limits and cite aliases."}]
+                         {"role": "user", "content": "The previous assessment failed schema validation ("
+                          + _validation_summary(exc, result) + "). Return one corrected ai-assessment@1 JSON "
+                          "response; follow the limits and cite aliases."}]
     repo.update_agent_session(session_id, hunt_id, {"state": "failed", "summary": "Assessment schema validation failed.",
                                                      "ended_at": utcnow()}, owner_token=owner_token)
     return None
+
+
+def _validation_summary(exc: Exception, result) -> str:
+    """What was wrong with a reply, in a few lines the model can act on (field paths and messages, no values)."""
+    if isinstance(exc, ValidationError):
+        errors = exc.errors(include_url=False, include_input=False, include_context=False)
+        shown = "; ".join(f"{'.'.join(str(p) for p in error['loc']) or '$'}: {error['msg']}" for error in errors[:5])
+        return shown + (f"; and {len(errors) - 5} more" if len(errors) > 5 else "")
+    if result.error:
+        return result.error[:500]
+    return f"{type(exc).__name__}: {exc}"[:500]
 
 
 def _prompt(name: str) -> str:
