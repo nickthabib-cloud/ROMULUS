@@ -10,7 +10,7 @@
 <div class="cols">
   <div class="stack">
     <section class="panel ai-surface" id="ai-assessment">
-      <div class="panel-head"><h2>AI assessment</h2><span class="ai-label">AI-generated · unconfirmed</span>
+      <div class="panel-head"><h2>AI assessment</h2>{% if ai_panel.assessment and ai_panel.assessment.source == 'agent' %}<span class="ai-label">AI-generated · unconfirmed</span>{% elif ai_panel.assessment %}<span class="chip">template narrative</span>{% endif %}
         {% if ai_panel.assessment and ai_panel.assessment.revision %}<div class="end help">revision {{ ai_panel.assessment.revision }}</div>{% endif %}</div>
       <div class="panel-body">
         {% include 'assessment_body.html' %}

@@ -124,11 +124,17 @@ def overview(repo, hunt: dict) -> dict:
     view = agent_views.assessment_view(repo, hunt_id)
     overall = next((section for section in (view or {}).get("sections", []) if section["name"] == "overall"), None)
     agent_audit = repo.latest_audit(hunt_id, "hunt.agent_summary")
+    with repo.engine.connect() as connection:
+        # any model call that left the host, whichever pass made it (the agent or a separately configured triage)
+        remote_calls = connection.execute(select(t.model_call.c.id).where(
+            t.model_call.c.hunt_id == hunt_id, t.model_call.c.egress == "remote").limit(1)).first() is not None
+    configured = hunt["manifest"].get("ai_agent") or {}
     flags = ((agent_audit or {}).get("detail") or {}).get("analyst_flags") or []
     return {"ranked": ranked, "top": top, "top_more": max(0, reported_total - len(top)),
             "reported_total": reported_total, "sections": sections,
             "chronological": sorted(top, key=lambda row: (row["ts"] is None, str(row["ts"] or ""), row["id"])),
-            "assessment": view, "overall": overall,
+            "assessment": view, "overall": overall, "remote_calls": remote_calls,
+            "remote_configured": configured.get("egress") == "remote" and bool(configured.get("requested")),
             "analyst_flags": [{"case_id": agent_views.clip(flag.get("case_id"), 200),
                                "message": agent_views.clip(flag.get("message") or flag.get("reason"), 600)}
                               for flag in flags[:20] if isinstance(flag, dict)],

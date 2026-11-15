@@ -9,7 +9,8 @@ from sqlalchemy import event
 from romulus.store import schema as t
 from romulus.store.db import utcnow
 from romulus.web import hunt_views
-from romulus.web.finding_order import finding_page
+from romulus.store.repo import FINAL_RANK_PASS
+from romulus.web.finding_order import finding_page, ranked_finding_page, segment_sizes
 from tests import test_web_agent_a6
 from tests.test_agent_store_r2 import NOW, _candidate, _repo
 
@@ -55,7 +56,7 @@ def test_every_tab_is_its_own_url_and_marks_itself_current(setup, suffix):
     assert client.get("/hunts/missing" + suffix).status_code == 404
 
 
-def test_findings_links_from_before_tabs_land_on_the_findings_tab(setup):
+def test_findings_query_on_the_hunt_url_redirects_to_the_findings_tab(setup):
     client, *_ = setup
     response = client.get("/hunts/h1?lane=urgent", follow_redirects=False)
     assert response.status_code == 303 and response.headers["location"] == "/hunts/h1/findings?lane=urgent"
@@ -111,7 +112,7 @@ def test_findings_tab_filters_by_lane_and_rule(setup):
     assert client.get("/hunts/h1/findings", params={"rule": "r" * 300}).status_code == 400
 
 
-def test_rule_filter_seeks_an_index_not_the_whole_table():
+def test_rule_filter_walks_the_order_index_without_a_sort():
     repo = _repo()
     _seed(repo, [_candidate(f"f{i:04}") for i in range(120)])
     statements = []
@@ -122,8 +123,9 @@ def test_rule_filter_seeks_an_index_not_the_whole_table():
     with repo.engine.connect() as connection:
         plans = [" ".join(str(row) for row in connection.exec_driver_sql("EXPLAIN QUERY PLAN " + sql, params))
                  for sql, params in list(statements)]
-    assert plans and all("USING INDEX" in plan or "USING COVERING INDEX" in plan for plan in plans)
-    assert all("SCAN candidate" not in plan or "USING" in plan for plan in plans)
+    # the hunt's order index, in order: bounded memory and no temporary sort (a sparse rule walks the hunt's range)
+    assert plans and all("USING INDEX ix_candidate_finding_order" in plan for plan in plans)
+    assert all("TEMP B-TREE" not in plan for plan in plans)
 
 
 def test_overview_shows_the_top_findings_and_how_many_more(setup):
@@ -133,6 +135,25 @@ def test_overview_shows_the_top_findings_and_how_many_more(setup):
     assert len(_ids(html)) == hunt_views.TOP_FINDINGS
     assert "21 more" in html and 'href="/hunts/h1/findings">All findings' in html
     assert "Timeline preview" in html
+
+
+def test_ranked_overview_lists_only_the_reported_set_in_report_order(setup):
+    from tests.test_rank_views import _copy_into, _ranked_repo
+    client, repo, *_ = setup
+    ranked = _ranked_repo(filler=40)
+    _copy_into(repo, ranked)
+    sizes = segment_sizes(repo, "h1", pass_no=FINAL_RANK_PASS)
+    reported = sum(sizes[index] for index in hunt_views.REPORTED_SEGMENTS)
+    first, _, _ = ranked_finding_page(repo, "h1", pass_no=FINAL_RANK_PASS, limit=hunt_views.TOP_FINDINGS)
+    expected = [row["id"] for row in first if row["segment"] in hunt_views.REPORTED_SEGMENTS]
+    html = client.get("/hunts/h1").text
+    top = html.split("Top Reported findings", 1)[1].split("Timeline preview", 1)[0]
+    assert _ids(top) == expected and expected[0] == "c-urgent" and "p-single" not in expected
+    left = reported - len(expected)
+    assert (f"{left} more ·" in top) if left else ("more ·" not in top)
+    tile = html.split('<div class="t-label">Reported</div>', 1)[1].split("</a>", 1)[0]
+    assert f'<div class="t-value">{reported}</div>' in tile
+    assert f"{sizes[0] + sizes[1]} confirmed" in tile and f"{sizes[3]} ranked, not reported" in tile
 
 
 def test_coverage_tab_lists_unresolved_first_and_pages_every_rule(setup):
@@ -292,6 +313,29 @@ def test_model_text_is_escaped_on_every_tab(setup):
     assert "&lt;script&gt;" in client.get("/hunts/h1/triage").text
     overview = client.get("/hunts/h1").text
     assert "AI-generated · unconfirmed" in overview and "&lt;script&gt;alert" in overview
+
+
+def test_a_template_narrative_is_not_labelled_as_ai_generated(setup):
+    client, repo, cid, *_ = setup
+    test_web_agent_a6.run_row(repo)
+    repo.save_agent_assessment({"id": "template", "hunt_id": "h1", "revision": 1, "source": "template",
+        "model": {}, "body": {"overall": [{"text": "Template sentence", "kind": "observed", "cites": [cid]}]},
+        "checker": {}, "created_at": utcnow()})
+    for suffix in ("", "/assessment"):
+        html = client.get("/hunts/h1" + suffix).text
+        assert "Template sentence" in html and "template narrative" in html
+        assert "AI-generated · unconfirmed</span>" not in html
+
+
+def test_overview_points_to_egress_from_any_remote_model_call(setup):
+    client, repo, *_ = setup
+    assert "Model egress:" not in client.get("/hunts/h1").text
+    repo.save_model_call({"id": "triage-1", "hunt_id": "h1", "purpose": "triage", "model": "m", "options": {},
+                          "prompt_digest": "d", "status": "ok", "provider": "anthropic",
+                          "endpoint_host": "api.provider.example", "egress": "remote", "model_reported": "m"})
+    html = client.get("/hunts/h1").text
+    assert "telemetry excerpts were sent to a remote model endpoint" in html
+    assert 'href="/hunts/h1/run#model-egress"' in html
 
 
 def test_overview_without_an_agent_says_so(setup):

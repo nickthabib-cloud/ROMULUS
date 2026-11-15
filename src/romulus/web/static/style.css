@@ -371,6 +371,9 @@ svg.timeline .tick-label, svg.timeline .row-label { font-weight: 400; }
 .cov-positive td:first-child { box-shadow: inset 3px 0 var(--lead); }
 .cov-none td:first-child { box-shadow: inset 3px 0 var(--suppressed); }
 
+/* in-page targets clear the sticky hunt header */
+main [id] { scroll-margin-top: 196px; }
+
 /* ---------- responsive ---------- */
 @media (max-width: 1180px) {
   .cols { grid-template-columns: 1fr; }
@@ -385,6 +388,7 @@ svg.timeline .tick-label, svg.timeline .row-label { font-weight: 400; }
   nav.primary a { padding: 8px 10px; }
   main { padding: 12px 16px 40px; }
   .hunt-head { margin: -12px -16px 14px; padding: 10px 16px 0; position: static; }
+  main [id] { scroll-margin-top: 12px; }
   .head-actions { margin-left: 0; }
   .chrono::before { left: 84px; }
   .chrono li { grid-template-columns: 72px 24px minmax(0, 1fr); }

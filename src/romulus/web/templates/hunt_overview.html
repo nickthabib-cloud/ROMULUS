@@ -8,7 +8,7 @@
 <div class="notice warn"><span><b>Stopped:</b> {{ stop | truncate(160) }}</span><a class="end" href="{{ url(h.id, '/run') }}#stop-reason">Run details</a></div>
 {% endif %}
 {% if internal_networks.warning %}<div class="notice warn"><span><b>Internal networks:</b> the host-address check reported a warning.</span><a class="end" href="{{ url(h.id, '/run') }}#internal-networks">Run details</a></div>{% endif %}
-{% if (h.manifest.ai_agent or {}).egress == 'remote' and (h.manifest.ai_agent or {}).requested %}<div class="notice"><span><b>Model egress:</b> the AI agent was configured with a remote model endpoint.</span><a class="end" href="{{ url(h.id, '/run') }}#model-egress">Run details</a></div>{% endif %}
+{% if ov.remote_calls or ov.remote_configured %}<div class="notice"><span><b>Model egress:</b> {% if ov.remote_calls %}telemetry excerpts were sent to a remote model endpoint.{% else %}the AI agent was configured with a remote model endpoint; no telemetry was sent to it.{% endif %}</span><a class="end" href="{{ url(h.id, '/run') }}#model-egress">Run details</a></div>{% endif %}
 {% if ov.analyst_flags %}
 <div class="notice warn"><div><b>Analyst review required</b>
   <ul>{% for flag in ov.analyst_flags %}<li><b>{{ flag.case_id }}</b>: {{ flag.message }}</li>{% endfor %}</ul>
@@ -71,7 +71,7 @@
 
   <div class="stack">
     <section class="panel ai-surface">
-      <div class="panel-head"><h2>AI assessment</h2><span class="ai-label">AI-generated · unconfirmed</span>
+      <div class="panel-head"><h2>AI assessment</h2>{% if ov.assessment and ov.assessment.source == 'agent' %}<span class="ai-label">AI-generated · unconfirmed</span>{% elif ov.assessment %}<span class="chip">template narrative</span>{% endif %}
         <div class="end"><a href="{{ url(h.id, '/assessment') }}">Full assessment →</a></div></div>
       <div class="panel-body">
         {% if ov.assessment %}

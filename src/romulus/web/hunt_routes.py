@@ -40,7 +40,7 @@ def register_hunt_routes(app, repo, s, need, hunt_page):
         u = need(request)
         params = request.query_params
         if "lane" in params or "after" in params:
-            # findings links from before the workspace had tabs
+            # a findings query (lane or page cursor) on the hunt URL lists findings
             return RedirectResponse(hunt_views.hunt_url(hunt_id, "/findings", lane=params.get("lane", ""),
                                                         after=params.get("after", "")), status_code=303)
         h = hunt(hunt_id)

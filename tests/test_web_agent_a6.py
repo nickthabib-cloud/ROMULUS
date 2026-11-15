@@ -346,7 +346,7 @@ def test_hunt_list_and_agent_findings_pages_are_keyset_bounded(setup, monkeypatc
     # the overview and findings tabs page by index and never read every candidate
     assert client.get("/hunts/h1").status_code == 200
     assert calls == []
-    # Run details still reads the legacy discovery rows for the investigator accounting, once
+    # Run details reads the discovery rows for the investigator accounting, once
     assert client.get("/hunts/h1/run").status_code == 200
     assert len(calls) == 1
 
