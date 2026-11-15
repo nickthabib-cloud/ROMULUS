@@ -65,11 +65,12 @@ from romulus.evidence.linux_catalog import (
     document_dataset,
     match_shape,
     module_syscall,
+    openvpn_file,
     text_candidate,
     text_payload,
     unmatched_families,
 )
-from romulus.evidence.linux_service_text import parse_service
+from romulus.evidence.linux_service_text import parse_service, service_skip_reason
 from romulus.evidence.linux_text import TextLine, classify, inline_time
 from romulus.evidence.linux_text_types import WRITER_MISMATCH_CAVEAT
 from romulus.evidence.raw_scrub import clean_source, might_be_zeek
@@ -3433,6 +3434,9 @@ def _new_writer_identity(program: str, journal: dict | None) -> tuple[str, list[
         names, units = frozenset({name, name.rsplit("/", 1)[-1]}), frozenset({"postfix"})
     elif name == "openvpn" or name.startswith("openvpn-"):
         names, units = frozenset({name, "openvpn"}), frozenset({name, "openvpn", "openvpn-server", "openvpn-client"})
+    elif name in ("dnsmasq-dhcp", "dnsmasq-tftp", "dnsmasq-script"):
+        # dnsmasq tags its DHCP, TFTP and script messages itself; the writing process is dnsmasq
+        names, units = frozenset({name, "dnsmasq"}), frozenset({"dnsmasq"})
     journal = journal or {}
     present = [field for field in _TRUSTED_WRITER_PATHS if field in journal]
     verified, disagreeing = False, []
@@ -3538,7 +3542,7 @@ def _linux_events(hit: dict, normalizer, *args) -> list[TypedEvent]:
 def normalize_text(hit: dict) -> list[TypedEvent]:
     src = hit["_source"]
     path, line = text_payload(src)
-    parsed = classify(line)
+    parsed = classify(line, openvpn_file=openvpn_file(src))
     if parsed.format == "unknown" and isinstance(program := _get(src, "process.name"), str):
         parsed = TextLine("syslog", program, line)
     dataset = document_dataset(src) or "(no dataset)"
@@ -3565,7 +3569,10 @@ def normalize_text(hit: dict) -> list[TypedEvent]:
         except Skip as error:
             records = _program_events(hit, parsed.program, parsed.message, origin, journal=journal)
             if not records:
-                reason = f"text format {parsed.format}, program {parsed.program!r} is not normalized: {dataset}"
+                detail = service_skip_reason(parsed.program, parsed.message)
+                # the detail precedes " is not normalized: ", after which the report reads the dataset
+                reason = (f"text format {parsed.format}, program {parsed.program!r}" + (f" ({detail})" if detail else "")
+                          + f" is not normalized: {dataset}")
                 raise Skip(reason[:256]) from error
             for record in records:
                 _text_provenance(record, parsed, origin)

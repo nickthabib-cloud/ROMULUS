@@ -308,6 +308,26 @@ def _openvpn(message: str) -> ParsedLine | None:
                       method="password", user=data[2], ip=address, port=port)
     if message.startswith("TLS Auth Error: "):
         return _event("openvpn", Outcome.failure, method="tls", ip=address, port=port)
+    # ssl.c and ssl_pkt.c: a handshake that failed or never completed, and a control packet whose tls-auth or
+    # tls-crypt key check failed. Neither is a password decision: they carry their own phase, which the password rules
+    # do not count.
+    if re.fullmatch(r"TLS Error: (?:TLS handshake failed|TLS key negotiation failed to occur within \d+ seconds"
+                    r"(?: \(check your network connectivity\))?)", message):
+        return _event("openvpn", Outcome.failure, method="tls", ip=address, port=port, phase="tls_handshake")
+    packet = re.fullmatch(r"TLS Error: (?:incoming packet authentication failed|cannot locate HMAC in incoming packet|"
+                          r"tls-crypt unwrapping failed) from (?:\[AF_INET6?\])?\[?([0-9A-Fa-f:.]+?)\]?:(\d{1,5})",
+                          message)
+    if packet:
+        return _event("openvpn", Outcome.failure, method="tls", ip=packet[1], port=packet[2],
+                      phase="packet_authentication")
+    # ssl_verify.c: the peer certificate check at depth 0 (the client's own certificate). The subject's common name is
+    # not an account, so no user is typed.
+    if re.fullmatch(r"VERIFY OK: depth=0, .+", message):
+        return _event("openvpn", Outcome.success, method="certificate", ip=address, port=port,
+                      phase="certificate_verification")
+    if re.fullmatch(r"VERIFY ERROR: depth=\d+, error=.+", message):
+        return _event("openvpn", Outcome.failure, method="certificate", ip=address, port=port,
+                      phase="certificate_verification")
     if re.fullmatch(r"(?:AUTH: Received control message: )?AUTH_FAILED(?:,.*)?", message):
         return _event("openvpn", Outcome.failure, ip=address, port=port)
     if re.fullmatch(

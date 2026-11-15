@@ -67,6 +67,26 @@ The mappings follow Arkime's official [SMB](https://github.com/arkime/arkime/blo
 
 Known credential values are masked in both typed evidence and retained raw records. Raw-reference digests cover the stored masked form. Presence/unknown fields retain the observation without the credential value.
 
+## DNS questions and answers by producer
+
+Every rule that reads `dns_query` reads Zeek's `dns.log` rows, Suricata's EVE `dns` query and answer records, and
+DNS server query logs (dnsmasq, unbound and BIND lines from Linux text) through the same typed fields. They differ in
+what each producer can show:
+
+| Rule | Zeek | Suricata | dnsmasq query log |
+|---|---|---|---|
+| `net.dns_subdomain_enumeration`, `net.dns_reverse_lookup_sweep`, `net.dns_tunnel_shape` | Each row is one question | Each query record is one question; answers are not counted again | Each `query[TYPE]` line is one question. A forwarded line is dnsmasq's own upstream question (its client, the dnsmasq host, has no logged address) and a reply line is an answer, so neither counts as another question; both are counted as records the rule could not evaluate |
+| `net.dns_nxdomain_burst` | The row's rcode, for its client | The answer record's rcode, for the endpoint not on the DNS port | Each reply line with a reply code, for the requester that `log-queries=extra` writes on the line (`client.ip`). One query has one NXDOMAIN line. Address and record-type reply lines carry no reply code and are counted missing. Without `extra` a reply line names no requester, so the rule cannot attribute it |
+| `net.dns_zone_transfer_or_any_request` | Client and server addresses | Client and server addresses | The client address; the server is the host the line's syslog header names, else the host that shipped the log (`host <name>`; the claim says which), as the log names no address of its own, so the internal-server test for the high lane never holds. Reply lines omit the question type and are not tied to the question |
+| `network.service_catalog` | The row's name and source | The query record's name and source | The query line's name and client; forwarded and reply lines have no client address and are counted missing |
+| `ioc.indicator_match`, Sigma `dns` rules | The question name on the row | The name on query and answer records | The name on every line: a lookup's query, forwarded and reply lines are each a record that names it |
+
+The rules read in `detect/dns.py` name each of these producer limits on the coverage cell of the partition where
+they occurred. `dns.server_logged` marks a question written by the server that received it. dnsmasq writes an answer to a reverse
+lookup with the looked-up address in place of the name; its question name is that address's reverse-lookup name.
+A reply code without a mnemonic is written as a number and typed as its name. The baseline of external destinations
+reads sensor datasets only, and a resolver log names no server address, so it does not read dnsmasq lines.
+
 ## SMB impact observations
 
 `network.smb_impact` folds by client, server and share within a closed five-minute window:

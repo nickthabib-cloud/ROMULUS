@@ -82,7 +82,11 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # Suricata fast.log alert lines are typed net_alert records, and dnsmasq lines gain their query
                    # serial, requester, transport and the documented answer forms; every other record normalizes as
                    # before.
-                   19: "e17c2bfc19a5c8db2e267419a48d421dcfaee0dd092a6539f1389d3b86ee3bd5"}
+                   19: "e17c2bfc19a5c8db2e267419a48d421dcfaee0dd092a6539f1389d3b86ee3bd5",
+                   # dnsmasq reverse-lookup replies, numeric reply codes, auth questions and DHCP acknowledgements are
+                   # typed, its extra-mode forwarded line names the requester apart from the client, and OpenVPN's own
+                   # log file is typed; every other record normalizes as before.
+                   20: "e4b62d90ed180fd105b39cb2dd7590162794fd3f9906db15d0fd1cce02561eda"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py", "rpc_catalog.py")
 PINNED_WINDOWS = {
     # A record's host addresses stand beside its stable source identifier, so clones that share the identifier
@@ -150,9 +154,9 @@ ARKIME_EVIDENCE_FILES = ("normalize.py", "arkime_protocols.py", "raw_scrub.py", 
                         "certificates.py", "zeek_credentials.py", "surrogates.py", "typed.py")
 # The dispatcher's optional report of Windows record digests changes no network record's output. Neither does the
 # typing of text alert lines and the evidence version that types them: EVE and Arkime records are read as before.
-PINNED_SURICATA = {"suricata-eve@2": "e1e2045cf4c9ef96225705947960b878247eab2ad0208fca89ffda471ab2f1be",
+PINNED_SURICATA = {"suricata-eve@2": "37ca42243df617b4bfa1611841889c0eb49d29cc13aae77e97f62375fbf890eb",
                    "suricata-eve@1": "8aba0c3bbb2061eef70c0c9dd77e5ab49a42bbed9a68b01ba4b4eeffad181e38"}
-PINNED_ARKIME = {"arkime@1": "6dac683bbcd20b0c5f227229a009e3f749875382897a4b9cac628f48c0eaaf60"}
+PINNED_ARKIME = {"arkime@1": "1cf0d12f1fa038f5175016403be5d968da619f1646ab3c9d77457e66c3ed3b5b"}
 
 
 # The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events, and TCP connections rebuilt

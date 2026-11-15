@@ -208,15 +208,29 @@ def _postfix(program: str, message: str) -> ParsedLine | None:
 
 
 # dnsmasq's query log (src/cache.c, log_query): "<source> <name> <verb> <dest>" with the verbs "from" (a client's
-# query[TYPE]), "to" (forwarded upstream, "#port" when the port is not 53) and "is" (a reply, a cache, config, DHCP,
-# auth or hosts-file answer). --log-queries=extra prefixes every line with a serial that ties the lines of one query
-# together and the requestor's "address/port"; =proto adds "TCP " or "UDP " before the serial. Lines are typed one at
-# a time: the serial is recorded, never joined.
+# query[TYPE], or auth[TYPE] for a question to its authoritative server), "to" (forwarded upstream, "#port" when the
+# port is not 53) and "is" (a reply, a cache, config, DHCP, auth or hosts-file answer). An answer to a reverse lookup
+# (F_REVERSE) swaps the roles: the looked-up address stands where the name does and the host name where the address
+# does. A reply code without a mnemonic is written as its number. --log-queries=extra prefixes every line with a serial
+# that ties the lines of one query together and the requestor's "address/port"; =proto adds "TCP " or "UDP " before
+# the serial. Lines are typed one at a time: the serial is recorded, never joined.
 _DNSMASQ_EXTRA = re.compile(r"^(?:(TCP|UDP) )?(\d{1,10}) (?:([^\s/]+)/(\d{1,5}) )?(.*)$")
 _DNSMASQ_SUFFIX = r"(?: \((?:EDE: [^()\r\n]*|DNSSEC signed)\))?"
 _DNSMASQ_RCODES = {"NXDOMAIN": "NXDOMAIN", "NODATA": "NOERROR", "NODATA-IPv4": "NOERROR", "NODATA-IPv6": "NOERROR",
                    "SERVFAIL": "SERVFAIL", "REFUSED": "REFUSED", "FORMERR": "FORMERR", "not implemented": "NOTIMP"}
+_RCODE_NUMBERS = {0: "NOERROR", 1: "FORMERR", 2: "SERVFAIL", 3: "NXDOMAIN", 4: "NOTIMP", 5: "REFUSED", 6: "YXDOMAIN",
+                  7: "YXRRSET", 8: "NXRRSET", 9: "NOTAUTH", 10: "NOTZONE"}
+_HOSTNAME = re.compile(r"(?=.{1,253}$)[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,62})(?:\.[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,62}))*\.?")
 DNSMASQ_ANSWER_CAVEAT = "DNS answer line omits the question type and is not joined to its query line"
+DNSMASQ_FORWARD_CAVEAT = ("DNS forwarding line: dnsmasq's own upstream query, without the question type; its client is "
+                          "the dnsmasq host, whose address the line does not name, and the requesting client is the "
+                          "query line's")
+DNSMASQ_REVERSE_CAVEAT = ("Reverse-lookup answer line: dnsmasq writes the looked-up address in place of the name, so "
+                          "the question name is read as that address's reverse-lookup name (a forward question for an "
+                          "address literal would be written the same way)")
+# A question a DNS server logged itself: the server that received it is the host that wrote the log, which names no
+# address of its own. Rules that need the server read the record's host then.
+SERVER_LOGGED = "dns.server_logged"
 
 
 def _dnsmasq_type(value: str) -> str:
@@ -238,12 +252,15 @@ def _dnsmasq(message: str) -> ParsedLine | None:
             if address is None or port is None:
                 return None
             requester = (address, port)
-    question = re.fullmatch(r"query\[([A-Za-z0-9_-]+|type=\d{1,5})\] (\S+) from (\S+)", message)
+    question = re.fullmatch(r"(query|auth)\[([A-Za-z0-9_-]+|type=\d{1,5})\] (\S+) from (\S+)", message)
     if question:
-        if not (address := _ip(question[3])):
+        if not (address := _ip(question[4])):
             return None
-        fields: dict[str, object] = {**context, "dns.type": "query", "dns.question.name": question[2],
-                                    "dns.question.type": _dnsmasq_type(question[1]), "source.ip": address}
+        fields: dict[str, object] = {**context, "dns.type": "query", "dns.question.name": question[3],
+                                    "dns.question.type": _dnsmasq_type(question[2]), "source.ip": address,
+                                    SERVER_LOGGED: True}
+        if question[1] == "auth":
+            fields["dnsmasq.authoritative"] = True
         if requester and requester[0] == address:
             fields["source.port"] = requester[1]
         return ParsedLine("dns_query", fields)
@@ -253,26 +270,107 @@ def _dnsmasq(message: str) -> ParsedLine | None:
         if forward[3] is not None and (port := _port(forward[3])) is not None:
             fields["destination.port"] = port
         if requester:
-            fields.update({"client.ip": requester[0], "client.port": requester[1]})
-        return ParsedLine("dns_query", fields, caveats=(
-            "DNS forwarding line: dnsmasq's own upstream query, without the question type; the requesting client is "
-            "the query line's" + (" (the line names it as client.ip)" if requester else ""),))
+            # the requester asked dnsmasq, not the upstream server: it is not this question's client
+            fields.update({"dnsmasq.requester.ip": requester[0], "dnsmasq.requester.port": requester[1]})
+        return ParsedLine("dns_query", fields, caveats=(DNSMASQ_FORWARD_CAVEAT,))
     answer = re.fullmatch(r"(reply|cached(?:-stale)?|config|auth|DHCP|/\S+) (\S+) is "
                           r"(not implemented|\S+)" + _DNSMASQ_SUFFIX, message)
     if not answer:
         return None
-    fields = {**context, "dns.type": "answer", "dns.question.name": answer[2]}
+    name, dest = answer[2], answer[3]
+    caveats = [DNSMASQ_ANSWER_CAVEAT]
+    looked_up = _ip(name)
+    if looked_up is not None:
+        # F_REVERSE: the name position holds the looked-up address
+        name = ipaddress.ip_address(looked_up).reverse_pointer
+        caveats.append(DNSMASQ_REVERSE_CAVEAT)
+    fields = {**context, "dns.type": "answer", "dns.question.name": name}
     if requester:
+        # the answer was sent to the requester: the client of this reply
         fields.update({"client.ip": requester[0], "client.port": requester[1]})
-    address = _ip(answer[3])
-    if address:
+    address = _ip(dest)
+    if address and looked_up is None:
         kind = "AAAA" if ":" in address else "A"
-        fields["dns.answers"] = [{"name": answer[2], "type": kind, "ttl": None, "data": address}]
-    elif answer[3] in _DNSMASQ_RCODES:
-        fields["dns.response_code"] = _DNSMASQ_RCODES[answer[3]]
-    elif not re.fullmatch(r"<(?:[A-Za-z0-9-]+|type=\d{1,5})>", answer[3]):
+        fields["dns.answers"] = [{"name": name, "type": kind, "ttl": None, "data": address}]
+    elif dest in _DNSMASQ_RCODES:
+        fields["dns.response_code"] = _DNSMASQ_RCODES[dest]
+    elif dest.isascii() and dest.isdigit() and len(dest) <= 5:
+        fields["dns.response_code"] = _RCODE_NUMBERS.get(int(dest), f"RCODE{int(dest)}")
+    elif looked_up is not None and address is None and _HOSTNAME.fullmatch(dest):
+        fields["dns.answers"] = [{"name": name, "type": "PTR", "ttl": None, "data": dest.rstrip(".")}]
+    elif not re.fullmatch(r"<(?:[A-Za-z0-9-]+|type=\d{1,5})>", dest):
         return None
-    return ParsedLine("dns_query", fields, caveats=(DNSMASQ_ANSWER_CAVEAT,))
+    return ParsedLine("dns_query", fields, caveats=tuple(caveats))
+
+
+# dnsmasq's DHCP log (src/rfc2131.c, log_packet; written by the "dnsmasq-dhcp" tag in src/log.c):
+# "<TYPE>(<interface>) [<address> ]<mac or client id>[ <host name>]", with log-dhcp prefixing the transaction id.
+_DHCP = re.compile(r"(?:(\d{1,10}) )?(DHCP[A-Z]+|BOOTP|PXE|NOANSWER)\(([^()\s]{1,64})\)(?: (.*))?")
+_MAC = re.compile(r"[0-9a-fA-F]{2}(?:[:-][0-9a-fA-F]{2}){5}")
+DHCP_ACK_CAVEAT = ("dnsmasq DHCPACK line: the server acknowledged this address for the client hardware address; an "
+                   "acknowledgement of a DHCPINFORM names the client's own address, and lines are not joined to tell "
+                   "the two apart")
+
+
+def _dnsmasq_dhcp(message: str) -> ParsedLine | None:
+    match = _DHCP.fullmatch(message)
+    if not match or match[2] != "DHCPACK" or not match[4]:
+        return None
+    parts = match[4].split(" ")
+    if len(parts) < 2 or not (address := _ip(parts[0])) or ":" in address or not _MAC.fullmatch(parts[1]):
+        return None
+    fields: dict[str, object] = {"dhcp.message_type": "DHCPACK", "dhcp.interface": match[3],
+                                 "dhcp.client_address": address, "dhcp.client_mac": parts[1].lower().replace("-", ":")}
+    if match[1] is not None:
+        fields["dhcp.transaction_id"] = int(match[1])
+    if len(parts) == 3 and _HOSTNAME.fullmatch(parts[2]):
+        fields["dhcp.hostname"] = parts[2].rstrip(".")
+    elif len(parts) > 2:
+        return None
+    return ParsedLine("address_assignment", fields, Outcome.success, (DHCP_ACK_CAVEAT,))
+
+
+# dnsmasq lines that are not query, reply or lease events. They are counted as skips with these reasons.
+_DNSMASQ_OTHER = (
+    (re.compile(r"(?:started, version|compile time options:|using nameserver|using local addresses only|"
+                r"using only locally-known addresses|reading |read |cleared cache|exiting on receipt|"
+                r"failed to |no servers found|setting upstream servers|DNS service limited|"
+                r"ignoring nameserver|warning: |LOUD WARNING|directory |inotify|cannot |"
+                r"DHCP, |DHCPv6, |router advertisement|IPv6 router|TFTP root|"
+                r"chown of PID file|dnsmasq (?:started|exiting)|"
+                r"default DNSSEC|DNSSEC (?:validation|signature)|"
+                r"(?:\d{1,10} )?(?:available DHCP|vendor class|user class|client provides|requested options|"
+                r"tags:|next server|sent size|broadcast response|bootfile name|server name|"
+                r"DHCP packet received|no address range|DHCP range|static leases|abandoning lease|"
+                r"not giving name|disabling DHCP|Ignoring domain))"),
+     "dnsmasq lifecycle, configuration or DHCP option detail line"),
+    (re.compile(r"(?:time \d|cache size \d|queries forwarded \d|queries for authoritative|server [^\s]+: queries|"
+                r"pool memory|failed to allocate|Maximum number of concurrent DNS queries|DNSSEC memory|"
+                r"(?:\d{1,10} )?cache entries)"),
+     "dnsmasq statistics or resource line"),
+    (re.compile(r"(?:(?:TCP |UDP )?\d{1,10} (?:[^\s/]+/\d{1,5} )?)?(?:validation |dnssec-query\[|"
+                r"(?:reply|cached|cached-stale) \S+ is (?:DS|DNSKEY) |ipset add |nftset add |non-query opcode)"),
+     "dnsmasq DNSSEC, ipset or opcode line"),
+    (re.compile(r"(?:possible DNS-rebind attack detected|nameserver \S+ refused to do a recursive query)"),
+     "dnsmasq resolver notice (no client address is logged)"),
+    (re.compile(r"(?:\d{1,10} )?(?:DHCP[A-Z]+|BOOTP|PXE|NOANSWER|RTR-[A-Z]+|SLAAC)[-(]"),
+     "dnsmasq DHCP packet line other than an IPv4 DHCPACK with a hardware address"),
+)
+
+
+def service_skip_reason(program: str, message: str) -> str | None:
+    """A precise reason for a recognized line of a supported program that is not a typed event, or None."""
+    if not isinstance(message, str) or not isinstance(program, str):
+        return None
+    program = program.lower()
+    if program in ("dnsmasq", "dnsmasq-dhcp"):
+        for pattern, reason in _DNSMASQ_OTHER:
+            if pattern.match(message):
+                return reason
+        return None
+    if program == "openvpn" or program.startswith("openvpn-"):
+        return openvpn_skip_reason(message)
+    return None
 
 
 # Suricata's fast.log (src/alert-fastlog.c, AlertFastLogger), one alert per line:
@@ -329,7 +427,7 @@ def _bind(message: str) -> ParsedLine | None:
     if not match or not (address := _ip(match[1])) or _port(match[2]) is None:
         return None
     fields: dict[str, object] = {"dns.type": "query", "source.ip": address, "source.port": int(match[2]),
-                                "dns.question.name": match[4], "dns.question.type": match[6]}
+                                "dns.question.name": match[4], "dns.question.type": match[6], SERVER_LOGGED: True}
     if _ip(match[8]):
         fields["destination.ip"] = _ip(match[8])
     return ParsedLine("dns_query", fields)
@@ -339,7 +437,7 @@ def _unbound(message: str) -> ParsedLine | None:
     match = re.fullmatch(r"(?:\[\d+:\d+\] )?info: (?:query )?(\S+) (\S+) ([A-Z0-9]+) (IN|CH|HS)", message)
     if not match or not (address := _ip(match[1])):
         return None
-    return ParsedLine("dns_query", {"dns.type": "query", "source.ip": address,
+    return ParsedLine("dns_query", {"dns.type": "query", "source.ip": address, SERVER_LOGGED: True,
                                     "dns.question.name": match[2], "dns.question.type": match[3]})
 
 
@@ -347,7 +445,8 @@ def _openvpn(message: str) -> ParsedLine | None:
     fields: dict[str, object] = {"vpn.service": "openvpn"}
     # multi.c's client context prefixes every lifecycle message, including socket.c's connect line.
     prefix = re.fullmatch(r"(?:([^\s/]+)/)?(\S+) ((?:\[[^\]]+\] )?Peer Connection Initiated with \S+|"
-                          r"MULTI_sva:.*|MULTI: Learn:.*|SIG(?:TERM|USR1|INT)\[.*)", message)
+                          r"MULTI_sva:.*|MULTI: Learn:.*|SIG(?:TERM|USR1|INT)\[.*|TLS: Initial packet from .*|"
+                          r"(?:\[[^\]]+\] )?Inactivity timeout .*)", message)
     if prefix and (endpoint := _endpoint(prefix[2])):
         if prefix[1]:
             fields["user.name"] = prefix[1]
@@ -357,6 +456,12 @@ def _openvpn(message: str) -> ParsedLine | None:
         message = prefix[3]
     assignment = re.fullmatch(r"MULTI_sva: pool returned IPv4=([^,]+), IPv6=(.+)", message)
     learn = re.fullmatch(r"MULTI: Learn: (\S+) -> ([^\s/]+)/(\S+)", message)
+    # sig.c print_signal: a server closes the client instance on SIGTERM ("exiting") and on a soft SIGUSR1 restart
+    # ("restarting", after a ping timeout or connection reset); the bracket holds the signal's source and reason
+    closed = re.fullmatch(r"SIG(?:TERM|USR1|INT)\[([^\]]+)\] received, client-instance (?:exiting|restarting)",
+                          message)
+    initial = re.fullmatch(r"TLS: Initial packet from (\S+?), sid=\S+(?: \S+)?", message)
+    timeout = re.fullmatch(r"(?:\[[^\]]+\] )?Inactivity timeout \((--[a-z-]+)\), (?:restarting|exiting)", message)
     if assignment:
         fields["vpn.action"] = "assign"
         for value, key in ((assignment[1], "vpn.assigned_ip"), (assignment[2], "vpn.assigned_ipv6")):
@@ -367,8 +472,18 @@ def _openvpn(message: str) -> ParsedLine | None:
                        "user.name": learn[2], "source.ip": endpoint[0]})
         if endpoint[1] is not None:
             fields["source.port"] = endpoint[1]
-    elif re.fullmatch(r"SIG(?:TERM|USR1|INT)\[[^\]]+\] received, client-instance exiting", message):
+    elif closed:
         fields["vpn.action"] = "disconnect"
+        fields["vpn.reason"] = closed[1]
+    elif initial and (endpoint := _endpoint(initial[1])):
+        # the first packet of a TLS handshake from a peer: an attempt, before any certificate or password check
+        fields.update({"vpn.action": "attempt", "source.ip": endpoint[0]})
+        fields.pop("source.port", None)
+        if endpoint[1] is not None:
+            fields["source.port"] = endpoint[1]
+    elif timeout:
+        # the signal line that follows closes the instance; this line only gives the reason, so it is not a boundary
+        fields.update({"vpn.action": "timeout", "vpn.reason": timeout[1]})
     else:
         connection = re.fullmatch(r"(?:\[([^\]]+)\] )?Peer Connection Initiated with (\S+)", message)
         if not connection or not (endpoint := _endpoint(connection[2])):
@@ -380,8 +495,68 @@ def _openvpn(message: str) -> ParsedLine | None:
             fields["source.port"] = endpoint[1]
         if connection[1]:
             fields["user.name"] = connection[1]
-    return ParsedLine("vpn_session", fields, Outcome.success,
-                      (VPN_IDENTITY_CAVEAT,) if "user.name" in fields else ())
+    outcome = Outcome.unknown if fields["vpn.action"] in ("attempt", "timeout") else Outcome.success
+    return ParsedLine("vpn_session", fields, outcome, (VPN_IDENTITY_CAVEAT,) if "user.name" in fields else ())
+
+
+# OpenVPN's own log file (error.c x_msg_va): "<time> <prefix> <message>", the time from otime.c time_string as
+# "%Y-%m-%d %H:%M:%S" (2.5 and later; " us=<n>" follows at high verbosity) or ctime's "Www Mmm dd hh:mm:ss yyyy"
+# (2.4 and earlier), and the prefix a server's client context ("common-name/address:port", or "address:port" before
+# the certificate is read). Lines without either time (--suppress-timestamps, --machine-readable-output) are not
+# identified.
+_OPENVPN_TIME = re.compile(r"(?:\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?: us=\d{1,6})?|"
+                           r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+                           r" +\d{1,2} \d{2}:\d{2}:\d{2} \d{4}) (.*)")
+_OPENVPN_PEER = re.compile(r"(?:[^\s/]+/)?(?:\[AF_INET6?\])?(?:\[[0-9A-Fa-f:.]+\]|[0-9A-Fa-f:.]+):\d{1,5} ")
+# OpenVPN messages that are not authentication decisions or session boundaries, by their fixed opening words.
+_OPENVPN_OTHER = (
+    (re.compile(r"SENT CONTROL \[[^\]]*\]: 'AUTH_FAILED"),
+     "OpenVPN AUTH_FAILED notice sent to the client (the decision is its TLS Auth Error line)"),
+    # openers no other program writes
+    (re.compile(r"(?:\[[^\]]+\] )?(?:OpenVPN \d|library versions:|Initialization Sequence Completed|Diffie-Hellman|"
+                r"TUN/TAP device|net_(?:route|addr|iface|link)_|UDPv[46] link|TCPv[46]_SERVER link|MULTI: |"
+                r"MULTI_sva:|IFCONFIG POOL|Control Channel:|Data Channel:|Outgoing Data Channel:|"
+                r"Incoming Data Channel:|Outgoing Static Key|Incoming Static Key|VERIFY (?:KU|EKU|SCRIPT|X509NAME) OK|"
+                r"VERIFY OK: depth=[1-9]|PUSH: |SENT CONTROL \[|peer info:|TLS: (?:soft reset|tls_|move_session|"
+                r"new session|Username/Password authentication)|Re-using SSL/TLS context|PLUGIN_|AUTH-PAM:|"
+                r"Authenticate/Decrypt packet error|Data Channel MTU|Outgoing Control Channel|"
+                r"Incoming Control Channel|MANAGEMENT:|Fatal TLS error)"),
+     "OpenVPN status, channel or configuration line (not an authentication decision or session boundary)"),
+)
+# Generic openers that identify OpenVPN only behind a server's client-context prefix.
+_OPENVPN_PEER_ONLY = re.compile(r"(?:\[[^\]]+\] )?(?:NOTE: |Note: |WARNING: |Connection reset|LZO compression|"
+                                r"OPTIONS IMPORT|Expected Remote Options|Local Options|Validating certificate|"
+                                r"Restart pause|SIG(?:TERM|USR1|USR2|HUP|INT)\[|Timers:|Preserving recently used|"
+                                r"GDG6?:|ROUTE6?:|client-instance|TCP connection established|Socket Buffers:)")
+
+
+def openvpn_skip_reason(message: str) -> str | None:
+    """The reason an identified OpenVPN message is not typed, or None for a message OpenVPN is not known to write."""
+    peer = _OPENVPN_PEER.match(message)
+    body = message[peer.end():] if peer else message
+    for pattern, reason in _OPENVPN_OTHER:
+        if pattern.match(body):
+            return reason
+    if peer and _OPENVPN_PEER_ONLY.match(body):
+        return _OPENVPN_OTHER[1][1]
+    return None
+
+
+def _identify_openvpn(line: str, openvpn_file: bool) -> tuple[str, str] | None:
+    """An OpenVPN log-file line. Other programs write the same ISO time and the same words ("AUTH_FAILED",
+    "WARNING:"), so an ISO-stamped line, and any line known only by an untyped OpenVPN phrase, is OpenVPN's only when the
+    record's typed fields say it was read from an OpenVPN log (`openvpn_file`). A ctime-stamped line whose message is
+    an OpenVPN session or authentication statement is identified by the line alone."""
+    stamped = _OPENVPN_TIME.fullmatch(line)
+    if not stamped:
+        return None
+    body = stamped[1]
+    typed = _openvpn(body) is not None or parse_auth("openvpn", body) is not None
+    if openvpn_file and (typed or openvpn_skip_reason(body)):
+        return "openvpn", body
+    if typed and not line[:1].isdigit():
+        return "openvpn", body
+    return None
 
 
 def _strongswan(message: str) -> ParsedLine | None:
@@ -508,6 +683,8 @@ def parse_service(program: str, message: str) -> ParsedLine | None:
         return _postfix(program, message)
     if program == "dnsmasq":
         return _dnsmasq(message)
+    if program == "dnsmasq-dhcp":
+        return _dnsmasq_dhcp(message)
     if program == "suricata-fastlog":
         return _fastlog(message)
     if program in ("named", "bind9"):
@@ -529,8 +706,9 @@ def parse_service(program: str, message: str) -> ParsedLine | None:
     return None
 
 
-def identify_service(line: str) -> tuple[str, str] | None:
-    """Identify fixed application envelopes; no host or record timestamp is invented."""
+def identify_service(line: str, *, openvpn_file: bool = False) -> tuple[str, str] | None:
+    """Identify fixed application envelopes; no host or record timestamp is invented. `openvpn_file` is the record's
+    typed evidence that it was read from an OpenVPN log (see `_identify_openvpn`)."""
     if (not isinstance(line, str) or len(line) > MAX_LINE
             or len(line.encode("utf-8", errors="replace")) > MAX_LINE
             or any(char in line for char in "\r\n\x00")):
@@ -543,12 +721,15 @@ def identify_service(line: str) -> tuple[str, str] | None:
         return "squid", line
     if _FAST.fullmatch(line):
         return "suricata-fastlog", line
-    dns = re.fullmatch(r"[A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2} dnsmasq\[\d+\]: (.*)", line)
+    # src/log.c my_syslog: a log file line is ctime's "Mmm dd hh:mm:ss", then "dnsmasq" with the facility tag of DHCP,
+    # TFTP and script messages ("-dhcp", "-tftp", "-script") and the pid
+    dns = re.fullmatch(r"[A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2} (dnsmasq(?:-dhcp|-tftp|-script)?)\[\d+\]: (.*)", line)
     if dns:
-        return "dnsmasq", dns[1]
+        return dns[1], dns[2]
+    openvpn = _identify_openvpn(line, openvpn_file)
+    if openvpn:
+        return openvpn
     vpn = re.fullmatch(r"[A-Z][a-z]{2} [A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2} \d{4} (.*)", line)
-    if vpn and _openvpn(vpn[1]):
-        return "openvpn", vpn[1]
     if vpn:
         transfer = re.fullmatch(r"\d+ (\S+) \d+ \S+ [ab] [_CTU]+ [iod] [agr] \S+ ftp [01] \S+ [ci]", vpn[1])
         if transfer and _ip(transfer[1]):

@@ -29,7 +29,7 @@ UNKNOWN_REASON = "text line in no recognized format: custom.unknown"
 # rehashes the event ids (candidates 75b41997... at epoch 17); the rule cells add the SMB impact and service
 # catalog rules (not applicable here).
 GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a6dadaa59988bdf81e',
- 'audit': '30a1963d6bc5411e2c891dfc483976f25fb2acdd3da1df2de613f9f82f057b03',
+ 'audit': '8395bf7d0ac298b365edfa15ada85dc4c72dc772b4cfe5323cc6d09cbd391c7e',
  'baseline_counts': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_hunt_exclusions': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_observations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
@@ -39,16 +39,16 @@ GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a
  'baseline_window_counts': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_window_event_hours': 'dbbcb75b0e5ad202089e3eeaf84801202f5f1b8b3fcfb214f42edbdd7e007f47',
  'baseline_window_scope_hours': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
- 'candidates': '6e3b99882b4c98f8afb8d131ac46a164b193e06a68613a98f6d9390b573a597e',
+ 'candidates': 'bd2c82cd1b13a41d83a6aa32c47ef939a84f58a45d3d8bcb8fd1e4f015524c78',
  'entities': '9e629528fba70d33c17e231aabf743f914b553fe3bc737669e3b8c0e33da6183',
  'event_citations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
- 'event_entities': '556170614dfd2e8e9250d79169033ad0d95286a60f8eac420c833a7b498cb205',
- 'events': '52746ac42aee9fdf9a68f63c66edde1d359223f1a71bb8cdf1695c26a22f7f7b',
+ 'event_entities': 'b2920d670e6504809c2e89deb86ffdfeae00db460ba1049e2e48d5a158e7bf6b',
+ 'events': 'bd5435aef6b275df8abbeb11240c6ab00cff8cfa39fbba70fc1f6acccadf23bb',
  'expansion': 'dae7cbd7929a4cb94bb232a7343d4d70f62885a979b52714b87bd3641a92169b',
- 'links': '2da9c8f241b595281ecf23c9e23bae301130b6fa7fe7805b88a0496ec70243c0',
- 'manifest': '1ccc9d972297b820156864521adda8ab83c9b0d149a0276d0b78bafa8ab76914',
+ 'links': '8abe2a07c083a1ea68a7cb03ccfa539e9e071fc67b2af99a555e04f4badc5928',
+ 'manifest': 'd78b77ffe3d9d629b94903f203560ff2a985ad17d27f0f5b8c013768d6d4b633',
  'raw': '64be31e697a32f93b1a71657560af514b2d430469cb3be19f44b8827985a7775',
- 'rule_cells': 'ae295b83251a67d75932ad4828225544a91b5f7a8d31bb9b012f1ce032d1518e',
+ 'rule_cells': '8d267da131c9c0ac6fdbb62445847da829ff11c3b4a42e43f6aeae9fb9efa8f6',
  'stats': '360c94cf6f93e02aefee3a7da01eeeae2bba877f3d1e318af96992d9e75f2e92',
  'tasks': 'a287691a5843ccb9f7b3d279364567cefb3dc6eb49f9d4753eaed993593437c4'}
 
@@ -171,7 +171,7 @@ def test_linux_text_whole_stack_retrieval_findings_and_partial_coverage(tmp_path
 def test_the_text_stack_candidates_moved_only_by_rule_versions(tmp_path, monkeypatch):
     snapshot, _trace, _docs = run_text_stack(tmp_path / "prior", monkeypatch)
     assert tf.deterministic_golden_digests(tf.with_prior_versions(snapshot))["candidates"] == (
-        "6e3b99882b4c98f8afb8d131ac46a164b193e06a68613a98f6d9390b573a597e")
+        "bd2c82cd1b13a41d83a6aa32c47ef939a84f58a45d3d8bcb8fd1e4f015524c78")
 
 
 def test_linux_text_whole_stack_snapshot_is_deterministic(tmp_path, monkeypatch):

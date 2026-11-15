@@ -11,6 +11,7 @@ writes no dataset at all). `LINUX_SHIPPER_DATASETS` is the one table every modul
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 MODULE_SYSCALLS = {
@@ -93,7 +94,8 @@ LINUX_LOGICAL_DATASETS: tuple[str, ...] = tuple(LINUX_SHIPPER_DATASETS)
 # and syslog lines feed sshd/sudo/useradd/systemd records; plain text lines feed the same, sudo included.
 _AUDIT_ADMIN = frozenset({"account_change", "service_change", "audit_config", "system_state"})
 TEXT_FAMILIES = frozenset({"auth", "mail_message", "vpn_session", "dns_query", "http_access", "web_error",
-                           "net_flow", "process_observed", "service_change", "account_change", "privilege_use"})
+                           "net_flow", "process_observed", "service_change", "account_change", "privilege_use",
+                           "address_assignment"})
 # Content-identified text also reads native application files a journal or syslog program never writes: an IDS alert
 # file (Suricata fast.log) feeds net_alert.
 CONTENT_TEXT_FAMILIES = TEXT_FAMILIES | {"net_alert"}
@@ -148,6 +150,20 @@ def match_shape(source: dict) -> tuple[str, ShipperShape] | None:
 
 
 TEXT_INPUT_TYPES = ("filestream", "log", "syslog", "tcp", "udp")
+
+
+def openvpn_file(source: dict) -> bool:
+    """Whether the document's own typed fields say it was read from an OpenVPN log: a file whose name starts with
+    "openvpn", or a dataset or module named for it ("openvpn", "openvpn.log", "openvpn-server"). A line's text never
+    decides this."""
+    path = _value(source, "log.file.path")
+    if isinstance(path, str) and re.split(r"[\\/]", path)[-1].lower().startswith("openvpn"):
+        return True
+    for name in ("event.dataset", "data_stream.dataset", "event.module"):
+        value = _value(source, name)
+        if isinstance(value, str) and re.split(r"[._-]", value.lower(), maxsplit=1)[0] == "openvpn":
+            return True
+    return False
 
 
 def text_payload(source: dict) -> tuple[str, str] | None:

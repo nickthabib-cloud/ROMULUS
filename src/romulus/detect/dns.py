@@ -10,7 +10,11 @@ Typed fields read (no record text is ever searched):
   server as the source), so the server is the endpoint on a DNS port and the client the other one. A question
   (a query or transaction record) is written as the client sent it, so when its ports do not tell (DNS on a
   site-configured port, or a server-to-server query from port 53 to port 53) its source is the client. An answer whose
-  ports do not tell leaves the roles unknown: it is counted as missing, and no server is named.
+  ports do not tell leaves the roles unknown: it is counted as missing, and no server is named, unless it names its
+  recipient as `client.ip` (a resolver's own log of the answer it sent, such as dnsmasq's with log-queries=extra).
+- `dns.server_logged`: a question written by the DNS server that received it (dnsmasq, unbound and BIND query logs).
+  When such a record names no destination address, its server is the record's host; only the zone-transfer rule,
+  which groups by server, reads it.
 - `dns.question.names` (a list) or `dns.question.name`, and `dns.question.type`: the question. When the list is
   present every name in it is evaluated (a session record may hold several questions); otherwise the scalar name
   is. Rules that read names and types read them from question records (queries and transaction records) only: in
@@ -216,7 +220,35 @@ def endpoints(event: TypedEvent, record_role: str | None = None) -> tuple[str | 
         return src, dst
     if side == "source":
         return dst, src
+    # A resolver's own log of an answer it sent names that answer's recipient as `client.ip` and no endpoint of its
+    # own, so the client is known and the server is not. Read for answers only: a question with `client.ip` is not
+    # oriented by it.
+    client = event.get("client.ip")
+    if (record_role or role(event)) == "answer" and isinstance(client, str) and client:
+        return client, None
     return None, None
+
+
+SERVER_FROM = {"header": "the host named in the log line's syslog header",
+               "shipper": "the host that shipped the log"}
+
+
+def logging_server(event: TypedEvent) -> tuple[str, str] | None:
+    """The server of a question its DNS server logged itself without naming its own address, as ("host <name>",
+    where the name came from), or None for any other record. The log line's own syslog header names the host that
+    wrote it; without one, the host that shipped the log is the server (a central collector shipping another host's
+    file is then named, and the claim says so)."""
+    if event.get("dns.server_logged") is not True:
+        return None
+    header = event.get("log.syslog.hostname")
+    if isinstance(header, str):
+        name = header.strip().rstrip(".").lower()
+        if name and name not in ("-", "localhost") and not name.startswith("localhost."):
+            return f"host {name}", "header"
+    for value in (event.get("host.hostname"), event.host):
+        if isinstance(value, str) and value.strip():
+            return f"host {value.strip()}", "shipper"
+    return None
 
 
 def server_side(event: TypedEvent, record_role: str | None = None) -> str | None:
@@ -383,8 +415,24 @@ class _DnsAggregate(Playbook):
     families = ("dns_query",)
     staged = True
 
+    # Why a record the rule could not evaluate was not evaluated, for the records whose producer cannot show what the
+    # rule needs (a fixed set of texts, so the cell's reasons stay bounded).
+    WHY: ClassVar[dict[str, str]] = {
+        "forwarded": "question records that name a server but no client address were not evaluated: a resolver's own "
+                     "upstream (forwarded) question, whose client is the resolver itself (dnsmasq does not log its own "
+                     "address)",
+        "unoriented": "answer records whose ports do not show which end is the client, and that name no client.ip, "
+                      "were not attributed to a client (dnsmasq writes its reply lines this way without "
+                      "log-queries=extra)",
+        "unpaired": "answer records with no flow identity were not tied to a retrieved question (a resolver's log "
+                    "writes its answers apart from their questions)",
+        "untyped_answer": "answer records that omit the question type were not evaluated (a resolver's log writes an "
+                          "answer without its question's type)",
+    }
+
     def __init__(self):
         super().__init__()
+        self._why: dict[str, str] = {}
         self._prev_query_flows: set = set()
         self._pending: dict[str, TypedEvent] = {}
         self.bounds = BoundStage()      # the records bounding each group's span, held while they bound it
@@ -393,6 +441,24 @@ class _DnsAggregate(Playbook):
 
     def retained_events(self) -> list[TypedEvent]:
         return []
+
+    def _missing(self, why: str | None = None) -> None:
+        """Count a record the rule could not evaluate, and name why when its producer cannot show what is needed."""
+        self.missing_required += 1
+        if why is not None:
+            self._why[why] = self.WHY[why]
+            self.note_coverage(why, self.WHY[why])
+
+    def _unread(self, event: TypedEvent, record_role: str | None) -> str | None:
+        """The reason a question or answer has no client, when it is one of the producer shapes named in WHY."""
+        if record_role == "answer":
+            return "unoriented" if event.get("client.ip") in (None, "") else None
+        if record_role == "query" and event.get("source.ip") in (None, "") and event.get("destination.ip"):
+            return "forwarded"
+        return None
+
+    def partition_coverage_notes(self) -> list[str]:
+        return list(self._why.values())
 
     def drain_staged(self) -> list[TypedEvent]:
         out, self._pending = list(self._pending.values()) + self.bounds.drain() + self.holds.drain(), {}
@@ -492,6 +558,7 @@ class _DnsAggregate(Playbook):
         name, question type, DNS id) matches a query record of this batch or the one before is that query's reply
         and is skipped; any other answer record is counted as missing (its question is not in the retrieved
         telemetry as a query record)."""
+        self._why = {}
         batch = [e for e in events if e.family in self.families]
         asked: set[tuple] = set()
         for event in batch:
@@ -506,7 +573,7 @@ class _DnsAggregate(Playbook):
                 names = question_names(event)
                 keys = transaction_keys(event, names) if names else None
                 if not keys or any(key not in known for key in keys):
-                    self.missing_required += 1
+                    self._missing("unpaired" if flow_key(event) is None else None)
                 continue
             if record_role is None:
                 self.missing_required += 1
@@ -514,7 +581,7 @@ class _DnsAggregate(Playbook):
             client, server = endpoints(event, record_role)
             names = question_names(event)
             if client is None or names is None:
-                self.missing_required += 1
+                self._missing(self._unread(event, record_role) if client is None else None)
                 continue
             self.evaluated += 1
             yield event, client, server, names
@@ -525,7 +592,7 @@ class _ZoneGroup:
     """One (client, server, transfer zone or ANY) group of the zone-transfer rule."""
 
     __slots__ = ("any_names", "asked_by_flow", "deciding", "ends", "examples", "named", "records", "replies",
-                 "requests", "span", "transports")
+                 "requests", "server_from", "span", "transports")
 
     def __init__(self):
         self.ends = Ends()                          # the records bounding the span
@@ -540,11 +607,12 @@ class _ZoneGroup:
         self.deciding: tuple[datetime, str] | None = None
         self.asked_by_flow: dict = {}
         self.examples = _Examples()
+        self.server_from: set[str] = set()          # where a host server's name came from (SERVER_FROM keys)
 
 
 class DnsZoneTransferOrAnyRequest(_DnsAggregate):
     id = "net.dns_zone_transfer_or_any_request"
-    version = "6"
+    version = "7"
     title = "DNS zone-transfer (AXFR/IXFR) or ANY question sent by one client to one server"
     required_fields = ()
     severity, lane = "medium", "lead"
@@ -566,7 +634,9 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
         "telemetry": "dns_query: dns.type, dns.question.name, dns.question.type, dns.response_code, source and "
                      "destination ip and port (the server is the endpoint on the DNS port) (Suricata EVE dns: present "
                      "and normalized in the lab profile; a session indexer's DNS block reads the same typed fields "
-                     "once it is normalized)",
+                     "once it is normalized). A DNS server's own query log (dnsmasq, unbound) names no server "
+                     "address: its question's server is the logging host (dns.server_logged), which never takes the "
+                     "high lane",
         "fidelity": "direct observation of the question type in a typed field: 'requested' is proven by a query "
                     "record; 'answered' only by an answer record with rcode NOERROR, which does not show how many "
                     "zone records were sent; nothing here proves the zone's content left the server",
@@ -600,27 +670,35 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
         return []
 
     def consume(self, events):
+        self._why = {}
         for event in events:
             if event.family not in self.families:
                 continue
             record_role = role(event)
             client, server = endpoints(event, record_role) if record_role else (None, None)
+            server_from = None
+            if server is None and client is not None and record_role in ("query", "transaction"):
+                server, server_from = logging_server(event) or (None, None)
             question_type = qtype(event.get("dns.question.type"))
             if record_role is None or client is None or server is None or question_type is None:
-                self.missing_required += 1
+                why = self._unread(event, record_role) if client is None else None
+                if why is None and record_role == "answer" and question_type is None:
+                    why = "untyped_answer"
+                self._missing(why)
                 continue
             self.evaluated += 1
             if question_type not in self.REQUEST_TYPES:
                 continue
             counted: set = set()            # the groups this record is already counted in
-            added = [self._add(event, record_role, client, server, question_type, name, counted)
+            added = [self._add(event, record_role, client, server, question_type, name, counted, server_from)
                      for name in question_names(event) or [""]]
             if not all(added):
                 self._disk_full()
         self._trim()
         return []
 
-    def _add(self, event, record_role, client, server, question_type, name, counted: set) -> bool:
+    def _add(self, event, record_role, client, server, question_type, name, counted: set,
+             server_from: str | None = None) -> bool:
         if question_type in self.TRANSFER_TYPES:
             key = (client, server, "transfer", name)
         else:
@@ -631,6 +709,8 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
         if key not in counted:
             counted.add(key)
             group.records += 1
+        if server_from is not None:
+            group.server_from.add(server_from)
         if question_type not in self.TRANSFER_TYPES and name:
             self._named(group.named, name, event)
         if question_type not in self.TRANSFER_TYPES and name and name not in group.any_names:
@@ -687,6 +767,11 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
                 if asked:
                     claim = (f"{client} sent {sum(asked.values())} DNS question record(s) ({_tally(asked)}) {subject} "
                              f"to {server} ({group.span.text()}).")
+                    if group.server_from:
+                        claim += (f" The server is {' and '.join(SERVER_FROM[k] for k in sorted(group.server_from))}: "
+                                  f"the DNS server's own log recorded the questions, names no server address and "
+                                  f"writes its answers without their question type, so the answers are not tied to "
+                                  f"these questions.")
                 else:
                     claim = (f"{client} received {sum(replies.values())} answer record(s) from {server} to "
                              f"{'/'.join(types)} question(s) {subject} ({group.span.text()}); the question records "
@@ -700,6 +785,8 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
                                   "answer records do not show how many zone records were sent.")
                     elif all(c in ("REFUSED", "NOTAUTH", "NOTIMP") for (_t, c) in replies):
                         claim += " The server refused or did not implement every answered question."
+                elif group.server_from:
+                    claim += " Whether the server answered is not established."
                 else:
                     claim += (" No answer record for these questions was retrieved, so whether the server answered is "
                               "not established.")
@@ -1170,7 +1257,7 @@ class _Address:
 
 class DnsNxdomainBurst(_DnsAggregate):
     id = "net.dns_nxdomain_burst"
-    version = "7"
+    version = "8"
     title = "Many NXDOMAIN answers to one client within ten minutes"
     required_fields = ()
     severity, lane = "high", "lead"
@@ -1200,8 +1287,9 @@ class DnsNxdomainBurst(_DnsAggregate):
                     "interval, the shape of algorithmically generated domain lookups",
         "telemetry": "dns_query answer records: dns.response_code, source/destination ip and port (the server is "
                      "the endpoint on the DNS port, the client the other; a record whose ports do not tell is not "
-                     "evaluated), dns.question.name (optional, for distinct names) (Suricata EVE dns v2 answer "
-                     "records: present in the lab profile)",
+                     "evaluated unless it names its recipient as client.ip, as dnsmasq's reply lines do with "
+                     "log-queries=extra), dns.question.name (optional, for distinct names) (Suricata EVE dns v2 "
+                     "answer records: present in the lab profile)",
         "fidelity": "direct observation of the rcode the client was sent; a deviation in volume, not proof of "
                     "malware",
         "benign_and_cost": "search-domain suffixing, stale software, DNSBL lookups, forwarders; one grouped "
@@ -1256,6 +1344,7 @@ class DnsNxdomainBurst(_DnsAggregate):
         return []
 
     def consume(self, events):
+        self._why = {}
         batch = [e for e in events if e.family in self.families]
         has_answers = any(role(e) == "answer" for e in batch)
         for event in batch:
@@ -1271,7 +1360,7 @@ class DnsNxdomainBurst(_DnsAggregate):
             client, server = endpoints(event, record_role)
             code = rcode(event.get("dns.response_code"))
             if client is None or code is None:
-                self.missing_required += 1
+                self._missing(self._unread(event, record_role) if client is None and code is not None else None)
                 continue
             self.evaluated += 1
             state = self.addresses.setdefault(client, _Address)

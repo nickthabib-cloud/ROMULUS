@@ -33,7 +33,7 @@ from tests.fixtures import zeek_logs as zl
 SENSOR = zl.SENSOR
 CLIENT, RESOLVER, PUBLIC = "10.20.0.15", "10.20.0.53", "203.0.113.77"
 SHAPES = ("malcolm", "elastic", "security_onion", "plain")
-QTYPES = {"A": 1, "PTR": 12, "TXT": 16, "AXFR": 252, "ANY": 255, "CNAME": 5, "NULL": 10}
+QTYPES = {"A": 1, "PTR": 12, "TXT": 16, "AXFR": 252, "ANY": 255, "CNAME": 5, "NULL": 10, "MX": 15}
 RCODES = {"NOERROR": 0, "NXDOMAIN": 3, "REFUSED": 5}
 
 CERTIFICATE_LINK_GAP = ("ssl.log names the server certificate but not its validity or fingerprint, which are on the "

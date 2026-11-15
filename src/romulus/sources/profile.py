@@ -14,6 +14,7 @@ from romulus.evidence.linux_catalog import (
     LINUX_LOGICAL_DATASETS,
     TEXT_INPUT_TYPES,
     logical_of,
+    openvpn_file,
     text_dataset_inventory,
     text_payload,
 )
@@ -845,7 +846,7 @@ def _text_sample(client, target: str, query: dict, records: int | None, *, count
         if payload is None:
             formats["no_text_payload"] += 1
             continue
-        parsed = classify(payload[1])
+        parsed = classify(payload[1], openvpn_file=openvpn_file(hit.get("_source") or {}))
         formats[parsed.format] += 1
         if parsed.program:
             # The sample has at most 1000 keys; bound each untrusted log identifier too.

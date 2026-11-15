@@ -162,7 +162,8 @@ def test_fast_time_is_a_diagnostic_inline_time():
     ("TCP 78 10.0.0.5/53112 query[TXT] t.example from 10.0.0.5",
      {"dnsmasq.serial": 78, "network.transport": "tcp", "dns.question.type": "TXT"}),
     ("77 10.0.0.5/53111 forwarded update.example to 192.0.2.53#5353",
-     {"dns.type": "query", "destination.ip": "192.0.2.53", "destination.port": 5353, "client.ip": "10.0.0.5"}),
+     {"dns.type": "query", "destination.ip": "192.0.2.53", "destination.port": 5353, "client.ip": None,
+      "dnsmasq.requester.ip": "10.0.0.5"}),
     ("77 10.0.0.5/53111 reply update.example is 203.0.113.9",
      {"dns.type": "answer", "client.ip": "10.0.0.5", "client.port": 53111}),
     ("reply update.example is NODATA-IPv4", {"dns.response_code": "NOERROR"}),
@@ -235,12 +236,15 @@ def test_fast_and_dnsmasq_records_reach_the_alert_and_dns_rules_through_the_swee
                                                      "linux.text:suricata-fast.log": 4}
     # Per DNS rule on dnsmasq lines (the host target's partition cell): question rules read every query line
     # (client and name); the forwarded line (dnsmasq's own upstream query) and the reply line (no client by port,
-    # no flow) are counted missing, never a clean negative. The zone-transfer rule needs the server address, which
-    # dnsmasq does not log; the NXDOMAIN rule needs a reply oriented by its DNS port, which dnsmasq does not log.
+    # no flow) are counted missing, never a clean negative. The zone-transfer rule reads the logging host as the
+    # server of each query line. Without log-queries=extra a reply line names no requester, so the NXDOMAIN rule
+    # cannot attribute it to a client.
     host = {row["rule_id"]: row for row in snapshot["rule_cells"]
             if row["target"] == tf.HOST_TARGET and row["rule_id"].startswith("net.dns_")}
     expected = {"net.dns_reverse_lookup_sweep": (159, 2), "net.dns_tunnel_shape": (159, 2),
-                "net.dns_zone_transfer_or_any_request": (0, 161), "net.dns_nxdomain_burst": (0, 1)}
+                "net.dns_zone_transfer_or_any_request": (159, 2), "net.dns_nxdomain_burst": (0, 1)}
+    from romulus.detect.dns import DnsNxdomainBurst
+    assert DnsNxdomainBurst.WHY["unoriented"] in host["net.dns_nxdomain_burst"]["detail"]["reasons"]
     for rule, (evaluated, missing) in expected.items():
         assert host[rule]["state"] == "evaluated_partial"
         assert (host[rule]["evaluated"], host[rule]["detail"]["missing_required"]) == (evaluated, missing)
