@@ -23,6 +23,7 @@ from romulus.agent.provider import (
     record_call,
 )
 from romulus.agent.provider.base import estimate_tokens
+from romulus.agent.refusals import reason, validation_reasons
 from romulus.agent.safety import injection_flags
 from romulus.agent.toolbox import argument_schema
 from romulus.report.incidents import build_incident_graph
@@ -491,19 +492,33 @@ def run_assessment(settings, repo, hunt_id: str, provider, budget: AgentBudget, 
         if heartbeat is not None:
             heartbeat()
         budget.charge(result)
+        stopped = result.status in {"refused", "too_large", "truncated_input", "truncated_output"}
+        # the answer is validated and checked before its call is recorded, so the call row says why it was refused
+        # or what the checker dropped: field paths, error types and counts, never the answer's values
+        failure: Exception | None = None
+        validation = None
+        if not stopped:
+            try:
+                parsed = result.parsed if isinstance(result.parsed, dict) else None
+                if parsed is None and result.content:
+                    parsed = json.loads(result.content)
+                validated = AssessmentBody.model_validate(parsed).model_dump(mode="json")
+                checked, checker = check_assessment(repo, hunt_id, validated, owner_token=owner_token)
+                validation = {"ok": result.ok, "errors": [result.error] if result.error else [], "drops": checker}
+            except (ValidationError, ValueError, TypeError) as exc:
+                failure = exc
+                validation = {"ok": False, "errors": [_validation_summary(exc, result)],
+                              "reasons": _failure_reasons(exc)}
         call_id = record_call(repo, provider, hunt_id=hunt_id, purpose="assess", request=request, result=result,
-                              limits=limits, session_id=session_id, owner_token=owner_token)
+                              limits=limits, session_id=session_id, validation=validation, owner_token=owner_token)
         try:
-            if result.status in {"refused", "too_large", "truncated_input", "truncated_output"}:
+            if stopped:
                 repo.update_agent_session(session_id, hunt_id, {"state": "refused" if result.status == "refused" else "context_full",
                                                                  "summary": result.error or result.status,
                                                                  "ended_at": utcnow()}, owner_token=owner_token)
                 return None
-            parsed = result.parsed if isinstance(result.parsed, dict) else None
-            if parsed is None and result.content:
-                parsed = json.loads(result.content)
-            validated = AssessmentBody.model_validate(parsed).model_dump(mode="json")
-            checked, checker = check_assessment(repo, hunt_id, validated, owner_token=owner_token)
+            if failure is not None:
+                raise failure
             assessment_row = {"id": "aa-" + uuid.uuid4().hex[:20], "hunt_id": hunt_id,
                               "source": "agent",
                               "model": {"provider": provider.name, "model_requested": provider.model,
@@ -535,15 +550,24 @@ def run_assessment(settings, repo, hunt_id: str, provider, budget: AgentBudget, 
     return None
 
 
-def _validation_summary(exc: Exception, result) -> str:
-    """What was wrong with a reply, in a few lines the model can act on (field paths and messages, no values)."""
+def _failure_reasons(exc: Exception) -> list[str]:
+    """Why an answer failed validation, as `<path>: <type>` reasons (romulus.agent.refusals)."""
     if isinstance(exc, ValidationError):
-        errors = exc.errors(include_url=False, include_input=False, include_context=False)
-        shown = "; ".join(f"{'.'.join(str(p) for p in error['loc']) or '$'}: {error['msg']}" for error in errors[:5])
-        return shown + (f"; and {len(errors) - 5} more" if len(errors) > 5 else "")
-    if result.error:
+        return validation_reasons(exc.errors(include_url=False, include_input=False, include_context=False))
+    if isinstance(exc, json.JSONDecodeError):
+        return [reason("$", "invalid_json")]
+    return [reason("$", "type_mismatch" if isinstance(exc, TypeError) else "invalid")]
+
+
+def _validation_summary(exc: Exception, result) -> str:
+    """What was wrong with a reply, in a few lines the model can act on: field paths and error types, never values
+    (romulus.agent.refusals)."""
+    if isinstance(exc, ValidationError):
+        reasons = _failure_reasons(exc)
+        return "; ".join(reasons[:5]) + (f"; and {len(reasons) - 5} more" if len(reasons) > 5 else "")
+    if result is not None and result.error:
         return result.error[:500]
-    return f"{type(exc).__name__}: {exc}"[:500]
+    return "; ".join(_failure_reasons(exc))
 
 
 def _prompt(name: str) -> str:

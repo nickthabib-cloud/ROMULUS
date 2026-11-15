@@ -250,7 +250,8 @@ def cmd_agent(args) -> int:
                 reason = "interrupted_by_reassessment" + (f"; {reason}" if reason else "")
             repo.finalize_agent_run(args.hunt_id, {"state": state, "reason": reason, "ended_at": utcnow()},
                                     owner_token=owner_token,
-                                    summary={"status": state, "reason": reason, "usage": repo.agent_usage(args.hunt_id)})
+                                    summary={"status": state, "reason": reason, "usage": repo.agent_usage(args.hunt_id),
+                                             "refusals": repo.agent_refusal_counts(args.hunt_id)})
     except Exception as exc:  # noqa: BLE001 - the agent's failures must not escape into hunt execution.
         from romulus.store.repo import is_lease_lost
         if not is_lease_lost(exc):

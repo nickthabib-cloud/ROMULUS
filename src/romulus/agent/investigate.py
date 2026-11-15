@@ -26,6 +26,7 @@ from romulus.agent.provider import (
     record_failure,
 )
 from romulus.agent.provider.base import estimate_tokens
+from romulus.agent.refusals import bounded, reason, tool_result_reasons
 from romulus.agent.toolbox import Toolbox
 from romulus.config import Settings
 from romulus.hunt.rank import place_late_findings
@@ -46,11 +47,13 @@ class AgentPhaseResult:
     limits_hit: list[str] = field(default_factory=list)
     unworked: list[str] = field(default_factory=list)
     usage: dict = field(default_factory=dict)
+    # refused tool calls and assessment answers, as counts by tool and reason (field paths and error types only)
+    refusals: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {"status": self.state, "reason": self.reason, "prompt_digests": self.prompt_digests,
                 "provider": self.provider, "sessions": self.sessions, "limits_hit": self.limits_hit,
-                "unworked": self.unworked, "usage": self.usage}
+                "unworked": self.unworked, "usage": self.usage, "refusals": self.refusals}
 
 
 @dataclass
@@ -178,6 +181,7 @@ def _place_late_ranks(repo: Repo, hunt_id: str, *, owner_token=None) -> None:
 def _finalize(repo: Repo, hunt_id: str, result: AgentPhaseResult, *, started_at=None,
               owner_token=None) -> AgentPhaseResult:
     _place_late_ranks(repo, hunt_id, owner_token=owner_token)
+    result.refusals = repo.agent_refusal_counts(hunt_id)
     repo.finalize_agent_run(hunt_id, {
         "state": result.state, "reason": result.reason, "prompt_digests": result.prompt_digests,
         "provider": result.provider, "started_at": started_at, "ended_at": utcnow(),
@@ -497,6 +501,7 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                                                    "seq": call_seq, "name": call.name, "arguments": arguments,
                                                    "arguments_truncated": len(call.raw_arguments.encode()) > 8192,
                                                    "status": "refused", "result_digest": digest(refused),
+                                                   "refusal_reasons": [reason("$", "tool_call_limit")],
                                                    "model_call_id": model_call_id, "created_at": utcnow()},
                                                   owner_token=owner_token)
                     if context_wrap_sent:
@@ -517,13 +522,17 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 at_limit = tool_count >= settings.agent_max_tool_calls_per_session and not wrap_up_sent
                 if at_limit:
                     tool_result = {"status": "refused", "errors": ["tool-call limit reached"]}
+                    reasons = [reason("$", "tool_call_limit")]
                 else:
                     tool_count += 1
                     if call.error:
+                        # the provider refused the arguments before any tool ran
                         tool_result = {"status": "refused", "errors": [call.error]}
+                        reasons = bounded(call.problems) or [reason("$", "invalid_arguments")]
                     else:
                         heartbeat()
                         tool_result = toolbox.execute(call.name, call.arguments)
+                        reasons = tool_result_reasons(tool_result)
                 raw_args = call.raw_arguments.encode("utf-8")
                 if call.arguments is not None:
                     stored_args = call.arguments
@@ -536,8 +545,9 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 repo.save_agent_tool_call({"id": _id("atc"), "hunt_id": hunt_id, "session_id": session_id,
                                            "seq": call_seq, "name": call.name, "arguments": stored_args,
                                            "arguments_truncated": truncated, "status": status,
-                                           "result_digest": digest(tool_result), "model_call_id": model_call_id,
-                                           "created_at": utcnow()}, owner_token=owner_token)
+                                           "result_digest": digest(tool_result), "refusal_reasons": reasons,
+                                           "model_call_id": model_call_id, "created_at": utcnow()},
+                                          owner_token=owner_token)
                 repo.update_agent_session(session_id, hunt_id, {"tool_calls": tool_count}, owner_token=owner_token)
                 tool_history.append((call.name, status))
                 if call.name == "update_hypothesis" and status == "complete":

@@ -63,6 +63,7 @@ from romulus.agent.provider.base import (
 )
 from romulus.agent.provider.egress import EgressDecision
 from romulus.agent.provider.openai_compatible import probe_calls
+from romulus.agent.refusals import EXTRA, bounded, reason
 from romulus.config import MIN_SECRET_LENGTH, Settings, redact_text
 
 log = logging.getLogger("romulus.agent")
@@ -575,50 +576,59 @@ def _format_ok(value: str, kind: str) -> bool:
         return False
 
 
-def instance_problems(value, schema: dict, root: dict | None = None, path: str = "$") -> list[str]:
-    """Why `value` does not match `schema` (a schema inside the strict subset, string formats included)."""
+def instance_problems(value, schema: dict, root: dict | None = None, path: str = "") -> list[str]:
+    """Why `value` does not match `schema` (a schema inside the strict subset, string formats included), as
+    `<path>: <type>` reasons (`romulus.agent.refusals`): field paths and error types, never a value, nor a key the
+    model supplied that the schema does not declare."""
     root = root if root is not None else schema
     if not isinstance(schema, dict):
         return []
+
+    def at(kind: str, where: str = path) -> str:
+        return reason(where or "$", kind)
+
     if "$ref" in schema:
         target = _defs(root).get(schema["$ref"])
-        return instance_problems(value, target, root, path) if target is not None else [f"{path}: unknown $ref"]
+        return instance_problems(value, target, root, path) if target is not None else [at("unknown_ref")]
     problems: list[str] = []
     if "anyOf" in schema and not any(not instance_problems(value, sub, root, path) for sub in schema["anyOf"]):
-        problems.append(f"{path}: matches none of the allowed shapes")
+        problems.append(at("no_matching_shape"))
     for sub in schema.get("allOf", []):
         problems += instance_problems(value, sub, root, path)
     if "const" in schema and not _same(value, schema["const"]):
-        problems.append(f"{path}: must be {schema['const']!r}")
+        problems.append(at("const_mismatch"))
     if "enum" in schema and not any(_same(value, option) for option in schema["enum"]):
-        problems.append(f"{path}: not one of the allowed values")
+        problems.append(at("enum_mismatch"))
     kinds = schema.get("type")
     if kinds is not None:
         listed = kinds if isinstance(kinds, list) else [kinds]
         if not any(_is_type(value, k) for k in listed):
-            return [*problems, f"{path}: expected {' or '.join(listed)}"]
+            return [*problems, at("type_mismatch")]
     if isinstance(value, dict):
         properties = schema.get("properties", {})
-        problems += [f"{path}: missing {name!r}" for name in schema.get("required", []) if name not in value]
-        if schema.get("additionalProperties") is False:
-            problems += [f"{path}: unexpected {name!r}" for name in value if name not in properties]
+
+        def child(name: str) -> str:
+            return f"{path}.{name}" if path else name
+        problems += [at("missing", child(name)) for name in schema.get("required", []) if name not in value]
+        if schema.get("additionalProperties") is False and any(name not in properties for name in value):
+            problems.append(at("unexpected_property", child(EXTRA)))
         for name, sub in properties.items():
             if name in value:
-                problems += instance_problems(value[name], sub, root, f"{path}.{name}")
+                problems += instance_problems(value[name], sub, root, child(name))
     if isinstance(value, list):
         if len(value) < schema.get("minItems", 0):
-            problems.append(f"{path}: needs at least {schema['minItems']} item(s)")
+            problems.append(at("too_few_items"))
         if isinstance(schema.get("items"), dict):
-            for n, item in enumerate(value):
-                problems += instance_problems(item, schema["items"], root, f"{path}[{n}]")
+            for item in value:
+                problems += instance_problems(item, schema["items"], root, f"{path or '?'}[]")
     if isinstance(value, str) and "pattern" in schema:
         try:
             if not re.search(schema["pattern"], value):
-                problems.append(f"{path}: does not match the pattern")
+                problems.append(at("pattern_mismatch"))
         except (re.error, TypeError):       # refused up front by strict_schema_problems; never skipped here
-            problems.append(f"{path}: the schema's pattern cannot be checked")
+            problems.append(at("pattern_unchecked"))
     if isinstance(value, str) and "format" in schema and not _format_ok(value, schema["format"]):
-        problems.append(f"{path}: not a valid {schema['format']}")
+        problems.append(at("format_mismatch"))
     return problems
 
 
@@ -1041,7 +1051,7 @@ class ClaudeMessagesProvider(ChatProvider):
         if result.ok and request.tool_choice == "required" and not calls:
             result.status, result.error = "invalid_tool_call", "the model answered without the tool call required"
         if result.ok and result.parsed is not None and request.response_schema is not None:
-            problems = instance_problems(result.parsed, strict_wire_schema(request.response_schema))
+            problems = bounded(instance_problems(result.parsed, strict_wire_schema(request.response_schema)))
             if problems:
                 result.status, result.parsed = "invalid_json", None
                 result.error = "the reply does not match the requested schema: " + "; ".join(problems[:5])
@@ -1063,10 +1073,11 @@ class ClaudeMessagesProvider(ChatProvider):
             sent = tool.parameters
         # otherwise the caller validates the arguments against its own model
         if call.arguments is not None and sent is not None:
-            problems = instance_problems(call.arguments, sent)
+            problems = bounded(instance_problems(call.arguments, sent))
             if problems:
                 return ToolCall(call_id, name, None, raw,
-                                "arguments do not match the tool's schema: " + "; ".join(problems[:5]))
+                                "arguments do not match the tool's schema: " + "; ".join(problems[:5]),
+                                problems=tuple(problems))
         return call
 
     # ---- doctor -----------------------------------------------------------------------------------------------

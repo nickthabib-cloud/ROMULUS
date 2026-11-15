@@ -109,6 +109,8 @@ class ToolCall:
     arguments: dict | None    # None when the arguments were not a JSON object
     raw_arguments: str
     error: str = ""
+    # why the arguments were refused, as `<path>: <type>` reasons (romulus.agent.refusals): never a value
+    problems: tuple[str, ...] = ()
 
     def as_dict(self) -> dict:
         return {"id": self.id, "name": self.name, "arguments": self.arguments,
@@ -207,16 +209,16 @@ def parse_tool_arguments(call_id: str, name: str, raw) -> ToolCall:
             text = json.dumps(raw, sort_keys=True, allow_nan=False)
         except (TypeError, ValueError) as exc:
             return ToolCall(call_id, name, None, json.dumps(raw, sort_keys=True, default=str),
-                            f"arguments are not valid JSON: {exc}")
+                            f"arguments are not valid JSON: {exc}", ("$: invalid_json",))
         return ToolCall(call_id, name, raw, text)
     text = raw if isinstance(raw, str) else json.dumps(raw)
     try:
         value = json.loads(text, parse_constant=lambda constant: (_ for _ in ()).throw(
             ValueError(f"non-finite JSON number {constant} is not allowed"))) if text.strip() else {}
     except (json.JSONDecodeError, ValueError) as exc:
-        return ToolCall(call_id, name, None, text, f"arguments are not valid JSON: {exc}")
+        return ToolCall(call_id, name, None, text, f"arguments are not valid JSON: {exc}", ("$: invalid_json",))
     if not isinstance(value, dict):
-        return ToolCall(call_id, name, None, text, "arguments are not a JSON object")
+        return ToolCall(call_id, name, None, text, "arguments are not a JSON object", ("$: not_an_object",))
     return ToolCall(call_id, name, value, text)
 
 

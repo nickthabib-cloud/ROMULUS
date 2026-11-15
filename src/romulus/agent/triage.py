@@ -45,6 +45,7 @@ from romulus.agent.provider import (
 )
 from romulus.agent.provider.base import estimate_tokens
 from romulus.agent.provider.budget import Charge
+from romulus.agent.refusals import reason
 from romulus.agent.safety import injection_flags
 from romulus.agent.triage_order import GROUPING_VERSION, MAX_TEXT, OrderWorkspace, StageRefused, clip
 from romulus.config import Settings
@@ -89,6 +90,17 @@ TRIAGE_SCHEMA = {
     "additionalProperties": False,
 }
 _LABEL = re.compile(LABEL_PATTERN)
+# each reason an answer item is dropped for, as the field path and error type its call row records
+# (romulus.agent.refusals): never the item's values
+DROP_REASONS = {
+    "parse_failure": "$: parse_failure", "malformed_item": "groups[]: malformed_item",
+    "unknown_group": "groups[].group_id: unknown_group", "duplicate_group": "groups[].group_id: duplicate_group",
+    "bad_assessment": "groups[].assessment: enum_mismatch",
+    "bad_incident_label": "groups[].incident_label: pattern_mismatch",
+    "missing_rationale": "groups[].rationale: missing", "overlong_rationale": "groups[].rationale: too_long",
+    "malformed_cites": "groups[].cites: type_mismatch", "too_many_cites": "groups[].cites: too_many_items",
+    "foreign_citation": "groups[].cites[]: foreign_citation",
+}
 
 
 def _prompt() -> str:
@@ -465,10 +477,14 @@ def _call(settings, repo, hunt_id, provider, request, budget: TriageBudget, prom
     budget.charge(result)
     verdicts, chunk_drops = ({}, Counter({result.status: 1})) if not result.ok else validate(
         result.parsed, {group: shown[group] for group in numbers})
+    reasons: Counter = Counter()
+    for drop, count in chunk_drops.items():
+        reasons[DROP_REASONS.get(drop, reason("$", drop))] += count
     record_call(repo, provider, hunt_id=hunt_id, purpose=TRIAGE_PURPOSE, request=request, result=result,
                 limits=limits, validation={"ok": result.ok and not chunk_drops,
                                            "errors": ([result.error] if result.error else [])
-                                           + [f"{reason}: {count}" for reason, count in sorted(chunk_drops.items())]},
+                                           + [f"{drop}: {count}" for drop, count in sorted(chunk_drops.items())],
+                                           "reasons": dict(sorted(reasons.items()))},
                 owner_token=owner_token)
     if not result.ok:
         return result.status

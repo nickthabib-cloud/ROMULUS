@@ -13,6 +13,11 @@ source queries {{ ai_panel.source_queries }} / {{ ai_panel.budgets.max_source_qu
 Estimated cost {{ ai_panel.usage.cost_usd }} USD / {{ ai_panel.budgets.max_cost_usd or 'no cost budget' }}.
 {% endif %}</p>
 {% if ai_panel.limits %}<h3>Limits reached</h3><ul>{% for limit in ai_panel.limits %}<li>{{ limit }}</li>{% endfor %}</ul>{% endif %}
+{% if ai_panel.refused_calls.by_tool %}<h3>Refused model calls</h3>
+<p class="help">Tool calls and assessment answers that validation refused, by tool and reason (field and error type).</p>
+<table><thead><tr><th>Tool</th><th>Reason</th><th>Count</th></tr></thead><tbody>
+{% for tool, reasons in ai_panel.refused_calls.by_tool.items() %}{% for why, count in reasons.items() %}<tr><td>{{ tool }}</td><td><code>{{ why }}</code></td><td>{{ count }}</td></tr>{% endfor %}{% endfor %}
+</tbody></table>{% if ai_panel.refused_calls.more %}<p>{{ ai_panel.refused_calls.more }} more refusals in further groups.</p>{% endif %}{% endif %}
 <p><a href="/hunts/{{ h.id | urlencode }}/hypotheses">{{ ai_panel.counts.hypotheses }} hypotheses</a>
 {% for name in ['findings', 'links', 'notes', 'requests'] %} · <a href="/hunts/{{ h.id | urlencode }}/agent/{{ name }}">{{ ai_panel.counts[name] }} agent {{ 'rule requests' if name == 'requests' else name }}</a>{% endfor %}</p>
 {% if ai_panel.usage.models_reported_more %}<p>{{ ai_panel.usage.models_reported_more }} more reported model groups; <a href="#reports">complete usage in the report</a>.</p>{% endif %}

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 import uuid
 from collections.abc import Iterable, Iterator
@@ -5917,6 +5918,50 @@ class Repo:
         query = query.order_by(t.agent_tool_call.c.session_id, t.agent_tool_call.c.seq)
         with self.engine.connect() as connection:
             return [dict(row) for row in connection.execute(query).mappings()]
+
+    def agent_refusal_counts(self, hunt_id: str, *, group_limit: int = 200) -> dict:
+        """Why the agent's tool calls and assessment answers were refused, as counts by tool and reason: refused tool
+        calls by tool name, and assessment answers that failed validation under "assessment". Rows are read in bounded
+        pages; at most `group_limit` (tool, reason) groups are kept, and `more` counts the refusals in groups past it.
+        Reasons are field paths and error types (romulus.agent.refusals checks their shape before they are stored),
+        never values."""
+        counts: dict[str, dict[str, int]] = {}
+        groups, more = 0, 0
+
+        def add(tool: str, reasons) -> None:
+            nonlocal groups, more
+            tool = tool if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", tool or "") else "?"
+            for item in reasons if isinstance(reasons, list) else []:
+                key = item if isinstance(item, str) and len(item) <= 200 else "?: invalid"
+                by_tool = counts.setdefault(tool, {})
+                if key not in by_tool:
+                    if groups >= group_limit:
+                        more += 1
+                        continue
+                    groups += 1
+                by_tool[key] = by_tool.get(key, 0) + 1
+
+        reasons = func.json_extract(t.model_call.c.validation, "$.reasons")
+        sources = (
+            (t.agent_tool_call, t.agent_tool_call.c.name, t.agent_tool_call.c.refusal_reasons,
+             t.agent_tool_call.c.refusal_reasons.is_not(None)),
+            (t.model_call, literal("assessment"), t.model_call.c.validation,
+             and_(t.model_call.c.purpose == "assess", reasons.is_not(None))),
+        )
+        with self.engine.connect() as c:
+            for table, name, column, condition in sources:
+                after = ""
+                while True:
+                    rows = c.execute(select(table.c.id, name, column).where(
+                        table.c.hunt_id == hunt_id, condition, table.c.id > after,
+                    ).order_by(table.c.id).limit(500)).all()
+                    for _row_id, tool, value in rows:
+                        add(str(tool), value.get("reasons") if isinstance(value, dict) else value)
+                    if len(rows) < 500:
+                        break
+                    after = rows[-1][0]
+        out = {tool: dict(sorted(by_reason.items())) for tool, by_reason in sorted(counts.items()) if by_reason}
+        return {"by_tool": out, "more": more} if more else {"by_tool": out}
 
     def _agent_rows(self, table, hunt_id: str) -> list[dict]:
         with self.engine.connect() as connection:
