@@ -657,9 +657,13 @@ class Sweep:
 
     @staticmethod
     def _dataset_natives(contract: FieldContract) -> tuple[str, str | None]:
-        """The native fields a record names its dataset in: event.dataset, then data_stream.dataset."""
+        """The native fields a record names its dataset in, as the window inventory groups them: event.dataset, then
+        data_stream.dataset when that field is a separate, countable one (otherwise the inventory cannot read it, and
+        neither does the tally, so both place such records alike)."""
+        primary = contract.spec("event.dataset")
         secondary = contract.spec("data_stream.dataset")
-        return contract.spec("event.dataset").native, secondary.native if secondary is not None else None
+        usable = secondary is not None and secondary.aggregatable and secondary.native != primary.native
+        return primary.native, secondary.native if usable else None
 
     def _tally_retrieved(self, target: str, contract: FieldContract | None, records: list[dict]) -> None:
         """Count the records a top-level partition retrieved, by the dataset each names (bounded names per target)."""
@@ -673,41 +677,46 @@ class Sweep:
                 name = _TALLY_OVERFLOW
             tally[name] += 1
 
-    def _window_dataset_counts(self, target: str, contract: FieldContract | None) -> dict | None:
+    def _window_dataset_counts(self, target: str, contract: FieldContract | None) -> tuple[dict | None, str]:
         """Records in the hunt window by the dataset each names (None: no dataset), from one aggregate over the whole
-        target; None when it cannot be counted exactly (no aggregatable dataset field, a cap, or a partial answer)."""
-        if not self._reconcilable(contract) or getattr(self, "client", None) is None:
-            return None
+        target, with "" as the reason; or (None, why it could not be counted exactly) on a reconcilable target."""
+        if not self._reconcilable(contract):
+            return None, ""
+        if getattr(self, "client", None) is None:
+            return None, "no source client to count the window's records by dataset"
         spec = contract.spec("event.dataset")
         if not spec.aggregatable:
-            return None
-        group = ["event.dataset"]
-        second = contract.spec("data_stream.dataset")
-        if second is not None and second.aggregatable and second.native != spec.native:
-            group.append("data_stream.dataset")
+            return None, f"event.dataset is not aggregatable on this target (mapped as {spec.type})"
+        _primary, secondary = self._dataset_natives(contract)
+        group = ["event.dataset", *(["data_stream.dataset"] if secondary is not None else [])]
         try:
             outcome = execute(self.client, SearchIntent(
                 kind="aggregate", target=target, window=self.window, group_by=group,
                 max_records=WINDOW_DATASET_BUCKETS, purpose="sweep dataset reconciliation"), contract)
-        except Exception:  # noqa: BLE001 - an inventory count never fails the sweep; its statements say not counted
-            return None
+        except Exception as exc:  # noqa: BLE001 - the count never fails the sweep; its reason is stated instead
+            return None, f"the window count by dataset failed ({exc.__class__.__name__}: {str(exc)[:200]})"
         if outcome.completeness != Completeness.complete:
-            return None
+            why = "; ".join([*outcome.reasons, *([outcome.error] if outcome.error else [])]) or "incomplete answer"
+            return None, f"the window count by dataset was not complete ({why[:300]})"
         counts: dict[str | None, int] = {}
         for bucket in outcome.buckets:
             key = bucket.get("key") if isinstance(bucket.get("key"), dict) else {}
             name = next((value for value in (key.get(field) for field in group)
                          if isinstance(value, str) and value), None)
             counts[name] = counts.get(name, 0) + int(bucket.get("count") or 0)
-        return counts
+        return counts, ""
 
-    def _reconcile_datasets(self, target: str, contract: FieldContract | None, window: dict | None) -> None:
+    def _reconcile_datasets(self, target: str, contract: FieldContract | None, window: dict | None,
+                            unavailable: str = "") -> None:
         """State every dataset of the target the sweep did not read in full. A dataset the plan selected whose window
         records were not all retrieved is listed with the exact shortfall, makes the hunt partial and leaves the rules
         reading its families partial on this target; one whose count is unknown is listed as not counted. A dataset
         with records in the window that the plan never selected, and that the profile inventory does not already list,
         is listed with its window count. A selected text dataset with records in the index but none in the window is
-        listed, since records indexed at the time they were shipped fall outside every window they describe."""
+        listed, since records indexed at the time they were shipped fall outside every window they describe. When
+        the window cannot be counted by dataset (`unavailable` says why), the reconciliation itself is stated as not
+        performed and the hunt is partial: a structured dataset read in part, a window dataset the profile never
+        listed and records naming no dataset could then go unstated."""
         selected = (self.stats.get("dataset_filter") or {}).get(target)
         if not self._reconcilable(contract) or selected is None:
             return
@@ -762,6 +771,14 @@ class Sweep:
                          "count_scope": f"records in the hunt window by {field}",
                          "reason": "not retrieved by the sweep: these records name no dataset and carry none of the "
                                    "selectors the sweep reads such records by"})
+        if window is None:
+            why = unavailable or "the window's records were not counted by dataset"
+            rows.append({"dataset": "any dataset not read in full", "records": None,
+                         "count_scope": f"not counted: {why}",
+                         "reason": f"dataset reconciliation not performed on {target}: {why}; records of a selected "
+                                   "dataset the source query did not return, window datasets the profile does not "
+                                   "list and records naming no dataset are not stated"})
+            self.partial_reasons.append(f"{target}: dataset reconciliation not performed: {why}")
         if rows:
             self.stats.setdefault("dataset_reconciliation", {})[target] = rows
         if not short:
@@ -781,6 +798,7 @@ class Sweep:
                             detail={"reasons": [reason]})
                  for pb in self.pack
                  if not isinstance(pb, BaselinePlaybook) and pb.id not in self.failed_rules
+                 and {"linux", "unknown"} & set(pb.os_families)
                  and (set(pb.families) - set(pb.context_families)) & families]
         if cells:
             self.repo.set_rule_cells(self.hunt_id, cells)
@@ -2105,7 +2123,7 @@ class Sweep:
         any_of = self._any_of_for(target, contract)
         any_of = self._select_ics(target, contract, any_of)
         # counted before retrieval, so records that arrive while the target is read are never reported as missed
-        window_datasets = self._window_dataset_counts(target, contract)
+        window_datasets, window_unavailable = self._window_dataset_counts(target, contract)
         try:
             self.heartbeat()
             parts = plan_partitions(self.client, target, contract, self.window, filters, any_of)
@@ -2139,7 +2157,7 @@ class Sweep:
                 self._next = (target, contract, filters, any_of, *following) if following else None
                 self.run_partition(target, contract, filters, w, est, any_of=any_of)
             self._finalize_baseline_target(target)
-            self._reconcile_datasets(target, contract, window_datasets)
+            self._reconcile_datasets(target, contract, window_datasets, window_unavailable)
         finally:
             self._next = None
             self._stop_prefetch()

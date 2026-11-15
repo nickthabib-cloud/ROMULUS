@@ -133,7 +133,11 @@ number of names per target). A selected dataset whose window records were not al
 shortfall, makes the hunt partial and leaves the rules reading its families partial on that target; where either
 count is unavailable the dataset is reported as not counted. Window datasets the profile inventory never listed are
 reported with their window counts, and a selected text dataset with records in the index but none in the window is
-named, since records indexed when they were shipped fall outside the window they describe.
+named, since records indexed when they were shipped fall outside the window they describe. When the window cannot be
+counted by dataset (a failed or partial count, a bucket cap, or a dataset field that cannot be aggregated), the
+reconciliation is reported as not performed, with its reason, and the hunt is partial. A mapped field whose index or
+doc values are switched off carries that in its profiled type: no predicate searches a field that is not indexed,
+and no aggregation reads one without doc values.
 
 ## Windows host source shapes
 

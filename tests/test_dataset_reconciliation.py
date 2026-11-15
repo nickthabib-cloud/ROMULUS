@@ -15,9 +15,17 @@ from romulus.sources.profile import OPS_BY_TYPE, build_profile, contract_from_ty
 from tests import throughput_fixture as tf
 from tests.test_linux_text_reporting import ProfileClient, _sample
 
-# A Filebeat-loaded host index: current Beats templates map `message` as match_only_text and `event.original` as
-# keyword, and a plain log or filestream input fills only `message`.
-FILEBEAT_TYPES = {**tf.HOST_TYPES, "message": "match_only_text", "event.original": "keyword",
+# A Filebeat-loaded host index: current Beats templates map `message` as match_only_text and `event.original` as a
+# keyword with neither an index nor doc values, and a plain log or filestream input fills only `message`.
+REAL_MAPPING = {"logs": {"mappings": {"properties": {
+    "@timestamp": {"type": "date"},
+    "message": {"type": "match_only_text"},
+    "event": {"properties": {"dataset": {"type": "keyword"},
+                             "original": {"type": "keyword", "index": False, "doc_values": False}}},
+    "input": {"properties": {"type": {"type": "keyword"}}},
+    "log": {"properties": {"file": {"properties": {"path": {"type": "keyword"}}}}},
+}}}}
+FILEBEAT_TYPES = {**tf.HOST_TYPES, "message": "match_only_text", "event.original": "keyword:not_indexed",
                   "input.type": "keyword", "log.file.path": "keyword"}
 DNSMASQ = ["Nov 18 14:00:01 dnsmasq[123]: query[A] update.example from 10.0.0.5",
            "Nov 18 14:00:01 dnsmasq[123]: forwarded update.example to 192.0.2.53",
@@ -110,6 +118,10 @@ def test_records_without_the_payload_of_a_selected_dataset_are_stated_with_count
     assert cells and all(cell["state"] == "evaluated_partial" and cell["target"] == tf.HOST_TARGET for cell in cells)
     assert {"auth.password_guessing", "net.dns_nxdomain_burst"} <= {cell["rule_id"] for cell in cells}
     assert "host.kernel_module_load" not in {cell["rule_id"] for cell in cells}   # reads no text family
+    from romulus.detect.registry import fresh_pack
+    oses = {pb.id: set(pb.os_families) for pb in fresh_pack()}
+    # a Linux target's shortfall leaves no Windows-only rule partial
+    assert all(oses[cell["rule_id"]] & {"linux", "unknown"} for cell in cells)
 
 
 def test_dataset_whose_sample_has_no_payload_is_stated_with_count(tmp_path, monkeypatch):
@@ -147,7 +159,7 @@ def test_reconciliation_rows_render_counts_zero_and_not_counted():
 def test_payload_mapped_in_an_unsearchable_type_is_stated_not_silent(tmp_path, monkeypatch):
     """The text payload is mapped in a type the source cannot test for presence: the content selection cannot reach
     the records, which are stated with their counts and the mapping reason."""
-    types = {**FILEBEAT_TYPES, "message": "semantic_text"}
+    types = {**FILEBEAT_TYPES, "message": "semantic_text", "event.original": "keyword"}
     datasets = {"dnsmasq.log": DNSMASQ, "horde.log": HORDE}
     snapshot, summary, rows = _run(tmp_path, monkeypatch, types, datasets)
     assert snapshot["stats"]["records"] == 0
@@ -193,12 +205,124 @@ def test_unknown_window_count_states_selected_text_dataset_as_not_counted(tmp_pa
     not counted, and its rules stay partial."""
     datasets = {"dnsmasq.log": DNSMASQ}
     docs = _docs(datasets, offset=timedelta(days=400))
-    monkeypatch.setattr(sw.Sweep, "_window_dataset_counts", lambda self, target, contract: None)
+    monkeypatch.setattr(sw.Sweep, "_window_dataset_counts", lambda self, target, contract: (None, "count withheld"))
     snapshot, summary, rows = _run(tmp_path, monkeypatch, FILEBEAT_TYPES, datasets, docs=docs)
     [row] = [row for row in rows if row["dataset"] == "dnsmasq.log"]
     assert row["records"] is None and row["count_scope"].startswith("not counted")
     assert any("dnsmasq.log (not counted)" in reason for reason in summary["partial_reasons"])
     assert _reconciliation_cells(snapshot)
+    _assert_not_performed(summary, rows, "count withheld")
+
+
+def _assert_not_performed(summary, rows, why):
+    """The reconciliation itself is stated: one row and one partial reason naming the target and the cause."""
+    stated = [row for row in rows if row["reason"].startswith(f"dataset reconciliation not performed on "
+                                                                f"{tf.HOST_TARGET}: ")]
+    assert len(stated) == 1 and why in stated[0]["reason"] and stated[0]["records"] is None
+    assert stated[0]["dataset"] == "any dataset not read in full"
+    assert [reason for reason in summary["partial_reasons"]
+            if reason.startswith(f"{tf.HOST_TARGET}: dataset reconciliation not performed: ")] == [
+        f"{tf.HOST_TARGET}: dataset reconciliation not performed: " + stated[0]["count_scope"].removeprefix(
+            "not counted: ")]
+
+
+def _failing_window_count(monkeypatch, outcome):
+    """Make only the reconciliation's window aggregate fail (raise) or answer incompletely (an outcome)."""
+    real = sw.execute
+
+    def execute(client, intent, contract, *args, **kwargs):
+        if intent.purpose == "sweep dataset reconciliation":
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome(real(client, intent, contract, *args, **kwargs))
+        return real(client, intent, contract, *args, **kwargs)
+    monkeypatch.setattr(sw, "execute", execute)
+
+
+def test_reconciliation_not_performed_when_the_window_count_raises(tmp_path, monkeypatch):
+    _failing_window_count(monkeypatch, RuntimeError("cluster gone"))
+    datasets = {"dnsmasq.log": DNSMASQ}
+    snapshot, summary, rows = _run(tmp_path, monkeypatch, FILEBEAT_TYPES, datasets)
+    assert snapshot["stats"]["records"] == 3       # retrieval itself was unaffected
+    _assert_not_performed(summary, rows, "the window count by dataset failed (RuntimeError: cluster gone)")
+
+
+def test_reconciliation_not_performed_when_the_window_count_is_partial(tmp_path, monkeypatch):
+    from romulus.sources.models import Completeness
+
+    _failing_window_count(monkeypatch, lambda out: out.model_copy(update={
+        "completeness": Completeness.partial, "reasons": ["timed_out", "shard_failures"]}))
+    _snapshot, summary, rows = _run(tmp_path, monkeypatch, FILEBEAT_TYPES, {"dnsmasq.log": DNSMASQ})
+    _assert_not_performed(summary, rows, "not complete (timed_out; shard_failures)")
+
+
+def test_reconciliation_not_performed_past_the_bucket_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(sw, "WINDOW_DATASET_BUCKETS", 1)
+    datasets = {"dnsmasq.log": DNSMASQ, "horde.log": HORDE}
+    _snapshot, summary, rows = _run(tmp_path, monkeypatch, FILEBEAT_TYPES, datasets)
+    _assert_not_performed(summary, rows, "aggregate_bucket_cap:1")
+
+
+def test_reconciliation_not_performed_when_the_dataset_field_cannot_be_aggregated(tmp_path, monkeypatch):
+    types = {**FILEBEAT_TYPES, "event.dataset": "keyword:no_doc_values"}
+    datasets = {"dnsmasq.log": DNSMASQ}
+    snapshot, summary, rows = _run(tmp_path, monkeypatch, types, datasets)
+    assert snapshot["stats"]["records"] == 3       # still selected and read by the dataset predicate
+    _assert_not_performed(summary, rows, "event.dataset is not aggregatable on this target (mapped as "
+                                         "keyword:no_doc_values)")
+
+
+def test_data_stream_dataset_without_doc_values_raises_no_spurious_no_dataset_row(tmp_path, monkeypatch):
+    """data_stream.dataset is mapped but cannot be counted: the window inventory and the retrieval tally both place a
+    record naming its dataset only there among the records naming none, so nothing is stated as missed."""
+    types = {**FILEBEAT_TYPES, "data_stream.dataset": "keyword:no_doc_values"}
+    datasets = {"dnsmasq.log": DNSMASQ}
+    docs = _docs(datasets)
+    builder_doc = dict(docs[tf.HOST_TARGET][0])
+    source = {key: value for key, value in builder_doc["_source"].items() if key != "event"}
+    source["data_stream"] = {"dataset": "stream.only"}
+    docs[tf.HOST_TARGET].append({**builder_doc, "_id": "stream-only-1", "_source": source})
+    snapshot, summary, rows = _run(tmp_path, monkeypatch, types, datasets, docs=docs)
+    assert snapshot["stats"]["records"] == 4
+    assert not [row for row in rows if row["dataset"] == "(records naming no dataset)"]
+    assert not any("reconciliation not performed" in reason for reason in summary["partial_reasons"])
+
+
+def test_real_filebeat_mapping_selects_text_through_message_only():
+    from romulus.sources.compile import compile_es
+    from romulus.sources.models import Predicate, SearchIntent, Window
+    from romulus.sources.profile import flatten_mapping
+
+    types = flatten_mapping(REAL_MAPPING)
+    assert types["event.original"] == "keyword:not_indexed" and types["message"] == "match_only_text"
+    contract = contract_from_types("logs", types)
+    original = contract.spec("event.original")
+    assert original.ops == [] and original.aggregatable is False
+    assert contract.supports("message", "exists")
+    query = compile_es(SearchIntent(kind="raw", target="logs", window=Window(start=tf.WINDOW_START,
+                                                                                end=tf.WINDOW_END),
+                                        filters=[Predicate(field="event.dataset", op="in", value=["linux.text"])]),
+                           contract).body["query"]
+    text = str(query)
+    assert "{'exists': {'field': 'message'}}" in text and "event.original" not in text
+
+
+@pytest.mark.parametrize("spec,kind", [
+    ({"type": "keyword"}, "keyword"),
+    ({"type": "keyword", "index": False, "doc_values": False}, "keyword:not_indexed"),
+    ({"type": "keyword", "index": "false"}, "keyword:doc_values_only"),
+    ({"type": "long", "doc_values": False}, "long:no_doc_values"),
+    ({"type": "text", "index": False}, "text:not_indexed"),
+    ({"type": "text"}, "text"),
+])
+def test_switched_off_index_or_doc_values_qualify_the_type(spec, kind):
+    from romulus.sources.profile import AGGREGATABLE, mapped_kind
+
+    assert mapped_kind(spec) == kind
+    base = spec["type"]
+    searchable = "index" not in spec
+    assert bool(OPS_BY_TYPE.get(kind)) == (searchable and bool(OPS_BY_TYPE.get(base)))
+    assert (kind in AGGREGATABLE) == (base in AGGREGATABLE and str(spec.get("doc_values", True)) != "False")
 
 
 def test_tally_overflow_never_attributes_a_shortfall_it_cannot_count(tmp_path, monkeypatch):
