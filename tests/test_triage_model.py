@@ -126,3 +126,44 @@ def test_a_forced_resume_records_the_switch_and_the_manifest_lists_it(tmp_path, 
     forced = _ai_agent(repo, "h1", hunt["manifest"])["model_forced"]
     assert forced["total"] == 1 and forced["switches"][0]["from"] == "ran-model"
     assert forced["switches"][0]["to"] == "other-model"
+
+
+def test_the_automatic_pass_after_the_agent_runs_on_the_triage_model(monkeypatch):
+    repo = _hunt(filler=10)
+    checked, built = _ready(monkeypatch)
+    monkeypatch.setattr(hunt_run, "agent_readiness", lambda s, *_a: SimpleNamespace(ready=True, model=s.agent_model))
+    monkeypatch.setattr(hunt_run, "build_provider", lambda s, **_kw: built.append(NamedTriage(s.agent_model))
+                        or built[-1])
+    s = settings(agent_model="agent-model", agent_triage_model="triage-model")
+    result = hunt_run._with_agent_result({"hunt_id": "h1"}, repo, {"status": "completed"}, settings=s,
+                                         manifest={"ai_agent": {"requested": True}})
+    assert checked == ["triage-model"] and [p.model for p in built] == ["triage-model"]
+    assert result["ai_triage"]["model"] == "triage-model"
+    assert result["ai_triage"]["model_source"] == "AGENT_TRIAGE_MODEL"
+
+
+def test_dropped_triage_items_are_recorded_by_field_and_reason_without_their_values():
+    sentinel = "SENTINELq7triage"
+    repo = _hunt(filler=10)
+
+    def policy(cards):
+        items = [{"group_id": f"G-{sentinel}", "assessment": "likely_attack", "incident_label": None,
+                  "rationale": "r", "cites": []}]
+        for n, card in enumerate(cards):
+            item = {"group_id": card["group"], "assessment": "likely_benign", "incident_label": None,
+                    "rationale": "Evidence on the card.", "cites": []}
+            if n == 0:
+                item["incident_label"] = f"Bad {sentinel}"
+            elif n == 1:
+                item["rationale"] = sentinel * 40
+            elif n == 2:
+                item["cites"] = [sentinel]
+            items.append(item)
+        return {"groups": items}
+    summary = run_triage(settings(), repo, "h1", provider=FakeTriage(policy))
+    assert summary["dropped"]["bad_incident_label"] and summary["dropped"]["unknown_group"]
+    rows = [row for row in repo.model_calls(hunt_id="h1") if row["purpose"] == "triage"]
+    reasons = rows[0]["validation"]["reasons"]
+    assert {"groups[].incident_label: pattern_mismatch", "groups[].rationale: too_long",
+            "groups[].cites[]: foreign_citation", "groups[].group_id: unknown_group"} <= set(reasons)
+    assert sentinel not in json.dumps([row["validation"] for row in rows])

@@ -5,6 +5,7 @@ import json
 import logging
 from datetime import UTC, datetime
 
+import pytest
 from pydantic import ValidationError
 
 from romulus.agent.admission import FinishSessionArgs, OpenHypothesisArgs
@@ -137,6 +138,24 @@ def test_refused_calls_record_reasons_on_their_rows_audit_and_logs_without_value
     # the retry message the model reads names fields and error types only
     retry = provider.requests[-1].messages[-1]["content"]
     assert "overall: list_type" in retry and SENTINEL not in retry
+
+
+def test_an_assessment_check_that_fails_still_records_the_billed_call(tmp_path, monkeypatch):
+    from romulus.agent import assessment
+    from romulus.agent.provider import AgentBudget, BudgetLimits
+    repo = _hunt(tmp_path)
+    body = {"overall": [], "key_steps": [], "confidence": {"overall": "low", "reasons": []}, "alternatives": [],
+            "gaps": [], "next_checks": []}
+
+    def broken(*_a, **_kw):
+        raise RuntimeError("store unavailable")
+    monkeypatch.setattr(assessment, "check_assessment", broken)
+    settings = Settings(home=tmp_path)
+    budget = AgentBudget(BudgetLimits.from_settings(settings), clock=lambda: 0.0)
+    with pytest.raises(RuntimeError, match="store unavailable"):
+        assessment.run_assessment(settings, repo, "h1", ScriptedProvider([response(parsed=body)]), budget)
+    rows = [row for row in repo.model_calls(hunt_id="h1") if row["purpose"] == "assess"]
+    assert len(rows) == 1 and rows[0]["validation"]["reasons"] == ["$: check_failed"]
 
 
 def test_triage_drop_reasons_are_paths_and_types():

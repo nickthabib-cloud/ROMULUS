@@ -13,8 +13,8 @@ from romulus.agent.triage import TriageBudget
 from romulus.config import Settings, load_settings
 
 MODEL = "claude-test-model"
-# the usage of a live investigation that stopped on its token budget after two of eight hypotheses
-LIVE_PROMPT, LIVE_READ, LIVE_WRITE, LIVE_OUTPUT = 1_595_635, 1_157_596, 437_963, 62_503
+# a mostly cached investigation: most of its prompt read from the cache, much of the rest written to it
+CACHED_PROMPT, CACHED_READ, CACHED_WRITE, CACHED_OUTPUT = 1_595_635, 1_157_596, 437_963, 62_503
 
 
 def anthropic(**kw) -> Settings:
@@ -36,23 +36,23 @@ class FakeProvider:
         return {"provider": self.name, "model": self.model, "endpoint_host": "api.example", "egress": "remote"}
 
 
-def live_weighted() -> int:
-    uncached = LIVE_PROMPT - LIVE_READ - LIVE_WRITE
-    return math.ceil(uncached + LIVE_READ * 0.1 + LIVE_WRITE * 1.25) + LIVE_OUTPUT
+def cached_weighted() -> int:
+    uncached = CACHED_PROMPT - CACHED_READ - CACHED_WRITE
+    return math.ceil(uncached + CACHED_READ * 0.1 + CACHED_WRITE * 1.25) + CACHED_OUTPUT
 
 
 def test_the_documented_defaults_weight_cache_reads_and_writes_for_the_anthropic_provider():
     limits = BudgetLimits.from_settings(anthropic())
     assert (limits.cache_read_token_weight, limits.cache_write_token_weight) == (0.1, 1.25)
     budget = AgentBudget(limits, clock=lambda: 0.0)
-    charged = budget.charge(result(LIVE_PROMPT, LIVE_OUTPUT, LIVE_READ, LIVE_WRITE))
+    charged = budget.charge(result(CACHED_PROMPT, CACHED_OUTPUT, CACHED_READ, CACHED_WRITE))
     # the raw counts are kept as they were; the budget holds the weighted total
-    assert budget.tokens == LIVE_PROMPT + LIVE_OUTPUT == 1_658_138
-    assert budget.budget_tokens == charged["budget_tokens"] == live_weighted() == 725_793
-    assert charged["prompt_tokens"] == LIVE_PROMPT and charged["cache_read_tokens"] == LIVE_READ
+    assert budget.tokens == CACHED_PROMPT + CACHED_OUTPUT == 1_658_138
+    assert budget.budget_tokens == charged["budget_tokens"] == cached_weighted() == 725_793
+    assert charged["prompt_tokens"] == CACHED_PROMPT and charged["cache_read_tokens"] == CACHED_READ
     snapshot = budget.snapshot()
     assert (snapshot["tokens"], snapshot["budget_tokens"]) == (1_658_138, 725_793)
-    # that run's next call fits the default 2,000,000 budget tokens; counted raw it would not
+    # its next call fits the default 2,000,000 budget tokens; counted raw it would not
     budget.check(100_000, 64_096)
     assert budget.tokens + limits.worst_tokens(100_000, 64_096) > limits.max_tokens
 
@@ -133,7 +133,7 @@ def test_call_rows_record_budget_tokens_and_a_resumed_budget_continues_from_them
     limits = BudgetLimits.from_settings(settings)
     request = ChatRequest([{"role": "user", "content": "go"}])
     first = record_call(repo, FakeProvider(), hunt_id="h1", purpose="investigate", request=request,
-                        result=result(LIVE_PROMPT, LIVE_OUTPUT, LIVE_READ, LIVE_WRITE), limits=limits)
+                        result=result(CACHED_PROMPT, CACHED_OUTPUT, CACHED_READ, CACHED_WRITE), limits=limits)
     failure = ProviderUnavailable("down")
     failure.billed = [{"model": MODEL, "prompt": 2000, "completion": 100, "cache_read": 1000, "cache_write": 0}]
     record_failure(repo, FakeProvider(), hunt_id="h1", purpose="investigate", request=request, error=failure,
@@ -142,13 +142,13 @@ def test_call_rows_record_budget_tokens_and_a_resumed_budget_continues_from_them
     record_call(repo, FakeProvider(), hunt_id="h1", purpose="investigate", request=request, result=estimated,
                 limits=limits)
     row = next(r for r in repo.model_calls(hunt_id="h1") if r["id"] == first)
-    assert row["options"]["budget_tokens"] == live_weighted()
-    assert (row["prompt_eval_count"], row["eval_count"]) == (LIVE_PROMPT, LIVE_OUTPUT)     # raw, as before
+    assert row["options"]["budget_tokens"] == cached_weighted()
+    assert (row["prompt_eval_count"], row["eval_count"]) == (CACHED_PROMPT, CACHED_OUTPUT)     # raw, as before
     usage = repo.agent_usage("h1")
     failure_weighted = math.ceil(1000 + 100) + 100
     estimated_raw = 50 + int(len("x" * 32) / 3.2) + 8
-    assert usage["tokens"] == LIVE_PROMPT + LIVE_OUTPUT + 2100 + estimated_raw
-    assert usage["budget_tokens"] == live_weighted() + failure_weighted + estimated_raw
+    assert usage["tokens"] == CACHED_PROMPT + CACHED_OUTPUT + 2100 + estimated_raw
+    assert usage["budget_tokens"] == cached_weighted() + failure_weighted + estimated_raw
     manifest = {"ai_agent": {"model": MODEL, "budgets": limits.as_dict()}}
     resumed = _budget(settings, manifest, repo, "h1", lambda: 0.0)
     assert resumed.limits.cache_read_token_weight == 0.1

@@ -505,7 +505,7 @@ def run_assessment(settings, repo, hunt_id: str, provider, budget: AgentBudget, 
                 validated = AssessmentBody.model_validate(parsed).model_dump(mode="json")
                 checked, checker = check_assessment(repo, hunt_id, validated, owner_token=owner_token)
                 validation = {"ok": result.ok, "errors": [result.error] if result.error else [], "drops": checker}
-            except (ValidationError, ValueError, TypeError) as exc:
+            except Exception as exc:  # noqa: BLE001 - the billed call is recorded whatever the check raised
                 failure = exc
                 validation = {"ok": False, "errors": [_validation_summary(exc, result)],
                               "reasons": _failure_reasons(exc)}
@@ -556,7 +556,9 @@ def _failure_reasons(exc: Exception) -> list[str]:
         return validation_reasons(exc.errors(include_url=False, include_input=False, include_context=False))
     if isinstance(exc, json.JSONDecodeError):
         return [reason("$", "invalid_json")]
-    return [reason("$", "type_mismatch" if isinstance(exc, TypeError) else "invalid")]
+    if isinstance(exc, (TypeError, ValueError)):
+        return [reason("$", "type_mismatch" if isinstance(exc, TypeError) else "invalid")]
+    return [reason("$", "check_failed")]
 
 
 def _validation_summary(exc: Exception, result) -> str:
