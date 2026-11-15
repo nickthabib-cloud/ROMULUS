@@ -69,14 +69,16 @@ class TextLine:
     fields: dict[str, object] = field(default_factory=dict)
 
 
-def classify(line: str) -> TextLine:
+def classify(line: str, *, openvpn_file: bool = False) -> TextLine:
+    """`openvpn_file`: the record's typed fields say it was read from an OpenVPN log, which lets an ISO-stamped
+    OpenVPN line be identified (linux_catalog.openvpn_file)."""
     if not isinstance(line, str):
         return TextLine("unknown")
     if len(line) > MAX_LINE_BYTES or len(line.encode("utf-8", errors="replace")) > MAX_LINE_BYTES:
         return TextLine("too_long")
     # Fixed native envelopes precede BSD headers: Dovecot's native file has a
     # timestamp followed directly by imap-login, without a syslog hostname.
-    native = identify_auth(line) or identify_service(line)
+    native = identify_auth(line) or identify_service(line, openvpn_file=openvpn_file)
     if native is not None:
         stamp = re.match(r"^(?:\[)?(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?: [+-]\d{4})?|"
                          r"\d{2}-[A-Z][a-z]{2}-\d{4} \d{2}:\d{2}:\d{2} [+-]\d{4}|"

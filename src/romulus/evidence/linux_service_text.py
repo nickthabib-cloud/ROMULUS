@@ -542,12 +542,19 @@ def openvpn_skip_reason(message: str) -> str | None:
     return None
 
 
-def _identify_openvpn(line: str) -> tuple[str, str] | None:
+def _identify_openvpn(line: str, openvpn_file: bool) -> tuple[str, str] | None:
+    """An OpenVPN log-file line. Other programs write the same ISO time and the same words ("AUTH_FAILED",
+    "WARNING:"), so an ISO-stamped line, and any line known only by an untyped OpenVPN phrase, is OpenVPN's only when the
+    record's typed fields say it was read from an OpenVPN log (`openvpn_file`). A ctime-stamped line whose message is
+    an OpenVPN session or authentication statement is identified by the line alone."""
     stamped = _OPENVPN_TIME.fullmatch(line)
     if not stamped:
         return None
     body = stamped[1]
-    if _openvpn(body) or parse_auth("openvpn", body) or openvpn_skip_reason(body):
+    typed = _openvpn(body) is not None or parse_auth("openvpn", body) is not None
+    if openvpn_file and (typed or openvpn_skip_reason(body)):
+        return "openvpn", body
+    if typed and not line[:1].isdigit():
         return "openvpn", body
     return None
 
@@ -699,8 +706,9 @@ def parse_service(program: str, message: str) -> ParsedLine | None:
     return None
 
 
-def identify_service(line: str) -> tuple[str, str] | None:
-    """Identify fixed application envelopes; no host or record timestamp is invented."""
+def identify_service(line: str, *, openvpn_file: bool = False) -> tuple[str, str] | None:
+    """Identify fixed application envelopes; no host or record timestamp is invented. `openvpn_file` is the record's
+    typed evidence that it was read from an OpenVPN log (see `_identify_openvpn`)."""
     if (not isinstance(line, str) or len(line) > MAX_LINE
             or len(line.encode("utf-8", errors="replace")) > MAX_LINE
             or any(char in line for char in "\r\n\x00")):
@@ -718,7 +726,7 @@ def identify_service(line: str) -> tuple[str, str] | None:
     dns = re.fullmatch(r"[A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2} (dnsmasq(?:-dhcp|-tftp|-script)?)\[\d+\]: (.*)", line)
     if dns:
         return dns[1], dns[2]
-    openvpn = _identify_openvpn(line)
+    openvpn = _identify_openvpn(line, openvpn_file)
     if openvpn:
         return openvpn
     vpn = re.fullmatch(r"[A-Z][a-z]{2} [A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2} \d{4} (.*)", line)

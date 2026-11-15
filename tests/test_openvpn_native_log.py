@@ -122,6 +122,44 @@ def test_mentions_are_never_vpn_or_auth_events(line):
     assert not [e for e in events if e.family in ("vpn_session", "auth")]
 
 
+def shipped(line, **source):
+    hit = {"_index": "i", "_id": "f1", "_source": {"@timestamp": "2026-11-09T12:00:00Z", "message": line,
+                                                   "host": {"name": "vpn1"}, "input": {"type": "log"}, **source}}
+    events, skips, errors = normalize_hits([hit])
+    assert not errors
+    return events, skips
+
+
+FAILED_LINE = "2026-11-09 12:00:00 AUTH: Received control message: AUTH_FAILED"
+
+
+@pytest.mark.parametrize("source", [
+    {"event": {"dataset": "openvpn.log"}},
+    {"event": {"dataset": "custom.text"}, "log": {"file": {"path": "/var/log/openvpn.log"}}},
+    {"event": {"dataset": "custom.text", "module": "openvpn"}},
+    {"data_stream": {"dataset": "openvpn.server"}},
+], ids=["dataset", "file", "module", "data-stream"])
+def test_an_iso_stamped_line_is_openvpn_when_the_record_says_it_came_from_an_openvpn_log(source):
+    [event], skips = shipped(FAILED_LINE, **source)
+    assert not skips and event.family == "auth" and event.get("auth.service") == "openvpn"
+    assert event.outcome == Outcome.failure
+
+
+@pytest.mark.parametrize("line", [FAILED_LINE, "2026-11-09 12:00:00 MULTI: worker pool resized",
+                                  f"2026-11-09 12:00:00 {PEER}:51234 WARNING: retrying the upload"])
+def test_an_iso_stamped_line_from_another_programs_file_is_never_openvpn(line):
+    events, skips = shipped(line, event={"dataset": "app.log"}, log={"file": {"path": "/var/log/app.log"}})
+    assert events == [] and list(skips) == ["text line in no recognized format: app.log"]
+
+
+def test_an_untyped_openvpn_phrase_in_a_ctime_line_needs_the_openvpn_file():
+    line = f"{CTIME} Initialization Sequence Completed"
+    assert classify(line).format == "unknown"
+    _events, skips = shipped(line, event={"dataset": "openvpn.log"})
+    assert list(skips) == [("text format application, program 'openvpn' (OpenVPN status, channel or configuration "
+                            "line (not an authentication decision or session boundary)) is not normalized: openvpn.log")]
+
+
 @pytest.mark.parametrize("line", [f"{ISO} worker[3]: job finished", f"{ISO} Connection reset by peer",
                                   f"{ISO} NOTE: the cache was rebuilt", f"{CTIME} Timers: 3 pending"])
 def test_unrelated_stamped_lines_are_not_identified_as_openvpn(line):

@@ -65,6 +65,7 @@ from romulus.evidence.linux_catalog import (
     document_dataset,
     match_shape,
     module_syscall,
+    openvpn_file,
     text_candidate,
     text_payload,
     unmatched_families,
@@ -3541,7 +3542,7 @@ def _linux_events(hit: dict, normalizer, *args) -> list[TypedEvent]:
 def normalize_text(hit: dict) -> list[TypedEvent]:
     src = hit["_source"]
     path, line = text_payload(src)
-    parsed = classify(line)
+    parsed = classify(line, openvpn_file=openvpn_file(src))
     if parsed.format == "unknown" and isinstance(program := _get(src, "process.name"), str):
         parsed = TextLine("syslog", program, line)
     dataset = document_dataset(src) or "(no dataset)"
