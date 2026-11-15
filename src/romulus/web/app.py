@@ -125,9 +125,10 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
     def hunts(request: Request, after: str = ""):
         from urllib.parse import urlencode
 
-        from sqlalchemy import func, select
+        from sqlalchemy import and_, func, not_, select
 
         from romulus.store import schema as tables
+        from romulus.store.repo import triage_placeholder_clause
         u = need(request)
         if len(after) > 512:
             raise HTTPException(400, "Invalid page cursor")
@@ -135,7 +136,8 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
             where = (tables.hunt.c.id < after,) if after else ()
             rows = [dict(row) for row in connection.execute(select(tables.hunt,
                 tables.agent_run.c.state.label("ai_state")).select_from(tables.hunt.outerjoin(
-                tables.agent_run, tables.agent_run.c.hunt_id == tables.hunt.c.id)).where(*where)
+                tables.agent_run, and_(tables.agent_run.c.hunt_id == tables.hunt.c.id,
+                                       not_(triage_placeholder_clause())))).where(*where)
                 .order_by(tables.hunt.c.id.desc()).limit(50)).mappings()]
             more = int(connection.execute(select(func.count()).select_from(tables.hunt).where(
                 tables.hunt.c.id < rows[-1]["id"])).scalar_one()) if rows else 0

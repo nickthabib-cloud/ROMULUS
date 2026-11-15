@@ -571,6 +571,17 @@ def _detection_result_on(connection, hunt_id: str) -> tuple[dict[str, int], str]
                     "leads_only" if counts.get("lead", 0) else "no_qualifying_observation_in_assessed_scope")
 
 
+def is_triage_placeholder(row) -> bool:
+    """Whether an agent record is only the placeholder a triage pass made for a hunt with no agent record."""
+    return (row is not None and row["state"] == "skipped" and row["reason"] == TRIAGE_PLACEHOLDER
+            and row["started_at"] is None)
+
+
+def triage_placeholder_clause():
+    return and_(t.agent_run.c.state == "skipped", func.coalesce(t.agent_run.c.reason, "") == TRIAGE_PLACEHOLDER,
+                t.agent_run.c.started_at.is_(None))
+
+
 def is_lease_lost(exc: BaseException) -> bool:
     """Recognize fencing failures without swallowing unrelated repository errors."""
     return isinstance(exc, RuntimeError) and "lease ownership lost" in str(exc)
@@ -687,8 +698,7 @@ class Repo:
         `hunt resume` treats as a resumable agent phase; a later triage pass claims and removes it."""
         claimed, before = self._claim_agent_lease(hunt_id, lease_seconds, None, None, initial={
             "state": "skipped", "reason": TRIAGE_PLACEHOLDER})
-        placeholder = before is None or (before["reason"] == TRIAGE_PLACEHOLDER and before["started_at"] is None)
-        return claimed["lease_owner"], placeholder
+        return claimed["lease_owner"], before is None or is_triage_placeholder(before)
 
     def release_triage_lease(self, hunt_id: str, *, owner_token: str, created: bool) -> None:
         """Release a triage pass's lease; the placeholder record is deleted rather than left behind."""
@@ -697,9 +707,14 @@ class Repo:
             return
         with write_txn(self.engine) as c:
             self._fence_agent_lease(c, hunt_id, owner_token)
-            c.execute(t.agent_run.delete().where(
+            # only the placeholder itself: a record anything else changed since (a pending agent handoff keeps the
+            # reason but not the state) is released, never deleted
+            deleted = c.execute(t.agent_run.delete().where(
                 t.agent_run.c.hunt_id == hunt_id, t.agent_run.c.lease_owner == owner_token,
-                t.agent_run.c.reason == TRIAGE_PLACEHOLDER, t.agent_run.c.started_at.is_(None)))
+                triage_placeholder_clause()))
+            if deleted.rowcount != 1:
+                c.execute(t.agent_run.update().where(t.agent_run.c.hunt_id == hunt_id).values(
+                    lease_owner=None, lease_until=None, updated_at=utcnow()))
 
     def release_agent_lease(self, hunt_id: str, *, owner_token: str | None = None) -> None:
         """Release a claimed phase while retaining its existing progress and assessment."""
@@ -5683,9 +5698,10 @@ class Repo:
         return rows
 
     def agent_run(self, hunt_id: str) -> dict | None:
+        """The hunt's agent record; a triage pass's placeholder is no agent record."""
         with self.engine.connect() as connection:
             row = connection.execute(select(t.agent_run).where(t.agent_run.c.hunt_id == hunt_id)).mappings().first()
-            return dict(row) if row else None
+            return dict(row) if row and not is_triage_placeholder(row) else None
 
     @staticmethod
     def _agent_cap_count(connection, table_name: str, hunt_id: str) -> int:
