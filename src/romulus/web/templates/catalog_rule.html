@@ -12,8 +12,6 @@
 <p>Families: {{ rule.families | join(', ') }}. Fields: {{ rule.required_fields | join(', ') or 'not recorded' }}</p>
 {% if rule.source == 'Sigma' %}<p>Referenced predicate fields (including alternatives): {{ rule.referenced_fields | join(', ') }}. The readable condition above preserves their boolean relationships.</p>{% endif %}
 {% for family, fields in rule.required_by_family.items() %}<p>{{ family }}: {{ fields | join(', ') }}</p>{% endfor %}
-<h2>Applicability</h2>{% for item in rule.applicability %}<p>{{ item.text }}</p>{% endfor %}
-<p class="help">Profiles older than 30 days and incomplete inventories are unknown. Applicability describes profile evidence, not a guarantee that every record has the field.</p>
 <h2>Performance</h2>
 {% if rule.performance is not none %}<p>{{ rule.performance.hits }} hits over retained hunts; {{ rule.performance.recent_hits }} in the last {{ last_n }} hunts. {{ deleted }} deleted hunt(s) excluded.</p>
 <p>Last fired: {% if rule.performance.last_hunt %}<a href="/hunts/{{ rule.performance.last_hunt | urlencode }}">{{ rule.performance.last_hunt }}</a> {{ rule.performance.last_at }}{% else %}never fired{% endif %}</p>
