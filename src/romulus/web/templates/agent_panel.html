@@ -13,7 +13,7 @@ source queries {{ ai_panel.source_queries }} / {{ ai_panel.budgets.max_source_qu
 Estimated cost {{ ai_panel.usage.cost_usd }} USD / {{ ai_panel.budgets.max_cost_usd or 'no cost budget' }}.
 {% endif %}</p>
 {% if ai_panel.limits %}<h3>Limits reached</h3><ul>{% for limit in ai_panel.limits %}<li>{{ limit }}</li>{% endfor %}</ul>{% endif %}
-{% if ai_panel.refused_calls.by_tool %}<h3>Refused model calls</h3>
+{% if ai_panel.refused_calls and ai_panel.refused_calls.by_tool %}<h3>Refused model calls</h3>
 <p class="help">Tool calls and assessment answers that validation refused, by tool and reason (field and error type).</p>
 <table><thead><tr><th>Tool</th><th>Reason</th><th>Count</th></tr></thead><tbody>
 {% for tool, reasons in ai_panel.refused_calls.by_tool.items() %}{% for why, count in reasons.items() %}<tr><td>{{ tool }}</td><td><code>{{ why }}</code></td><td>{{ count }}</td></tr>{% endfor %}{% endfor %}
