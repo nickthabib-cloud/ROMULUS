@@ -305,7 +305,8 @@ Index("ix_entity_rank_position", entity_rank.c.hunt_id, entity_rank.c["pass"], e
 # of a hunt's latest triage pass. It is a separately labelled presentation order: nothing here changes a lane, rank,
 # Reported flag, citation or the deterministic report order. A new pass replaces the hunt's rows in one transaction
 # with its summary audit. `finding_ids` holds only the ids the model was shown (at most three, the group's first in
-# deterministic order): a promotion moves those findings alone, and the rest of the group keeps its place. A group's
+# deterministic order): a promotion moves those of them the model cited (`cites`) alone, and the rest of the group
+# keeps its place. A group's
 # full membership is its key (section, rule, entity, provenance) over the stored findings; `case_findings` counts its
 # findings an investigator case discovered. `position` is the group's place in the
 # triage view: by section, the promoted groups first, then the rest by their best deterministic position.

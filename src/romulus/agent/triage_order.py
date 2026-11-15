@@ -13,11 +13,16 @@ investigator case discovered stay in their rule's groups and are counted on the 
 
 Everything is staged in a temporary SQLite file under the hunt's stage directory, so memory stays bounded by one page
 of findings and one card whatever the hunt's size; the file is held to the site's stage byte budget, and a refusal is
-an honest failure that keeps the deterministic order. The triage order is finding-level: within each section, the
-findings the model was shown for each promoted group (its claim excerpts, at most MAX_EXCERPTS, the only ones it could
-cite) come first, group by group; every other finding, including the rest of a promoted group, keeps its
-deterministic place. No finding moves down by more than promote-per-lane x MAX_EXCERPTS findings, and nothing is ever
-removed.
+an honest failure that keeps the deterministic order.
+
+Placement. Triage exists to surface what the deterministic order buried, so in each section the promoted groups are
+the model's likely-attack groups, then its possible-attack groups, each tier most buried first (the largest best
+deterministic position, ties by group number); a group already near the top gains little from a slot. The triage
+order is finding-level: within each section, the findings the model cited for each promoted group (its evidence:
+cites are checked to be among the group's claim excerpts, at most MAX_EXCERPTS) come first, group by group in that
+selection order; a promoted group that cited nothing moves nothing. Every other finding, including the rest of a
+promoted group, keeps its deterministic place. No finding moves down by more than promote-per-lane x MAX_EXCERPTS
+findings, and nothing is ever removed.
 """
 from __future__ import annotations
 
@@ -37,6 +42,9 @@ from romulus.hunt.rank import PASS_FINAL, rank_unranked
 from romulus.store.repo import Repo
 
 GROUPING_VERSION = "triage-groups@2"
+# Which groups are promoted and which of their findings move. It is applied after the model answers, so it is not part
+# of the prompt digest; a pass or export made under another placement is stale.
+PLACEMENT_VERSION = "triage-placement@3"
 SECTIONS_RANKED = ("Confirmed", "Reported entities", "Ranked findings (not reported)")
 SECTIONS_LANES = ("Urgent", "High", "Investigative leads")
 LANE_SECTION = {"urgent": 0, "high": 1, "lead": 2}
@@ -102,6 +110,13 @@ BUILD_STATEMENTS = (
     ("INSERT INTO g (gid, best, n, cases, section, first_ts, last_ts) SELECT gid, best, n, cases, section, "
      "first_ts, last_ts FROM gt INDEXED BY gt_best ORDER BY best"),
 )
+
+
+def moved_ids(shown, cites) -> list[str]:
+    """The findings a promoted group moves: those the model cited among the ones it was shown, in deterministic
+    order. None when it cited nothing."""
+    cited = set(cites or ())
+    return [finding_id for finding_id in list(shown or ())[:MAX_EXCERPTS] if finding_id in cited]
 
 
 def order_key(finding: dict, ranked: bool) -> tuple:
@@ -394,8 +409,9 @@ class OrderWorkspace:
 
     def promote(self, per_section: int, tiers: tuple[str, ...]) -> dict[int, list[int]]:
         """Choose the promoted groups: in each section at most `per_section` deterministic groups the model assessed in
-        one of `tiers`, the stronger tier first, then by best deterministic position. Returns section -> group numbers
-        in promoted order. Chunk order and the model's own ordering never decide it."""
+        one of `tiers`, the stronger tier first, and within a tier the most buried first (largest best deterministic
+        position, ties by group number). Returns section -> group numbers in promoted order. Chunk order and the
+        model's own ordering never decide it."""
         promoted: dict[int, list[int]] = {}
         if per_section <= 0 or not tiers:
             return promoted
@@ -404,7 +420,7 @@ class OrderWorkspace:
             rows = self.db.execute(
                 f"SELECT g.group_no FROM v JOIN g ON g.group_no = v.group_no JOIN k ON k.gid = g.gid "
                 f"WHERE g.section = ? AND k.provenance = 'deterministic' AND v.status = 'assessed' AND v.assessment IN "
-                f"({', '.join('?' for _ in tiers)}) ORDER BY CASE v.assessment {order} END, g.best LIMIT ?",
+                f"({', '.join('?' for _ in tiers)}) ORDER BY CASE v.assessment {order} END, g.best DESC, g.group_no LIMIT ?",
                 (section, *tiers, per_section)).fetchall()
             promoted[section] = [row[0] for row in rows]
             self.db.executemany("UPDATE v SET status = 'promoted' WHERE group_no = ?", rows)
@@ -464,18 +480,20 @@ class OrderWorkspace:
             yield from (json.loads(row) for _position, row in rows)
             after = rows[-1][0]
 
-    def shown_of(self, group_numbers: list[int]) -> list[list[str]]:
+    def moved_of(self, group_numbers: list[int]) -> list[list[str]]:
+        """The findings each promoted group moves (`moved_ids`)."""
         out = []
         for group_no in group_numbers:
-            row = self.db.execute("SELECT shown FROM v WHERE group_no = ?", (group_no,)).fetchone()
-            out.append(json.loads(row[0]) if row and row[0] else [])
+            row = self.db.execute("SELECT shown, cites FROM v WHERE group_no = ?", (group_no,)).fetchone()
+            out.append(moved_ids(json.loads(row[0] or "[]"), json.loads(row[1] or "[]")) if row else [])
         return out
 
     def triage_order(self, promoted: dict[int, list[list[str]]]) -> Iterator[str]:
-        """Every surfaced finding id in the triage order. Per section: the shown findings of each promoted group (at
-        most MAX_EXCERPTS each, in that group's deterministic order), then every other finding of the section in
-        deterministic order, the rest of each promoted group included. With nothing promoted it is the deterministic
-        order. Ids no longer in that section (a store changed after the pass) are ignored."""
+        """Every surfaced finding id in the triage order. Per section: the moved findings of each promoted group (its
+        cited excerpts, `moved_ids`, at most MAX_EXCERPTS each, in that group's deterministic order), group by group in
+        promotion order, then every other finding of the section in deterministic order, the rest of each promoted
+        group included. With nothing moved it is the deterministic order. Ids no longer in that section (a store changed
+        after the pass) are ignored."""
         for section in range(3):
             moved: list[str] = []
             for ids in promoted.get(section) or []:

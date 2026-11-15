@@ -9,9 +9,9 @@ it is length-capped, carried as escaped JSON between data markers, flagged when 
 an instruction; the output checks hold whatever it says.
 
 Within each report section at most `agent_triage_promote_per_lane` groups assessed as likely or possible attack are
-promoted, the stronger assessment first, then by deterministic position. A promoted group moves ahead only the findings
-the model was shown for it (its claim excerpts, at most MAX_EXCERPTS, the only ones it could cite); the rest of the
-group and every other finding keep their deterministic place. Nothing is removed or hidden, and no finding moves down
+promoted, the stronger assessment first, then the most buried first. A promoted group moves ahead only the findings the
+model cited for it (among its claim excerpts, at most MAX_EXCERPTS); the rest of the group and every other finding keep
+their deterministic place (`triage_order`). Nothing is removed or hidden, and no finding moves down
 by more than promote-per-lane x MAX_EXCERPTS findings.
 Agent-proposed findings are never triaged. Triage changes no lane, rank, Reported flag, candidate, citation or the
 deterministic report order, which stays authoritative.
@@ -46,7 +46,14 @@ from romulus.agent.provider import (
 from romulus.agent.provider.base import estimate_tokens
 from romulus.agent.provider.budget import Charge
 from romulus.agent.safety import injection_flags
-from romulus.agent.triage_order import GROUPING_VERSION, MAX_TEXT, OrderWorkspace, StageRefused, clip
+from romulus.agent.triage_order import (
+    GROUPING_VERSION,
+    MAX_TEXT,
+    PLACEMENT_VERSION,
+    OrderWorkspace,
+    StageRefused,
+    clip,
+)
 from romulus.config import Settings
 from romulus.store.db import digest
 from romulus.store.repo import TRIAGE_FAILED, TRIAGE_PURPOSE, TRIAGE_SUMMARY, Repo, is_lease_lost
@@ -319,7 +326,8 @@ def run_triage_pass(settings: Settings, repo: Repo, hunt_id: str, provider, *, o
             cards_digest, eligible, excluded = build_cards(ws, titles)
             prompt_digest = pass_digest(cards_digest, settings, provider, system)
             if (not force and previous and previous.get("prompt_digest") == prompt_digest
-                    and previous.get("status") == "complete" and previous.get("order_digest") == ws.order_digest):
+                    and previous.get("status") == "complete" and previous.get("order_digest") == ws.order_digest
+                    and previous.get("placement") == PLACEMENT_VERSION):
                 return {**previous, "reused": True}
             return _run(settings, repo, hunt_id, provider, ws, budget, system, prompt_digest, eligible, excluded,
                         previous, owner_token, heartbeat)
@@ -377,14 +385,14 @@ def _run(settings, repo, hunt_id, provider, ws: OrderWorkspace, budget: TriageBu
     assessed = sum(assessments.values())
     status = ("complete" if assessed == eligible else "failed" if eligible and not assessed else "partial")
     reasons = sorted({*not_triaged, *(("dropped_output",) if drops else ())})
-    moved = {ws.section_titles[section]: sum(len(ids) for ids in ws.shown_of(numbers))
+    moved = {ws.section_titles[section]: sum(len(ids) for ids in ws.moved_of(numbers))
              for section, numbers in promoted.items()}
     count = ws.materialize_view(promoted, lambda item: _row(item, prompt_digest, model))
     summary = {
         "version": TRIAGE_VERSION, "label": LABEL, "pass": int((previous or {}).get("pass") or 0) + 1,
         "status": status, "reason": "; ".join(reasons) or None,
         "mode": "ranked" if ws.ranked else "lanes", "sections": list(ws.section_titles),
-        "prompt_digest": prompt_digest, "grouping": GROUPING_VERSION, "model": model,
+        "prompt_digest": prompt_digest, "grouping": GROUPING_VERSION, "placement": PLACEMENT_VERSION, "model": model,
         "provider": {key: described.get(key) for key in ("provider", "model", "endpoint_host", "egress")
                      if key in described},
         "settings": settings_view(settings),
