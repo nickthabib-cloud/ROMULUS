@@ -57,10 +57,10 @@ from romulus.evidence.linux_catalog import (
     APACHE_ERROR,
     AUDIT_EVENT,
     AUDIT_RECORD,
+    CONTENT_TEXT_FAMILIES,
     JOURNAL_FIELDS,
     JOURNAL_JSON,
     SYSLOG_LINE,
-    TEXT_FAMILIES,
     WATCH_PLACEHOLDERS,
     document_dataset,
     match_shape,
@@ -3569,6 +3569,15 @@ def normalize_text(hit: dict) -> list[TypedEvent]:
                 raise Skip(reason[:256]) from error
             for record in records:
                 _text_provenance(record, parsed, origin)
+                if record.family == "net_alert":
+                    # a text alert names no community id; computed from its own 5-tuple as for EVE without one, so
+                    # flows of the same connection from other sensors share it
+                    computed = community_id(record.get("source.ip"), record.get("source.port"),
+                                            record.get("destination.ip"), record.get("destination.port"),
+                                            record.get("network.transport"))
+                    if computed is not None:
+                        record.fields["network.community_id"] = fv(
+                            computed, f"{origin}.src_ip+src_port+dest_ip+dest_port+proto#computed:community_id_v1")
             return records
         event.caveats.append(SYSLOG_WRITER_CAVEAT)
         event.caveats.extend(writer_caveats)
@@ -3842,7 +3851,7 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
         except Skip as s:
             skips[s.reason] += 1
             if isinstance(s, TextSkip) and skip_families is not None:
-                fed = TEXT_FAMILIES | (unmatched_families(h["_source"]) or frozenset())
+                fed = CONTENT_TEXT_FAMILIES | (unmatched_families(h["_source"]) or frozenset())
                 skip_families[s.reason] = (skip_families.get(s.reason) or frozenset()) | fed
         except (ValueError, KeyError, TypeError, AttributeError, OverflowError) as e:   # malformed: an error, not a crash
             errors.append((h["_id"], f"{ds}: {e}"))

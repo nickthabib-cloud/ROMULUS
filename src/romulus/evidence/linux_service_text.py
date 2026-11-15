@@ -207,37 +207,119 @@ def _postfix(program: str, message: str) -> ParsedLine | None:
     return ParsedLine("mail_message", fields, outcome)
 
 
+# dnsmasq's query log (src/cache.c, log_query): "<source> <name> <verb> <dest>" with the verbs "from" (a client's
+# query[TYPE]), "to" (forwarded upstream, "#port" when the port is not 53) and "is" (a reply, a cache, config, DHCP,
+# auth or hosts-file answer). --log-queries=extra prefixes every line with a serial that ties the lines of one query
+# together and the requestor's "address/port"; =proto adds "TCP " or "UDP " before the serial. Lines are typed one at
+# a time: the serial is recorded, never joined.
+_DNSMASQ_EXTRA = re.compile(r"^(?:(TCP|UDP) )?(\d{1,10}) (?:([^\s/]+)/(\d{1,5}) )?(.*)$")
+_DNSMASQ_SUFFIX = r"(?: \((?:EDE: [^()\r\n]*|DNSSEC signed)\))?"
+_DNSMASQ_RCODES = {"NXDOMAIN": "NXDOMAIN", "NODATA": "NOERROR", "NODATA-IPv4": "NOERROR", "NODATA-IPv6": "NOERROR",
+                   "SERVFAIL": "SERVFAIL", "REFUSED": "REFUSED", "FORMERR": "FORMERR", "not implemented": "NOTIMP"}
+DNSMASQ_ANSWER_CAVEAT = "DNS answer line omits the question type and is not joined to its query line"
+
+
+def _dnsmasq_type(value: str) -> str:
+    """dnsmasq writes types it has no name for as "type=N"; the DNS rules read those as "TYPEN"."""
+    return f"TYPE{value[5:]}" if value.startswith("type=") else value
+
+
 def _dnsmasq(message: str) -> ParsedLine | None:
-    extra = re.match(r"^(\d+) ([^\s/]+)/(\d+) (.*)$", message)
+    extra = _DNSMASQ_EXTRA.fullmatch(message)
+    requester: tuple[str, int] | None = None
+    context: dict[str, object] = {}
     if extra:
-        message = extra[4]
-    question = re.fullmatch(r"query\[([A-Za-z0-9_-]+)\] (\S+) from (\S+)", message)
+        message = extra[5]
+        context["dnsmasq.serial"] = int(extra[2])
+        if extra[1]:
+            context["network.transport"] = extra[1].lower()
+        if extra[3] is not None:
+            address, port = _ip(extra[3]), _port(extra[4])
+            if address is None or port is None:
+                return None
+            requester = (address, port)
+    question = re.fullmatch(r"query\[([A-Za-z0-9_-]+|type=\d{1,5})\] (\S+) from (\S+)", message)
     if question:
         if not (address := _ip(question[3])):
             return None
-        fields: dict[str, object] = {"dns.type": "query", "dns.question.name": question[2],
-                                    "dns.question.type": question[1], "source.ip": address}
-        if extra and _ip(extra[2]) == address and (port := _port(extra[3])) is not None:
-            fields["source.port"] = port
+        fields: dict[str, object] = {**context, "dns.type": "query", "dns.question.name": question[2],
+                                    "dns.question.type": _dnsmasq_type(question[1]), "source.ip": address}
+        if requester and requester[0] == address:
+            fields["source.port"] = requester[1]
         return ParsedLine("dns_query", fields)
-    forward = re.fullmatch(r"forwarded (\S+) to (\S+)", message)
+    forward = re.fullmatch(r"forwarded (\S+) to ([^\s#]+)(?:#(\d{1,5}))?" + _DNSMASQ_SUFFIX, message)
     if forward and (address := _ip(forward[2])):
-        return ParsedLine("dns_query", {"dns.type": "query", "dns.question.name": forward[1],
-                                        "destination.ip": address}, caveats=("DNS forwarding line omits the requesting client and question type",))
-    answer = re.fullmatch(r"(reply|cached(?:-stale)?|config|/etc/hosts) (\S+) is (\S+)", message)
+        fields = {**context, "dns.type": "query", "dns.question.name": forward[1], "destination.ip": address}
+        if forward[3] is not None and (port := _port(forward[3])) is not None:
+            fields["destination.port"] = port
+        if requester:
+            fields.update({"client.ip": requester[0], "client.port": requester[1]})
+        return ParsedLine("dns_query", fields, caveats=(
+            "DNS forwarding line: dnsmasq's own upstream query, without the question type; the requesting client is "
+            "the query line's" + (" (the line names it as client.ip)" if requester else ""),))
+    answer = re.fullmatch(r"(reply|cached(?:-stale)?|config|auth|DHCP|/\S+) (\S+) is "
+                          r"(not implemented|\S+)" + _DNSMASQ_SUFFIX, message)
     if not answer:
         return None
-    fields = {"dns.type": "answer", "dns.question.name": answer[2]}
+    fields = {**context, "dns.type": "answer", "dns.question.name": answer[2]}
+    if requester:
+        fields.update({"client.ip": requester[0], "client.port": requester[1]})
     address = _ip(answer[3])
     if address:
         kind = "AAAA" if ":" in address else "A"
         fields["dns.answers"] = [{"name": answer[2], "type": kind, "ttl": None, "data": address}]
-    elif answer[3] in ("NXDOMAIN", "NODATA", "SERVFAIL", "REFUSED"):
-        fields["dns.response_code"] = "NOERROR" if answer[3] == "NODATA" else answer[3]
-    elif answer[3] != "<CNAME>":
+    elif answer[3] in _DNSMASQ_RCODES:
+        fields["dns.response_code"] = _DNSMASQ_RCODES[answer[3]]
+    elif not re.fullmatch(r"<(?:[A-Za-z0-9-]+|type=\d{1,5})>", answer[3]):
         return None
-    return ParsedLine("dns_query", fields,
-                      caveats=("DNS answer line omits client address and query linkage; no per-line join is inferred",))
+    return ParsedLine("dns_query", fields, caveats=(DNSMASQ_ANSWER_CAVEAT,))
+
+
+# Suricata's fast.log (src/alert-fastlog.c, AlertFastLogger), one alert per line:
+# "<time>  [Drop] [**] [gid:sid:rev] <msg> [**] [Classification: <class>] [Priority: <n>] {<proto>} <src>:<sp> -> <dst>:<dp>"
+# The time is CreateTimeString's "MM/DD/YYYY-HH:MM:SS.uuuuuu" (sensor local time, no zone). "[Drop] " marks a packet
+# dropped in IPS mode, "[wDrop] " one a drop rule matched outside IPS mode. A protocol without a name prints as
+# "PROTO:nnn". ICMP and ICMPv6 alerts print the ICMP type and code in the port slots. IPv6 addresses print without
+# brackets, so the port is after the last colon. The message is printed raw, so the last "[**] [Classification:" is
+# the trailer. A decoder-event alert (no IP header) prints raw packet bytes instead of addresses and is not typed.
+_FAST = re.compile(
+    r"(?P<time>\d{2}/\d{2}/\d{4}-\d{2}:\d{2}:\d{2}\.\d{1,9})  (?:\[(?P<action>Drop|wDrop)\] )?"
+    r"\[\*\*\] \[(?P<gid>\d{1,10}):(?P<sid>\d{1,10}):(?P<rev>\d{1,10})\] (?P<msg>.*) \[\*\*\] "
+    r"\[Classification: (?P<cls>[^\]\r\n]*)\] \[Priority: (?P<prio>\d{1,10})\] "
+    r"\{(?P<proto>[A-Za-z0-9-]{1,32}|PROTO:\d{3})\} (?P<src>[0-9A-Fa-f.:]+):(?P<sp>\d{1,5}) -> "
+    r"(?P<dst>[0-9A-Fa-f.:]+):(?P<dp>\d{1,5})")
+FAST_TIME = re.compile(r"\d{2}/\d{2}/\d{4}-\d{2}:\d{2}:\d{2}\.\d{1,9}")
+FASTLOG_CAVEAT = ("Suricata fast.log alert line: no flow id, application protocol or signature metadata (ATT&CK ids, "
+                  "signature severity) is logged; the sensor's local time is diagnostic only")
+
+
+def _fastlog(line: str) -> ParsedLine | None:
+    match = _FAST.fullmatch(line)
+    if not match or not match["msg"]:
+        return None
+    source, destination = _ip(match["src"]), _ip(match["dst"])
+    sport, dport = _port(match["sp"]), _port(match["dp"])
+    if source is None or destination is None or sport is None or dport is None:
+        return None
+    fields: dict[str, object] = {
+        "alert.signature": match["msg"], "alert.signature_id": int(match["sid"]), "alert.gid": int(match["gid"]),
+        "alert.rev": int(match["rev"]), "alert.severity": int(match["prio"]),
+        # a fast.log line without "[Drop]" was not dropped by the engine
+        "alert.action": "blocked" if match["action"] == "Drop" else "allowed",
+        "source.ip": source, "destination.ip": destination,
+    }
+    if match["cls"] not in ("", "(null)"):
+        fields["alert.category"] = match["cls"]
+    proto = match["proto"]
+    if proto.startswith("PROTO:"):
+        fields["network.iana_number"] = str(int(proto[6:]))
+    else:
+        fields["network.transport"] = proto.lower()
+    if proto.upper() in ("ICMP", "IPV6-ICMP", "ICMPV6"):
+        fields["icmp.type"], fields["icmp.code"] = sport, dport
+    else:
+        fields["source.port"], fields["destination.port"] = sport, dport
+    return ParsedLine("net_alert", fields, Outcome.unknown, (FASTLOG_CAVEAT,))
 
 
 def _bind(message: str) -> ParsedLine | None:
@@ -426,6 +508,8 @@ def parse_service(program: str, message: str) -> ParsedLine | None:
         return _postfix(program, message)
     if program == "dnsmasq":
         return _dnsmasq(message)
+    if program == "suricata-fastlog":
+        return _fastlog(message)
     if program in ("named", "bind9"):
         return _bind(message)
     if program == "unbound":
@@ -457,6 +541,8 @@ def identify_service(line: str) -> tuple[str, str] | None:
         return "exim", exim[1]
     if _SQUID.fullmatch(line):
         return "squid", line
+    if _FAST.fullmatch(line):
+        return "suricata-fastlog", line
     dns = re.fullmatch(r"[A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2} dnsmasq\[\d+\]: (.*)", line)
     if dns:
         return "dnsmasq", dns[1]

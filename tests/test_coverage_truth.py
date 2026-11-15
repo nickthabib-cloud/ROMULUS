@@ -105,6 +105,11 @@ class FaultyES:
                 "timed_out": False, "_shards": {"failed": 0},
                 "hits": {"total": {"value": 3, "relation": "eq"}, "hits": []},
                 "aggregations": {"h": {"buckets": [{"key_as_string": _iso(start), "doc_count": 3}]}}})
+        if "g" in body.get("aggs", {}):                       # the sweep's window count by dataset: always clean
+            return httpx.Response(200, json={
+                "timed_out": False, "_shards": {"failed": 0},
+                "hits": {"total": {"value": 3, "relation": "eq"}, "hits": []},
+                "aggregations": {"g": {"buckets": [{"key": {"event.dataset": "apache.access"}, "doc_count": 3}]}}})
         if path == "/_search":
             return self._page(body)
         return httpx.Response(404, json={"error": f"unexpected {request.method} {path}"})

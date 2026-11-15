@@ -221,6 +221,11 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
                         "records": None,
                         "count_scope": "unknown: the source preflight could not list every dataset of the index",
                         "reason": "not retrieved by the sweep"})
+    # What the sweep's own window counts show it did not read: a selected dataset whose window records were not all
+    # retrieved, and window datasets the inventory above does not name.
+    for target, rows in sorted((stats.get("dataset_reconciliation") or {}).items()):
+        out.extend({"target": target, "dataset": row.get("dataset"), "records": row.get("records"),
+                    "count_scope": row.get("count_scope"), "reason": row.get("reason")} for row in rows)
     for target, classes in sorted((stats.get("windows_unassessed") or {}).items()):
         for event_class in classes:
             if event_class.get("uncatalogued"):
