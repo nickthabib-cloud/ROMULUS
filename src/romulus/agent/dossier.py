@@ -291,7 +291,7 @@ def _budget(repo: Repo, hunt_id: str, manifest: dict) -> dict:
     spent = budget.snapshot()
     remaining = {
         "calls": max(0, limits.max_calls - budget.calls),
-        "tokens": max(0, limits.max_tokens - budget.tokens),
+        "tokens": max(0, limits.max_tokens - budget.budget_tokens),
         "wall_seconds": max(0.0, limits.max_wall_seconds - budget.wall_seconds()),
         "cost_usd": (max(0.0, limits.max_cost_usd - budget.cost_usd) if limits.max_cost_usd else None),
     }

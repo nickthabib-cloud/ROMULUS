@@ -5984,13 +5984,16 @@ class Repo:
                     exclude_purposes: tuple[str, ...] = (), purposes: tuple[str, ...] | None = None) -> dict:
         """Persisted spending, streamed in bounded pages; UI model breakdowns may be limited. A budget counts only its
         own calls: `exclude_purposes` leaves out other passes' calls (the agent's budget leaves out triage), and
-        `purposes` keeps only the named ones."""
+        `purposes` keeps only the named ones. `tokens` counts raw tokens; `budget_tokens` counts them weighted by
+        price as each call recorded it (a call recorded without that weighting, or with estimated usage, counts its
+        raw tokens)."""
         if group_limit is not None and not 1 <= group_limit <= 200:
             raise ValueError("usage group_limit must be between 1 and 200")
         scope = (t.model_call.c.hunt_id == hunt_id, t.model_call.c.provider.is_not(None),
                  *((t.model_call.c.purpose.not_in(exclude_purposes),) if exclude_purposes else ()),
                  *((t.model_call.c.purpose.in_(purposes),) if purposes is not None else ()))
-        calls, tokens, cost, ms, estimated = 0, 0, 0.0, 0, False
+        calls, tokens, budget_tokens, cost, ms, estimated = 0, 0, 0, 0.0, 0, False
+        weighted = func.json_extract(t.model_call.c.options, "$.budget_tokens")
         with self.engine.connect() as c:
             after = ""
             while True:
@@ -6000,14 +6003,16 @@ class Repo:
                     t.model_call.c.prompt_tokens_est, t.model_call.c.prompt_eval_count, t.model_call.c.eval_count,
                     case((or_(t.model_call.c.prompt_eval_count.is_(None), t.model_call.c.eval_count.is_(None)),
                           t.model_call.c.raw_response), else_=None),
-                    t.model_call.c.cost_usd_est, t.model_call.c.duration_ms,
+                    t.model_call.c.cost_usd_est, t.model_call.c.duration_ms, weighted,
                 ).where(*scope, t.model_call.c.id > after).order_by(t.model_call.c.id).limit(200)).all()
-                for call_id, prompt_est, prompt, completion, raw, row_cost, duration in rows:
+                for call_id, prompt_est, prompt, completion, raw, row_cost, duration, row_budget in rows:
                     if prompt is None or completion is None:
                         estimated = True
-                        prompt, completion = prompt_est or 0, int(len(raw or "") / 3.2) + 8
+                        prompt, completion, row_budget = prompt_est or 0, int(len(raw or "") / 3.2) + 8, None
                     calls += 1
                     tokens += int(prompt) + int(completion)
+                    budget_tokens += (int(row_budget) if isinstance(row_budget, (int, float))
+                                      else int(prompt) + int(completion))
                     cost += float(row_cost or 0.0)
                     ms += int(duration or 0)
                 if len(rows) < 200:
@@ -6027,7 +6032,7 @@ class Repo:
                 ("endpoint_host", "model"), or_(t.model_call.c.egress.is_(None), t.model_call.c.egress != "local"))
             answered, answered_more = groups((t.model_call.c.model, t.model_call.c.model_reported),
                 ("model", "model_reported"), and_(t.model_call.c.model_reported.is_not(None), t.model_call.c.model_reported != ""))
-        result = {"calls": calls, "tokens": tokens, "cost_usd": cost, "model_ms": ms, "estimated": estimated,
+        result = {"calls": calls, "tokens": tokens, "budget_tokens": budget_tokens, "cost_usd": cost, "model_ms": ms, "estimated": estimated,
                   "remote_calls": remote, "models_reported": answered}
         if group_limit is not None:
             result.update(remote_calls_more=remote_more, models_reported_more=answered_more)

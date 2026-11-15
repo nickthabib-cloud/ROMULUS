@@ -459,7 +459,8 @@ def run_assessment(settings, repo, hunt_id: str, provider, budget: AgentBudget, 
             if not info.get("retry_available"):
                 return True
             used = charge_parts(parts_of(info.get("billed")))
-            projected_tokens = budget.tokens + used.prompt + used.completion + limits.worst_tokens(prompt_est, max_output)
+            projected_tokens = (budget.budget_tokens + limits.budget_tokens(used)
+                                + limits.worst_tokens(prompt_est, max_output))
             projected_cost = (budget.cost_usd + limits.charge_cost(used)
                               + limits.worst_cost(prompt_est, max_output))
             if projected_tokens > limits.max_tokens:

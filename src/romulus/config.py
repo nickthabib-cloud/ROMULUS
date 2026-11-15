@@ -151,6 +151,11 @@ class Settings(BaseModel):
     agent_price_fallback_input_per_mtok: float = Field(default=0.0, ge=0.0)
     agent_price_fallback_output_per_mtok: float = Field(default=0.0, ge=0.0)
     agent_price_fallback_cache_read_per_mtok: float = Field(default=0.0, ge=0.0)
+    # anthropic only: what one prompt token read from / written to the prompt cache counts against the token budgets
+    # (AGENT_MAX_TOKENS and the triage input budget), relative to an uncached one, as the API prices them: a cache
+    # read at about a tenth of the input price, a five-minute cache write at 1.25 times it. Output tokens count once.
+    agent_cache_read_token_weight: float = Field(default=0.1, gt=0.0, le=1.0)
+    agent_cache_write_token_weight: float = Field(default=1.25, ge=1.0, le=10.0)
     agent_max_tool_calls_per_session: int = Field(default=25, ge=1, le=500)
     agent_max_source_queries: int = Field(default=200, ge=1, le=100_000)
     agent_concurrency: int = Field(default=2, ge=1, le=16)
@@ -342,6 +347,8 @@ ENV_MAP = {
     "AGENT_PRICE_FALLBACK_INPUT_PER_MTOK": "agent_price_fallback_input_per_mtok",
     "AGENT_PRICE_FALLBACK_OUTPUT_PER_MTOK": "agent_price_fallback_output_per_mtok",
     "AGENT_PRICE_FALLBACK_CACHE_READ_PER_MTOK": "agent_price_fallback_cache_read_per_mtok",
+    "AGENT_CACHE_READ_TOKEN_WEIGHT": "agent_cache_read_token_weight",
+    "AGENT_CACHE_WRITE_TOKEN_WEIGHT": "agent_cache_write_token_weight",
     "AGENT_MAX_TOOL_CALLS_PER_SESSION": "agent_max_tool_calls_per_session",
     "AGENT_MAX_SOURCE_QUERIES": "agent_max_source_queries",
     "AGENT_CONCURRENCY": "agent_concurrency",

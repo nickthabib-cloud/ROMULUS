@@ -231,7 +231,7 @@ def cmd_agent(args) -> int:
             if args.max_calls is not None or args.max_tokens is not None:
                 limits = replace(budget.limits,
                                  max_calls=budget.calls + args.max_calls if args.max_calls is not None else budget.limits.max_calls,
-                                 max_tokens=budget.tokens + args.max_tokens if args.max_tokens is not None else budget.limits.max_tokens)
+                                 max_tokens=budget.budget_tokens + args.max_tokens if args.max_tokens is not None else budget.limits.max_tokens)
                 budget = AgentBudget.from_usage(limits, usage,
                                                 wall_seconds_before=repo.agent_elapsed_ms(
                                                     args.hunt_id, exclude_purposes=(TRIAGE_PURPOSE,)) / 1000.0,

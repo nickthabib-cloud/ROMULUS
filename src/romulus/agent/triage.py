@@ -97,15 +97,17 @@ def _prompt() -> str:
 
 
 class TriageBudget(AgentBudget):
-    """The pass's own budget: calls, wall time, and prompt and output tokens counted separately. Each call is checked
-    before it starts against its worst case (its prompt estimate and the provider's full output allowance, doubled
-    when a refusal fallback may answer it too)."""
+    """The pass's own budget: calls, wall time, and prompt and output tokens counted separately. Prompt tokens count
+    as budget tokens, weighted by price (`BudgetLimits.budget_prompt_tokens`); the raw counts are kept too. Each call
+    is checked before it starts against its worst case (its prompt estimate at the dearest token weight and the
+    provider's full output allowance, doubled when a refusal fallback may answer it too)."""
 
     def __init__(self, limits: BudgetLimits, *, max_input_tokens: int, max_output_tokens: int, **kwargs):
         super().__init__(limits, **kwargs)
         self.max_input_tokens = max_input_tokens
         self.max_output_tokens = max_output_tokens
         self.input_tokens = 0
+        self.budget_input_tokens = 0
         self.output_tokens = 0
 
     @classmethod
@@ -119,21 +121,25 @@ class TriageBudget(AgentBudget):
 
     def check(self, prompt_tokens_est: int, max_output_tokens: int) -> None:
         super().check(prompt_tokens_est, max_output_tokens)
-        factor = 2 if self.limits.refusal_fallback else 1
-        if self.input_tokens + prompt_tokens_est * factor > self.max_input_tokens:
-            raise BudgetExhausted("input-tokens", f"{self.input_tokens} of {self.max_input_tokens} prompt tokens "
-                                                  f"used; the next call could use up to {prompt_tokens_est * factor}")
+        factor = self.limits.attempts_reserved
+        worst_prompt = self.limits.worst_prompt_tokens(prompt_tokens_est)
+        if self.budget_input_tokens + worst_prompt > self.max_input_tokens:
+            raise BudgetExhausted("input-tokens", f"{self.budget_input_tokens} of {self.max_input_tokens} prompt "
+                                                  "budget tokens (weighted by price) used; the next call could use "
+                                                  f"up to {worst_prompt}")
         if self.output_tokens + max_output_tokens * factor > self.max_output_tokens:
             raise BudgetExhausted("output-tokens", f"{self.output_tokens} of {self.max_output_tokens} output tokens "
                                                    f"used; the next call could use up to {max_output_tokens * factor}")
 
     def _add(self, charge: Charge) -> dict:
         self.input_tokens += charge.prompt
+        self.budget_input_tokens += self.limits.budget_prompt_tokens(charge)
         self.output_tokens += charge.completion
         return super()._add(charge)
 
     def snapshot(self) -> dict:
-        return {**super().snapshot(), "input_tokens": self.input_tokens, "output_tokens": self.output_tokens,
+        return {**super().snapshot(), "input_tokens": self.input_tokens,
+                "budget_input_tokens": self.budget_input_tokens, "output_tokens": self.output_tokens,
                 "max_input_tokens": self.max_input_tokens, "max_output_tokens": self.max_output_tokens}
 
 
@@ -430,8 +436,9 @@ def _call(settings, repo, hunt_id, provider, request, budget: TriageBudget, prom
         if not info.get("retry_available"):
             return True
         used = charge_parts(parts_of(info.get("billed")))
-        factor = 2 if limits.refusal_fallback else 1
-        if budget.input_tokens + used.prompt + prompt_est * factor > budget.max_input_tokens:
+        factor = limits.attempts_reserved
+        if (budget.budget_input_tokens + limits.budget_prompt_tokens(used) + limits.worst_prompt_tokens(prompt_est)
+                > budget.max_input_tokens):
             retry_budget.append("input-tokens")
         elif budget.output_tokens + used.completion + max_out * factor > budget.max_output_tokens:
             retry_budget.append("output-tokens")

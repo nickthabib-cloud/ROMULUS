@@ -92,7 +92,7 @@ class _BudgetGate:
         with self.lock:
             self.budget.check(prompt, output)
             after_calls = self.budget.calls + self.calls + 1
-            after_tokens = self.budget.tokens + self.tokens + tokens
+            after_tokens = self.budget.budget_tokens + self.tokens + tokens
             after_cost = self.budget.cost_usd + self.cost + cost
             if purpose != "assess":
                 reserve_calls, reserve_tokens, reserve_cost, reserve_wall = self._reserve_for_assess(prompt, output)
@@ -128,7 +128,8 @@ class _BudgetGate:
         extra_tokens = limits.worst_tokens(reservation.prompt_est, reservation.max_output)
         extra_cost = limits.worst_cost(reservation.prompt_est, reservation.max_output)
         with self.lock:
-            tokens = self.budget.tokens + max(0, self.tokens - reservation.tokens) + used.prompt + used.completion + extra_tokens
+            tokens = (self.budget.budget_tokens + max(0, self.tokens - reservation.tokens)
+                      + limits.budget_tokens(used) + extra_tokens)
             cost = self.budget.cost_usd + max(0.0, self.cost - reservation.cost) + limits.charge_cost(used) + extra_cost
             if tokens > limits.max_tokens:
                 reservation.retry_budget = "tokens"

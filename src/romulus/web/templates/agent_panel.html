@@ -5,7 +5,8 @@
 <p>Requested provider/model: {{ ai_panel.provider }}/{{ ai_panel.model }}.
 Started: {{ ai_panel.run.started_at or 'not started' }} · Ended: {{ ai_panel.run.ended_at or 'not recorded' }}.</p>
 <p>Calls {{ ai_panel.usage.calls }} / {{ ai_panel.budgets.max_calls or 'not recorded' }};
-tokens {{ ai_panel.usage.tokens }} / {{ ai_panel.budgets.max_tokens or 'not recorded' }}{% if ai_panel.usage.estimated %} (estimated){% endif %};
+budget tokens (weighted by price) {{ ai_panel.usage.budget_tokens }} / {{ ai_panel.budgets.max_tokens or 'not recorded' }}{% if ai_panel.usage.estimated %} (estimated){% endif %};
+raw tokens {{ ai_panel.usage.tokens }};
 wall time {{ ai_panel.wall_seconds }} s / {{ ai_panel.budgets.max_wall_seconds or 'not recorded' }} s;
 source queries {{ ai_panel.source_queries }} / {{ ai_panel.budgets.max_source_queries or 'not recorded' }}.
 {% if ai_panel.budgets.price_input_per_mtok or ai_panel.budgets.max_cost_usd %}
