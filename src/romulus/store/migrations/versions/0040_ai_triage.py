@@ -34,6 +34,7 @@ ai_triage_group = Table(
     Column("entity", String),
     Column("provenance", String, nullable=False),
     Column("finding_count", Integer, nullable=False),
+    Column("case_findings", Integer, nullable=False, server_default="0"),
     Column("finding_ids", JSON, nullable=False),
     Column("status", String, nullable=False),
     Column("reason", String),

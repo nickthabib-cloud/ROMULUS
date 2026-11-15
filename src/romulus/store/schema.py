@@ -304,8 +304,10 @@ Index("ix_entity_rank_position", entity_rank.c.hunt_id, entity_rank.c["pass"], e
 # The AI triage order: one row per deterministic finding group (rule and primary target within one report section)
 # of a hunt's latest triage pass. It is a separately labelled presentation order: nothing here changes a lane, rank,
 # Reported flag, citation or the deterministic report order. A new pass replaces the hunt's rows in one transaction
-# with its summary audit. `finding_ids` holds only the ids the model was shown (bounded); a group's full membership is
-# its key (section, rule, entity, provenance) over the stored findings. `position` is the group's place in the
+# with its summary audit. `finding_ids` holds only the ids the model was shown (at most three, the group's first in
+# deterministic order): a promotion moves those findings alone, and the rest of the group keeps its place. A group's
+# full membership is its key (section, rule, entity, provenance) over the stored findings; `case_findings` counts its
+# findings an investigator case discovered. `position` is the group's place in the
 # triage view: by section, the promoted groups first, then the rest by their best deterministic position.
 ai_triage_group = Table(
     "ai_triage_group", metadata,
@@ -320,6 +322,7 @@ ai_triage_group = Table(
     Column("entity", String),
     Column("provenance", String, nullable=False),
     Column("finding_count", Integer, nullable=False),
+    Column("case_findings", Integer, nullable=False, server_default="0"),
     Column("finding_ids", JSON, nullable=False),
     Column("status", String, nullable=False),        # promoted | assessed | not_triaged | dropped | excluded
     Column("reason", String),

@@ -439,6 +439,10 @@ FINAL_RANK_SUMMARY = "hunt.rank_pass_2_summary"
 TRIAGE_SUMMARY = "hunt.ai_triage_summary"
 # The model-call purpose of the triage pass: its calls are spent from its own budget, never the agent's.
 TRIAGE_PURPOSE = "triage"
+# A triage attempt that failed before publishing (its previous pass, if any, stays the view).
+TRIAGE_FAILED = "hunt.ai_triage_failed"
+# The reason on the agent record a triage pass creates for a hunt with no agent record: terminal, removed on release.
+TRIAGE_PLACEHOLDER = "triage_lease_placeholder"
 # A snapshot taken while the hunt has its final ranking lists findings in report order, as segments: ranked confirmed
 # (section 0), confirmed findings stored after the pass (lane urgent, no rank row), ranked reported (1), ranked not
 # reported (2), then every other member. Ranked members are ordered by position (`ix_finding_rank_section`), the
@@ -626,6 +630,12 @@ class Repo:
     def claim_agent_lease(self, hunt_id: str, lease_seconds: int, now: datetime | None = None,
                           owner_token: str | None = None) -> dict:
         """Claim agent-only work without changing the detection run's state."""
+        return self._claim_agent_lease(hunt_id, lease_seconds, now, owner_token)[0]
+
+    def _claim_agent_lease(self, hunt_id: str, lease_seconds: int, now: datetime | None, owner_token: str | None,
+                           *, initial: dict | None = None) -> tuple[dict, dict | None]:
+        """Claim the agent lease; return the claimed record and the record as it was before (None: the claim
+        created it, with `initial`'s state and reason, else pending)."""
         if lease_seconds <= 0:
             raise ValueError("agent lease_seconds must be positive")
         now = now or utcnow()
@@ -641,9 +651,10 @@ class Repo:
                 # failed hunt would publish a negative for scope that was never assessed.
                 raise RuntimeError(f"hunt {hunt_id} is {hunt['execution_state']}: the agent runs only after "
                                    "detection finishes; resume the hunt first")
+            before = c.execute(select(t.agent_run).where(t.agent_run.c.hunt_id == hunt_id)).mappings().first()
             values = {"hunt_id": hunt_id, "state": "pending", "prompt_digests": {}, "provider": {},
                       "lease_owner": owner_token, "lease_until": now + timedelta(seconds=lease_seconds),
-                      "updated_at": now}
+                      "updated_at": now, **(initial or {})}
             claimed = c.execute(insert(t.agent_run).values(**values).on_conflict_do_update(
                 index_elements=["hunt_id"],
                 set_={key: values[key] for key in ("lease_owner", "lease_until", "updated_at")},
@@ -651,7 +662,8 @@ class Repo:
             ))
             if claimed.rowcount != 1:
                 raise RuntimeError(f"hunt {hunt_id} agent phase has an active lease")
-            return dict(c.execute(select(t.agent_run).where(t.agent_run.c.hunt_id == hunt_id)).mappings().one())
+            return (dict(c.execute(select(t.agent_run).where(t.agent_run.c.hunt_id == hunt_id)).mappings().one()),
+                    dict(before) if before is not None else None)
 
     def heartbeat_agent_lease(self, hunt_id: str, lease_seconds: int, now: datetime | None = None,
                               *, owner_token: str | None = None) -> dict:
@@ -669,17 +681,17 @@ class Repo:
             return dict(c.execute(select(t.agent_run).where(t.agent_run.c.hunt_id == hunt_id)).mappings().one())
 
     def claim_triage_lease(self, hunt_id: str, lease_seconds: int) -> tuple[str, bool]:
-        """Claim the agent lease for a triage pass; return the owner token and whether the claim created the hunt's
-        agent record (a hunt stored before the agent phase existed). A created record is removed again on release
-        (`release_triage_lease`), so triage never makes a hunt look as if it had an agent phase."""
-        with self.engine.connect() as connection:
-            existed = connection.execute(select(t.agent_run.c.hunt_id).where(
-                t.agent_run.c.hunt_id == hunt_id)).first() is not None
-        claimed = self.claim_agent_lease(hunt_id, lease_seconds)
-        return claimed["lease_owner"], not existed and claimed["state"] == "pending" and claimed["started_at"] is None
+        """Claim the agent lease for a triage pass; return the owner token and whether the hunt's agent record is the
+        triage placeholder (a hunt with no agent record). The check and the claim are one transaction. The
+        placeholder is a terminal `skipped` record named by its reason, so an interrupted pass never leaves anything
+        `hunt resume` treats as a resumable agent phase; a later triage pass claims and removes it."""
+        claimed, before = self._claim_agent_lease(hunt_id, lease_seconds, None, None, initial={
+            "state": "skipped", "reason": TRIAGE_PLACEHOLDER})
+        placeholder = before is None or (before["reason"] == TRIAGE_PLACEHOLDER and before["started_at"] is None)
+        return claimed["lease_owner"], placeholder
 
     def release_triage_lease(self, hunt_id: str, *, owner_token: str, created: bool) -> None:
-        """Release a triage pass's lease; a record the claim created is deleted rather than left pending."""
+        """Release a triage pass's lease; the placeholder record is deleted rather than left behind."""
         if not created:
             self.release_agent_lease(hunt_id, owner_token=owner_token)
             return
@@ -687,7 +699,7 @@ class Repo:
             self._fence_agent_lease(c, hunt_id, owner_token)
             c.execute(t.agent_run.delete().where(
                 t.agent_run.c.hunt_id == hunt_id, t.agent_run.c.lease_owner == owner_token,
-                t.agent_run.c.state == "pending", t.agent_run.c.started_at.is_(None)))
+                t.agent_run.c.reason == TRIAGE_PLACEHOLDER, t.agent_run.c.started_at.is_(None)))
 
     def release_agent_lease(self, hunt_id: str, *, owner_token: str | None = None) -> None:
         """Release a claimed phase while retaining its existing progress and assessment."""
