@@ -28,10 +28,13 @@ from romulus.agent.provider import (
 )
 from romulus.agent.provider.claude_messages import (
     FALLBACK_BETA,
+    GRAMMAR_BUDGET,
+    MAX_STRICT_TOOLS,
     EgressViolation,
     _format_ok,
     instance_problems,
     strict_schema_problems,
+    strict_wire_schema,
 )
 from romulus.config import Settings, load_settings
 from romulus.doctor import check_agent
@@ -367,14 +370,8 @@ def test_requests_never_carry_sampling_parameters_and_records_say_so(tmp_path):
 
 @pytest.mark.parametrize(("schema", "problem"), [
     ({"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]}, "additionalProperties"),
-    ({"type": "object", "properties": {"a": {"type": "string", "minLength": 2}}, "required": ["a"],
-      "additionalProperties": False}, "minLength"),
-    ({"type": "object", "properties": {"n": {"type": "integer", "maximum": 9}}, "required": ["n"],
-      "additionalProperties": False}, "maximum"),
     ({"type": "object", "properties": {"a": {"oneOf": [{"type": "string"}, {"type": "null"}]}}, "required": ["a"],
       "additionalProperties": False}, "anyOf"),
-    ({"type": "object", "properties": {"a": {"type": "array", "items": {"type": "string"}, "minItems": 2}},
-      "required": ["a"], "additionalProperties": False}, "minItems"),
     ({"type": "object", "properties": {"a": {"type": "string", "format": "ipv4-cidr"}}, "required": ["a"],
       "additionalProperties": False}, "format"),
     ({"type": "object", "properties": {"a": {"type": "string", "pattern": r"(a)\1"}}, "required": ["a"],
@@ -430,7 +427,10 @@ def test_past_the_per_request_strict_limits_tools_go_loose_and_a_response_schema
     ep = Endpoint(reply([text("hi")]))
     p, _ = provider(claude_settings(), ep)
     assert p.chat(ask(tools=many)).ok
-    assert sum(t["strict"] for t in ep.body()["tools"]) == 20
+    assert GRAMMAR_BUDGET["tools"] < MAX_STRICT_TOOLS
+    sent = {t["name"]: t["strict"] for t in ep.body()["tools"]}
+    # taken in the order the request lists them, up to the grammar budget's tool count
+    assert [name for name, strict in sent.items() if strict] == sorted(f"t{n}" for n in range(GRAMMAR_BUDGET["tools"]))
     optional = {"type": "object", "properties": {f"p{n}": {"type": "string"} for n in range(25)}, "required": [],
                 "additionalProperties": False}
     assert p.chat(ask(tools=[Tool("wide", "x", optional), TOOL])).ok
@@ -904,9 +904,104 @@ def test_the_union_limit_is_checked():
     result = p.chat(ask(response_schema=union))
     assert "17 union-typed parameters" in result.error and ep.calls == []
     assert p.chat(ask(tools=[Tool("wide", "x", union)])).ok and ep.body()["tools"][0]["strict"] is False
-    union["properties"].pop("u16")
+    # a response schema may use every documented union; tools stay inside the smaller grammar budget
+    for n in range(16, GRAMMAR_BUDGET["union"], -1):
+        union["properties"].pop(f"u{n}")
+        union["required"].pop()
+    sent = len(ep.calls)
+    assert p.chat(ask(response_schema=union)).status == "invalid_json" and len(ep.calls) == sent + 1   # "hi" is sent
+    assert p.chat(ask(tools=[Tool("wide", "x", union)])).ok and ep.body()["tools"][0]["strict"] is False
+    union["properties"].pop(f"u{GRAMMAR_BUDGET['union']}")
     union["required"].pop()
     assert p.chat(ask(tools=[Tool("wide", "x", union)])).ok and ep.body()["tools"][0]["strict"] is True
+
+
+EXACT = {"type": "object", "additionalProperties": False, "required": ["summary", "cites"], "properties": {
+    "summary": {"type": "string", "minLength": 20, "maxLength": 2000, "description": "The summary."},
+    "cites": {"type": "array", "items": {"type": "string", "pattern": "^E[1-9][0-9]*$"}, "minItems": 1,
+              "maxItems": 20},
+    "page": {"type": "integer", "minimum": 1, "default": 1},
+    "tags": {"type": "array", "items": {"type": "string"}, "default": []},
+    "cursor": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None, "description": "Next page."},
+    "free": {"type": "string"}}}
+
+
+def test_a_strict_schema_states_unsupported_bounds_in_words_and_avoids_unions_and_optional_defaults():
+    assert any("minLength" in p for p in strict_schema_problems(EXACT))      # the exact form is outside the subset
+    wire = strict_wire_schema(EXACT)
+    counts: dict = {}
+    assert strict_schema_problems(wire, counts) == []
+    props = wire["properties"]
+    assert props["summary"] == {"type": "string", "description": (
+        "The summary. (Must be at least 20 character(s), at most 2000 characters.)")}
+    assert props["cites"]["minItems"] == 1 and "maxItems" not in props["cites"]
+    assert props["cites"]["items"] == {"type": "string",
+                                       "description": "Must be a match for the regular expression ^E[1-9][0-9]*$."}
+    # a non-null default: required, so the model states it; a null default on "this or null": optional, no union
+    assert {"page", "tags"} <= set(wire["required"]) and "minimum" not in props["page"]
+    assert props["cursor"] == {"type": "string", "description": "Next page."} and "cursor" not in wire["required"]
+    assert "free" not in wire["required"]
+    assert (counts["union"], counts["optional"]) == (0, 2)
+    # every value the strict form allows is still checked by the exact form's owner; the input is unchanged
+    assert EXACT["properties"]["summary"]["minLength"] == 20
+    assert strict_wire_schema(TOOL.parameters) == TOOL.parameters
+
+
+def test_a_tool_that_does_not_ask_for_strictness_is_sent_loose_with_its_exact_schema():
+    ep = Endpoint(reply([text("hi")]))
+    p, _ = provider(claude_settings(), ep)
+    assert p.chat(ask(tools=[Tool("read", "Read.", EXACT, strict=False), Tool("write", "Write.", EXACT)])).ok
+    sent = {t["name"]: t for t in ep.body()["tools"]}
+    assert sent["read"]["strict"] is False and sent["read"]["input_schema"] == EXACT
+    assert sent["write"]["strict"] is True and sent["write"]["input_schema"] == strict_wire_schema(EXACT)
+
+
+def test_the_grammar_budget_keeps_tools_strict_only_while_every_bound_holds():
+    # each tool alone fits; together they pass the property bound, so later ones go loose and smaller ones still fit
+    def wide(n):
+        return {"type": "object", "additionalProperties": False, "required": [f"p{i}" for i in range(n)],
+                "properties": {f"p{i}": {"type": "string"} for i in range(n)}}
+    half = (GRAMMAR_BUDGET["properties"] - 1) // 2
+    tools = [Tool("a", "x", wide(half)), Tool("b", "x", wide(half)), Tool("c", "x", wide(half)),
+             Tool("d", "x", wide(1))]
+    ep = Endpoint(reply([text("hi")]))
+    p, _ = provider(claude_settings(), ep)
+    assert p.chat(ask(tools=tools)).ok
+    assert {t["name"]: t["strict"] for t in ep.body()["tools"]} == {"a": True, "b": True, "c": False, "d": True}
+    enums = {"type": "object", "additionalProperties": False, "required": ["e"],
+             "properties": {"e": {"type": "string", "enum": [f"v{i}" for i in range(GRAMMAR_BUDGET["enum"] + 1)]}}}
+    assert p.chat(ask(tools=[Tool("enums", "x", enums)])).ok and ep.body()["tools"][0]["strict"] is False
+
+
+def test_a_grammar_refusal_is_sent_again_once_with_every_tool_loose_and_remembered():
+    too_large = httpx2.Response(400, json={"type": "error", "error": {
+        "type": "invalid_request_error",
+        "message": "The compiled grammar is too large. Simplify your tool schemas."}})
+    ep = Endpoint(too_large, reply([text("hi")]), reply([text("again")]))
+    p, sleeps = provider(claude_settings(), ep)
+    result = p.chat(ask(tools=[TOOL, PIVOT]))
+    assert result.ok and result.content == "hi" and sleeps == []
+    assert "compiled grammar is too large" in result.details["strict_tools_refused"]
+    assert [t["strict"] for t in ep.body(0)["tools"]] == [True, True]
+    assert [t["strict"] for t in ep.body(1)["tools"]] == [False, False]
+    assert p.chat(ask(tools=[TOOL, PIVOT])).ok and len(ep.calls) == 3
+    assert [t["strict"] for t in ep.body()["tools"]] == [False, False]          # the same tool set stays loose
+    assert p.chat(ask(tools=[TOOL])).ok and ep.body()["tools"][0]["strict"] is True     # another set does not
+
+
+def test_any_other_bad_request_is_not_resent_and_a_response_schema_never_goes_loose():
+    bad = httpx2.Response(400, json={"type": "error", "error": {"type": "invalid_request_error",
+                                                                "message": "messages: field required"}})
+    ep = Endpoint(bad)
+    p, _ = provider(claude_settings(), ep)
+    result = p.chat(ask(tools=[TOOL]))
+    assert result.status == "error" and "field required" in result.error and len(ep.calls) == 1
+    too_large = httpx2.Response(400, json={"type": "error", "error": {
+        "type": "invalid_request_error", "message": "Schema is too complex for compilation."}})
+    ep = Endpoint(too_large)
+    p, _ = provider(claude_settings(), ep)
+    result = p.chat(ask(response_schema=TOOL.parameters))       # no strict tool to loosen: reported as it is
+    assert result.status == "error" and "too complex" in result.error and len(ep.calls) == 1
 
 
 def test_the_sdk_without_its_http_library_is_not_configured(monkeypatch):

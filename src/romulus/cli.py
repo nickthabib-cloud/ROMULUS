@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from romulus.config import load_settings
+from romulus.config import load_settings, with_agent_model
 
 EXIT_OK, EXIT_FAIL, EXIT_USAGE = 0, 1, 2
 
@@ -20,10 +20,20 @@ def _env_file(args) -> Path:
     return p if p.exists() else Path(".env")
 
 
+def _settings(args):
+    """The run's settings: the .env, with --agent-model (where the command takes it) replacing AGENT_MODEL for this
+    run only. Raises ValueError for a malformed model id."""
+    return with_agent_model(load_settings(_env_file(args)), getattr(args, "agent_model", None))
+
+
 def cmd_doctor(args) -> int:
     from romulus.doctor import run_all
     env = _env_file(args)
-    s = load_settings(env)
+    try:
+        s = _settings(args)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_USAGE
     checks = run_all(s, env)
     if args.json:
         print(json.dumps([c.__dict__ for c in checks], indent=2))
@@ -56,11 +66,26 @@ def _parse_time(value: str, tz: str):
 def cmd_hunt(args) -> int:
     import logging
 
-    from romulus.hunt.run import ai_agent_entry, create_hunt, open_repo, resume_hunt, run_hunt
+    from romulus.hunt.run import (
+        AgentModelMismatch,
+        ai_agent_entry,
+        create_hunt,
+        open_repo,
+        resume_hunt,
+        run_hunt,
+    )
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     logging.getLogger("alembic").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    s = load_settings(_env_file(args))
+    try:
+        s = _settings(args)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_USAGE
+    force_model = bool(getattr(args, "force_model", False))
+    if force_model and args.action != "resume":
+        print("--force-model applies only to hunt resume", file=sys.stderr)
+        return EXIT_USAGE
     if args.action == "start":
         from romulus.hunt.run import _lease_seconds
         from romulus.store.db import maintenance_lease
@@ -104,7 +129,11 @@ def cmd_hunt(args) -> int:
         if args.agent or args.no_agent:
             print("resume uses the agent request recorded on the hunt", file=sys.stderr)
             return EXIT_FAIL
-        result = resume_hunt(s, args.hunt_id)
+        try:
+            result = resume_hunt(s, args.hunt_id, force_model=force_model)
+        except AgentModelMismatch as exc:
+            print(str(exc), file=sys.stderr)
+            return EXIT_FAIL
         if args.json:
             print(json.dumps(result, indent=2, default=str))
         else:
@@ -466,7 +495,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--env-file", help="path to .env (default: $ROMULUS_HOME/.env)")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("doctor", help="check sources, privileges, model endpoint, tools and storage")
+    model_help = ("the agent's model id for this run only, in place of AGENT_MODEL (the .env is not changed; "
+                  "the hunt records the model it used)")
+    dop = sub.add_parser("doctor", help="check sources, privileges, model endpoint, tools and storage")
+    dop.add_argument("--agent-model", help=model_help)
     hp = sub.add_parser("hunt", help="create/run hunts and show status")
     hp.add_argument("action", choices=["start", "resume", "status"])
     hp.add_argument("hunt_id", nargs="?")
@@ -477,6 +509,10 @@ def main(argv: list[str] | None = None) -> int:
     agent_switch = hp.add_mutually_exclusive_group()
     agent_switch.add_argument("--agent", action="store_true", help="request the AI investigating agent")
     agent_switch.add_argument("--no-agent", action="store_true", help="run the deterministic hunt without the agent")
+    hp.add_argument("--agent-model", help=model_help + "; resume refuses a model other than the one the hunt's "
+                    "agent used, unless --force-model")
+    hp.add_argument("--force-model", action="store_true",
+                    help="resume: let the agent continue with a different model than the hunt recorded")
     hp.add_argument("--no-expand", action="store_true", help=argparse.SUPPRESS)
     ap = sub.add_parser("agent", help="run an AI assessment for a stored hunt")
     agent_actions = ap.add_subparsers(dest="action", required=True)

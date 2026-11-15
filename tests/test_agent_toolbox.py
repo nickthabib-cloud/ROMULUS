@@ -69,7 +69,10 @@ def _assert_strict_objects(value):
     if isinstance(value, dict):
         if value.get("type") == "object" or "properties" in value:
             assert value.get("additionalProperties") is False
-            assert set(value.get("required") or []) == set((value.get("properties") or {}).keys())
+            properties = value.get("properties") or {}
+            assert set(value.get("required") or []) <= set(properties)
+            # an optional property states the default its omission means
+            assert all("default" in properties[name] for name in set(properties) - set(value["required"]))
         for child in value.values():
             _assert_strict_objects(child)
     elif isinstance(value, list):
@@ -102,6 +105,8 @@ def test_registry_exports_a1_tools_with_strict_round_trip_schemas():
         _assert_strict_objects(tool.parameters)
     lane_schema = tools["list_findings"].parameters["properties"]["lane"]
     assert {item.get("type") for item in lane_schema["anyOf"]} == {"string", "null"}
+    assert lane_schema["default"] is None and tools["list_findings"].parameters["required"] == []
+    assert not any(tool.strict for tool in tools.values())      # read tools are validated here alone
     assert toolbox.registry["list_findings"].arguments.model_validate({
         "lane": None, "rule": RULE, "entity": None, "page": 1,
     }).rule == RULE

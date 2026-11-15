@@ -603,8 +603,37 @@ def _with_agent_result(result: dict, repo: Repo, summary: dict, *, settings: Set
     return combined
 
 
-def resume_hunt(s: Settings, hunt_id: str) -> dict:
-    """Resume persisted agent work without repeating a completed deterministic hunt."""
+class AgentModelMismatch(ValueError):
+    """A resume would run the hunt's agent with another model than the one it recorded."""
+
+
+def recorded_agent_model(repo: Repo, hunt: dict) -> str:
+    """The model the hunt's agent ran with, else the one its manifest recorded when the hunt was created ("" when
+    neither names one)."""
+    run = repo.agent_run(hunt["id"]) or {}
+    return str((run.get("provider") or {}).get("model")
+               or ((hunt.get("manifest") or {}).get("ai_agent") or {}).get("model") or "")
+
+
+def _check_agent_model(s: Settings, repo: Repo, hunt: dict, force_model: bool) -> None:
+    """A resumed agent keeps the model the hunt recorded: its signed reasoning and its results belong to that model.
+    Another model is refused unless the caller forces it."""
+    if not ((hunt.get("manifest") or {}).get("ai_agent") or {}).get("requested"):
+        return
+    recorded = recorded_agent_model(repo, hunt)
+    if recorded and s.agent_model != recorded and not force_model:
+        raise AgentModelMismatch(
+            f"hunt {hunt['id']}'s agent used model {recorded}, but this resume would use "
+            f"{s.agent_model or 'no model'}. Resume with --agent-model {recorded}, or add --force-model to "
+            "continue with the other model.")
+    if recorded and s.agent_model != recorded:
+        log.warning("hunt %s: the agent continues with model %s instead of the recorded %s (forced)",
+                    hunt["id"], s.agent_model, recorded)
+
+
+def resume_hunt(s: Settings, hunt_id: str, *, force_model: bool = False) -> dict:
+    """Resume persisted agent work without repeating a completed deterministic hunt. The agent keeps the model the
+    hunt recorded unless `force_model`."""
     repo = open_repo(s)
     hunt = repo.get_hunt(hunt_id)
     if hunt is None:
@@ -626,6 +655,7 @@ def resume_hunt(s: Settings, hunt_id: str) -> dict:
         repo.set_hunt_state(hunt_id, "failed", owner_token=stale["lease_owner"],
                             stop_reason="the hunt's worker stopped before its sweep finished")
         raise RuntimeError("running hunt cannot resume because the sweep did not finish; it is now marked failed")
+    _check_agent_model(s, repo, hunt, force_model)
     recorded_manifest = hunt.get("manifest") or {}
     ensure_site_unchanged(s.home, recorded_manifest.get("site"))
     recorded = recorded_manifest.get("normalizer")

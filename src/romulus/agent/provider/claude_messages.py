@@ -12,9 +12,11 @@ broke off mid-reply at its full output allowance), so budgets price each attempt
 Translation: leading system messages become the top-level system prompt and later ones mid-conversation system
 messages, placed where the API accepts them (after a user turn, last or before an assistant turn; anything else is a
 HistoryError); assistant tool calls become tool_use blocks; consecutive tool results go back in one user message. A
-tool is sent strict when its schema is inside the strict subset the API documents (and the request within its strict
-limits), else not strict; a response schema becomes output_config.format and must be inside the subset, or the request
-is refused before anything is sent; sampling parameters are never sent. tool_choice "required" becomes "auto" with an
+tool that asks for strictness is sent strict while its schema fits the strict subset the API documents and the
+request stays within the documented strict limits and a conservative grammar budget (bounds the subset lacks move
+into the description); every other tool is sent loose with its exact schema, and if the API still refuses the strict
+grammar, the call is sent once more with every tool loose. A response schema becomes output_config.format and must
+fit the subset, or the request is refused before anything is sent; sampling parameters are never sent. tool_choice "required" becomes "auto" with an
 instruction to call a tool, and a reply without one is invalid_tool_call. Thinking is adaptive, AGENT_EFFORT sets how
 much, and every call's max_tokens adds AGENT_THINKING_TOKENS of room for it. Calls stream (large max_tokens values
 need it), tool inputs stream as generated, and so each tool input is parsed strictly from the raw stream and, for a
@@ -63,6 +65,7 @@ from romulus.agent.provider.egress import EgressDecision
 from romulus.agent.provider.openai_compatible import probe_calls
 from romulus.config import MIN_SECRET_LENGTH, Settings, redact_text
 
+log = logging.getLogger("romulus.agent")
 # the server-side refusal fallback, "default" form: the API picks the fallback model by refusal category
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 CACHE = {"type": "ephemeral"}            # five-minute cache entries
@@ -92,9 +95,25 @@ STRICT_KEYS = frozenset({"type", "properties", "required", "additionalProperties
                          "pattern"})
 DEF_KEYS = ("$defs", "$def", "definitions")
 UNSUPPORTED_PATTERN = re.compile(r"\\[1-9]|\(\?<?[=!]|\\[bB]")   # backreferences, lookaround, word boundaries
+# the documented per-request limits, over every strict tool and the response schema together
 MAX_STRICT_TOOLS = 20
 MAX_OPTIONAL_PARAMETERS = 24
 MAX_UNION_PARAMETERS = 16
+# The API also refuses a request whose strict schemas compile to too large a grammar, at a size it does not
+# publish. These bounds keep the strict tools well inside sizes that are known to compile: past any of them, further
+# tools are sent loose (and still validated by the caller). A response schema has no loose form and is not held to
+# them. Counts are over the schemas as sent: every property at every depth, every enum value, every pattern.
+GRAMMAR_BUDGET = {"tools": 10, "optional": 12, "union": 8, "properties": 48, "enum": 40}
+# a request refused for its grammar's size; it is sent again once with every tool loose
+GRAMMAR_REFUSAL = re.compile(r"grammar|too complex|compil", re.IGNORECASE)
+# keywords a strict schema states in its description instead, for the caller's own validation to enforce: those
+# outside the strict subset, and patterns, which the subset takes but which enlarge the compiled grammar; minItems 0
+# and 1 are inside the subset and stay
+DESCRIBED_KEYS = {"minLength": "at least {} character(s)", "maxLength": "at most {} characters",
+                  "minimum": "at least {}", "maximum": "at most {}", "exclusiveMinimum": "more than {}",
+                  "exclusiveMaximum": "less than {}", "multipleOf": "a multiple of {}",
+                  "minItems": "at least {} items", "maxItems": "at most {} items",
+                  "pattern": "a match for the regular expression {}"}
 
 
 class EgressViolation(Exception):
@@ -295,10 +314,25 @@ def _refs(node) -> set[str]:
     return set()
 
 
+def _pattern_ok(pattern) -> bool:
+    """A regular expression the strict subset supports: it compiles, with no backreference, lookaround or word
+    boundary."""
+    if not isinstance(pattern, str) or UNSUPPORTED_PATTERN.search(pattern):
+        return False
+    try:
+        re.compile(pattern)
+    except re.error:
+        return False
+    return True
+
+
 def strict_schema_problems(schema, counts: dict | None = None) -> list[str]:
     """Why `schema` is outside the documented strict subset (empty when it is inside). `counts` accumulates
-    optional and union parameters for the per-request limits."""
-    counts = counts if counts is not None else {"optional": 0, "union": 0}
+    optional and union parameters for the per-request limits, and properties, enum values and patterns for the
+    grammar budget."""
+    counts = counts if counts is not None else {}
+    for key in ("optional", "union", "properties", "enum", "pattern"):
+        counts.setdefault(key, 0)
     problems: list[str] = []
     if not isinstance(schema, dict):
         return ["the schema is not a JSON object"]
@@ -335,6 +369,7 @@ def strict_schema_problems(schema, counts: dict | None = None) -> list[str]:
                 if unknown:
                     problems.append(f"{path}: required names undeclared properties {unknown}")
                 counts["optional"] += len(set(properties) - set(required))
+                counts["properties"] += len(properties)
                 for name, sub in properties.items():
                     walk(sub, f"{path}.{name}")
         elif "additionalProperties" in node and node["additionalProperties"] is not False:
@@ -346,9 +381,12 @@ def strict_schema_problems(schema, counts: dict | None = None) -> list[str]:
         if "enum" in node and (not isinstance(node["enum"], list) or any(
                 isinstance(v, (dict, list)) for v in node["enum"])):
             problems.append(f"{path}: enum must list strings, numbers, booleans or nulls")
+        elif "enum" in node:
+            counts["enum"] += len(node["enum"])
         if "format" in node and node["format"] not in STRICT_FORMATS:
             problems.append(f"{path}: format {node['format']!r} is not supported")
         if "pattern" in node:
+            counts["pattern"] += 1
             if not isinstance(node["pattern"], str) or UNSUPPORTED_PATTERN.search(node["pattern"]):
                 problems.append(f"{path}: the pattern uses an unsupported regular-expression feature")
             else:
@@ -386,6 +424,78 @@ def strict_schema_problems(schema, counts: dict | None = None) -> list[str]:
                 seen.add(ref)
                 stack.extend(graph.get(ref, ()))
     return problems
+
+
+def _null_branch(node) -> dict | None:
+    """The non-null schema of a two-way anyOf with null, else None."""
+    branches = node.get("anyOf") if isinstance(node, dict) else None
+    if not isinstance(branches, list) or len(branches) != 2 or {"type": "null"} not in branches:
+        return None
+    other = branches[0] if branches[1] == {"type": "null"} else branches[1]
+    return other if isinstance(other, dict) else None
+
+
+def strict_wire_schema(schema):
+    """The form a strict tool's or response's schema is sent in. Bounds outside the strict subset (lengths, numbers,
+    item counts) and patterns move into the description in words, for the caller to enforce. A property with a non-null default becomes required, so the model states
+    the value (each optional parameter widens the grammar); one whose default is null and whose type is "this or
+    null" keeps only "this" and stays optional, as omitting it means null (each union widens the grammar more). A
+    schema inside the subset with neither comes back unchanged."""
+    if not isinstance(schema, dict):
+        return schema
+
+    def walk(node):
+        if isinstance(node, list):
+            return [walk(item) for item in node]
+        if not isinstance(node, dict):
+            return node
+        out = {}
+        said = []
+        for key, value in node.items():
+            if key == "pattern" and not _pattern_ok(value):
+                out[key] = value            # left in place: strict_schema_problems refuses it, so it goes loose
+            elif key in DESCRIBED_KEYS and not (key == "minItems" and value in (0, 1)):
+                said.append(DESCRIBED_KEYS[key].format(value))
+            elif key in ("properties", *DEF_KEYS) and isinstance(value, dict):
+                out[key] = {name: walk(sub) for name, sub in value.items()}
+            elif key in ("items", "anyOf", "allOf"):
+                out[key] = walk(value)
+            else:
+                out[key] = value
+        if said:
+            note = "Must be " + ", ".join(said) + "."
+            out["description"] = f"{out['description']} ({note})" if out.get("description") else note
+        properties = out.get("properties")
+        required = out.get("required")
+        if isinstance(properties, dict) and isinstance(required, list):
+            required = list(required)
+            for name, sub in list(properties.items()):
+                if name in required or not isinstance(sub, dict) or "default" not in sub:
+                    continue
+                if sub["default"] is not None:
+                    required.append(name)
+                    continue
+                kept = _null_branch(sub)
+                if kept is not None:
+                    merged = {**kept, **{k: v for k, v in sub.items() if k in ("description", "title")}}
+                    properties[name] = merged
+            out["required"] = required
+        return out
+
+    return walk(schema)
+
+
+def _counts_over(counts: dict, budget: dict, tools: int) -> list[str]:
+    """Which documented limits or grammar-budget bounds `counts` (and `tools` strict tools) exceed."""
+    over = []
+    if tools > min(MAX_STRICT_TOOLS, budget["tools"]):
+        over.append(f"{tools} strict tools")
+    for key, documented in (("optional", MAX_OPTIONAL_PARAMETERS), ("union", MAX_UNION_PARAMETERS),
+                            ("properties", None), ("enum", None)):
+        bound = budget[key] if documented is None else min(documented, budget[key])
+        if counts[key] > bound:
+            over.append(f"{counts[key]} {key}")
+    return over
 
 
 def _is_type(value, kind: str) -> bool:
@@ -531,6 +641,7 @@ class ClaudeMessagesProvider(ChatProvider):
         self.base_url = endpoint_url(settings).rstrip("/")
         self.betas = (FALLBACK_BETA,) if settings.agent_refusal_fallback == "default" else ()
         self._window: int | None = None
+        self._grammar_refused: set[str] = set()     # tool sets the API refused to compile strict
         key = settings.agent_api_key.get_secret_value()
         timeout = float(settings.agent_timeout_seconds)
         # an explicit transport: the SDK's default one would mount the environment's (or the registry's) proxies
@@ -585,6 +696,7 @@ class ClaudeMessagesProvider(ChatProvider):
         raw_inputs: dict[int, str] = {}
         attempts = [0]
         broken: list[dict] = []          # attempts that broke off after their reply began: billed all the same
+        loosened = ""
 
         def once():
             attempts[0] += 1
@@ -603,18 +715,32 @@ class ClaudeMessagesProvider(ChatProvider):
                 raise
 
         t0 = time.monotonic()
-        try:
-            message, ms, n = self._retrying(once, attempt_guard=request.attempt_guard,
-                                            billed=lambda: broken)
-        except _Failed as exc:
-            result = failed(exc.status, exc.error, int((time.monotonic() - t0) * 1000), attempts[0])
-            if broken:
-                result.details = {"billed": broken}
-            return result
-        except ProviderUnavailable as exc:
-            exc.billed = broken      # for AgentBudget.charge_failure: the provider billed these attempts
-            raise
-        return self._result(request, message, raw_inputs, required, est, ms, n, broken, max_out)
+        while True:
+            try:
+                message, ms, _ = self._retrying(once, attempt_guard=request.attempt_guard,
+                                                billed=lambda: broken)
+                break
+            except _Failed as exc:
+                if (strict and exc.error.startswith("HTTP 400") and GRAMMAR_REFUSAL.search(exc.error)
+                        and not broken):
+                    # refused before anything ran, for the size of the strict tools' grammar: once more, all loose
+                    self._grammar_refused.add(self._tool_set(request))
+                    loosened = exc.error
+                    log.warning("the API refused the strict tool schemas (%s); sending the tools loose", exc.error)
+                    strict = {}
+                    body, required = self._body(request, messages, max_out, strict)
+                    continue
+                result = failed(exc.status, exc.error, int((time.monotonic() - t0) * 1000), attempts[0])
+                if broken:
+                    result.details = {"billed": broken}
+                return result
+            except ProviderUnavailable as exc:
+                exc.billed = broken      # for AgentBudget.charge_failure: the provider billed these attempts
+                raise
+        result = self._result(request, message, raw_inputs, required, est, ms, attempts[0], broken, max_out, strict)
+        if loosened:
+            result.details["strict_tools_refused"] = loosened
+        return result
 
     def _broken_attempt(self, began: dict, max_out: int) -> list[dict]:
         """The charge of an attempt whose reply began and then broke off: its reported prompt, and its output at the
@@ -687,47 +813,53 @@ class ClaudeMessagesProvider(ChatProvider):
             raise _Failed("error", f"the reply stream could not be read: {exc}"[:600]) from None
 
     # ---- request ----------------------------------------------------------------------------------------------
-    def _strictness(self, request: ChatRequest) -> tuple[frozenset[str], list[str]]:
-        """Choose a bounded strict-tool prefix in stable output-first order.
+    @staticmethod
+    def _tool_set(request: ChatRequest) -> str:
+        return json.dumps(sorted([t.name, t.parameters, t.strict] for t in request.tools), sort_keys=True)
 
-        The response schema has no loose form, so its problems refuse the request. Tools after the provider's
-        per-request union/optional limit remain available with local validation but are sent non-strict.
-        """
-        schema_counts = {"optional": 0, "union": 0}
+    def _strictness(self, request: ChatRequest) -> tuple[dict[str, dict], list[str]]:
+        """The tools sent strict, each with the schema it is sent with, and why the request cannot be sent.
+
+        The response schema has no loose form: outside the strict subset or past a documented limit, the request is
+        refused before anything is sent. Tools that ask for strictness are then taken in the order the request lists
+        them while every documented limit and the grammar budget hold, the response schema's share counted first;
+        the rest are sent loose with their exact schema, and the caller validates their arguments. A tool set the API
+        refused for its grammar's size is sent with every tool loose from then on. The choice depends only on the
+        request, so the cached prefix of tools stays the same from call to call."""
+        counts = {"optional": 0, "union": 0, "properties": 0, "enum": 0, "pattern": 0}
         problems: list[str] = []
         if request.response_schema is not None:
             problems = [f"response schema: {p}"
-                        for p in strict_schema_problems(request.response_schema, schema_counts)]
-        counts = dict(schema_counts)
-        strict = set()
-        preferred = (
-            "propose_finding", "propose_link", "add_note", "request_rule",
-            "open_hypothesis", "update_hypothesis", "finish_session",
-            "get_finding", "get_evidence", "get_incident",
-            "list_findings", "list_coverage", "list_incidents", "entity_profile",
-            "entity_timeline", "auth_activity", "process_tree", "ids_alerts", "follow_link",
-        )
-        order = {name: index for index, name in enumerate(preferred)}
-        for t in sorted(request.tools, key=lambda item: (order.get(item.name, len(order)), item.name)):
-            tool_counts = {"optional": 0, "union": 0}
-            if not strict_schema_problems(t.parameters, tool_counts):
-                proposed = {key: counts[key] + tool_counts[key] for key in counts}
-                if (len(strict) >= MAX_STRICT_TOOLS or proposed["optional"] > MAX_OPTIONAL_PARAMETERS
-                        or proposed["union"] > MAX_UNION_PARAMETERS):
-                    break
-                strict.add(t.name)
-                counts = proposed
-        if schema_counts["optional"] > MAX_OPTIONAL_PARAMETERS:
-            problems.append(f"{schema_counts['optional']} optional parameters (at most {MAX_OPTIONAL_PARAMETERS})")
-        if schema_counts["union"] > MAX_UNION_PARAMETERS:
-            problems.append(f"{schema_counts['union']} union-typed parameters (at most {MAX_UNION_PARAMETERS})")
-        return frozenset(strict), problems
+                        for p in strict_schema_problems(strict_wire_schema(request.response_schema), counts)]
+            if counts["optional"] > MAX_OPTIONAL_PARAMETERS:
+                problems.append(f"{counts['optional']} optional parameters (at most {MAX_OPTIONAL_PARAMETERS})")
+            if counts["union"] > MAX_UNION_PARAMETERS:
+                problems.append(f"{counts['union']} union-typed parameters (at most {MAX_UNION_PARAMETERS})")
+        strict: dict[str, dict] = {}
+        if self._tool_set(request) in self._grammar_refused:
+            return strict, problems
+        # the response schema's share counts against the documented limits; the grammar budget is for the tools
+        budget = {key: GRAMMAR_BUDGET[key] + counts.get(key, 0) for key in GRAMMAR_BUDGET}
+        for t in request.tools:
+            if not t.strict or t.name in strict:
+                continue
+            wire = strict_wire_schema(t.parameters)
+            tool_counts: dict = {}
+            if strict_schema_problems(wire, tool_counts):
+                continue
+            proposed = {key: counts[key] + tool_counts[key] for key in counts}
+            if _counts_over(proposed, budget, len(strict) + 1):
+                continue
+            strict[t.name] = wire
+            counts = proposed
+        return strict, problems
 
     def _body(self, request: ChatRequest, messages: list[dict], max_out: int,
-              strict: frozenset[str] = frozenset()) -> tuple[dict, list[str]]:
+              strict: dict[str, dict] | None = None) -> tuple[dict, list[str]]:
         """The stream() arguments, and the tools a required-tool instruction named (replayed with the reply)."""
+        strict = strict or {}
         system, out = self._translate(request, messages)
-        tools = [{"name": t.name, "description": t.description, "input_schema": t.parameters,
+        tools = [{"name": t.name, "description": t.description, "input_schema": strict.get(t.name, t.parameters),
                   "strict": t.name in strict,
                   # inputs stream as generated; _tool_call parses each one, as the API no longer does
                   "eager_input_streaming": True}
@@ -745,7 +877,7 @@ class ClaudeMessagesProvider(ChatProvider):
         _check_placement(out)
         output_config: dict = {"effort": self.s.agent_effort}
         if request.response_schema is not None:
-            output_config["format"] = {"type": "json_schema", "schema": request.response_schema}
+            output_config["format"] = {"type": "json_schema", "schema": strict_wire_schema(request.response_schema)}
         # never temperature, top_p or top_k: the API rejects sampling parameters
         body: dict = {"model": self.model, "max_tokens": max_out, "messages": out,
                       "thinking": {"type": "adaptive"}, "output_config": output_config,
@@ -829,7 +961,9 @@ class ClaudeMessagesProvider(ChatProvider):
 
     # ---- reply ------------------------------------------------------------------------------------------------
     def _result(self, request: ChatRequest, message, raw_inputs: dict[int, str], required: list[str], est: int,
-                ms: int, attempts: int, broken: list[dict], max_out: int) -> ChatResult:
+                ms: int, attempts: int, broken: list[dict], max_out: int,
+                strict: dict[str, dict] | None = None) -> ChatResult:
+        strict = strict or {}
         blocks = list(message.content or [])
         # after a fallback, only text from before the last switch carries over; the declined model's thinking and
         # tool calls are dropped, and the switch marker itself is an audit record the API ignores
@@ -853,7 +987,7 @@ class ClaudeMessagesProvider(ChatProvider):
                 if raw is None:
                     raw = json.dumps(block.input) if block.input else ""
                 tool_inputs[block.id] = raw
-                calls.append(self._tool_call(block.id, block.name, raw, request))
+                calls.append(self._tool_call(block.id, block.name, raw, request, strict.get(block.name)))
         content = "".join(texts)
         native = message.stop_reason
         details: dict = {"stop_reason": native, "model": message.model}
@@ -907,7 +1041,7 @@ class ClaudeMessagesProvider(ChatProvider):
         if result.ok and request.tool_choice == "required" and not calls:
             result.status, result.error = "invalid_tool_call", "the model answered without the tool call required"
         if result.ok and result.parsed is not None and request.response_schema is not None:
-            problems = instance_problems(result.parsed, request.response_schema)
+            problems = instance_problems(result.parsed, strict_wire_schema(request.response_schema))
             if problems:
                 result.status, result.parsed = "invalid_json", None
                 result.error = "the reply does not match the requested schema: " + "; ".join(problems[:5])
@@ -919,13 +1053,17 @@ class ClaudeMessagesProvider(ChatProvider):
             result.provider_state = state
         return result
 
-    def _tool_call(self, call_id: str, name: str, raw: str, request: ChatRequest) -> ToolCall:
-        """The port's argument parsing on the raw streamed JSON, then the tool's schema."""
+    def _tool_call(self, call_id: str, name: str, raw: str, request: ChatRequest,
+                   sent: dict | None = None) -> ToolCall:
+        """The port's argument parsing on the raw streamed JSON, then the schema a strict tool was sent with, or a
+        loose tool's own schema when it is inside the subset this adapter checks."""
         call = parse_tool_arguments(call_id, name, raw)
         tool = next((t for t in request.tools if t.name == name), None)
-        # a schema outside the subset was sent loose; the caller validates those arguments against its own model
-        if call.arguments is not None and tool is not None and not strict_schema_problems(tool.parameters):
-            problems = instance_problems(call.arguments, tool.parameters)
+        if sent is None and tool is not None and not strict_schema_problems(tool.parameters):
+            sent = tool.parameters
+        # otherwise the caller validates the arguments against its own model
+        if call.arguments is not None and sent is not None:
+            problems = instance_problems(call.arguments, sent)
             if problems:
                 return ToolCall(call_id, name, None, raw,
                                 "arguments do not match the tool's schema: " + "; ".join(problems[:5]))
