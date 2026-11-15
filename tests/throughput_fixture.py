@@ -587,12 +587,12 @@ def _strip(value):
 
 
 def run_stack(stage_dir, *, scale: int = 1, docs: dict | None = None, rank: bool = True,
-              profiles: dict | None = None) -> dict:
+              profiles: dict | None = None, keep: dict | None = None) -> dict:
     """Sweep every target, finalize, rank, expand from the ranked seeds, rank again and build the report manifest, as
     a hunt runs. Returns a canonical snapshot of everything a hunt stores or reports, without wall-clock fields.
     Callers patch the partition and pivot sizes first (`patched_sizes`). `rank=False` runs the stack as it ran before
     evidence ranking (seeds by the rule estimate), for comparisons. `profiles` (target -> source profile dict) are the
-    preflight profiles the hunt records; by default the hunt has none."""
+    preflight profiles the hunt records; by default the hunt has none. A `keep` dict receives the store's `repo`."""
     from sqlalchemy import select
 
     from romulus.baseline.lookback import HistoryGap
@@ -722,6 +722,9 @@ def run_stack(stage_dir, *, scale: int = 1, docs: dict | None = None, rank: bool
         "expansion": expansion,
         "manifest": manifest,
     }
+    if keep is not None:
+        # a caller that works on the stack's store afterwards (an AI triage pass, for one) gets its repository
+        keep["repo"] = repo
     return json.loads(json.dumps(_strip(snapshot), sort_keys=True, default=str))
 
 
