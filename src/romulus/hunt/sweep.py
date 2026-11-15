@@ -167,8 +167,40 @@ DEFAULT_WINDOWS_LIVENESS_TOLERANCE = timedelta(minutes=15)
 MAX_SKIP_REASONS = 256
 SKIP_REASON_OVERFLOW = "additional skip reasons omitted after bounded category limit"
 MAX_WINDOWS_UNCATALOGUED = 256
+# Dataset reconciliation on a Linux host target: the records of each dataset in the hunt window (one aggregate before
+# retrieval) against the records the sweep actually retrieved. The tally keeps this many dataset names per target;
+# records of further names are counted together and their datasets' shortfall is stated as not counted. A target with
+# more names than this is far outside any shipper layout seen, and the statement stays honest past it.
+RETRIEVED_DATASET_NAMES = 1_024
+# Composite buckets (event.dataset x data_stream.dataset pairs) the window inventory may read; past it the window
+# counts are unknown and every statement that needs one says so.
+WINDOW_DATASET_BUCKETS = 4_096
+_TALLY_OVERFLOW = ("overflow",)
+DATASET_RECONCILIATION_PARTITION = "dataset-reconciliation"
+RECONCILIATION_NAMED = 10
 NXLOG_MIXED_GATE = ("Windows collection not attested: NXLog flat records on a Linux target; continuity and "
                     "event-class inventory not assessed")
+
+
+def _native_value(source: dict, path: str):
+    """A native field's value in a record: a literal dotted key, else the nested path."""
+    if path in source:
+        return source[path]
+    cur = source
+    for part in path.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur
+
+
+def _dataset_name(source: dict, primary: str, secondary: str | None) -> str | None:
+    """The dataset a record names, as the window inventory groups it: the first non-empty of the two fields."""
+    for path in (primary, secondary):
+        value = _native_value(source, path) if path else None
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def _error_tag(message: str) -> str:
@@ -552,6 +584,14 @@ class Sweep:
         present: dict[str, dict[str, int]] = {}
         if "linux.text" in datasets:
             if contract is None or any(contract.supports(name, "exists") for name in ("message", "event.original")):
+                # A payload field the mapping holds but the source cannot test for presence: text records that carry
+                # their line only there are outside the content selection, which the reconciliation states.
+                blind = [f"{name} is mapped as {spec.type}, which a source query cannot test for presence"
+                         for name in ("message", "event.original")
+                         if contract is not None and (spec := contract.spec(name)) is not None
+                         and not contract.supports(name, "exists")]
+                if blind:
+                    self.stats.setdefault("linux_text_selection_notes", {})[target] = blind
                 text_inventory = text_dataset_inventory(inventory)
                 present["linux.text"] = text_inventory
                 if contract is not None and contract.linux_text_mixed is not False:
@@ -606,6 +646,143 @@ class Sweep:
         if outcome.completeness != Completeness.complete:
             return None
         return sum(int(bucket.get("count") or 0) for bucket in outcome.buckets)
+
+    @staticmethod
+    def _reconcilable(contract: FieldContract | None) -> bool:
+        """A Linux host target, read through the Linux dataset selection: the targets whose source query selects
+        datasets by name and text by content, so a dataset the plan names can still return no record."""
+        return (contract is not None and contract.role == "host" and contract.os_family != "windows"
+                and not contract.ecar and contract.spec("event.dataset") is not None)
+
+    @staticmethod
+    def _dataset_natives(contract: FieldContract) -> tuple[str, str | None]:
+        """The native fields a record names its dataset in: event.dataset, then data_stream.dataset."""
+        secondary = contract.spec("data_stream.dataset")
+        return contract.spec("event.dataset").native, secondary.native if secondary is not None else None
+
+    def _tally_retrieved(self, target: str, contract: FieldContract | None, records: list[dict]) -> None:
+        """Count the records a top-level partition retrieved, by the dataset each names (bounded names per target)."""
+        if not self._reconcilable(contract) or not records:
+            return
+        primary, secondary = self._dataset_natives(contract)
+        tally = self.__dict__.setdefault("_retrieved_datasets", {}).setdefault(target, Counter())
+        for record in records:
+            name = _dataset_name(record.get("_source") or {}, primary, secondary)
+            if name not in tally and len(tally) >= RETRIEVED_DATASET_NAMES:
+                name = _TALLY_OVERFLOW
+            tally[name] += 1
+
+    def _window_dataset_counts(self, target: str, contract: FieldContract | None) -> dict | None:
+        """Records in the hunt window by the dataset each names (None: no dataset), from one aggregate over the whole
+        target; None when it cannot be counted exactly (no aggregatable dataset field, a cap, or a partial answer)."""
+        if not self._reconcilable(contract) or getattr(self, "client", None) is None:
+            return None
+        spec = contract.spec("event.dataset")
+        if not spec.aggregatable:
+            return None
+        group = ["event.dataset"]
+        second = contract.spec("data_stream.dataset")
+        if second is not None and second.aggregatable and second.native != spec.native:
+            group.append("data_stream.dataset")
+        try:
+            outcome = execute(self.client, SearchIntent(
+                kind="aggregate", target=target, window=self.window, group_by=group,
+                max_records=WINDOW_DATASET_BUCKETS, purpose="sweep dataset reconciliation"), contract)
+        except Exception:  # noqa: BLE001 - an inventory count never fails the sweep; its statements say not counted
+            return None
+        if outcome.completeness != Completeness.complete:
+            return None
+        counts: dict[str | None, int] = {}
+        for bucket in outcome.buckets:
+            key = bucket.get("key") if isinstance(bucket.get("key"), dict) else {}
+            name = next((value for value in (key.get(field) for field in group)
+                         if isinstance(value, str) and value), None)
+            counts[name] = counts.get(name, 0) + int(bucket.get("count") or 0)
+        return counts
+
+    def _reconcile_datasets(self, target: str, contract: FieldContract | None, window: dict | None) -> None:
+        """State every dataset of the target the sweep did not read in full. A dataset the plan selected whose window
+        records were not all retrieved is listed with the exact shortfall, makes the hunt partial and leaves the rules
+        reading its families partial on this target; one whose count is unknown is listed as not counted. A dataset
+        with records in the window that the plan never selected, and that the profile inventory does not already list,
+        is listed with its window count. A selected text dataset with records in the index but none in the window is
+        listed, since records indexed at the time they were shipped fall outside every window they describe."""
+        selected = (self.stats.get("dataset_filter") or {}).get(target)
+        if not self._reconcilable(contract) or selected is None:
+            return
+        if getattr(self, "_profiles", None) is None and hasattr(getattr(self, "repo", None), "source_profiles"):
+            self._profiles = self.repo.source_profiles(self.hunt_id)
+        profile = (getattr(self, "_profiles", None) or {}).get(target) or {}
+        inventory = profile.get("datasets") if isinstance(profile.get("datasets"), dict) else {}
+        listed = set(inventory) | set((profile.get("linux_text") or {}).get("inventory") or {})
+        tally = getattr(self, "_retrieved_datasets", {}).get(target) or Counter()
+        overflow = tally.get(_TALLY_OVERFLOW, 0)
+        field = contract.time_field
+        notes = (self.stats.get("linux_text_selection_notes") or {}).get(target) or []
+        note = f" ({'; '.join(notes)})" if notes else ""
+        not_read = "not retrieved: selected for retrieval, but the sweep's source query did not return these records, " \
+                   "so no rule evaluated them" + note
+        rows: list[dict] = []
+        short: list[tuple[str, int | None]] = []
+        for name in sorted({*selected, *(name for name in (window or {}) if isinstance(name, str))}):
+            chosen = name in selected
+            text = chosen and name not in LINUX_DATASET_FAMILIES
+            got = tally.get(name, 0)
+            attributed = not overflow or name in tally
+            in_window = window.get(name, 0) if window is not None else None
+            if in_window is None or not attributed:
+                if chosen and got == 0 and (text or in_window) and (inventory.get(name) or in_window):
+                    scope = ("not counted: the hunt window's records were not counted by dataset" if in_window is None
+                             else f"not counted: more dataset names were retrieved than the sweep tallies "
+                                  f"({RETRIEVED_DATASET_NAMES:,}); {in_window:,} in the hunt window by {field}")
+                    rows.append({"dataset": name, "records": None, "count_scope": scope, "reason": not_read})
+                    short.append((name, None))
+                continue
+            missing = in_window - got
+            if missing > 0 and chosen:
+                rows.append({"dataset": name, "records": missing, "reason": not_read,
+                             "count_scope": f"records in the hunt window by {field} that the sweep did not retrieve, "
+                                            f"of {in_window:,}"})
+                short.append((name, missing))
+            elif missing > 0 and name not in listed:
+                rows.append({"dataset": name, "records": missing,
+                             "count_scope": f"records in the hunt window by {field}",
+                             "reason": "not retrieved by the sweep: no normalizer reads this dataset, so no rule "
+                                       "evaluates it"})
+            elif in_window == 0 and text and got == 0 and inventory.get(name):
+                rows.append({"dataset": name, "records": 0,
+                             "count_scope": f"records in the hunt window by {field}; the whole index held "
+                                            f"{inventory[name]:,} at source preflight",
+                             "reason": "selected for retrieval, but none of its records falls in the hunt window by "
+                                       "the indexed time field; if they carry the time they were shipped rather than "
+                                       "the time they were logged, their activity in the window was not assessed"})
+        if window is not None and not overflow and (missing := window.get(None, 0) - tally.get(None, 0)) > 0:
+            rows.append({"dataset": "(records naming no dataset)", "records": missing,
+                         "count_scope": f"records in the hunt window by {field}",
+                         "reason": "not retrieved by the sweep: these records name no dataset and carry none of the "
+                                   "selectors the sweep reads such records by"})
+        if rows:
+            self.stats.setdefault("dataset_reconciliation", {})[target] = rows
+        if not short:
+            return
+        named = ", ".join(f"{name} ({count:,})" if count is not None else f"{name} (not counted)"
+                          for name, count in short[:RECONCILIATION_NAMED])
+        if len(short) > RECONCILIATION_NAMED:
+            named += f" and {len(short) - RECONCILIATION_NAMED} more"
+        reason = (f"{target}: records of {len(short)} selected dataset(s) in the hunt window were not retrieved, so "
+                  f"no rule evaluated them: {named}{note}")
+        self.partial_reasons.append(reason)
+        families: set[str] = set()
+        for name, _count in short:
+            fed = LINUX_DATASET_FAMILIES.get(name)
+            families |= set(fed) if fed is not None else set(TEXT_FAMILIES)
+        cells = [self._cell(pb, target, DATASET_RECONCILIATION_PARTITION, "evaluated_partial",
+                            detail={"reasons": [reason]})
+                 for pb in self.pack
+                 if not isinstance(pb, BaselinePlaybook) and pb.id not in self.failed_rules
+                 and (set(pb.families) - set(pb.context_families)) & families]
+        if cells:
+            self.repo.set_rule_cells(self.hunt_id, cells)
 
     def _any_of_for(self, target: str, contract: FieldContract | None = None) -> list[list[Predicate]]:
         groups = self._source_any_of_for(target, contract)
@@ -1926,6 +2103,8 @@ class Sweep:
         filters = self._filters_for(target, contract)
         any_of = self._any_of_for(target, contract)
         any_of = self._select_ics(target, contract, any_of)
+        # counted before retrieval, so records that arrive while the target is read are never reported as missed
+        window_datasets = self._window_dataset_counts(target, contract)
         try:
             self.heartbeat()
             parts = plan_partitions(self.client, target, contract, self.window, filters, any_of)
@@ -1959,6 +2138,7 @@ class Sweep:
                 self._next = (target, contract, filters, any_of, *following) if following else None
                 self.run_partition(target, contract, filters, w, est, any_of=any_of)
             self._finalize_baseline_target(target)
+            self._reconcile_datasets(target, contract, window_datasets)
         finally:
             self._next = None
             self._stop_prefetch()
@@ -2065,6 +2245,8 @@ class Sweep:
         if out.completeness != Completeness.complete:
             self._note_zeek_inventory_gap(target,contract,out.reasons or [out.error or "source retrieval incomplete"])
         self.stats["records"] += out.returned
+        if not partition_tag:
+            self._tally_retrieved(target, contract, out.records)
         self.repo.update_task(tid, "executed", outcome={"completeness": out.completeness, "reasons": out.reasons,
                                                         "total": out.total, "returned": out.returned})
         if out.completeness == Completeness.failed:

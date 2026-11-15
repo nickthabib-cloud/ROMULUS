@@ -586,11 +586,13 @@ def _strip(value):
     return value
 
 
-def run_stack(stage_dir, *, scale: int = 1, docs: dict | None = None, rank: bool = True) -> dict:
+def run_stack(stage_dir, *, scale: int = 1, docs: dict | None = None, rank: bool = True,
+              profiles: dict | None = None) -> dict:
     """Sweep every target, finalize, rank, expand from the ranked seeds, rank again and build the report manifest, as
     a hunt runs. Returns a canonical snapshot of everything a hunt stores or reports, without wall-clock fields.
     Callers patch the partition and pivot sizes first (`patched_sizes`). `rank=False` runs the stack as it ran before
-    evidence ranking (seeds by the rule estimate), for comparisons."""
+    evidence ranking (seeds by the rule estimate), for comparisons. `profiles` (target -> source profile dict) are the
+    preflight profiles the hunt records; by default the hunt has none."""
     from sqlalchemy import select
 
     from romulus.baseline.lookback import HistoryGap
@@ -627,7 +629,7 @@ def run_stack(stage_dir, *, scale: int = 1, docs: dict | None = None, rank: bool
         "window": {"start": window.start.isoformat(), "end": window.end.isoformat()},
         "style": "broad", "hypothesis": "", "original_input": {}, "targets": targets,
         "pack": {"version": "test", "playbooks": []}, "normalizer": "test", "policy": "test",
-        "model": {}, "romulus_version": "test", "ai_agent": {"requested": False}, "source_profiles": {},
+        "model": {}, "romulus_version": "test", "ai_agent": {"requested": False}, "source_profiles": profiles or {},
         "budgets": {"wall_clock_minutes": 120},
         "baseline": {
             "plan_version": "baseline-plan@1", "site": "throughput-fixture", "history_days": 7,
@@ -638,6 +640,8 @@ def run_stack(stage_dir, *, scale: int = 1, docs: dict | None = None, rank: bool
             "budget": {"queries": 200, "records": 5_000_000, "seconds": 1800},
             "store_cut_digest": "empty",
         }}, "digest", "test")
+    for profile in (profiles or {}).values():
+        repo.save_profile("h1", profile)
     repo.set_hunt_state("h1", "running")
     sweep = Sweep(repo, client, "h1", window, contracts, stage_dir=stage_dir)
     for target in targets:

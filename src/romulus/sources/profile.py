@@ -43,6 +43,9 @@ OPS_BY_TYPE: dict[str, set[str]] = {
     "date": {"gte", "lt", "exists", "missing"},
     "boolean": {"eq", "exists", "missing"},
     "text": {"exists", "missing"},
+    # Elasticsearch's space-saving text variant (the default `message` mapping of current Beats templates): analyzed
+    # like text, and its presence is searchable.
+    "match_only_text": {"exists", "missing"},
     # A flattened leaf is indexed like a keyword. Aliases below name the leaf explicitly; the object root itself
     # is never used for a value predicate.
     "flattened": {"eq", "in", "not_in", "prefix", "contains", "exists", "missing"},
