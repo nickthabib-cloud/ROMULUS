@@ -13,10 +13,10 @@ from sqlalchemy import select
 from romulus.agent.provider import ProviderUnavailable
 from romulus.agent.provider.base import ChatResult, Usage
 from romulus.agent.triage import DATA_BEGIN, DATA_END, LABEL, run_triage_pass
-from romulus.agent.triage_order import OrderWorkspace
+from romulus.agent.triage_order import MAX_EXCERPTS, OrderWorkspace
 from romulus.config import Settings
 from romulus.hunt.rank import PASS_FINAL, compute_rank_pass
-from romulus.hunt.triage import run_triage, write_export
+from romulus.hunt.triage import StaleTriage, run_triage, write_export
 from romulus.report.manifest import build_manifest, canonical_manifest
 from romulus.report.markdown import ranked_sections, render
 from romulus.store import schema as t
@@ -145,21 +145,26 @@ def groups_of(repo) -> dict[str, tuple]:
     """Each surfaced finding's group key, from the workspace."""
     with OrderWorkspace(repo, "h1") as ws:
         ws.build()
-        return {finding_id: (section, gkey) for finding_id, section, gkey in ws.db.execute(
-            "SELECT finding_id, section, gkey FROM o")}
+        return {finding_id: (section, gid) for finding_id, section, gid in ws.db.execute(
+            "SELECT finding_id, section, gid FROM o")}
 
 
 def assert_promote_only(repo, before: list[str], after: list[str], k: int):
-    """A permutation of the deterministic order; no finding moves down by more than k groups (the groups that now
-    come ahead of it but came after it); at most k groups promoted per section; sections never mix."""
+    """A permutation of the deterministic order in which sections never mix and no finding moves down by more than
+    k x MAX_EXCERPTS places: the findings that now come ahead of it but came after it are at most the shown excerpts
+    of k promoted groups. Everything that did not move keeps its deterministic relative order."""
     assert sorted(after) == sorted(before) and len(after) == len(set(after))
     groups = groups_of(repo)
     old = {finding_id: index for index, finding_id in enumerate(before)}
     new = {finding_id: index for index, finding_id in enumerate(after)}
     assert [groups[f][0] for f in after] == sorted(groups[f][0] for f in after)
+    moved = set()
     for finding_id in before:
-        overtaking = {groups[other][1] for other in after[:new[finding_id]] if old[other] > old[finding_id]}
-        assert len(overtaking) <= k, (finding_id, overtaking)
+        overtaking = [other for other in after[:new[finding_id]] if old[other] > old[finding_id]]
+        assert len(overtaking) <= k * MAX_EXCERPTS, (finding_id, len(overtaking))
+        moved.update(overtaking)
+    rest = [f for f in after if f not in moved]
+    assert rest == [f for f in before if f not in moved]
 
 
 # -- order semantics ------------------------------------------------------------------------------------------------
@@ -174,12 +179,110 @@ def test_attack_groups_deep_in_the_order_are_promoted_within_their_section(tmp_p
     order = exported(repo, tmp_path)["order"]
     assert_promote_only(repo, before, order, k=2)
     section_start = min(order.index(f) for f in order if groups_of(repo)[f][0] == groups_of(repo)["z-attack-0"][0])
-    attack = [order.index(f"z-attack-{i}") for i in range(4)]
-    assert attack == list(range(section_start, section_start + 4))   # first in its section, contiguous, in order
+    attack = [order.index(f"z-attack-{i}") for i in range(3)]
+    assert attack == list(range(section_start, section_start + 3))   # the shown excerpts lead their section
+    assert order.index("z-attack-3") > section_start + 3                  # the rest keeps its deterministic place
     # agent proposals are never triaged and never promoted
     assert all("agent.proposal" not in json.dumps(cards_of(request)) for request in provider.requests)
     assert summary["groups"]["excluded_agent"] == 1
     assert order.index("zz-agent") >= before.index("zz-agent")
+
+
+def test_one_huge_promoted_group_moves_only_its_shown_findings(tmp_path):
+    """A group of 935 findings promoted over a lone attack finding moves three findings, not 935."""
+    repo = _repo()
+    rows = [_row("a-attack", "r.attack", lane="lead", host="victim", priority=50.0, ts=START)]
+    rows += [_row(f"b-{i:04}", "r.remote", lane="lead", host="exposed", priority=5.0,
+                  ts=START + timedelta(seconds=i + 1)) for i in range(935)]
+    _insert(repo, rows)
+    compute_rank_pass(repo, "h1", PASS_FINAL)
+    _finished(repo)
+    before = deterministic(repo)
+    policy = by_rule({"r.remote"})
+    summary = run_triage_pass(settings(), repo, "h1", FakeTriage(policy))
+    order = exported(repo, tmp_path)["order"]
+    assert_promote_only(repo, before, order, k=2)
+    assert order.index("a-attack") == before.index("a-attack") + MAX_EXCERPTS
+    assert sum(summary["groups"]["findings_moved"].values()) == MAX_EXCERPTS
+    view = build_manifest(repo, "h1", "test")["ai_triage"]
+    group = next(g for section in view["sections"] for g in section["promoted"])
+    assert (group["moved"], group["in_deterministic_place"]) == (3, 932)
+    text = render({**build_manifest(repo, "h1", "test"), "revision": {"number": 1, "id": "r1", "supersedes": None}})
+    assert "932 more in deterministic place" in text
+
+
+def test_the_view_rows_page_by_index_and_publish_only_inserts(tmp_path):
+    """No page of the view scans the groups, and the shared database's write transaction only copies rows."""
+    repo = _hunt()
+    with OrderWorkspace(repo, "h1", directory=str(tmp_path)) as ws:
+        ws.build()
+        plan = " ".join(str(row[-1]) for row in ws.db.execute("EXPLAIN QUERY PLAN " + ws.view_page_query(),
+                                                                (2, 0, 1000)))
+        assert "SCAN g" not in plan and "g_section_best" in plan, plan
+    published = []
+    original = Repo.publish_triage
+
+    def spy(self, hunt_id, pass_no, rows, summary, **kwargs):
+        rows = list(rows)                                   # finished rows: plain dicts, nothing left to compute
+        published.append(rows)
+        return original(self, hunt_id, pass_no, iter(rows), summary, **kwargs)
+    Repo.publish_triage = spy
+    try:
+        run_triage_pass(settings(), repo, "h1", FakeTriage(by_rule({"r.attack"})))
+    finally:
+        Repo.publish_triage = original
+    assert [row["position"] for row in published[0]] == list(range(1, len(published[0]) + 1))
+
+
+def test_a_stage_over_its_byte_budget_is_an_honest_failure(tmp_path):
+    repo = _hunt()
+    before = deterministic(repo)
+    provider = FakeTriage(by_rule({"r.attack"}))
+    summary = run_triage_pass(settings(), repo, "h1", provider, max_bytes=4096)
+    assert summary["status"] == "failed" and summary["reason"].startswith("stage_refused")
+    assert not provider.requests and repo.latest_audit("h1", "hunt.ai_triage_summary") is None
+    assert exported(repo, tmp_path)["order"] == before
+    assert exported(repo, tmp_path)["latest_failed_attempt"]["reason"].startswith("stage_refused")
+
+
+def test_an_interrupted_pass_leaves_nothing_resume_takes_for_an_agent_phase():
+    repo = _repo()
+    _insert(repo, [_row("a", "r.a", host="x")])
+    repo.set_hunt_state("h1", "running")
+    repo.set_hunt_state("h1", "completed_within_scope")
+    _owner, created = repo.claim_triage_lease("h1", 600)         # a worker dies holding it
+    assert created
+    run = repo.agent_run("h1")
+    assert run["state"] == "skipped" and run["reason"] == "triage_lease_placeholder"
+    with repo.engine.begin() as connection:                      # its lease expires
+        connection.execute(t.agent_run.update().values(lease_until=None))
+    assert run_triage(settings(), repo, "h1", provider=FakeTriage(by_rule({"r.a"})))["status"] == "complete"
+    assert repo.agent_run("h1") is None                          # the next pass claims and removes it
+
+
+def test_cases_cost_and_a_stale_export(tmp_path):
+    repo = _hunt(filler=10)
+    with repo.engine.begin() as connection:
+        connection.execute(t.candidate.update().where(t.candidate.c.id == "z-attack-1").values(source_case_id="case-1"))
+    provider = FakeTriage(by_rule({"r.attack"}))
+    run_triage_pass(settings(), repo, "h1", provider)
+    card = next(c for r in provider.requests for c in cards_of(r) if c["rule"]["id"] == "r.attack")
+    assert card["case_discovered"] == 1
+    with repo.engine.connect() as connection:
+        assert connection.execute(select(t.ai_triage_group.c.case_findings).where(
+            t.ai_triage_group.c.rule_id == "r.attack")).scalar_one() == 1
+    # a cost cap stops the pass before a call that could exceed it
+    priced = settings(agent_max_cost_usd=0.0001, agent_price_input_per_mtok=10.0, agent_price_output_per_mtok=10.0)
+    capped = FakeTriage(by_rule({"r.attack"}))
+    summary = run_triage_pass(priced, repo, "h1", capped, force=True)
+    assert not capped.requests and "budget:cost" in summary["reason"]
+    # a finding added after the pass makes it stale: the report says so and the export refuses it
+    run_triage_pass(settings(), repo, "h1", provider, force=True)
+    _insert(repo, [_row("late", "r.late", host="victim")])
+    assert build_manifest(repo, "h1", "test")["ai_triage"]["stale"]
+    with pytest.raises(StaleTriage):
+        write_export(repo, "h1", tmp_path / "stale.json")
+    assert write_export(repo, "h1", tmp_path / "stale.json", allow_stale=True)["stale"]
 
 
 def test_an_adversarial_model_promoting_everything_moves_at_most_k_groups_per_section(tmp_path):
