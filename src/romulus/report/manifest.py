@@ -17,6 +17,7 @@ from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.hunt.publish import subject_event_ids
 from romulus.hunt.rank import PASS_FINAL, rank_summary, rank_unranked
 from romulus.report.incidents import build_incident_graph, incident_narrative
+from romulus.report.triage import triage_view
 from romulus.store import schema as t
 from romulus.store.db import digest, utcnow, write_txn
 from romulus.store.repo import Repo, raw_id
@@ -787,6 +788,10 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
     }
     if ranking is not None:
         m["ranking"], m["entities"] = ranking
+    # the AI triage order: a separately labelled view after the deterministic findings, present once a pass ran
+    triage = triage_view(repo, hunt_id)
+    if triage is not None:
+        m["ai_triage"] = triage
     lists = hm.get('indicator_lists') or {}
     if lists.get('applied') or lists.get('excluded'):
         m['versions']['indicator_lists'] = {
@@ -1093,7 +1098,10 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
         "rule_requests": ((manifest.get("ai_agent") or {}).get("rule_requests") or []),
         "banners": manifest.get("banners") or [],
     }
+    if "ai_triage" in manifest:
+        ai_content["triage"] = manifest["ai_triage"]
     canonical["ai"] = canonicalize(ai_content)
+    canonical.pop("ai_triage", None)
     deterministic_findings = [row for row in repo.candidates(hunt_id)
                               if row.get("provenance", "deterministic") != "agent"]
     deterministic_views = [row for row in manifest["findings"] if row.get("provenance") != "agent"]
