@@ -349,6 +349,20 @@ def load_settings(env_file: Path | None = None, environ: dict[str, str] | None =
     return Settings(**kwargs)
 
 
+# a model id as providers list them: letters, digits and . _ : / -, bounded
+MODEL_ID = re.compile(r"[A-Za-z0-9._:/-]{1,128}")
+
+
+def with_agent_model(settings: Settings, model: str | None) -> Settings:
+    """`settings` with AGENT_MODEL replaced for one run (nothing is written back); unchanged when `model` is None.
+    Raises ValueError for anything but a plain model id."""
+    if model is None:
+        return settings
+    if not MODEL_ID.fullmatch(model):
+        raise ValueError("--agent-model must be a model id of 1 to 128 letters, digits and . _ : / - characters")
+    return settings.model_copy(update={"agent_model": model})
+
+
 def short_secrets(settings: Settings) -> list[str]:
     """The environment names of configured secrets shorter than MIN_SECRET_LENGTH (never their values or lengths).
     Text that short also turns up in ordinary words, so redacting it distorts prompts and reports, and below 4

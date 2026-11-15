@@ -32,7 +32,7 @@ The manifest exposes agent provenance, usage, hypotheses, output counts, notes, 
 
 Detection results and lane totals count deterministic findings, including genuine rule matches discovered by agent pivots. Agent-proposed findings are counted separately and labelled unconfirmed.
 
-The CLI offers `hunt start --agent` and `hunt start --no-agent`, plus `agent reassess` to create another assessment revision and report revision.
+The CLI offers `hunt start --agent` and `hunt start --no-agent`, plus `agent reassess` to create another assessment revision and report revision. `--agent-model <id>` on `hunt start`, `hunt resume` and `doctor` replaces the configured model for that run only, and the manifest and agent run record the model used. A resume whose model differs from the one the hunt's agent recorded is refused unless `--force-model` is given.
 
 The executive DOCX includes the same assessment header, sentences, citation labels and checker explanation as the manifest. Agent text is plain text in Word, including strings that resemble links or field instructions. Historical reports without an assessment retain their original rendering.
 
