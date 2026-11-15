@@ -479,6 +479,47 @@ def test_the_cli_runs_reuses_and_exports(tmp_path, monkeypatch):
     assert sorted(exported_order["order"]) == sorted(deterministic(repo))
 
 
+def test_the_response_schema_stays_small_flat_and_inside_the_strict_subset():
+    """Structured outputs compile the schema into a size-limited grammar: it never grows with the hunt."""
+    from romulus.agent.provider.claude_messages import (
+        MAX_OPTIONAL_PARAMETERS,
+        MAX_UNION_PARAMETERS,
+        strict_schema_problems,
+    )
+    from romulus.agent.triage import TRIAGE_SCHEMA
+    counts = {"optional": 0, "union": 0}
+    assert strict_schema_problems(TRIAGE_SCHEMA, counts) == []          # the port's own guard
+    assert counts["union"] == 0 and counts["optional"] <= MAX_OPTIONAL_PARAMETERS and MAX_UNION_PARAMETERS
+
+    def walk(node, depth=1):
+        """Container depth (objects, and arrays of objects); an array of scalars is a leaf."""
+        assert isinstance(node, dict)
+        assert not {"anyOf", "oneOf", "allOf", "$ref", "pattern"} & set(node), node
+        assert len(node.get("enum") or []) <= 4
+        deepest = depth
+
+        def container(child):
+            return child.get("type") == "object" or (child.get("type") == "array"
+                                                     and (child.get("items") or {}).get("type") == "object")
+        for child in (node.get("properties") or {}).values():
+            deepest = max(deepest, walk(child, depth + 1) if container(child) else walk(child, depth) and depth)
+        items = node.get("items")
+        if isinstance(items, dict) and items.get("type") == "object":
+            deepest = max(deepest, walk(items, depth + 1))
+        elif isinstance(items, dict):
+            walk(items, depth)
+        return deepest
+    assert walk(TRIAGE_SCHEMA) <= 3
+    assert len(json.dumps(TRIAGE_SCHEMA)) < 1000
+    # the same schema for every chunk: no id set ever enters it
+    repo = _hunt()
+    provider = FakeTriage(by_rule({"r.attack"}))
+    run_triage_pass(settings(), repo, "h1", provider)
+    assert len(provider.requests) > 1
+    assert all(request.response_schema == TRIAGE_SCHEMA for request in provider.requests)
+    assert all("G1" not in json.dumps(request.response_schema) for request in provider.requests)
+
+
 def test_the_migration_round_trips(tmp_path):
     engine = make_engine(tmp_path / "triage.sqlite")
     with engine.begin() as connection:

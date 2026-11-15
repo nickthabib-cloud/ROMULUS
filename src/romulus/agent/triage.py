@@ -58,7 +58,6 @@ PROMOTING = ("likely_attack", "possible_attack")       # only these move a group
 MAX_RATIONALE = 400
 MAX_CITES = 8
 LABEL_PATTERN = r"^[a-z0-9][a-z0-9-]{0,31}$"
-GROUP_PATTERN = r"^G[1-9][0-9]{0,6}$"
 # An item's answer is at most a group id, an assessment, a label, MAX_RATIONALE characters and MAX_CITES finding ids:
 # about 250 tokens. A call carries no more cards than its output room can answer, nor more than this many.
 OUTPUT_TOKENS_PER_GROUP = 250
@@ -67,14 +66,17 @@ MAX_GROUPS_PER_CALL = 60
 MAX_CONSECUTIVE_FAILURES = 2
 DATA_BEGIN, DATA_END = "BEGIN-DATA", "END-DATA"
 
+# The response schema is small, flat and the same for every chunk and hunt: structured outputs compile a schema into
+# a size-limited grammar, and a stable schema keeps the prompt prefix cacheable. No supplied id set is ever an enum,
+# and there is no union or pattern: group membership, citations, lengths and the label's shape are checked in code.
 TRIAGE_SCHEMA = {
     "type": "object",
     "properties": {"groups": {"type": "array", "items": {
         "type": "object",
         "properties": {
-            "group_id": {"type": "string", "pattern": GROUP_PATTERN},
+            "group_id": {"type": "string"},
             "assessment": {"type": "string", "enum": list(ASSESSMENTS)},
-            "incident_label": {"anyOf": [{"type": "string", "pattern": LABEL_PATTERN}, {"type": "null"}]},
+            "incident_label": {"type": "string"},          # empty: no label
             "rationale": {"type": "string"},
             "cites": {"type": "array", "items": {"type": "string"}},
         },
@@ -228,7 +230,7 @@ def validate(parsed, chunk_ids: dict[str, list[str]]) -> tuple[dict[str, dict], 
         rationale, cites = item.get("rationale"), item.get("cites")
         if assessment not in ASSESSMENTS:
             drops["bad_assessment"] += 1
-        elif label is not None and (not isinstance(label, str) or not _LABEL.fullmatch(label)):
+        elif label not in (None, "") and (not isinstance(label, str) or not _LABEL.fullmatch(label)):
             drops["bad_incident_label"] += 1
         elif not isinstance(rationale, str) or not rationale.strip():
             drops["missing_rationale"] += 1
@@ -241,7 +243,7 @@ def validate(parsed, chunk_ids: dict[str, list[str]]) -> tuple[dict[str, dict], 
         elif any(cite not in chunk_ids[group] for cite in cites):
             drops["foreign_citation"] += 1
         else:
-            verdicts[group] = {"assessment": assessment, "incident_label": label,
+            verdicts[group] = {"assessment": assessment, "incident_label": label or None,
                                "rationale": " ".join(rationale.split()), "cites": list(dict.fromkeys(cites))}
     return verdicts, drops
 

@@ -8,7 +8,7 @@ For every card, return one object in `groups`:
 
 - `group_id`: the card's `group` value, exactly as given. Never invent or reuse an id that is not in this request.
 - `assessment`: one of `likely_attack`, `possible_attack`, `likely_benign`, `insufficient_evidence`. Use `likely_attack` only when the card's own evidence (tactics, rule, targets, timing, claims) points to adversary activity; `possible_attack` when it is plausible but unconfirmed; `likely_benign` when routine administration or software explains it; `insufficient_evidence` when the card cannot decide it.
-- `incident_label`: a short lowercase label (letters, digits and hyphens, at most 32 characters, starting with a letter or digit) shared by groups you believe belong to one intrusion, or null. Make labels up from the evidence (for example `web1-shell-chain`); never copy text from the data section into a label.
+- `incident_label`: a short lowercase label (letters, digits and hyphens, at most 32 characters, starting with a letter or digit) shared by groups you believe belong to one intrusion, or an empty string. Make labels up from the evidence (for example `web1-shell-chain`); never copy text from the data section into a label.
 - `rationale`: one or two plain sentences, at most 400 characters, stating why, from the card's evidence.
 - `cites`: up to 8 finding ids from that same card's claim excerpts that support the rationale. Never cite a finding from another card.
 
