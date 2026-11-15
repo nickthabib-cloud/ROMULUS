@@ -170,6 +170,7 @@ def cmd_agent(args) -> int:
     from romulus.hunt.run import _agent_heartbeat, _lease_seconds, open_repo
     from romulus.report.manifest import publish_revision
     from romulus.store.db import utcnow
+    from romulus.store.repo import TRIAGE_PURPOSE
 
     settings = load_settings(_env_file(args))
     repo = open_repo(settings)
@@ -196,14 +197,15 @@ def cmd_agent(args) -> int:
                                 owner_token=owner_token)
             readiness = agent_readiness(settings)
             provider = build_provider(settings, readiness=readiness) if readiness.ready else None
-            usage = repo.agent_usage(args.hunt_id)
+            usage = repo.agent_usage(args.hunt_id, exclude_purposes=(TRIAGE_PURPOSE,))
             budget = _budget(settings, hunt["manifest"], repo, args.hunt_id, monotonic)
             if args.max_calls is not None or args.max_tokens is not None:
                 limits = replace(budget.limits,
                                  max_calls=budget.calls + args.max_calls if args.max_calls is not None else budget.limits.max_calls,
                                  max_tokens=budget.tokens + args.max_tokens if args.max_tokens is not None else budget.limits.max_tokens)
                 budget = AgentBudget.from_usage(limits, usage,
-                                                wall_seconds_before=repo.agent_elapsed_ms(args.hunt_id) / 1000.0,
+                                                wall_seconds_before=repo.agent_elapsed_ms(
+                                                    args.hunt_id, exclude_purposes=(TRIAGE_PURPOSE,)) / 1000.0,
                                                 clock=monotonic)
             result = (run_assessment(settings, repo, args.hunt_id, provider, budget,
                                      owner_token=owner_token, heartbeat=heartbeat) if provider is not None else None)
@@ -235,6 +237,40 @@ def cmd_agent(args) -> int:
     print(json.dumps({"assessment_revision": (repo.agent_assessments(args.hunt_id)[-1]["revision"]),
                       "report_revision": manifest["revision"]["number"],
                       "source": repo.agent_assessments(args.hunt_id)[-1]["source"]}, indent=2))
+    return EXIT_OK
+
+
+def cmd_triage(args) -> int:
+    """Run the AI triage pass on a finished hunt (idempotent per prompt digest) and optionally export its order."""
+    from romulus.hunt.run import open_repo
+    from romulus.hunt.triage import StaleTriage, run_triage, stage_limits, write_export
+
+    settings = load_settings(_env_file(args))
+    repo = open_repo(settings)
+    if repo.get_hunt(args.hunt_id) is None:
+        print(f"unknown hunt: {args.hunt_id}", file=sys.stderr)
+        return EXIT_FAIL
+    summary = None
+    if not args.no_run:
+        summary = run_triage(settings, repo, args.hunt_id, force=args.force)
+        print(json.dumps(summary, indent=2, default=str) if args.json else
+              f"AI triage: {summary.get('status')}" + (f" ({summary['reason']})" if summary.get("reason") else "")
+              + ("; reused the stored pass with the same prompt digest" if summary.get("reused") else "")
+              + "; the deterministic report order is authoritative. Run `romulus report` to publish it.")
+    if args.export:
+        try:
+            header = write_export(repo, args.hunt_id, Path(args.export), allow_stale=args.allow_stale,
+                                  **stage_limits(settings))
+        except StaleTriage as exc:
+            print(f"triage export refused: {exc}", file=sys.stderr)
+            return EXIT_FAIL
+        print(f"triage order of {header['written']} findings written to {header['path']} "
+              f"(status {header['status']}{', stale' if header['stale'] else ''})")
+        if header.get("latest_failed_attempt"):
+            print(f"the latest triage attempt failed: {header['latest_failed_attempt'].get('reason')}",
+                  file=sys.stderr)
+    if summary is not None and summary.get("status") in ("skipped", "failed") and not summary.get("reused"):
+        return EXIT_FAIL
     return EXIT_OK
 
 
@@ -448,6 +484,13 @@ def main(argv: list[str] | None = None) -> int:
     reassess.add_argument("hunt_id")
     reassess.add_argument("--max-calls", type=int, help="additional call budget for this reassessment")
     reassess.add_argument("--max-tokens", type=int, help="additional token budget for this reassessment")
+    tp = sub.add_parser("triage", help="run the AI triage order (a labelled, promote-only view) on a finished hunt")
+    tp.add_argument("hunt_id")
+    tp.add_argument("--export", help="write the triage order (every surfaced finding id) as JSON to this file")
+    tp.add_argument("--no-run", action="store_true", help="export the stored pass without calling the model")
+    tp.add_argument("--force", action="store_true", help="run a new pass even when the prompt digest is unchanged")
+    tp.add_argument("--allow-stale", action="store_true",
+                    help="export a pass whose hunt's findings or order changed after it ran")
     fp = sub.add_parser("findings", help="list candidates of a hunt, ranked by lane and priority")
     fp.add_argument("hunt_id")
     fp.add_argument("--lane", action="append", choices=["urgent", "high", "lead", "context"])
@@ -506,7 +549,7 @@ def main(argv: list[str] | None = None) -> int:
         p.error("hunt start needs --start and --end")
     if args.cmd == "hunt" and args.action == "resume" and not args.hunt_id:
         p.error("hunt resume needs a hunt id")
-    handlers = {"doctor": cmd_doctor, "hunt": cmd_hunt, "agent": cmd_agent,
+    handlers = {"doctor": cmd_doctor, "hunt": cmd_hunt, "agent": cmd_agent, "triage": cmd_triage,
                 "findings": cmd_findings, "report": cmd_report,
                 "user": cmd_user, "web": cmd_web, "db": cmd_db,
                 "indicators": cmd_indicators, "sigma": cmd_sigma}

@@ -501,7 +501,7 @@ def _settle_material(repo: Repo, hunt_id: str, specs: list[str], targets: list[s
         if other == hunt_id:
             continue
         row = repo.get_hunt(other)
-        if row is None or row["execution_state"] == "planned" or _lease_active(row, now, repo.agent_run(other)):
+        if row is None or row["execution_state"] == "planned" or _lease_active(row, now, repo.agent_lease(other)):
             continue
         if row["execution_state"] not in _UNRESUMABLE:
             if repo.baseline_window_retention(other) is not None:
@@ -535,7 +535,7 @@ def _settle_material(repo: Repo, hunt_id: str, specs: list[str], targets: list[s
             # A hunt holding an active lease is running (for example, a resumed baseline stage judging from its
             # material): its material is never released under it. Its own finish settles it.
             row = repo.get_hunt(item["hunt_id"])
-            if row is not None and _lease_active(row, now, repo.agent_run(item["hunt_id"])):
+            if row is not None and _lease_active(row, now, repo.agent_lease(item["hunt_id"])):
                 continue
         _release_hunt(repo, item["hunt_id"], _hunt_pairs(repo, item["hunt_id"]), reason)
         total -= int(item["bytes"])

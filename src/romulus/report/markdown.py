@@ -245,6 +245,56 @@ def _ranked_summary(m: dict, out: list[str]) -> list[dict]:
     return ordered
 
 
+def _triage_section(m: dict) -> list[str]:
+    """The AI triage order: its own labelled section after the deterministic findings, which it never reorders."""
+    view = m.get("ai_triage")
+    if not view:
+        return []
+    groups = view.get("groups") or {}
+    out = [f"## {esc(view['label'])}", "",
+           ("A model read deterministic group cards (one per rule and primary target in a report section) and "
+            "proposed which groups an analyst should see first. Within each section at most "
+            f"{esc((view.get('settings') or {}).get('promote_per_lane', 'the configured number of'))} groups it "
+            "assessed as likely or possible attack are listed here. In the triage order only the findings it was "
+            "shown for each (at most three) move ahead; the rest of each group and every other finding keep their "
+            "deterministic place. Lanes, ranks, the Reported set and citations are unchanged. This is "
+            "AI-generated and unconfirmed."), "",
+           f"- Status: {esc(view.get('status') or 'unknown')}"
+           + (f" ({esc(view['reason'])})" if view.get("reason") else ""),
+           (f"- Groups: {groups.get('total', 0)} in total, {groups.get('eligible', 0)} eligible, "
+            f"{groups.get('triaged', 0)} triaged, {groups.get('not_triaged', 0)} not triaged (deterministic order "
+            f"kept), {groups.get('excluded_agent', 0)} of agent proposals not triaged"),
+           f"- Assessments: {esc(json.dumps(groups.get('by_assessment') or {}, sort_keys=True))}",
+           f"- Dropped model output: {esc(json.dumps(view.get('dropped') or {}, sort_keys=True))}",
+           (f"- Model: {esc((view.get('provider') or {}).get('provider') or 'unknown')}/"
+            f"{esc(view.get('model') or 'unknown')} · pass {esc(view.get('pass'))} · prompt digest "
+            f"`{esc(str(view.get('prompt_digest') or '')[:16])}`"), ""]
+    if view.get("stale"):
+        out += ["> **Stale:** the hunt's findings or order changed after this triage pass.", ""]
+    if view.get("verification_error"):
+        out += [(f"> **Unverified:** this view could not be checked against the hunt "
+                 f"({cell(view['verification_error'])}); the deterministic order above is authoritative."), ""]
+    if (view.get("last_attempt") or {}).get("status") == "failed":
+        out += [f"> **A later triage attempt failed:** {cell(view['last_attempt'].get('reason') or '')}", ""]
+    for section in view.get("sections") or []:
+        out += [f"### {esc(section['title'])}", ""]
+        if not section["promoted"]:
+            out += ["No group promoted; the deterministic order stands.", ""]
+            continue
+        out += [("| Triage # | Group | Rule | Target | Findings | Deterministic position | Assessment | "
+                 "Incident label | Rationale | Cites |"), "|---:|---|---|---|---|---:|---|---|---|---|"]
+        for group in section["promoted"]:
+            entity = group.get("entity") or {}
+            cites = ", ".join(f"[{esc(c)}](#f-{c})" for c in group.get("cites") or [])
+            out.append(f"| {group['position']} | {esc(group['group_id'])} | {esc(group['rule_id'])} | "
+                       f"{cell(_entity_text(entity) if entity.get('value') else entity.get('kind') or 'unattributed')} | "
+                       f"{group.get('moved', 0)} moved, {group.get('in_deterministic_place', 0)} more in "
+                       f"deterministic place | {group['best_position']} | {esc(group.get('assessment'))} | "
+                       f"{esc(group.get('incident_label') or '')} | {cell(group.get('rationale') or '')} | {cites} |")
+        out.append("")
+    return out
+
+
 def _render_body(m: dict, banner: str = BANNER) -> str:
     h = m["hunt"]
     graph = m.get("incident_graph") or {"incidents": [], "links": [], "nodes": [], "edges": []}
@@ -345,6 +395,7 @@ def _render_body(m: dict, banner: str = BANNER) -> str:
             out.append(f"| … | {len(f['citations']) - 25} more citations in the JSON manifest | | | |")
         out.append("")
 
+    out += _triage_section(m)
     out += ["## Incidents", "",
             ("Incidents are connected only by observed typed links. Inferred links remain visible hypotheses and "
              "never merge incident counts."), "",
