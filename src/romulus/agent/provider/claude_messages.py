@@ -75,6 +75,8 @@ RETRY_ERROR_TYPES = frozenset({"overloaded_error", "rate_limit_error", "api_erro
 # the documented stop reasons that say what a reply is, in the port's words; any other is an error (stop_sequence
 # included: no stop sequence is ever sent)
 CLAUDE_STOP_REASONS = {"end_turn": "stop", "tool_use": "tool_calls", "max_tokens": "length", "refusal": "refusal"}
+# the policy categories a refusal (or a fallback's trigger) may name
+REFUSAL_CATEGORIES = frozenset({"cyber", "bio", "frontier_llm", "reasoning_extraction", "general_harms"})
 
 # what a reply may hold and an assistant turn may replay: these block types, with only these fields
 BLOCK_KEYS = {"text": frozenset({"type", "text", "citations"}),
@@ -115,6 +117,11 @@ DESCRIBED_KEYS = {"minLength": "at least {} character(s)", "maxLength": "at most
                   "exclusiveMaximum": "less than {}", "multipleOf": "a multiple of {}",
                   "minItems": "at least {} items", "maxItems": "at most {} items",
                   "pattern": "a match for the regular expression {}"}
+
+
+def refusal_category(value) -> str | None:
+    """A refusal category the API documents, else None: the value is recorded and shown, so nothing else passes."""
+    return value if isinstance(value, str) and value in REFUSAL_CATEGORIES else None
 
 
 class EgressViolation(Exception):
@@ -1004,19 +1011,26 @@ class ClaudeMessagesProvider(ChatProvider):
         refusal = ""
         stop = message.stop_details
         if native == "refusal":
-            category = getattr(stop, "category", None)
+            category = refusal_category(getattr(stop, "category", None))
             details["refusal"] = {"category": category, "explanation": getattr(stop, "explanation", None),
                                   "recommended_model": getattr(stop, "recommended_model", None)}
             refusal = (f"the model declined to answer (category: {category or 'none given'})"
                        + (f": {stop.explanation}" if getattr(stop, "explanation", None) else ""))
             calls = []      # a refusal can cut a tool call off mid-input; never run one
-        switches = [{"from": b.from_.model, "to": b.to.model} for b in blocks if b.type == "fallback"]
+        # each hop where a model declined and another took over, with the category of that refusal: the API states it
+        # on the switch itself (stop_details describes only a reply that ended refused, so it is empty here)
+        switches = [{"from": b.from_.model, "to": b.to.model,
+                     "category": refusal_category(getattr(getattr(b, "trigger", None), "category", None))}
+                    for b in blocks if b.type == "fallback"]
         usage = message.usage
         iterations = [it for it in (getattr(usage, "iterations", None) or [])
                       if it.type in ("message", "fallback_message")]
         served_by_fallback = any(it.type == "fallback_message" for it in iterations)
         if switches or served_by_fallback:
-            details["fallback"] = {"served_by": message.model, "switches": switches}
+            # a fallback that served the call outright (no model ran and declined first) carries no switch, and so
+            # no category
+            details["fallback"] = {"served_by": message.model, "switches": switches,
+                                   "category": switches[0]["category"] if switches else None}
         read, write = (usage.cache_read_input_tokens or 0), (usage.cache_creation_input_tokens or 0)
         tokens = Usage(usage.input_tokens + read + write, usage.output_tokens, read, write)
         # every attempt the API billed for this call, each with the model that served it (the declined ones, and a
