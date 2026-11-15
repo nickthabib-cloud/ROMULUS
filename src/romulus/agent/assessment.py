@@ -7,7 +7,7 @@ import unicodedata
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.exc import IntegrityError
@@ -29,8 +29,6 @@ from romulus.report.incidents import build_incident_graph
 from romulus.report.manifest import coverage_for_hunt
 from romulus.store.db import digest, utcnow
 
-Alias = Annotated[str, Field(pattern=r"^[FIENLHA][1-9][0-9]*$")]
-
 
 class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -50,9 +48,11 @@ def _section(what: str, limit: int) -> str:
 class Sentence(_Strict):
     text: str = Field(description=(
         f"One concise sentence, at most {TEXT_LIMIT} characters; an empty or longer one is dropped and counted."))
-    cites: list[Alias] = Field(description=(
-        f"Aliases supplied for this hunt that support the sentence, at most {CITE_LIMIT} (the rest are dropped). "
-        "A sentence without a citation, or with an alias not issued in this hunt, is dropped."))
+    # plain strings: the checker drops a sentence citing anything that is not an alias issued in this hunt, and counts it
+    cites: list[str] = Field(description=(
+        f"Aliases supplied for this hunt that support the sentence (such as F12 or E3), one per item, at most "
+        f"{CITE_LIMIT} (the rest are dropped). A sentence without a citation, or with anything but an alias issued "
+        "in this hunt, is dropped."))
     kind: Literal["observed", "inferred", "hypothesis"] = Field(description=(
         "observed: recorded in the cited records; inferred: reasoned from them; hypothesis: proposed, unconfirmed."))
 

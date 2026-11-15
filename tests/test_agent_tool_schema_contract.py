@@ -300,12 +300,30 @@ def test_a_reply_the_response_schema_allows_passes_validation_and_the_bounds_are
     assert len(checked["overall"]) == SECTION_LIMITS["overall"] and len(checked["key_steps"]) == 2
     assert checked["gaps"] == [] and checked["next_checks"][0]["cites"] == ["ev1"] * CITE_LIMIT
     assert counts == {"dropped_over_cap": 2, "removed_over_length": 1, "removed_empty": 1, "trimmed_citations": 5}
+    # a citation that is not an issued alias drops its sentence, counted; it never discards the reply
+    odd = _reply(alias, alternatives=[_sentence(alias, cites=["ev1"]), _sentence(alias, cites=[f"{alias}, E2"])])
+    assert _schema_valid(odd)
+    checked, counts = check_assessment(repo, "h1", odd)
+    assert checked["alternatives"] == [] and counts == {"removed_unknown_alias": 2}
+
+
+def _without_descriptions(node):
+    if isinstance(node, dict):
+        return {k: _without_descriptions(v) for k, v in node.items() if k != "description"}
+    if isinstance(node, list):
+        return [_without_descriptions(v) for v in node]
+    return node
+
+
+def test_the_assessment_is_sent_with_exactly_the_schema_it_is_validated_against():
+    # nothing the validator enforces is left out of what the API enforces (only descriptions differ)
+    assert _without_descriptions(strict_wire_schema(ASSESSMENT_SCHEMA)) == _without_descriptions(ASSESSMENT_SCHEMA)
 
 
 def test_a_reply_the_response_schema_refuses_is_refused_by_validation(repo):
     alias = AliasBook(repo, "h1").alias_for("E", "ev1")
     for broken in (_reply(alias, overall=[_sentence(alias, kind="fact")]),
-                   _reply(alias, overall=[_sentence(alias, cites=["ev1"])]),
+                   _reply(alias, overall=[_sentence(alias, cites="E1")]),
                    _reply(alias, confidence={"overall": "certain", "reasons": []}),
                    {k: v for k, v in _reply(alias).items() if k != "gaps"},
                    _reply(alias, extra=[]),

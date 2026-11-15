@@ -96,9 +96,8 @@ def test_every_toolbox_tool_can_be_sent_by_every_adapter(tmp_path, adapter):
 
 WRITE_TOOLS = {"open_hypothesis", "update_hypothesis", "propose_finding", "propose_link", "add_note",
                "request_rule", "finish_session"}
-# what the first live agent-on hunt sent for investigate, which the API refused as too large a grammar: 15 strict
-# tools, 15 union-typed and 0 optional parameters, 56 properties, 24 enum values. Orient, which compiled, sent 11
-# strict tools, 14 unions, 38 properties.
+# a strict tool set the Messages API refuses as too large a grammar, though inside every documented limit: 15 strict
+# tools with 15 union-typed parameters and 56 properties (a set of 11 tools, 14 unions and 38 properties compiles)
 REFUSED_INVESTIGATE = {"tools": 15, "union": 15, "properties": 56}
 
 
