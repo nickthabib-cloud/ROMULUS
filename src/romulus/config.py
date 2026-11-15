@@ -175,6 +175,8 @@ class Settings(BaseModel):
     # provider's full output allowance including any thinking room)
     agent_triage_max_input_tokens: int = Field(default=4_000_000, ge=1000, le=10_000_000_000)
     agent_triage_max_output_tokens: int = Field(default=2_000_000, ge=1000, le=10_000_000_000)
+    # the wall budget counts staging the order and building every card: about 75 s for 200,000 findings on a lab
+    # host, so the default leaves most of it to the calls
     agent_triage_max_wall_seconds: int = Field(default=1800, ge=10, le=7 * 24 * 3600)
     # one call: the cards it carries (estimated prompt tokens) and the answer it may write
     agent_triage_call_input_tokens: int = Field(default=30_000, ge=2000, le=1_000_000)

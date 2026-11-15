@@ -251,13 +251,100 @@ def test_an_interrupted_pass_leaves_nothing_resume_takes_for_an_agent_phase():
     repo.set_hunt_state("h1", "running")
     repo.set_hunt_state("h1", "completed_within_scope")
     _owner, created = repo.claim_triage_lease("h1", 600)         # a worker dies holding it
-    assert created
-    run = repo.agent_run("h1")
+    assert created and repo.agent_run("h1") is None              # readers see no agent record
+    with repo.engine.connect() as connection:
+        run = connection.execute(select(t.agent_run)).mappings().one()
     assert run["state"] == "skipped" and run["reason"] == "triage_lease_placeholder"
     with repo.engine.begin() as connection:                      # its lease expires
         connection.execute(t.agent_run.update().values(lease_until=None))
     assert run_triage(settings(), repo, "h1", provider=FakeTriage(by_rule({"r.a"})))["status"] == "complete"
     assert repo.agent_run("h1") is None                          # the next pass claims and removes it
+
+
+def test_a_pending_agent_handoff_with_the_placeholder_reason_is_released_not_deleted():
+    repo = _repo()
+    _insert(repo, [_row("a", "r.a", host="x")])
+    repo.set_hunt_state("h1", "running")
+    repo.set_hunt_state("h1", "completed_within_scope")
+    owner, created = repo.claim_triage_lease("h1", 600)
+    with repo.engine.begin() as connection:     # an upsert that changes the state and keeps the reason
+        connection.execute(t.agent_run.update().values(state="pending"))
+    repo.release_triage_lease("h1", owner_token=owner, created=created)
+    run = repo.agent_run("h1")
+    assert run is not None and run["state"] == "pending" and run["lease_owner"] is None
+
+
+def test_the_placeholder_never_labels_the_report_during_a_pass_or_after_a_kill():
+    repo = _repo()
+    _insert(repo, [_row("a", "r.a", host="x")])
+    repo.set_hunt_state("h1", "running")
+    repo.set_hunt_state("h1", "completed_within_scope")
+
+    def agent_view():
+        manifest = build_manifest(repo, "h1", "test")
+        return manifest["ai_assessment"], manifest["ai_agent"]["run"], manifest["ai_agent"]["phase"]
+    before = agent_view()
+    assert before[0] is None
+    repo.claim_triage_lease("h1", 600)                             # a pass is running
+    assert agent_view() == before
+    with repo.engine.begin() as connection:                        # the worker was killed: its lease expired
+        connection.execute(t.agent_run.update().values(lease_until=None, lease_owner=None))
+    assert agent_view() == before
+    text = render({**build_manifest(repo, "h1", "test"), "revision": {"number": 1, "id": "r1", "supersedes": None}})
+    assert "triage_lease_placeholder" not in text
+
+
+def test_the_report_verifies_the_order_without_staging_and_never_blocks(tmp_path, monkeypatch):
+    import tempfile
+
+    from romulus.report import triage as report_triage
+    repo = _hunt(filler=10)
+    run_triage_pass(settings(), repo, "h1", FakeTriage(by_rule({"r.attack"})))
+
+    def unavailable(*_a, **_kw):
+        raise FileNotFoundError("no temporary directory")
+    monkeypatch.setattr(tempfile, "mkdtemp", unavailable)
+    view = build_manifest(repo, "h1", "test")["ai_triage"]          # nothing is staged to verify it
+    assert view["order_verified"] and view["stale"] is False
+    monkeypatch.setattr(report_triage, "report_order_digest", unavailable)
+    view = build_manifest(repo, "h1", "test")["ai_triage"]
+    assert view["stale"] is None and not view["order_verified"] and "FileNotFoundError" in view["verification_error"]
+    monkeypatch.setattr(report_triage, "_stale", lambda *_a: 1 / 0)
+    monkeypatch.setattr("romulus.report.manifest.triage_view", unavailable)
+    manifest = build_manifest(repo, "h1", "test")                   # the authoritative report still publishes
+    assert manifest["ai_triage"]["status"] == "unverified" and manifest["findings"]
+
+
+def test_lanes_mode_ties_inserted_out_of_id_order_verify_by_key(tmp_path):
+    repo = _repo()
+    tied = [_row(cid, "r.tie", lane="lead", host="h", priority=7.0, ts=START) for cid in ("t-c", "t-a", "t-b")]
+    _insert(repo, [_row("u-1", "r.u", lane="urgent", host="h"), *tied])
+    _finished(repo)
+    assert deterministic(repo) == ["u-1", "t-a", "t-b", "t-c"]
+    run_triage_pass(settings(), repo, "h1", FakeTriage(by_rule(set())))
+    assert build_manifest(repo, "h1", "test")["ai_triage"]["stale"] is False
+
+
+@pytest.mark.parametrize("ranked", [True, False])
+def test_a_lane_change_that_keeps_the_count_makes_the_view_stale(ranked):
+    repo = _hunt(filler=10, ranked=ranked, agent=False)
+    run_triage_pass(settings(), repo, "h1", FakeTriage(by_rule({"r.attack"})))
+    assert build_manifest(repo, "h1", "test")["ai_triage"]["stale"] is False
+    with repo.engine.begin() as connection:
+        connection.execute(t.candidate.update().where(t.candidate.c.id == "z-attack-2").values(lane="urgent"))
+    assert build_manifest(repo, "h1", "test")["ai_triage"]["stale"] is True
+
+
+def test_the_stage_reads_its_order_and_groups_through_indexes_never_a_temp_sort(tmp_path):
+    from romulus.agent.triage_order import BUILD_STATEMENTS
+    repo = _hunt()
+    with OrderWorkspace(repo, "h1", directory=str(tmp_path)) as ws:
+        assert ws.db.execute("PRAGMA temp_store").fetchone()[0] == 2           # memory: nothing in another dir
+        for statement in BUILD_STATEMENTS:
+            plan = " ".join(str(row[-1]) for row in ws.db.execute("EXPLAIN QUERY PLAN " + statement))
+            assert "TEMP B-TREE" not in plan, (statement, plan)
+        ws.build()
+        assert ws.findings == len(deterministic(repo))
 
 
 def test_cases_cost_and_a_stale_export(tmp_path):
