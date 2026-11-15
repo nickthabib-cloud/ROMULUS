@@ -40,6 +40,8 @@ evidence ranking, pass 2 ─► ranked findings and entities (report manifest)
                             │
 AI investigating agent (planned) ─► hypotheses, typed pivots, AI assessment
                             │
+AI triage order ─► a labelled, promote-only view over the surfaced finding groups (never the report order)
+                            │
 report ─► ReportManifest ─► JSON | Markdown | web (findings, incidents, narratives, timeline)
 ```
 
