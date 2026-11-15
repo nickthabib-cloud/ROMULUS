@@ -354,6 +354,36 @@ def test_overview_points_to_egress_from_any_remote_model_call(setup):
     assert 'href="/hunts/h1/run#model-egress"' in html
 
 
+def test_fallback_answers_and_declined_calls_show_on_run_details_and_assessment(setup):
+    client, repo, *_ = setup
+    test_web_agent_a6.run_row(repo)
+    calls = [("fb-1", "assess", {"stop_reason": "end_turn", "fallback": {
+                 "served_by": "<b>claude-fallback</b>", "category": "cyber", "switches": []}}),
+             ("fb-2", "agent.triage", {"stop_reason": "refusal", "refusal": {"category": "cyber",
+                                                                             "explanation": "private text"}})]
+    for call_id, purpose, details in calls:
+        repo.save_model_call({"id": call_id, "hunt_id": "h1", "purpose": purpose, "model": "configured",
+                              "options": {"provider_details": details}, "prompt_digest": "d", "status": "ok",
+                              "provider": "anthropic", "endpoint_host": "api.provider.example", "egress": "remote",
+                              "model_reported": "configured"})
+    run = client.get("/hunts/h1/run").text
+    block = run.split('id="fallbacks"', 1)[1].split("</section>", 1)[0]
+    assert "Declined calls and fallback answers" in run
+    assert "1 agent call(s) (assess 1) were written by fallback model(s) &lt;b&gt;claude-fallback&lt;/b&gt;" in block
+    assert "1 call(s) ended declined (by category: cyber 1)" in block
+    assert "<b>claude-fallback</b>" not in run and "private text" not in run
+    assessment = client.get("/hunts/h1/assessment").text
+    assert "1 call(s) were answered by a fallback model after the configured model declined" in assessment
+    assert "1 call(s) ended declined" in assessment and 'href="/hunts/h1/run#fallbacks"' in assessment
+
+
+def test_no_fallback_block_without_fallbacks(setup):
+    client, repo, *_ = setup
+    test_web_agent_a6.run_row(repo)
+    assert "Declined calls and fallback answers" not in client.get("/hunts/h1/run").text
+    assert "fallback model" not in client.get("/hunts/h1/assessment").text
+
+
 def test_overview_without_an_agent_says_so(setup):
     client, *_ = setup
     html = client.get("/hunts/h1").text

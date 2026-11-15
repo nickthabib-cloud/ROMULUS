@@ -102,9 +102,31 @@ class RequestRuleArgs(_Args):
                                description="Evidence (E...) or finding (F...) aliases that show the pattern.")
 
 
+SUMMARY_MAX_CHARS = 2000
+SUMMARY_TRUNCATED = f"[summary truncated by the product at {SUMMARY_MAX_CHARS} characters]"
+_SENTENCE_END = re.compile(r"[.!?](?=\s|$)|\n")
+
+
 class FinishSessionArgs(_Args):
-    summary: Annotated[str, Field(min_length=20, max_length=2000)] = Field(description=(
-        "What was examined, what changed and what is left, 20 to 2000 characters."))
+    summary: Annotated[str, Field(min_length=20, max_length=SUMMARY_MAX_CHARS)] = Field(description=(
+        f"What was examined, what changed and what is left, 20 to {SUMMARY_MAX_CHARS} characters."))
+
+
+def truncated_summary(text: str) -> str:
+    """An over-length session summary cut to fit SUMMARY_MAX_CHARS with SUMMARY_TRUNCATED at its end: at the last
+    sentence end that keeps at least half the room, else the last word break, else mid-word. Used only after the
+    model has been told the limit and its summary's length and wrote one over it again."""
+    room = SUMMARY_MAX_CHARS - len(SUMMARY_TRUNCATED) - 1
+    text = text.strip()
+    if len(text) <= SUMMARY_MAX_CHARS:
+        return text
+    head = text[:room]
+    ends = [match.end() for match in _SENTENCE_END.finditer(head)]
+    if ends and ends[-1] >= room // 2:
+        head = head[:ends[-1]]
+    elif head.rfind(" ") >= room // 2:
+        head = head[:head.rfind(" ")]
+    return f"{head.rstrip()} {SUMMARY_TRUNCATED}"
 
 
 def _id(prefix: str) -> str:

@@ -172,6 +172,13 @@ def _ai_agent_cell(m: dict) -> str:
     if others:
         text += "; answered by " + ", ".join(f"{r['model_reported']} ({r['calls']} calls, configured {r['model']})"
                                              for r in others)
+    fallbacks = (ai.get("usage") or {}).get("fallbacks") or {}
+    if fallbacks.get("note"):
+        text += "; " + fallbacks["note"]
+    if fallbacks.get("refusals"):
+        text += (f"; {fallbacks['refusals']} call(s) ended declined (by category: "
+                 + ", ".join(f"{name} {count}" for name, count in sorted(fallbacks["refusals_by_category"].items()))
+                 + ")")
     return text
 
 

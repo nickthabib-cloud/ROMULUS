@@ -12,7 +12,7 @@ import anyio
 from sqlalchemy import func, select, tuple_
 from starlette.concurrency import run_in_threadpool
 
-from romulus.report.manifest import _ai_assessment
+from romulus.report.manifest import _ai_assessment, fallback_view
 from romulus.store import schema as t
 
 PAGE_SIZE = 50
@@ -149,7 +149,9 @@ def panel(repo, hunt, usage, *, with_assessment=True):
             "assessment": assessment_view(repo, hunt["id"]) if with_assessment else None,
             "refusal": repo.agent_reassessment_refusal(hunt["id"]),
             # why the model's tool calls and assessment answers were refused: counts by tool and reason
-            "refused_calls": repo.agent_refusal_counts(hunt["id"])}
+            "refused_calls": repo.agent_refusal_counts(hunt["id"]),
+            # calls a fallback model answered after the configured model declined, and calls left declined
+            "fallbacks": fallback_view(repo, hunt["id"])}
 
 
 def hypotheses_page(repo, hunt_id, after=""):

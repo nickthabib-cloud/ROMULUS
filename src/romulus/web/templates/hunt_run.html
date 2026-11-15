@@ -112,6 +112,9 @@
   <table class="grid small"><thead><tr><th>Tool</th><th>Reason</th><th>Count</th></tr></thead><tbody>
   {% for tool, reasons in ai_panel.refused_calls.by_tool.items() %}{% for why, count in reasons.items() %}<tr><td>{{ tool }}</td><td><code>{{ why }}</code></td><td>{{ count }}</td></tr>{% endfor %}{% endfor %}
   </tbody></table>{% if ai_panel.refused_calls.more %}<p>{{ ai_panel.refused_calls.more }} more refusals in further groups.</p>{% endif %}{% endif %}
+  {% if ai_panel.fallbacks %}<h3 id="fallbacks">Declined calls and fallback answers</h3>
+  {% if ai_panel.fallbacks.note %}<p>{{ ai_panel.fallbacks.note }}</p>{% endif %}
+  {% if ai_panel.fallbacks.refusals %}<p>{{ ai_panel.fallbacks.refusals }} call(s) ended declined (by category: {% for name, count in ai_panel.fallbacks.refusals_by_category.items() %}{{ name }} {{ count }}{% if not loop.last %}, {% endif %}{% endfor %}).</p>{% endif %}{% endif %}
   {% if ai_panel.usage.models_reported_more %}<p class="small">{{ ai_panel.usage.models_reported_more }} more reported model groups; <a href="{{ url(h.id) }}#reports">complete usage in the report</a>.</p>{% endif %}
   {% if ai_panel.usage.remote_calls_more %}<p class="small">{{ ai_panel.usage.remote_calls_more }} more remote model groups; <a href="{{ url(h.id) }}#reports">complete usage in the report</a>.</p>{% endif %}
   </div>

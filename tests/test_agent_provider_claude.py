@@ -546,8 +546,11 @@ def test_the_model_that_answered_is_recorded_when_the_fallback_served(tmp_path):
     p, _ = provider(s, ep)
     result = p.chat(ask(tools=[TOOL]))
     assert result.ok and result.model_reported == "claude-fallback-model" and result.model_requested == MODEL
-    assert result.details["fallback"] == {"served_by": "claude-fallback-model",
-                                          "switches": [{"from": MODEL, "to": "claude-fallback-model"}]}
+    # the refusal's category comes from the switch itself: stop_details is empty on a reply the fallback served
+    assert result.details["fallback"] == {"served_by": "claude-fallback-model", "category": "cyber",
+                                          "switches": [{"from": MODEL, "to": "claude-fallback-model",
+                                                        "category": "cyber"}]}
+    assert "refusal" not in result.details
     # the declined model's thinking before the switch is dropped; its text carries over; the marker is not replayed
     kept = result.provider_state["content"]
     assert [b["type"] for b in kept] == ["text", "thinking", "text", "tool_use"]

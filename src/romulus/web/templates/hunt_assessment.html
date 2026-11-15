@@ -26,6 +26,7 @@
           <dt>Model</dt><dd class="mono small">{{ ai_panel.provider }}/{{ ai_panel.model }}</dd>
           <dt>Calls</dt><dd>{{ ai_panel.usage.calls }} / {{ ai_panel.budgets.max_calls or 'not recorded' }}</dd>
         </dl>
+        {% if ai_panel.fallbacks %}<div class="notice warn"><span>{% if ai_panel.fallbacks.calls %}{{ ai_panel.fallbacks.calls }} call(s) were answered by a fallback model after the configured model declined{% if ai_panel.fallbacks.refusals %}; {% endif %}{% endif %}{% if ai_panel.fallbacks.refusals %}{{ ai_panel.fallbacks.refusals }} call(s) ended declined{% endif %}.</span><a class="end" href="{{ url(h.id, '/run') }}#fallbacks">Details</a></div>{% endif %}
         {% if user.r == 'lead' %}
         {% if ai_panel.refusal %}<p class="help small">Re-run assessment unavailable: {{ ai_panel.refusal }}</p>{% else %}
         <form method="post" action="/hunts/{{ h.id | urlencode }}/agent/reassess"><input type="hidden" name="csrf" value="{{ csrf }}">

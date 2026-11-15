@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from romulus.agent.models import EntityRef, PivotResult
-from romulus.agent.toolbox import Toolbox
+from romulus.agent.toolbox import FOLLOW_LINK_KINDS, Toolbox
 from romulus.config import Settings
 from romulus.detect.registry import bind_windows_site, fresh_direct_pack
 from romulus.evidence.typed import TypedEvent
@@ -26,6 +26,8 @@ _PIVOT_LINK_TYPES = {
 }
 _AGENT_HYPOTHESIS = "agent_hypothesis"
 _EVENT_DIGEST_LIMIT = 50
+# anchors whose followable link kinds one session's executor remembers (each costs one read of the anchor's records)
+_FOLLOWABLE_CACHE = 256
 
 
 def _utc(value: datetime) -> datetime:
@@ -43,6 +45,7 @@ class HuntToolExecutor:
         self.fetcher = fetcher
         self.window = Window(start=_utc(hunt_start), end=_utc(hunt_end))
         self.owner_token = owner_token
+        self._followable: dict[str, tuple[str, ...]] = {}
 
     def _events(self, ids: list[str]) -> list[TypedEvent]:
         rows = self.repo.citation_events(self.hunt_id, ids)
@@ -124,6 +127,40 @@ class HuntToolExecutor:
             "caveats": event.caveats[:5],
         }
 
+    def _link_anchor(self, candidate: dict) -> LinkAnchor:
+        anchor_events = self._events(candidate["event_ids"])
+        return LinkAnchor(
+            finding_id=candidate["id"], ts=_utc(candidate["ts"]),
+            host=ExpansionEngine._anchor_host(anchor_events),
+            event_ids=candidate["event_ids"], events=anchor_events,
+        )
+
+    def _link_window(self, anchor: LinkAnchor, window_label: str | None):
+        label = window_label or "anchor ±5 min"
+        return next(item for item in expansion_windows(anchor.ts, self.window) if item.label == label)
+
+    def followable_links(self, anchor_id: str) -> tuple[str, ...]:
+        """The follow_link kinds the anchor finding's cited records carry a usable typed key for, decided by the
+        link planner itself without a source query. A finding without an observation time gets every kind:
+        follow_link then answers each with its own partial result."""
+        cached = self._followable.get(anchor_id)
+        if cached is not None:
+            return cached
+        candidate = self.repo.candidate(anchor_id)
+        decide = getattr(self.fetcher, "followable", None)
+        if candidate is None or candidate["hunt_id"] != self.hunt_id:
+            kinds: tuple[str, ...] = ()
+        elif candidate["ts"] is None or decide is None:
+            kinds = FOLLOW_LINK_KINDS       # a fetcher that cannot say lets every kind through to follow_link
+        else:
+            anchor = self._link_anchor(candidate)
+            window = self._link_window(anchor, None)
+            kinds = tuple(kind for kind in FOLLOW_LINK_KINDS if decide(anchor, kind, window))
+        if len(self._followable) >= _FOLLOWABLE_CACHE:
+            self._followable.pop(next(iter(self._followable)))
+        self._followable[anchor_id] = kinds
+        return kinds
+
     def follow_link(self, session_id: str, anchor_id: str, link_type: str,
                     window_label: str | None) -> PivotResult:
         candidate = self.repo.candidate(anchor_id)
@@ -133,15 +170,8 @@ class HuntToolExecutor:
             return PivotResult(status="partial", reasons=[
                 "anchor observation time unavailable; time-based link was not evaluated",
             ])
-        anchor_events = self._events(candidate["event_ids"])
-        anchor = LinkAnchor(
-            finding_id=candidate["id"], ts=_utc(candidate["ts"]),
-            host=ExpansionEngine._anchor_host(anchor_events),
-            event_ids=candidate["event_ids"], events=anchor_events,
-        )
-        windows = expansion_windows(anchor.ts, self.window)
-        label = window_label or "anchor ±5 min"
-        window = next(item for item in windows if item.label == label)
+        anchor = self._link_anchor(candidate)
+        window = self._link_window(anchor, window_label)
         used = int(getattr(self.fetcher.executor, "source_queries", 0))
         maximum = getattr(self.fetcher.executor, "source_query_budget", None)
         remaining = max(0, int(maximum) - used) if isinstance(maximum, int) else 12

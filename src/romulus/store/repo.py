@@ -6094,6 +6094,54 @@ class Repo:
             result.update(remote_calls_more=remote_more, models_reported_more=answered_more)
         return result
 
+    def agent_fallbacks(self, hunt_id: str, *, group_limit: int = 50) -> dict:
+        """Model calls a fallback model answered after the configured model declined, and calls that ended declined,
+        counted by purpose, serving model and refusal category, from the provider details each call recorded. Rows
+        are read in bounded pages; at most `group_limit` serving models are named (the rest are counted in
+        `fallback_models_more`). A category outside the provider's word shape is counted as unknown."""
+        details = "$.provider_details"
+        served = func.json_extract(t.model_call.c.options, f"{details}.fallback.served_by")
+        category = func.json_extract(t.model_call.c.options, f"{details}.fallback.category")
+        stop = func.json_extract(t.model_call.c.options, f"{details}.stop_reason")
+        declined = func.json_extract(t.model_call.c.options, f"{details}.refusal.category")
+        out = {"fallback_calls": 0, "fallback_by_purpose": {}, "fallback_models": {}, "fallback_by_category": {},
+               "refusals": 0, "refusals_by_category": {}}
+        more = 0
+
+        def word(value) -> str:
+            return value if isinstance(value, str) and re.fullmatch(r"[a-z][a-z_]{0,31}", value) else "unknown"
+
+        def bump(key: str, name: str) -> None:
+            out[key][name] = out[key].get(name, 0) + 1
+
+        with self.engine.connect() as c:
+            after = ""
+            while True:
+                rows = c.execute(select(t.model_call.c.id, t.model_call.c.purpose, served, category, stop, declined)
+                                 .where(t.model_call.c.hunt_id == hunt_id, t.model_call.c.id > after,
+                                        or_(served.is_not(None), stop == "refusal"))
+                                 .order_by(t.model_call.c.id).limit(500)).all()
+                for _call_id, purpose, model, why, reason_, refused in rows:
+                    if model is not None:
+                        out["fallback_calls"] += 1
+                        bump("fallback_by_purpose", purpose if isinstance(purpose, str) and re.fullmatch(
+                            r"[a-z][a-z0-9_.]{0,63}", purpose) else "unknown")
+                        name = str(model)[:200]
+                        if name in out["fallback_models"] or len(out["fallback_models"]) < group_limit:
+                            bump("fallback_models", name)
+                        else:
+                            more += 1
+                        bump("fallback_by_category", word(why))
+                    if reason_ == "refusal":
+                        out["refusals"] += 1
+                        bump("refusals_by_category", word(refused))
+                if len(rows) < 500:
+                    break
+                after = rows[-1][0]
+        if more:
+            out["fallback_models_more"] = more
+        return out
+
     def agent_elapsed_ms(self, hunt_id: str, *, exclude_purposes: tuple[str, ...] = ()) -> int:
         with self.engine.connect() as c:
             model_ms = c.execute(select(func.coalesce(func.sum(t.model_call.c.duration_ms), 0)).where(

@@ -440,7 +440,7 @@ def test_invalid_tool_arguments_consume_the_per_session_call_budget(tmp_path):
     engine.dispose()
 
 
-@pytest.mark.parametrize("second", ["corrected", "refused_again"])
+@pytest.mark.parametrize("second", ["corrected", "refused_again", "too_long_again"])
 def test_a_refused_wrap_up_finish_gets_one_corrected_call(tmp_path, second):
     engine = make_engine(tmp_path / "agent-finish-retry.sqlite")
     migrate(engine)
@@ -451,8 +451,10 @@ def test_a_refused_wrap_up_finish_gets_one_corrected_call(tmp_path, second):
     opened = ToolCall("open", "open_hypothesis", {"statement": "Review this bounded wrap-up hypothesis"}, "{}")
     too_long = ToolCall("f1", "finish_session", {"summary": "s" * 2001}, "{}")
     fixed = ToolCall("f2", "finish_session", {"summary": "The orientation opened one hypothesis."}, "{}")
+    too_short = ToolCall("f3", "finish_session", {"summary": "short"}, "{}")
     provider = ScriptedProvider([response(tool_calls=[opened]), response(tool_calls=[too_long]),
-                                 response(tool_calls=[fixed if second == "corrected" else too_long])])
+                                 response(tool_calls=[{"corrected": fixed, "refused_again": too_short,
+                                                       "too_long_again": too_long}[second]])])
     budget = AgentBudget.from_usage(BudgetLimits.from_settings(settings), repo.agent_usage("h1"), clock=lambda: 0.0)
 
     outcome = _run_session(settings, repo, "h1", provider, _BudgetGate(budget, settings),
@@ -461,6 +463,11 @@ def test_a_refused_wrap_up_finish_gets_one_corrected_call(tmp_path, second):
     statuses = [row["status"] for row in repo.agent_tool_calls("h1")]
     if second == "corrected":
         assert outcome["state"] == "finished" and outcome["summary"] == "The orientation opened one hypothesis."
+        assert statuses == ["complete", "refused", "complete"]
+    elif second == "too_long_again":
+        # a second over-length summary is kept, cut to the limit and marked, never lost
+        assert outcome["state"] == "finished" and len(outcome["summary"]) <= 2000
+        assert outcome["summary"].endswith("[summary truncated by the product at 2000 characters]")
         assert statuses == ["complete", "refused", "complete"]
     else:
         assert outcome["state"] == "capped" and outcome["reason"] == "wrap_up_not_finished"

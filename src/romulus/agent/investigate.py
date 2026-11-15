@@ -6,12 +6,18 @@ import logging
 import math
 import threading
 import uuid
+from collections import deque
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from time import monotonic
 
-from romulus.agent.admission import AgentAdmission, typed_alias_arguments
+from romulus.agent.admission import (
+    SUMMARY_MAX_CHARS,
+    AgentAdmission,
+    truncated_summary,
+    typed_alias_arguments,
+)
 from romulus.agent.assessment import run_assessment, template_assessment
 from romulus.agent.dossier import build_dossier
 from romulus.agent.provider import (
@@ -67,12 +73,24 @@ class _Reservation:
 
 
 class _BudgetGate:
-    """Reserve worst-case concurrent calls so parallel sessions cannot race past hunt caps."""
+    """Reserve worst-case concurrent calls so parallel sessions cannot race past hunt caps.
+
+    A call reserves its own worst case (`BudgetLimits.worst_tokens`: the whole prompt at the dearest token weight and
+    the full output allowance, once more for the refusal fallback's attempt only when that fallback is on) while it
+    runs, and the assessment keeps its hold. A call that fits beside what is already spent but not beside the live
+    reservations of calls still in flight waits for them to settle (they almost always settle far below their worst
+    case) instead of stopping its session; it stops only when it cannot fit even with nothing else in flight. Waiters
+    are served in arrival order. The stop's detail states what was spent, reserved and held, and the limit."""
+
+    # how often a waiting call re-checks the wall-clock budget while calls in flight hold their reservations
+    WAIT_SECONDS = 5.0
 
     def __init__(self, budget: AgentBudget, settings: Settings):
         self.budget = budget
         self.settings = settings
         self.lock = threading.Lock()
+        self.changed = threading.Condition(self.lock)
+        self.queue: deque[object] = deque()
         self.calls = 0
         self.tokens = 0
         self.cost = 0.0
@@ -88,39 +106,75 @@ class _BudgetGate:
         wall = max(limits.max_wall_seconds * fraction, min(limits.max_wall_seconds, 60.0))
         return calls, tokens, cost, wall
 
+    def _over(self, prompt: int, output: int, purpose: str, tokens: int, cost: float, *,
+              live: bool) -> BudgetExhausted | None:
+        """Why this call cannot start now (None when it can): against what is spent, the assessment's hold and, with
+        `live`, the reservations of calls in flight. Called with the lock held."""
+        limits, spent = self.budget.limits, self.budget
+        try:
+            spent.check(prompt, output)
+        except BudgetExhausted as exc:
+            return exc
+        held_calls, held_tokens, held_cost, held_wall = (
+            self._reserve_for_assess(prompt, output) if purpose != "assess" else (0, 0, 0.0, 0.0))
+        in_flight = (self.calls, self.tokens, self.cost) if live else (0, 0, 0.0)
+        if spent.calls + in_flight[0] + 1 + held_calls > limits.max_calls:
+            return BudgetExhausted("calls", (
+                f"{spent.calls} of {limits.max_calls} calls used, {in_flight[0]} in flight, {held_calls} held for "
+                "the assessment"))
+        if spent.budget_tokens + in_flight[1] + tokens + held_tokens > limits.max_tokens:
+            return BudgetExhausted("tokens", (
+                f"{spent.budget_tokens} of {limits.max_tokens} budget tokens (weighted by price) spent, {tokens} "
+                f"reserved for this call's worst case, {in_flight[1]} reserved by calls in flight, {held_tokens} "
+                "held for the assessment"))
+        if limits.max_cost_usd and spent.cost_usd + in_flight[2] + cost + held_cost > limits.max_cost_usd:
+            return BudgetExhausted("cost", (
+                f"about ${spent.cost_usd:.4f} of ${limits.max_cost_usd:.2f} spent, ${cost:.4f} reserved for this "
+                f"call's worst case, ${in_flight[2]:.4f} reserved by calls in flight, ${held_cost:.4f} held for the "
+                "assessment"))
+        if held_wall and spent.wall_seconds() + held_wall >= limits.max_wall_seconds:
+            return BudgetExhausted("wall-clock", (
+                f"{spent.wall_seconds():.0f} s of {limits.max_wall_seconds} s used, {held_wall:.0f} s held for the "
+                "assessment"))
+        return None
+
     def reserve(self, prompt: int, output: int, purpose: str) -> _Reservation:
         limits = self.budget.limits
         tokens = limits.worst_tokens(prompt, output)
         cost = limits.worst_cost(prompt, output)
-        with self.lock:
-            self.budget.check(prompt, output)
-            after_calls = self.budget.calls + self.calls + 1
-            after_tokens = self.budget.budget_tokens + self.tokens + tokens
-            after_cost = self.budget.cost_usd + self.cost + cost
-            if purpose != "assess":
-                reserve_calls, reserve_tokens, reserve_cost, reserve_wall = self._reserve_for_assess(prompt, output)
-                if after_calls + reserve_calls > limits.max_calls:
-                    raise BudgetExhausted("calls", "assessment reserve must remain available")
-                if after_tokens + reserve_tokens > limits.max_tokens:
-                    raise BudgetExhausted("tokens", "assessment reserve must remain available")
-                if limits.max_cost_usd and after_cost + reserve_cost > limits.max_cost_usd:
-                    raise BudgetExhausted("cost", "assessment reserve must remain available")
-                if self.budget.wall_seconds() + reserve_wall >= limits.max_wall_seconds:
-                    raise BudgetExhausted("wall-clock", "assessment reserve must remain available")
-            self.calls += 1
-            self.tokens += tokens
-            self.cost += cost
-        return _Reservation(prompt, output, tokens, cost, purpose)
+        ticket = object()
+        with self.changed:
+            self.queue.append(ticket)
+            try:
+                while True:
+                    if self.queue[0] is ticket:
+                        # never past a limit with nothing else in flight: a stop, since spending only grows
+                        alone = self._over(prompt, output, purpose, tokens, cost, live=False)
+                        if alone is not None:
+                            raise alone
+                        if self._over(prompt, output, purpose, tokens, cost, live=True) is None:
+                            self.calls += 1
+                            self.tokens += tokens
+                            self.cost += cost
+                            return _Reservation(prompt, output, tokens, cost, purpose)
+                    # it fits once the calls in flight settle, or it is not this call's turn yet
+                    self.changed.wait(self.WAIT_SECONDS)
+            finally:
+                self.queue.remove(ticket)
+                self.changed.notify_all()
 
     def settle(self, reservation: _Reservation, result=None, error: BaseException | None = None) -> None:
-        with self.lock:
+        with self.changed:
             self.calls -= 1
             self.tokens -= reservation.tokens
             self.cost -= reservation.cost
-            if error is not None:
-                self.budget.charge_failure(error)
-            elif result is not None:
-                self.budget.charge(result)
+            try:
+                if error is not None:
+                    self.budget.charge_failure(error)
+                elif result is not None:
+                    self.budget.charge(result)
+            finally:
+                self.changed.notify_all()
 
     def attempt_guard(self, reservation: _Reservation, billed: dict) -> bool:
         parts = parts_of(billed.get("billed"))
@@ -327,6 +381,51 @@ def _session_tools(toolbox: Toolbox) -> list:
     return toolbox.provider_tools()
 
 
+# A session's tool calls: AGENT_MAX_TOOL_CALLS_PER_SESSION covers its pivots, proposals and finish, plus one read for
+# each unit of input it is handed that it can only see by reading it: each dossier index page after the first an
+# orient session is shown (one list_findings call each), each finding an investigate session's hypothesis cites (one
+# get_finding call each). The extra never exceeds TOOL_CALL_EXTRA_FACTOR times the base, so one session stays bounded
+# however large the hunt; the hunt's model-call, token and wall-clock budgets bound the sessions together.
+TOOL_CALL_EXTRA_FACTOR = 3
+
+
+def _tool_call_allowance(settings: Settings, *, reads: int) -> int:
+    base = settings.agent_max_tool_calls_per_session
+    return base + min(max(0, reads), TOOL_CALL_EXTRA_FACTOR * base)
+
+
+def _cited_findings(repo: Repo, hypothesis_id: str) -> int:
+    return len({row["target_id"] for row in repo.agent_hypothesis_cites(hypothesis_id=hypothesis_id)
+                if row["target_kind"] == "finding"})
+
+
+_SUMMARY_TOO_LONG = reason("summary", "string_too_long")
+SUMMARY_TRUNCATED_REASON = reason("summary", "truncated_by_product")
+
+
+def _overlong_summary(arguments, reasons) -> bool:
+    """A finish_session refused only because its summary is longer than the limit."""
+    return reasons == [_SUMMARY_TOO_LONG] and isinstance(arguments, dict) and isinstance(arguments.get("summary"), str)
+
+
+def _overlong_finish(toolbox: Toolbox, summary: str, attempt: int) -> tuple[dict, list[str]]:
+    """The first over-length summary is refused with the limit and its length (numbers only, never its text). The
+    next one is accepted cut to the limit at a sentence end, with a marker saying so, and recorded under the reason
+    `summary: truncated_by_product`: the session's work is never lost to a summary that will not fit."""
+    if attempt == 1:
+        message = (f"summary has {len(summary)} characters; finish_session accepts at most {SUMMARY_MAX_CHARS}. "
+                   f"Call finish_session again with a summary of at most {SUMMARY_MAX_CHARS} characters; another "
+                   "over-length summary is cut to fit and marked as truncated.")
+        refused = {"status": "refused", "coverage": {"status": "complete", "gaps": []},
+                   "counts": {"returned": 0, "total": 0}, "more": False, "errors": [message],
+                   "data": {"error": {"code": "summary_too_long", "message": message,
+                                      "length": len(summary), "limit": SUMMARY_MAX_CHARS,
+                                      "reasons": [_SUMMARY_TOO_LONG]}}}
+        return refused, [_SUMMARY_TOO_LONG]
+    accepted = toolbox.execute("finish_session", {"summary": truncated_summary(summary)})
+    return accepted, [SUMMARY_TRUNCATED_REASON]
+
+
 def _deterministic_tool_summary(calls: list[tuple[str, str]], changes: list[dict]) -> str:
     recent = calls[-10:]
     steps = "; ".join(f"{name}: {status}" for name, status in recent) or "no tool calls"
@@ -353,11 +452,13 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
     context_wrap_sent = False
     call_seq = 0
     provider_unavailable = False
+    call_limit = settings.agent_max_tool_calls_per_session
+    overlong_summaries = 0
 
     def finish(state: str, final_summary: str, reason: str | None = None) -> dict:
         outcome = {"id": session_id, "hypothesis_id": hypothesis_id, "purpose": purpose, "state": state,
                    "summary": final_summary[:2000], "reason": reason,
-                   "provider_unavailable": provider_unavailable,
+                   "provider_unavailable": provider_unavailable, "tool_call_limit": call_limit,
                    "limits_hit": sorted(admission.limits_hit) if admission is not None else []}
         if session_saved:
             try:
@@ -384,6 +485,16 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                                    owner_token=owner_token, purpose=purpose)
         admission.register(toolbox)
         tools = _session_tools(toolbox)
+        followable = None
+        if getattr(toolbox.executor, "followable_links", None) is not None:
+            # remembered across the dossier rebuilds below: each unfinished expansion anchor is planned once per
+            # session (they are at most the dossier's materialization cap of reportable findings)
+            known: dict[str, tuple[str, ...] | None] = {}
+
+            def followable(finding_id: str) -> tuple[str, ...]:
+                if finding_id not in known:
+                    known[finding_id] = toolbox.followable_kinds(finding_id)
+                return known[finding_id] or ()
         system_text = prompts["system.md"]
         if purpose == "orient":
             orientation = prompts["orient.md"]
@@ -394,7 +505,8 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                         provider.output_limit(shell) - 512) if context_limit else 24_000)
             # Pagination estimates canonical data; measure the actual request envelope too.
             for _ in range(4):
-                dossier = build_dossier(repo, hunt_id, token_budget=room, owner_token=owner_token)
+                dossier = build_dossier(repo, hunt_id, token_budget=room, owner_token=owner_token,
+                                        followable=followable)
                 page = dossier.page(1)
                 user = {"message": "Dossier index page 1 of " + str(len(dossier.pages)) +
                         "; call list_findings for the rest.", "page": page}
@@ -410,7 +522,9 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
             if excess > 0:
                 return finish("context_full", "Orient input exceeds the available context budget.", "context_full")
             admission.issue_aliases(page, source="dossier")
+            call_limit = _tool_call_allowance(settings, reads=len(dossier.pages) - 1)
         else:
+            call_limit = _tool_call_allowance(settings, reads=_cited_findings(repo, hypothesis_id))
             context = _hypothesis_context(repo, hunt_id, hypothesis, _summaries(repo, hunt_id, hypothesis_id),
                                           owner_token=owner_token)
             dossier = build_dossier(repo, hunt_id, token_budget=1000, owner_token=owner_token)
@@ -435,16 +549,15 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 request = ChatRequest(messages=messages, tools=tools, tool_choice="auto")
                 prompt_est = estimate_tokens(request.prompt_text())
                 max_out = provider.output_limit(request)
+            # before the reservation: nothing between reserving and the call may raise without settling it
+            heartbeat()
             try:
                 reservation = budget_gate.reserve(prompt_est, max_out, purpose)
             except BudgetExhausted as exc:
-                if purpose == "assess":
-                    return finish("budget", _deterministic_tool_summary(tool_history, hypothesis_changes),
-                                  f"budget:{exc.budget}")
-                return finish("budget", _deterministic_tool_summary(tool_history, hypothesis_changes),
-                              f"budget:{exc.budget}")
+                log.info("agent session %s stopped: %s", session_id, exc)
+                stopped = f"Budget stop: {exc}. " + _deterministic_tool_summary(tool_history, hypothesis_changes)
+                return finish("budget", stopped, f"budget:{exc.budget}")
             request.attempt_guard = lambda info, reservation=reservation: budget_gate.attempt_guard(reservation, info)
-            heartbeat()
             started = monotonic()
             try:
                 result = provider.chat(request)
@@ -458,10 +571,11 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 return finish("failed", _deterministic_tool_summary(tool_history, hypothesis_changes),
                               f"budget:{reservation.retry_budget}" if reservation.retry_budget else
                               "provider_unavailable")
-            except Exception as exc:
-                if is_lease_lost(exc):
-                    raise
+            except BaseException as exc:
+                # settled on every exit: a reservation left behind would hold a sibling's call waiting
                 budget_gate.settle(reservation)
+                if is_lease_lost(exc) or not isinstance(exc, Exception):
+                    raise
                 return finish("failed", f"Provider call failed: {type(exc).__name__}: {exc}"[:2000],
                               "provider_error")
             budget_gate.settle(reservation, result=result)
@@ -512,14 +626,14 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 allowed_calls = [finish_call]
             else:
                 allowed_calls = result.tool_calls
-            if not wrap_up_sent and tool_count >= settings.agent_max_tool_calls_per_session:
+            if not wrap_up_sent and tool_count >= call_limit:
                 messages.append({"role": "user", "content": "Tool-call limit reached. Call finish_session now with a summary."})
                 wrap_up_sent = True
                 # This reply already used the final ordinary tool call. The single wrap-up call is next.
                 continue
             for call in allowed_calls:
                 call_seq += 1
-                at_limit = tool_count >= settings.agent_max_tool_calls_per_session and not wrap_up_sent
+                at_limit = tool_count >= call_limit and not wrap_up_sent
                 if at_limit:
                     tool_result = {"status": "refused", "errors": ["tool-call limit reached"]}
                     reasons = [reason("$", "tool_call_limit")]
@@ -533,6 +647,11 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                         heartbeat()
                         tool_result = toolbox.execute(call.name, call.arguments)
                         reasons = tool_result_reasons(tool_result)
+                        if call.name == "finish_session" and _overlong_summary(call.arguments, reasons):
+                            overlong_summaries += 1
+                            # after the context wrap-up there is no further turn to correct it in
+                            tool_result, reasons = _overlong_finish(
+                                toolbox, call.arguments["summary"], 2 if context_wrap_sent else overlong_summaries)
                 raw_args = call.raw_arguments.encode("utf-8")
                 if call.arguments is not None:
                     stored_args = call.arguments
@@ -558,7 +677,7 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                     summary = str((tool_result.get("data") or {}).get("summary") or "Session finished.")
                     end_state = "context_full" if context_wrap_sent else "finished"
                     return finish(end_state, summary, "context_full" if context_wrap_sent else None)
-            if not wrap_up_sent and tool_count >= settings.agent_max_tool_calls_per_session:
+            if not wrap_up_sent and tool_count >= call_limit:
                 messages.append({"role": "user", "content": "Tool-call limit reached. Call finish_session now with a summary."})
                 wrap_up_sent = True
                 continue
