@@ -31,7 +31,7 @@ from romulus.config import Settings
 from romulus.hunt.rank import place_late_findings
 from romulus.report.incidents import build_incident_graph
 from romulus.store.db import digest, utcnow
-from romulus.store.repo import Repo, is_lease_lost
+from romulus.store.repo import TRIAGE_PURPOSE, Repo, is_lease_lost
 
 log = logging.getLogger("romulus.agent")
 
@@ -344,6 +344,7 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
     tool_count = 0
     no_tool_misses = 0
     wrap_up_sent = False
+    finish_retried = False
     context_wrap_sent = False
     call_seq = 0
     provider_unavailable = False
@@ -550,6 +551,13 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 messages.append({"role": "user", "content": "Tool-call limit reached. Call finish_session now with a summary."})
                 wrap_up_sent = True
                 continue
+            if wrap_up_sent and not finish_retried and any(
+                    call.name == "finish_session" for call in allowed_calls):
+                # the wrap-up's finish_session was refused (its result says why): one corrected call is allowed
+                messages.append({"role": "user", "content": "finish_session was refused; its result says why. "
+                                 "Call finish_session once more with a corrected summary."})
+                finish_retried = True
+                continue
             if wrap_up_sent:
                 return finish("capped", _deterministic_tool_summary(tool_history, hypothesis_changes),
                               "wrap_up_not_finished")
@@ -596,8 +604,10 @@ def _budget(settings: Settings, manifest: dict, repo: Repo, hunt_id: str, clock)
     required = {"max_calls", "max_tokens", "max_wall_seconds"}
     limits = (BudgetLimits.from_dict(config, str((manifest.get("ai_agent") or {}).get("model") or ""))
               if required <= config.keys() else BudgetLimits.from_settings(settings))
-    return AgentBudget.from_usage(limits, repo.agent_usage(hunt_id),
-                                  wall_seconds_before=repo.agent_elapsed_ms(hunt_id) / 1000.0, clock=clock)
+    # the triage pass spends from its own budget, never the agent's
+    return AgentBudget.from_usage(limits, repo.agent_usage(hunt_id, exclude_purposes=(TRIAGE_PURPOSE,)),
+                                  wall_seconds_before=repo.agent_elapsed_ms(
+                                      hunt_id, exclude_purposes=(TRIAGE_PURPOSE,)) / 1000.0, clock=clock)
 
 
 def recover_agent_finalization(repo: Repo, hunt_id: str, *, owner_token=None) -> AgentPhaseResult | None:

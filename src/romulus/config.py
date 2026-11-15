@@ -161,6 +161,26 @@ class Settings(BaseModel):
     agent_max_findings: int = Field(default=200, ge=1, le=10_000)
     agent_max_links: int = Field(default=300, ge=1, le=10_000)
     agent_max_notes: int = Field(default=500, ge=1, le=20_000)
+    # AI triage order: a separately labelled, promote-only presentation order over a hunt's surfaced findings, run
+    # after the agent phase when the agent is enabled, or on demand with `romulus triage`. It never changes lanes,
+    # ranks, the Reported set, citations or the deterministic report order. The model sees deterministic group cards
+    # (one per rule and primary target in a report section) in budget-sized chunks. Within each report section at
+    # most `agent_triage_promote_per_lane` groups are promoted, and each moves ahead only the (at most three)
+    # findings the model was shown for it. Ten groups fill an analyst's first screen, and no finding moves down by
+    # more than 10 x 3 = 30 places.
+    agent_triage: Literal["on", "off"] = "on"
+    agent_triage_promote_per_lane: int = Field(default=10, ge=0, le=100)
+    agent_triage_max_calls: int = Field(default=100, ge=1, le=10_000)
+    # totals for one triage pass, checked before each call against its worst case (prompt estimate, and the
+    # provider's full output allowance including any thinking room)
+    agent_triage_max_input_tokens: int = Field(default=4_000_000, ge=1000, le=10_000_000_000)
+    agent_triage_max_output_tokens: int = Field(default=2_000_000, ge=1000, le=10_000_000_000)
+    # the wall budget also counts staging the order and building the cards, which grow linearly with the hunt's
+    # findings and groups; a larger hunt needs a proportionally larger wall budget
+    agent_triage_max_wall_seconds: int = Field(default=1800, ge=10, le=7 * 24 * 3600)
+    # one call: the cards it carries (estimated prompt tokens) and the answer it may write
+    agent_triage_call_input_tokens: int = Field(default=30_000, ge=2000, le=1_000_000)
+    agent_triage_call_output_tokens: int = Field(default=8192, ge=512, le=200_000)
     # Bootstrap-only switch: the one value that lets telemetry excerpts reach a non-local model endpoint.
     model_egress: Literal["", "lab-public-data"] = ""
     # Extra hosts, addresses or CIDR networks treated as local (e.g. a team's model server on an enclave address).
@@ -331,6 +351,14 @@ ENV_MAP = {
     "AGENT_ASSESS_RESERVE_FRACTION": "agent_assess_reserve_fraction",
     "AGENT_MAX_FINDINGS": "agent_max_findings", "AGENT_MAX_LINKS": "agent_max_links",
     "AGENT_MAX_NOTES": "agent_max_notes",
+    "AGENT_TRIAGE": "agent_triage",
+    "AGENT_TRIAGE_PROMOTE_PER_LANE": "agent_triage_promote_per_lane",
+    "AGENT_TRIAGE_MAX_CALLS": "agent_triage_max_calls",
+    "AGENT_TRIAGE_MAX_INPUT_TOKENS": "agent_triage_max_input_tokens",
+    "AGENT_TRIAGE_MAX_OUTPUT_TOKENS": "agent_triage_max_output_tokens",
+    "AGENT_TRIAGE_MAX_WALL_SECONDS": "agent_triage_max_wall_seconds",
+    "AGENT_TRIAGE_CALL_INPUT_TOKENS": "agent_triage_call_input_tokens",
+    "AGENT_TRIAGE_CALL_OUTPUT_TOKENS": "agent_triage_call_output_tokens",
     "ROMULUS_MODEL_EGRESS": "model_egress", "MODEL_LOCAL_HOSTS": "model_local_hosts",
     "ROMULUS_INTERNAL_NETWORKS": "internal_networks", "ROMULUS_EXTERNAL_NETWORKS": "external_networks",
 }
@@ -347,6 +375,20 @@ def load_settings(env_file: Path | None = None, environ: dict[str, str] | None =
         logging.getLogger("romulus.config").warning("AGENT_MODE is deprecated and ignored; use AGENT_DEFAULT and --agent/--no-agent")
     kwargs = {ENV_MAP[k]: v for k, v in merged.items() if k in ENV_MAP and v != ""}
     return Settings(**kwargs)
+
+
+# a model id as providers list them: letters, digits and . _ : / -, bounded
+MODEL_ID = re.compile(r"[A-Za-z0-9._:/-]{1,128}")
+
+
+def with_agent_model(settings: Settings, model: str | None) -> Settings:
+    """`settings` with AGENT_MODEL replaced for one run (nothing is written back); unchanged when `model` is None.
+    Raises ValueError for anything but a plain model id."""
+    if model is None:
+        return settings
+    if not MODEL_ID.fullmatch(model):
+        raise ValueError("--agent-model must be a model id of 1 to 128 letters, digits and . _ : / - characters")
+    return settings.model_copy(update={"agent_model": model})
 
 
 def short_secrets(settings: Settings) -> list[str]:

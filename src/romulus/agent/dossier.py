@@ -16,7 +16,7 @@ from romulus.hunt.expansion_plan import TIER_PLAN
 from romulus.report.incidents import build_incident_graph
 from romulus.report.manifest import coverage_for_hunt
 from romulus.store.db import digest
-from romulus.store.repo import FINAL_RANK_PASS, Repo
+from romulus.store.repo import FINAL_RANK_PASS, TRIAGE_PURPOSE, Repo
 
 DOSSIER_SCHEMA = "agent-dossier@1"
 REPORTABLE_LANES = ("urgent", "high", "lead")
@@ -282,9 +282,11 @@ def _budget(repo: Repo, hunt_id: str, manifest: dict) -> dict:
     if not required <= configured.keys():
         return {"configured": False, "spent": {}, "remaining": {}}
     limits = BudgetLimits.from_dict(configured, str((manifest.get("ai_agent") or {}).get("model") or ""))
-    usage = repo.agent_usage(hunt_id)
+    # the agent's own budget: the triage pass spends from its own
+    usage = repo.agent_usage(hunt_id, exclude_purposes=(TRIAGE_PURPOSE,))
     budget = AgentBudget.from_usage(
-        limits, usage, wall_seconds_before=repo.agent_elapsed_ms(hunt_id) / 1000.0, clock=lambda: 0.0,
+        limits, usage, wall_seconds_before=repo.agent_elapsed_ms(
+            hunt_id, exclude_purposes=(TRIAGE_PURPOSE,)) / 1000.0, clock=lambda: 0.0,
     )
     spent = budget.snapshot()
     remaining = {

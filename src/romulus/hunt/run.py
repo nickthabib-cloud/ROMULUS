@@ -560,13 +560,41 @@ def run_hunt(s: Settings, hunt_id: str, on_candidate=None, expand: bool | None =
         pending_agent_lease_seconds=_lease_seconds(s),
         retain_budget_bytes=int(s.baseline_retain_disk_gb * 1e9),
     )
-    return _with_agent_result(result, repo, _ai_agent_phase(s, repo, hunt_id, m, agent_owner, client, contracts))
+    return _with_agent_result(result, repo, _ai_agent_phase(s, repo, hunt_id, m, agent_owner, client, contracts),
+                              settings=s, manifest=m)
 
 
-def _with_agent_result(result: dict, repo: Repo, summary: dict) -> dict:
-    """Return the result refreshed by the agent's atomic finalization without changing detection completion."""
+def _triage_after_agent(s: Settings, repo: Repo, hunt_id: str, manifest: dict, agent_summary: dict) -> dict | None:
+    """Run the AI triage pass once the agent phase has ended and released its lease, when the hunt asked for the agent,
+    triage is on and the provider is ready. A hunt with no surfaced finding makes no call. Never raises: triage only
+    orders a separate view, and its failure is recorded without touching the hunt or the agent's result."""
+    try:
+        if s.agent_triage != "on" or not (manifest.get("ai_agent") or {}).get("requested", False):
+            return None
+        if agent_summary.get("status") in (None, "skipped") or agent_summary.get("reason") == "lease_lost":
+            return None
+        readiness = agent_readiness(s)
+        if not readiness.ready:
+            return None
+        if not repo.reportable_count(hunt_id):
+            return {"status": "skipped", "reason": "no surfaced findings"}
+        from romulus.hunt.triage import run_triage
+        return run_triage(s, repo, hunt_id, readiness=readiness, build=build_provider)
+    except Exception as exc:  # triage must never change a finished hunt's result
+        log.exception("AI triage after the agent phase failed")
+        return {"status": "failed", "reason": f"triage_error: {type(exc).__name__}: {exc}"[:300]}
+
+
+def _with_agent_result(result: dict, repo: Repo, summary: dict, *, settings: Settings | None = None,
+                       manifest: dict | None = None) -> dict:
+    """Return the result refreshed by the agent's atomic finalization without changing detection completion. With
+    `settings`, the AI triage pass runs first (after the agent phase) and its summary is added."""
+    triage = (_triage_after_agent(settings, repo, result["hunt_id"], manifest or {}, summary)
+              if settings is not None else None)
     combined = {**result, "ai_agent": summary,
                 "agent": {"status": summary.get("status", "unknown"), "stop_reason": summary.get("reason")}}
+    if triage is not None:
+        combined["ai_triage"] = triage
     try:
         stored = repo.get_hunt(result["hunt_id"])
         combined.update(lanes=repo.lane_counts(result["hunt_id"]), detection_result=stored["detection_result"])
@@ -575,8 +603,37 @@ def _with_agent_result(result: dict, repo: Repo, summary: dict) -> dict:
     return combined
 
 
-def resume_hunt(s: Settings, hunt_id: str) -> dict:
-    """Resume persisted agent work without repeating a completed deterministic hunt."""
+class AgentModelMismatch(ValueError):
+    """A resume would run the hunt's agent with another model than the one it recorded."""
+
+
+def recorded_agent_model(repo: Repo, hunt: dict) -> str:
+    """The model the hunt's agent ran with, else the one its manifest recorded when the hunt was created ("" when
+    neither names one)."""
+    run = repo.agent_run(hunt["id"]) or {}
+    return str((run.get("provider") or {}).get("model")
+               or ((hunt.get("manifest") or {}).get("ai_agent") or {}).get("model") or "")
+
+
+def _check_agent_model(s: Settings, repo: Repo, hunt: dict, force_model: bool) -> None:
+    """A resumed agent keeps the model the hunt recorded: its signed reasoning and its results belong to that model.
+    Another model is refused unless the caller forces it."""
+    if not ((hunt.get("manifest") or {}).get("ai_agent") or {}).get("requested"):
+        return
+    recorded = recorded_agent_model(repo, hunt)
+    if recorded and s.agent_model != recorded and not force_model:
+        raise AgentModelMismatch(
+            f"hunt {hunt['id']}'s agent used model {recorded}, but this resume would use "
+            f"{s.agent_model or 'no model'}. Resume with --agent-model {recorded}, or add --force-model to "
+            "continue with the other model.")
+    if recorded and s.agent_model != recorded:
+        log.warning("hunt %s: the agent continues with model %s instead of the recorded %s (forced)",
+                    hunt["id"], s.agent_model, recorded)
+
+
+def resume_hunt(s: Settings, hunt_id: str, *, force_model: bool = False) -> dict:
+    """Resume persisted agent work without repeating a completed deterministic hunt. The agent keeps the model the
+    hunt recorded unless `force_model`."""
     repo = open_repo(s)
     hunt = repo.get_hunt(hunt_id)
     if hunt is None:
@@ -598,6 +655,7 @@ def resume_hunt(s: Settings, hunt_id: str) -> dict:
         repo.set_hunt_state(hunt_id, "failed", owner_token=stale["lease_owner"],
                             stop_reason="the hunt's worker stopped before its sweep finished")
         raise RuntimeError("running hunt cannot resume because the sweep did not finish; it is now marked failed")
+    _check_agent_model(s, repo, hunt, force_model)
     recorded_manifest = hunt.get("manifest") or {}
     ensure_site_unchanged(s.home, recorded_manifest.get("site"))
     recorded = recorded_manifest.get("normalizer")
@@ -663,7 +721,7 @@ def resume_hunt(s: Settings, hunt_id: str) -> dict:
             with _agent_heartbeat(repo, hunt_id, owner_token, _lease_seconds(s)):
                 recovered = recover_agent_finalization(repo, hunt_id, owner_token=owner_token)
             if recovered is not None:
-                return _with_agent_result(base_result, repo, recovered.as_dict())
+                return _with_agent_result(base_result, repo, recovered.as_dict(), settings=s, manifest=manifest)
         except Exception as exc:  # noqa: BLE001 - recovery errors stay inside the independent agent phase.
             reason = "lease_lost" if is_lease_lost(exc) else f"agent_error: {type(exc).__name__}"
             summary = {"status": "partial" if is_lease_lost(exc) else "failed", "reason": reason}
@@ -686,7 +744,7 @@ def resume_hunt(s: Settings, hunt_id: str) -> dict:
         if not wanted or not readiness.ready:
             summary = _ai_agent_phase(s, repo, hunt_id, manifest, owner_token, None, {},
                                       readiness_snapshot=readiness)
-            return _with_agent_result(base_result, repo, summary)
+            return _with_agent_result(base_result, repo, summary, settings=s, manifest=manifest)
     window = Window(
         start=datetime.fromisoformat(manifest["window"]["start"]),
         end=datetime.fromisoformat(manifest["window"]["end"]),
@@ -720,7 +778,8 @@ def resume_hunt(s: Settings, hunt_id: str) -> dict:
         return _with_agent_result({"hunt_id": hunt_id, "execution_state": hunt["execution_state"],
                 "stats": sweep_summary.get("stats") or {}, "lanes": repo.lane_counts(hunt_id),
                 "detection_result": hunt.get("detection_result"), "agent": ai_agent_summary,
-                "ai_agent": ai_agent_summary, "baseline": {}, "expansion": {}}, repo, ai_agent_summary)
+                "ai_agent": ai_agent_summary, "baseline": {}, "expansion": {}}, repo, ai_agent_summary,
+                settings=s, manifest=manifest)
     packet_audit = repo.latest_audit(hunt_id, "hunt.packet_summary")
     packet_summary = dict(packet_audit["detail"]) if packet_audit else {}
     if not packet_summary.get("finished"):
@@ -760,4 +819,5 @@ def resume_hunt(s: Settings, hunt_id: str) -> dict:
         retain_budget_bytes=int(s.baseline_retain_disk_gb * 1e9),
     )
     return _with_agent_result(result, repo, _ai_agent_phase(
-        s, repo, hunt_id, manifest, agent_owner, client, contracts, resuming=True, previous_run=agent_run))
+        s, repo, hunt_id, manifest, agent_owner, client, contracts, resuming=True, previous_run=agent_run),
+        settings=s, manifest=manifest)

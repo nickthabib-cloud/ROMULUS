@@ -96,7 +96,10 @@ def error_message(body: str, settings: Settings) -> str:
 class Tool:
     name: str
     description: str
-    parameters: dict          # JSON schema of the arguments object
+    parameters: dict          # JSON schema of the arguments object: exactly what the caller's validator accepts
+    # whether the caller wants the arguments' shape enforced by the server where it can (a strict mode); an
+    # adapter may still send the tool loose, and the caller validates every call's arguments either way
+    strict: bool = True
 
 
 @dataclass(frozen=True)

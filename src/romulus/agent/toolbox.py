@@ -64,12 +64,21 @@ class _Args(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+_PAGE = "1 for the first page; a later page also needs the cursor the first page returned."
+_CURSOR = "The cursor the first page of this same request returned; omit (or null) for page 1."
+_CHUNK = "Which chunk of long telemetry text to return, from 1; a result names the next chunk when there is one."
+
+
 class ListFindingsArgs(_Args):
-    lane: Literal["urgent", "high", "lead", "context"] | None = None
-    rule: str | None = None
-    entity: AliasArg | None = None
-    page: int = Field(default=1, ge=1)
-    cursor: str | None = Field(default=None, pattern=r"^D[0-9a-f]{16}$")
+    lane: Literal["urgent", "high", "lead", "context"] | None = Field(
+        default=None, description="Only findings in this lane; omit (or null) for every lane.")
+    rule: str | None = Field(default=None, description=(
+        "Only findings of this rule: an identifier from the hunt's detector registry or a Sigma rule pinned in "
+        "this hunt, as findings show it in rule_id; omit (or null) for every rule."))
+    entity: AliasArg | None = Field(default=None, description="Only findings naming this entity alias (N...).")
+    page: int = Field(default=1, ge=1, description=_PAGE)
+    cursor: str | None = Field(default=None, pattern=r"^D[0-9a-f]{16}$", description=(
+        _CURSOR + " A dossier page cursor also pages the dossier's findings."))
 
     @field_validator("rule")
     @classmethod
@@ -80,44 +89,49 @@ class ListFindingsArgs(_Args):
 
 
 class GetFindingArgs(_Args):
-    finding: AliasArg
+    finding: AliasArg = Field(description="A finding alias (F...) issued in this hunt.")
 
 
 class ListCoverageArgs(_Args):
-    page: int = Field(default=1, ge=1)
-    cursor: str | None = Field(default=None, pattern=r"^C[0-9a-f]{20}$")
+    page: int = Field(default=1, ge=1, description=_PAGE)
+    cursor: str | None = Field(default=None, pattern=r"^C[0-9a-f]{20}$", description=_CURSOR)
 
 
 class GetEvidenceArgs(_Args):
-    evidence: list[AliasArg] = Field(min_length=1, max_length=20)
-    chunk_index: int = Field(default=1, ge=1)
-    raw_page: int = Field(default=1, ge=1)
+    evidence: list[AliasArg] = Field(min_length=1, max_length=20,
+                                     description="One to twenty evidence aliases (E...) issued in this hunt.")
+    chunk_index: int = Field(default=1, ge=1, description=_CHUNK)
+    raw_page: int = Field(default=1, ge=1, description=(
+        "Which page of each record's raw source records to return, from 1 (two per page)."))
 
 
 class GetIncidentArgs(_Args):
-    incident: AliasArg
-    page: int = Field(default=1, ge=1)
-    cursor: str | None = Field(default=None, pattern=r"^G[0-9a-f]{20}$")
+    incident: AliasArg = Field(description="An incident alias (I...) that list_incidents returned.")
+    page: int = Field(default=1, ge=1, description=_PAGE)
+    cursor: str | None = Field(default=None, pattern=r"^G[0-9a-f]{20}$", description=_CURSOR)
 
 
 class ListIncidentsArgs(_Args):
-    page: int = Field(default=1, ge=1)
-    cursor: str | None = Field(default=None, pattern=r"^J[0-9a-f]{20}$")
+    page: int = Field(default=1, ge=1, description=_PAGE)
+    cursor: str | None = Field(default=None, pattern=r"^J[0-9a-f]{20}$", description=_CURSOR)
 
 
 class EntityProfileArgs(_Args):
-    entity: AliasArg
-    page: int = Field(default=1, ge=1)
-    cursor: str | None = Field(default=None, pattern=r"^R[0-9a-f]{20}$")
-    chunk_index: int = Field(default=1, ge=1)
+    entity: AliasArg = Field(description="An entity alias (N...) issued in this hunt.")
+    page: int = Field(default=1, ge=1, description=_PAGE)
+    cursor: str | None = Field(default=None, pattern=r"^R[0-9a-f]{20}$", description=_CURSOR)
+    chunk_index: int = Field(default=1, ge=1, description=_CHUNK)
 
 
 class _WindowedArgs(_Args):
-    anchor: AliasArg
-    start: datetime | None = None
-    end: datetime | None = None
-    page: int = Field(default=1, ge=1)
-    cursor: str | None = Field(default=None, pattern=r"^P[0-9a-f]{20}$")
+    anchor: AliasArg = Field(description="The finding alias (F...) this lead starts from.")
+    start: datetime | None = Field(default=None, description=(
+        "Window start, an RFC 3339 date-time with a UTC offset; omit (or null) for the hunt's start. The window "
+        "is clipped to the hunt's, and start must be before end."))
+    end: datetime | None = Field(default=None, description=(
+        "Window end, an RFC 3339 date-time with a UTC offset; omit (or null) for the hunt's end."))
+    page: int = Field(default=1, ge=1, description=_PAGE)
+    cursor: str | None = Field(default=None, pattern=r"^P[0-9a-f]{20}$", description=_CURSOR)
 
     @field_validator("start", "end")
     @classmethod
@@ -134,31 +148,33 @@ class _WindowedArgs(_Args):
 
 
 class EntityTimelineToolArgs(_WindowedArgs):
-    entity: AliasArg
+    entity: AliasArg = Field(description="A host or IP entity alias (N...).")
 
 
 class AuthActivityToolArgs(_WindowedArgs):
-    entity: AliasArg
+    entity: AliasArg = Field(description="A host or account entity alias (N...).")
 
 
 class ProcessTreeToolArgs(_WindowedArgs):
-    process: AliasArg
+    process: AliasArg = Field(description=(
+        "An evidence alias (E...) the anchor finding cites: a process execution record with a host and process ID."))
 
 
 class IdsAlertsToolArgs(_WindowedArgs):
-    entity: AliasArg
+    entity: AliasArg = Field(description="An IP entity alias (N...).")
 
 
 class FollowLinkArgs(_Args):
-    anchor: AliasArg
+    anchor: AliasArg = Field(description="The finding alias (F...) whose expansion link to follow.")
     link_type: Literal[
         "process_lineage", "login_session", "network_flow", "flow_host_side",
         "source_ip", "account", "host_after_anchor", "process_activity",
         "process_session", "kerberos_logon", "remote_logon_source", "service_process",
-    ]
-    window: Literal["anchor ±5 min", "anchor ±30 min", "anchor ±2 h"] | None = None
-    page: int = Field(default=1, ge=1)
-    cursor: str | None = Field(default=None, pattern=r"^P[0-9a-f]{20}$")
+    ] = Field(description="The kind of deterministic link to follow from the anchor.")
+    window: Literal["anchor ±5 min", "anchor ±30 min", "anchor ±2 h"] | None = Field(
+        default=None, description="The time window around the anchor; omit (or null) for anchor ±5 min.")
+    page: int = Field(default=1, ge=1, description=_PAGE)
+    cursor: str | None = Field(default=None, pattern=r"^P[0-9a-f]{20}$", description=_CURSOR)
 
 
 class InvestigationExecutor(Protocol):
@@ -170,33 +186,48 @@ class InvestigationExecutor(Protocol):
                     window_label: str | None) -> PivotResult: ...
 
 
-def _strict_schema(model: type[BaseModel]) -> dict:
-    schema = model.model_json_schema()
-    strict_keys = {"type", "properties", "required", "additionalProperties", "items", "enum", "const",
-                   "anyOf", "allOf", "$ref", "description", "title", "format", "$defs", "$def", "definitions"}
+# the JSON-schema keywords an argument model's schema keeps: every one its validator enforces, and descriptions
+SCHEMA_KEYS = frozenset({"type", "properties", "required", "additionalProperties", "items", "enum", "const", "anyOf",
+                         "allOf", "$ref", "description", "format", "pattern", "default", "minLength", "maxLength",
+                         "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "minItems", "maxItems",
+                         "$defs"})
 
-    def visit(value, top: bool = False):
+
+def argument_schema(model: type[BaseModel]) -> dict:
+    """The JSON schema of exactly the arguments `model` accepts: its required and optional properties, their
+    defaults, bounds, patterns and enums, and its field descriptions (titles dropped). Every object is closed.
+    Rules a schema cannot state (an alias of the right kind, a registered rule, an ordered window) are in the
+    descriptions, and the model's own validation still decides every call."""
+    schema = model.model_json_schema(by_alias=True)
+
+    def defaults(node: dict, cls: type[BaseModel]) -> None:
+        # a default_factory leaves no default in pydantic's schema; state it, so the model knows what omission means
+        # (top-level fields: no argument model nests an optional model)
+        for name, field in cls.model_fields.items():
+            prop = (node.get("properties") or {}).get(field.alias or name)
+            if prop is not None and not field.is_required() and "default" not in prop:
+                prop["default"] = field.get_default(call_default_factory=True)
+
+    def visit(value):
         if isinstance(value, dict):
-            for key in list(value):
-                if key not in strict_keys or (not top and key in {"$defs", "$def", "definitions"}):
-                    value.pop(key)
-            properties = value.get("properties")
-            if isinstance(properties, dict):
+            for key in [k for k in value if k not in SCHEMA_KEYS]:
+                value.pop(key)
+            if isinstance(value.get("properties"), dict):
                 value["additionalProperties"] = False
-                value["required"] = list(properties)
-                for child in properties.values():
+                value.setdefault("required", [])
+                for child in value["properties"].values():
                     visit(child)
             for key, child in value.items():
-                if key not in {"properties", "$defs", "$def", "definitions"}:
+                if key not in ("properties", "$defs", "default", "enum", "const"):
                     visit(child)
-            for definitions in ("$defs", "$def", "definitions"):
-                for child in value.get(definitions, {}).values():
-                    visit(child)
+            for child in (value.get("$defs") or {}).values():
+                visit(child)
         elif isinstance(value, list):
             for child in value:
                 visit(child)
 
-    visit(schema, top=True)
+    defaults(schema, model)
+    visit(schema)
     return schema
 
 
@@ -206,9 +237,13 @@ class RegisteredTool:
     description: str
     arguments: type[BaseModel]
     handler: Callable[[BaseModel], dict]
+    # whether the arguments' shape should be enforced by the model server where it can: worth its cost for the
+    # tools that write (hypotheses, proposals, the session's end); read tools are validated here alone
+    strict: bool = False
 
     def provider_tool(self) -> Tool:
-        return Tool(name=self.name, description=self.description, parameters=_strict_schema(self.arguments))
+        return Tool(name=self.name, description=self.description, parameters=argument_schema(self.arguments),
+                    strict=self.strict)
 
 
 def _jsonable(value: Any) -> Any:

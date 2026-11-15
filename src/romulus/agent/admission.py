@@ -25,55 +25,85 @@ class _Args(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+Technique = Annotated[str, Field(min_length=2, max_length=16)]
+_TECHNIQUES = ("MITRE ATT&CK technique IDs (Enterprise or ICS), such as T1059 or T1059.001; an unknown, revoked or "
+               "deprecated ID is refused.")
+_SUPPORT = "Aliases of supporting findings (F...), evidence (E...), expansion links (L...) or agent links (A...)."
+
+
 class OpenHypothesisArgs(_Args):
-    statement: Annotated[str, Field(min_length=10, max_length=600)]
-    techniques: list[Annotated[str, Field(min_length=2, max_length=16)]] = Field(default_factory=list, max_length=20)
-    entities: list[Alias] = Field(default_factory=list, max_length=40)
-    supporting: list[Alias] = Field(default_factory=list, max_length=40)
-    questions: list[Question] = Field(default_factory=list, max_length=8)
+    statement: Annotated[str, Field(min_length=10, max_length=600)] = Field(
+        description="The hypothesis, 10 to 600 characters.")
+    techniques: list[Technique] = Field(default_factory=list, max_length=20, description=_TECHNIQUES)
+    entities: list[Alias] = Field(default_factory=list, max_length=40,
+                                  description="Entity aliases (N...) the hypothesis concerns.")
+    supporting: list[Alias] = Field(default_factory=list, max_length=40, description=_SUPPORT)
+    questions: list[Question] = Field(default_factory=list, max_length=8, description=(
+        "Concrete open questions, each 1 to 300 characters."))
 
 
 class UpdateHypothesisArgs(_Args):
-    hypothesis: Alias
-    status: Literal["open", "supported", "weakened", "refuted", "abandoned"] | None = None
-    confidence: Literal["low", "medium", "high"] | None = None
-    add_support: list[Alias] = Field(default_factory=list, max_length=20)
-    add_contradiction: list[Alias] = Field(default_factory=list, max_length=20)
-    questions: list[Question] | None = Field(default=None, max_length=8)
-    note: Annotated[str, Field(min_length=1, max_length=600)]
+    hypothesis: Alias = Field(description="The hypothesis alias (H...) to update.")
+    status: Literal["open", "supported", "weakened", "refuted", "abandoned"] | None = Field(default=None, description=(
+        "The new status; omit (or null) to keep it. supported needs a support citation and refuted a "
+        "contradiction citation, on the hypothesis or in this update."))
+    confidence: Literal["low", "medium", "high"] | None = Field(
+        default=None, description="The new confidence; omit (or null) to keep it.")
+    add_support: list[Alias] = Field(default_factory=list, max_length=20, description=_SUPPORT)
+    add_contradiction: list[Alias] = Field(default_factory=list, max_length=20, description=(
+        "Aliases of contradicting findings (F...), evidence (E...), expansion links (L...) or agent links (A...)."))
+    questions: list[Question] | None = Field(default=None, max_length=8, description=(
+        "The full new list of open questions (replaces the old one), each 1 to 300 characters; omit (or null) "
+        "to keep them."))
+    note: Annotated[str, Field(min_length=1, max_length=600)] = Field(
+        description="Why the hypothesis changes, 1 to 600 characters.")
 
 
 class ProposeFindingArgs(_Args):
-    claim: Annotated[str, Field(min_length=10, max_length=400)]
-    claim_kind: Literal["execution", "network", "auth", "file", "account_change", "mention"]
-    cites: list[Alias] = Field(min_length=1, max_length=20)
-    lane: Literal["urgent", "high", "lead", "context"]
-    techniques: list[Annotated[str, Field(min_length=2, max_length=16)]] = Field(default_factory=list, max_length=20)
-    rationale: Annotated[str, Field(max_length=1000)] = ""
-    hypothesis: Alias | None = None
+    claim: Annotated[str, Field(min_length=10, max_length=400)] = Field(
+        description="What the cited evidence shows, 10 to 400 characters.")
+    claim_kind: Literal["execution", "network", "auth", "file", "account_change", "mention"] = Field(description=(
+        "The kind of claim; at least one cited record must be of a family that can show it (mention: a record "
+        "that only names something)."))
+    cites: list[Alias] = Field(min_length=1, max_length=20, description="Evidence aliases (E...) the claim rests on.")
+    lane: Literal["urgent", "high", "lead", "context"] = Field(description=(
+        "The proposed lane. context is refused; urgent is recorded as high, and a mention claim at most as lead."))
+    techniques: list[Technique] = Field(default_factory=list, max_length=20, description=_TECHNIQUES)
+    rationale: Annotated[str, Field(max_length=1000)] = Field(
+        default="", description="Why the evidence supports the claim, at most 1000 characters.")
+    hypothesis: Alias | None = Field(default=None, description=(
+        "The hypothesis alias (H...) the finding belongs to; omit (or null) for this session's hypothesis."))
 
 
 class ProposeLinkArgs(_Args):
-    from_: Alias = Field(alias="from")
-    to: Alias
-    relation: Literal["same_actor", "precedes", "enabled", "lateral_movement", "same_campaign", "related"]
-    cites: list[Alias] = Field(min_length=1, max_length=20)
-    rationale: Annotated[str, Field(min_length=1, max_length=1000)]
+    from_: Alias = Field(alias="from", description="A finding (F...) or entity (N...) alias.")
+    to: Alias = Field(description="A finding (F...) or entity (N...) alias.")
+    relation: Literal["same_actor", "precedes", "enabled", "lateral_movement", "same_campaign", "related"] = Field(
+        description="The proposed relationship, recorded as a hypothesis.")
+    cites: list[Alias] = Field(min_length=1, max_length=20, description=(
+        "Aliases of evidence (E...), findings (F...) or expansion links (L...) supporting the link."))
+    rationale: Annotated[str, Field(min_length=1, max_length=1000)] = Field(
+        description="Why the cited records support the link, 1 to 1000 characters.")
 
 
 class AddNoteArgs(_Args):
-    target: Alias
-    text: Annotated[str, Field(min_length=1, max_length=1000)]
-    cites: list[Alias] = Field(default_factory=list, max_length=20)
+    target: Alias = Field(description=(
+        "The finding (F...), incident (I...), entity (N...), hypothesis (H...) or agent link (A...) alias to annotate."))
+    text: Annotated[str, Field(min_length=1, max_length=1000)] = Field(description="The note, 1 to 1000 characters.")
+    cites: list[Alias] = Field(default_factory=list, max_length=20, description=(
+        "Aliases of evidence (E...), findings (F...), expansion links (L...), agent links (A...) or hypotheses (H...)."))
 
 
 class RequestRuleArgs(_Args):
-    pattern_description: Annotated[str, Field(min_length=20, max_length=1000)]
-    cites: list[Alias] = Field(min_length=1, max_length=20)
+    pattern_description: Annotated[str, Field(min_length=20, max_length=1000)] = Field(
+        description="The detection pattern for an analyst to review, 20 to 1000 characters.")
+    cites: list[Alias] = Field(min_length=1, max_length=20,
+                               description="Evidence (E...) or finding (F...) aliases that show the pattern.")
 
 
 class FinishSessionArgs(_Args):
-    summary: Annotated[str, Field(min_length=20, max_length=2000)]
+    summary: Annotated[str, Field(min_length=20, max_length=2000)] = Field(description=(
+        "What was examined, what changed and what is left, 20 to 2000 characters."))
 
 
 def _id(prefix: str) -> str:
@@ -206,7 +236,7 @@ class AgentAdmission:
         for name, description, model, handler in tools:
             if self.purpose == "orient" and name not in {"open_hypothesis", "finish_session"}:
                 continue
-            toolbox.registry[name] = RegisteredTool(name, description, model, handler)
+            toolbox.registry[name] = RegisteredTool(name, description, model, handler, strict=True)
 
     def _check_techniques(self, ids: list[str]) -> list[str]:
         index = _technique_index()

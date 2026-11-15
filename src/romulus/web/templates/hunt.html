@@ -18,7 +18,7 @@
 {% if agent_message %}<p class="warn">{{ agent_message }}</p>{% endif %}
 {% if ai_panel %}{% include "agent_panel.html" %}{% endif %}
 
-<p><a href="/hunts/{{ h.id }}/timeline">Attack-path timeline →</a></p>
+<p><a href="/hunts/{{ h.id }}/timeline">Attack-path timeline →</a> · <a href="/hunts/{{ h.id | urlencode }}/triage">AI triage order (model-proposed) →</a></p>
 
 {% if investigations.summary.mode == 'deterministic_expansion' %}
 <section id="expansion-summary">
