@@ -3569,6 +3569,15 @@ def normalize_text(hit: dict) -> list[TypedEvent]:
                 raise Skip(reason[:256]) from error
             for record in records:
                 _text_provenance(record, parsed, origin)
+                if record.family == "net_alert":
+                    # a text alert names no community id; computed from its own 5-tuple as for EVE without one, so
+                    # flows of the same connection from other sensors share it
+                    computed = community_id(record.get("source.ip"), record.get("source.port"),
+                                            record.get("destination.ip"), record.get("destination.port"),
+                                            record.get("network.transport"))
+                    if computed is not None:
+                        record.fields["network.community_id"] = fv(
+                            computed, f"{origin}.src_ip+src_port+dest_ip+dest_port+proto#computed:community_id_v1")
             return records
         event.caveats.append(SYSLOG_WRITER_CAVEAT)
         event.caveats.extend(writer_caveats)

@@ -81,7 +81,8 @@ def classify(line: str) -> TextLine:
         stamp = re.match(r"^(?:\[)?(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?: [+-]\d{4})?|"
                          r"\d{2}-[A-Z][a-z]{2}-\d{4} \d{2}:\d{2}:\d{2} [+-]\d{4}|"
                          r"[A-Z][a-z]{2} [A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2} \d{4}|"
-                         r"[A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2}|\d{9,19}(?:\.\d{1,9})?)(?: |\])", line)
+                         r"[A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2}|\d{9,19}(?:\.\d{1,9})?|"
+                         r"\d{2}/\d{2}/\d{4}-\d{2}:\d{2}:\d{2}\.\d{1,9})(?: |\])", line)
         return TextLine("application", native[0], native[1], timestamp=stamp[1] if stamp else None)
     if match := _RFC.fullmatch(line):
         body = _structured_body(match["rest"])
@@ -126,7 +127,7 @@ def inline_time(value: str | None, pipeline: datetime) -> datetime | None:
         result = None
         for pattern in ("%d/%b/%Y:%H:%M:%S %z", "%a %b %d %H:%M:%S.%f %Y", "%a %b %d %H:%M:%S %Y",
                         "%Y/%m/%d %H:%M:%S", "%b %d %H:%M:%S", "%d-%b-%Y %H:%M:%S %z",
-                        "%Y-%m-%d %H:%M:%S %z", "%Y-%m-%d %H:%M:%S.%f %z"):
+                        "%Y-%m-%d %H:%M:%S %z", "%Y-%m-%d %H:%M:%S.%f %z", "%m/%d/%Y-%H:%M:%S.%f"):
             try:
                 result = datetime.strptime(value, pattern)
                 if pattern == "%b %d %H:%M:%S":

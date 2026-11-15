@@ -101,9 +101,12 @@ PAM authentication records for services with a native decision grammar are skipp
 attempt twice; their session records remain typed. OpenSSH helper PAM records use the helper's service name and
 feed only the generic rules, while the existing SSH normalization keeps its original behavior.
 
-Service authentication, resolver requests, proxy requests, firewall packets, scheduler observations and account
-changes use the existing `auth`, `dns_query`, `http_access`, `net_flow`, `process_observed`, `service_change` and
-`account_change` families. Authentication sessions are distinguished from authentication decisions. Firewall
+Service authentication, resolver requests, proxy requests, firewall packets, IDS alert lines (Suricata `fast.log`),
+scheduler observations and account changes use the existing `auth`, `dns_query`, `http_access`, `net_flow`,
+`net_alert`, `process_observed`, `service_change` and `account_change` families. A `fast.log` alert carries the
+fields an EVE alert does except its flow id, application protocol and signature metadata; its community ID is
+computed from its 5-tuple. dnsmasq lines are typed one at a time: with `log-queries=extra` each line keeps its query
+serial and requester, and lines are never joined. Authentication sessions are distinguished from authentication decisions. Firewall
 log records do not invent connection counters, and a cron command log does not claim a kernel-observed exec.
 Two additional families preserve information that those contracts cannot express:
 
@@ -123,6 +126,14 @@ extrapolated to whole-source typing claims. A dataset enters the text retrieval 
 contains a text payload; otherwise the report names the absent payload or incomplete sample. Reports name
 unrecognized datasets and unsupported programs with the counts observed during the hunt. Text shape and skip
 labels are bounded to 256 characters.
+
+A sample decides only what the sweep asks for, never what it read. On a Linux host target the sweep counts each
+dataset's records in the hunt window before retrieval and tallies what its partitions actually return (a bounded
+number of names per target). A selected dataset whose window records were not all returned is reported with the
+shortfall, makes the hunt partial and leaves the rules reading its families partial on that target; where either
+count is unavailable the dataset is reported as not counted. Window datasets the profile inventory never listed are
+reported with their window counts, and a selected text dataset with records in the index but none in the window is
+named, since records indexed when they were shipped fall outside the window they describe.
 
 ## Windows host source shapes
 
