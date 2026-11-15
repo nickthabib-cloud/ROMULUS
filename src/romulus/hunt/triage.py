@@ -14,7 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from romulus.agent.triage import LABEL, latest_failure, latest_summary, run_triage_pass
-from romulus.agent.triage_order import OrderWorkspace
+from romulus.agent.triage_order import PLACEMENT_VERSION, OrderWorkspace, moved_ids
 from romulus.config import Settings, triage_model, triage_settings
 from romulus.store.db import utcnow
 from romulus.store.repo import TRIAGE_FAILED, Repo, is_lease_lost
@@ -82,8 +82,8 @@ def run_triage(s: Settings, repo: Repo, hunt_id: str, *, provider=None, readines
 def write_export(repo: Repo, hunt_id: str, path: Path, *, workdir: str | None = None, max_bytes: int | None = None,
                  reserve_bytes: int = 0, allow_stale: bool = False) -> dict:
     """Write the latest triage pass's order as JSON: every surfaced finding id, in triage order, rebuilt from the
-    stored findings and the findings the pass moved (the shown excerpts of each promoted group). With no pass, or
-    nothing promoted, it is the deterministic order. The file is streamed, so memory stays bounded whatever the hunt's
+    stored findings and the findings the pass moved (each promoted group's cited excerpts). With no pass, or nothing
+    moved, it is the deterministic order. The file is streamed, so memory stays bounded whatever the hunt's
     size. A pass whose deterministic order no longer matches the store is stale: refused unless `allow_stale`.
     Returns the export's header."""
     summary = latest_summary(repo, hunt_id) or {}
@@ -91,17 +91,20 @@ def write_export(repo: Repo, hunt_id: str, path: Path, *, workdir: str | None = 
     after = 0
     while page := repo.triage_groups(hunt_id, statuses=("promoted",), after_position=after):
         for row in page:
-            promoted.setdefault(int(row["section"]), []).append(list(row["finding_ids"] or []))
+            promoted.setdefault(int(row["section"]), []).append(moved_ids(row["finding_ids"], row["cites"]))
         after = page[-1]["position"]
     with OrderWorkspace(repo, hunt_id, directory=workdir, max_bytes=max_bytes, reserve_bytes=reserve_bytes) as ws:
         ws.build()
-        stale = bool(summary) and summary.get("order_digest") != ws.order_digest
+        # stale: the store changed, or the pass placed its groups under another placement version
+        stale = bool(summary) and (summary.get("order_digest") != ws.order_digest
+                                   or summary.get("placement") != PLACEMENT_VERSION)
         if stale and not allow_stale:
-            raise StaleTriage("the hunt's findings or order changed after the triage pass; run `romulus triage` "
-                              "again, or export with --allow-stale")
+            raise StaleTriage("the hunt's findings or order changed after the triage pass, or it was placed under "
+                              "another placement version; run `romulus triage` again, or export with --allow-stale")
         header = {"schema": EXPORT_SCHEMA, "label": LABEL, "hunt_id": hunt_id, "pass": summary.get("pass"),
                   "status": summary.get("status") or "not_run", "reason": summary.get("reason"),
-                  "latest_failed_attempt": latest_failure(repo, hunt_id),
+                  "latest_failed_attempt": latest_failure(repo, hunt_id), "placement": PLACEMENT_VERSION,
+                  "pass_placement": summary.get("placement"),
                   "prompt_digest": summary.get("prompt_digest"), "model": summary.get("model"),
                   "provider": summary.get("provider"), "mode": "ranked" if ws.ranked else "lanes",
                   "findings": ws.findings, "deterministic_order_digest": ws.order_digest,
