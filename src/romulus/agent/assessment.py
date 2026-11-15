@@ -522,7 +522,8 @@ def run_assessment(settings, repo, hunt_id: str, provider, budget: AgentBudget, 
             assessment_row = {"id": "aa-" + uuid.uuid4().hex[:20], "hunt_id": hunt_id,
                               "source": "agent",
                               "model": {"provider": provider.name, "model_requested": provider.model,
-                                        "model_reported": result.model_reported},
+                                        "model_reported": result.model_reported,
+                                        **_fallback_provenance(result)},
                               "body": checked, "checker": checker, "created_at": utcnow()}
             for revision_attempt in range(3):
                 revision = max((row["revision"] for row in repo.agent_assessments(hunt_id)), default=0) + 1
@@ -548,6 +549,17 @@ def run_assessment(settings, repo, hunt_id: str, provider, budget: AgentBudget, 
     repo.update_agent_session(session_id, hunt_id, {"state": "failed", "summary": "Assessment schema validation failed.",
                                                      "ended_at": utcnow()}, owner_token=owner_token)
     return None
+
+
+def _fallback_provenance(result) -> dict:
+    """When a fallback model wrote the answer after the configured model declined: that model and the refusal's
+    category (None when the provider gave none). Nothing for an answer the configured model wrote."""
+    fallback = (result.details or {}).get("fallback")
+    if not isinstance(fallback, dict):
+        return {}
+    category = fallback.get("category")
+    return {"fallback": {"served_by": str(fallback.get("served_by") or result.model_reported or "")[:200],
+                         "category": category if isinstance(category, str) and category.isidentifier() else None}}
 
 
 def _failure_reasons(exc: Exception) -> list[str]:

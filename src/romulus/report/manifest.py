@@ -912,6 +912,9 @@ def _ai_agent(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dict:
     shown["billed_failures"] = sum(bool((row.get("options") or {}).get("billed_failure")) for row in calls)
     if usage["models_reported"]:
         shown["models_reported"] = usage["models_reported"]
+    fallbacks = fallback_view(repo, hunt_id)
+    if fallbacks is not None:
+        shown["fallbacks"] = fallbacks
     run = repo.agent_run(hunt_id)
     hypotheses = []
     for row in repo.agent_hypotheses(hunt_id):
@@ -973,6 +976,34 @@ def _group_agent_notes(notes: list[dict]) -> list[dict]:
             for (kind, target_id), rows in sorted(grouped.items())]
 
 
+def fallback_sentence(fallback: dict, configured: str | None) -> str:
+    """Who wrote an answer the configured model declined, for a header an analyst reads."""
+    served = fallback.get("served_by") or "unknown"
+    category = fallback.get("category") or "not given"
+    return (f"Written by fallback model {served} after the configured model"
+            f"{f' {configured}' if configured else ''} declined (category: {category}).")
+
+
+def fallback_view(repo: Repo, hunt_id: str) -> dict | None:
+    """The agent's calls a fallback model answered and the calls that ended declined, by purpose, model and
+    category; None when there were none."""
+    seen = repo.agent_fallbacks(hunt_id)
+    if not seen["fallback_calls"] and not seen["refusals"]:
+        return None
+    out = {"calls": seen["fallback_calls"], "by_purpose": seen["fallback_by_purpose"],
+           "models": seen["fallback_models"], "by_category": seen["fallback_by_category"],
+           "refusals": seen["refusals"], "refusals_by_category": seen["refusals_by_category"]}
+    if seen.get("fallback_models_more"):
+        out["models_more"] = seen["fallback_models_more"]
+    if seen["fallback_calls"]:
+        purposes = ", ".join(f"{name} {count}" for name, count in sorted(seen["fallback_by_purpose"].items()))
+        categories = ", ".join(f"{name} {count}" for name, count in sorted(seen["fallback_by_category"].items()))
+        models = ", ".join(sorted(seen["fallback_models"]))
+        out["note"] = (f"{seen['fallback_calls']} agent call(s) ({purposes}) were written by fallback model(s) "
+                       f"{models} after the configured model declined (categories: {categories}).")
+    return out
+
+
 def _ai_assessment(repo: Repo, hunt_id: str, *, stored_only: bool = False) -> dict | None:
     # A live view needs only the latest revision, not the accumulated assessment or session history.
     with repo.engine.connect() as connection:
@@ -1001,6 +1032,12 @@ def _ai_assessment(repo: Repo, hunt_id: str, *, stored_only: bool = False) -> di
         if stale:
             header = ("Prior AI assessment: investigation changed after this assessment; not current. "
                       "The prior body is retained for review.")
+        if source == "agent" and isinstance(model.get("fallback"), dict):
+            header += " " + fallback_sentence(model["fallback"], model.get("model_requested"))
+        # the work the assessment rests on: other agent calls a fallback model wrote
+        fallbacks = fallback_view(repo, hunt_id)
+        if fallbacks and any(purpose != "assess" for purpose in fallbacks["by_purpose"]):
+            header += " Agent calls behind it: " + fallbacks["note"]
         return {"source": source, "header": header, "model": model, "body": row["body"],
                 "checker": row["checker"], "revision": row["revision"], **({"stale": True} if stale else {})}
     # Preserve the byte-for-byte renderer output for hunts that predate the persisted agent phase.

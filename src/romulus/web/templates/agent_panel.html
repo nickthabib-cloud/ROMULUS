@@ -18,6 +18,9 @@ Estimated cost {{ ai_panel.usage.cost_usd }} USD / {{ ai_panel.budgets.max_cost_
 <table><thead><tr><th>Tool</th><th>Reason</th><th>Count</th></tr></thead><tbody>
 {% for tool, reasons in ai_panel.refused_calls.by_tool.items() %}{% for why, count in reasons.items() %}<tr><td>{{ tool }}</td><td><code>{{ why }}</code></td><td>{{ count }}</td></tr>{% endfor %}{% endfor %}
 </tbody></table>{% if ai_panel.refused_calls.more %}<p>{{ ai_panel.refused_calls.more }} more refusals in further groups.</p>{% endif %}{% endif %}
+{% if ai_panel.fallbacks %}<h3>Declined calls and fallback answers</h3>
+{% if ai_panel.fallbacks.note %}<p>{{ ai_panel.fallbacks.note }}</p>{% endif %}
+{% if ai_panel.fallbacks.refusals %}<p>{{ ai_panel.fallbacks.refusals }} call(s) ended declined (by category: {% for name, count in ai_panel.fallbacks.refusals_by_category.items() %}{{ name }} {{ count }}{% if not loop.last %}, {% endif %}{% endfor %}).</p>{% endif %}{% endif %}
 <p><a href="/hunts/{{ h.id | urlencode }}/hypotheses">{{ ai_panel.counts.hypotheses }} hypotheses</a>
 {% for name in ['findings', 'links', 'notes', 'requests'] %} · <a href="/hunts/{{ h.id | urlencode }}/agent/{{ name }}">{{ ai_panel.counts[name] }} agent {{ 'rule requests' if name == 'requests' else name }}</a>{% endfor %}</p>
 {% if ai_panel.usage.models_reported_more %}<p>{{ ai_panel.usage.models_reported_more }} more reported model groups; <a href="#reports">complete usage in the report</a>.</p>{% endif %}

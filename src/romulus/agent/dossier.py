@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -359,7 +359,12 @@ def _incidents(repo: Repo, hunt_id: str, candidates: list[dict], aliases: AliasB
     return out
 
 
-def _expansion(repo: Repo, hunt_id: str, aliases: AliasBook) -> dict:
+def _expansion(repo: Repo, hunt_id: str, aliases: AliasBook,
+               followable: Callable[[str], Iterable[str]] | None = None) -> dict:
+    """What deterministic expansion did not finish. A link it recorded as unsupported (the anchor's records carry
+    no key for its kind, or no source can be searched by it) is marked not followable. With `followable` (the
+    follow_link kinds an anchor finding supports), each tier not reached is marked whether follow_link can follow
+    it from that anchor; nothing is dropped."""
     links = repo.expansion_links(hunt_id)
     by_anchor: dict[str, list[dict]] = {}
     for link in links:
@@ -374,21 +379,28 @@ def _expansion(repo: Repo, hunt_id: str, aliases: AliasBook) -> dict:
         reasons = _bounded_data(sorted(str(reason) for reason in row.get("reasons") or []))
         unfinished.append({"anchor": anchor_alias, "status": row["status"], "reasons": reasons})
         existing = {(link["link_type"], link["window_label"]) for link in by_anchor.get(row["id"], [])}
+        kinds = set(followable(row["candidate_id"])) if followable is not None else None
         for tier, link_types, label in TIER_PLAN:
             for link_type in link_types:
                 if (link_type, label) not in existing:
-                    not_reached.append({
+                    item = {
                         "anchor": anchor_alias, "tier": tier, "link_type": link_type,
                         "window": label,
                         "reasons": reasons or ["not reached before deterministic expansion stopped"],
-                    })
+                    }
+                    if kinds is not None:
+                        item["followable"] = link_type in kinds
+                    not_reached.append(item)
         for link in by_anchor.get(row["id"], []):
             if link["status"] != "complete":
-                partial_links.append({
+                item = {
                     "alias": aliases.alias_for("L", link["id"]), "anchor": anchor_alias,
                     "link_type": link["link_type"], "status": link["status"],
                     "reasons": _bounded_data(sorted(str(reason) for reason in link.get("reasons") or [])),
-                })
+                }
+                if link["status"] == "unsupported":
+                    item["followable"] = False
+                partial_links.append(item)
     return {"unfinished_anchors": unfinished, "link_tiers_not_reached": not_reached,
             "partial_links": partial_links}
 
@@ -632,8 +644,10 @@ def _large_dossier(repo: Repo, hunt_id: str, manifest: dict, token_budget: int,
     return Dossier(payload=payload, pages=pages)
 
 
-def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int, owner_token: str | None = None) -> Dossier:
-    """Build a canonical JSON dossier without querying a source or calling a model."""
+def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int, owner_token: str | None = None,
+                  followable: Callable[[str], Iterable[str]] | None = None) -> Dossier:
+    """Build a canonical JSON dossier without querying a source or calling a model. `followable` gives the
+    follow_link kinds an anchor finding supports (see `_expansion`)."""
     if token_budget < 1:
         raise ValueError("token_budget must be positive")
     hunt = repo.get_hunt(hunt_id)
@@ -668,7 +682,7 @@ def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int, owner_token: s
                     for rule_id, count in sorted(context_counts.items())]
     entities = _entity_refs(repo, reportable, aliases)
     incidents = _incidents(repo, hunt_id, reportable, aliases)
-    expansion = _expansion(repo, hunt_id, aliases)
+    expansion = _expansion(repo, hunt_id, aliases, followable)
     base = {
         "schema": DOSSIER_SCHEMA,
         "header": {"finding_counts": {

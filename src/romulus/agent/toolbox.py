@@ -10,7 +10,7 @@ import json
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal, Protocol
+from typing import Annotated, Any, Literal, Protocol, get_args
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -33,6 +33,7 @@ from romulus.agent.dossier import (
 )
 from romulus.agent.models import EntityRef, PivotResult
 from romulus.agent.provider.base import Tool
+from romulus.agent.refusals import reason as refusal_reason
 from romulus.agent.refusals import validation_reasons
 from romulus.agent.safety import injection_flags
 from romulus.decide.policy import LANE_ORDER
@@ -107,7 +108,9 @@ class GetEvidenceArgs(_Args):
 
 
 class GetIncidentArgs(_Args):
-    incident: AliasArg = Field(description="An incident alias (I...) that list_incidents returned.")
+    incident: AliasArg = Field(description=(
+        "An incident alias (I...) issued in this hunt: from list_incidents, the dossier's incidents, or a hypothesis "
+        "that names one. Not a list position or index number."))
     page: int = Field(default=1, ge=1, description=_PAGE)
     cursor: str | None = Field(default=None, pattern=r"^G[0-9a-f]{20}$", description=_CURSOR)
 
@@ -165,13 +168,25 @@ class IdsAlertsToolArgs(_WindowedArgs):
     entity: AliasArg = Field(description="An IP entity alias (N...).")
 
 
+FollowLinkKind = Literal[
+    "process_lineage", "login_session", "network_flow", "flow_host_side",
+    "source_ip", "account", "host_after_anchor", "process_activity",
+    "process_session", "kerberos_logon", "remote_logon_source", "service_process",
+]
+FOLLOW_LINK_KINDS: tuple[str, ...] = get_args(FollowLinkKind)
+FOLLOW_LINK_DESCRIPTION = (
+    "Follow one deterministic expansion link from a cited finding. The kinds follow_link can follow are "
+    + ", ".join(FOLLOW_LINK_KINDS) + ". A kind can be followed only from an anchor whose cited records carry its "
+    "typed key (a process ID, logon session, flow, source address or account): get_finding lists the kinds a "
+    "finding supports in follow_link_kinds, and any other kind is refused. Link types shown on links already "
+    "recorded (zeek_uid, zeek_file, certificate, address_host, agent_*, cited_evidence) describe those links; they "
+    "are not kinds to follow.")
+
+
 class FollowLinkArgs(_Args):
     anchor: AliasArg = Field(description="The finding alias (F...) whose expansion link to follow.")
-    link_type: Literal[
-        "process_lineage", "login_session", "network_flow", "flow_host_side",
-        "source_ip", "account", "host_after_anchor", "process_activity",
-        "process_session", "kerberos_logon", "remote_logon_source", "service_process",
-    ] = Field(description="The kind of deterministic link to follow from the anchor.")
+    link_type: FollowLinkKind = Field(description=(
+        "The kind of deterministic link to follow from the anchor: one get_finding lists in follow_link_kinds."))
     window: Literal["anchor ±5 min", "anchor ±30 min", "anchor ±2 h"] | None = Field(
         default=None, description="The time window around the anchor; omit (or null) for anchor ±5 min.")
     page: int = Field(default=1, ge=1, description=_PAGE)
@@ -185,6 +200,10 @@ class InvestigationExecutor(Protocol):
 
     def follow_link(self, session_id: str, anchor_id: str, link_type: str,
                     window_label: str | None) -> PivotResult: ...
+
+    # optional: the follow_link kinds an anchor finding's cited records carry the typed key for, decided without
+    # any source query. An executor without it lets every kind through to follow_link, which reports the outcome.
+    def followable_links(self, anchor_id: str) -> tuple[str, ...]: ...
 
 
 # the JSON-schema keywords an argument model's schema keeps: every one its validator enforces, and descriptions
@@ -344,7 +363,8 @@ class Toolbox:
                     ListIncidentsArgs, self._list_incidents,
                 ),
                 RegisteredTool(
-                    "get_incident", "Read one deterministic incident and its observed or inferred links.",
+                    "get_incident", ("Read one deterministic incident and its observed or inferred links, by its "
+                                     "incident alias (I...); list_incidents need not be called first."),
                     GetIncidentArgs, self._get_incident,
                 ),
                 RegisteredTool(
@@ -368,7 +388,7 @@ class Toolbox:
                     IdsAlertsToolArgs, self._ids_alerts,
                 ),
                 RegisteredTool(
-                    "follow_link", "Follow one deterministic expansion link from a cited finding.",
+                    "follow_link", FOLLOW_LINK_DESCRIPTION,
                     FollowLinkArgs, self._follow_link,
                 ),
             )
@@ -687,6 +707,9 @@ class Toolbox:
             "benign_alternatives": _jsonable(candidate.get("benign_alternatives") or []),
             "next_checks": _jsonable(candidate.get("next_checks") or []),
         }
+        followable = self.followable_kinds(candidate["id"])
+        if followable is not None:
+            finding["follow_link_kinds"] = list(followable)
         return _result(coverage["status"], coverage=self._coverage_view(
             coverage, {candidate["rule_id"]},
         ), counts={"returned": 1, "total": 1},
@@ -767,61 +790,10 @@ class Toolbox:
         else:
             if args.page != 1:
                 return self._semantic_refusal("cursor_required", "a continuation page requires its cursor")
-            counts = {
-                "reportable_findings": self.repo.candidate_count_lanes(
-                    self.hunt_id, REPORTABLE_LANES,
-                ),
-                "expansion_links": self.repo.expansion_link_count(self.hunt_id),
-                "coverage_cells": self.repo.rule_cell_count(self.hunt_id),
-                "entities": self.repo.entity_count(self.hunt_id),
-                "expansion_link_payload_bytes": self.repo.expansion_link_payload_bytes(self.hunt_id),
-            }
-            over_cap = (
-                counts["reportable_findings"] > MATERIALIZE_FINDING_LIMIT
-                or counts["expansion_links"] > MATERIALIZE_LINK_LIMIT
-                or counts["coverage_cells"] > MATERIALIZE_COVERAGE_LIMIT
-                or counts["entities"] > MATERIALIZE_ENTITY_LIMIT
-                or counts["expansion_link_payload_bytes"] > MATERIALIZE_LINK_BYTES_LIMIT
-            )
-            if over_cap:
-                return _result(
-                    "partial", coverage={"status": "partial", "gaps": [{
-                        "reason": "incident correlation exceeded the bounded materialization cap",
-                    }]}, counts={"returned": 0, "total": None}, data={"incidents": [],
-                        "assessment": {
-                            "status": "unassessed_at_materialization_cap", "counts": counts,
-                            "omission": "incident membership and links were not materialized",
-                            "fetch": ("use list_findings page=1 for the complete finding index; "
-                                      "incident correlation remains explicitly unassessed"),
-                        }}, more=False,
-                )
-            graph, incidents = self._incident_graph()
-            links_by_id = {link["id"]: link for link in graph["links"]}
-            items = []
-            for incident in incidents.values():
-                header = {
-                    "alias": incident["alias"],
-                    "member_count": len(incident["finding_ids"]),
-                    "link_count": len(incident["link_ids"]),
-                    "host_count": len(incident["hosts"]),
-                    "account_count": len(incident["accounts"]),
-                    "open_end_count": sum(
-                        len(values) for values in incident.get("open_ends", {}).values()
-                    ),
-                    "fetch": f"get_incident incident={incident['alias']} page=1",
-                }
-                items.append({
-                    "header": header, "incident": incident,
-                    "links": [links_by_id[link_id] for link_id in incident["link_ids"]],
-                })
-            items.sort(key=lambda item: item["header"]["alias"])
-            cursor = "J" + digest({
-                "identity": identity, "items": items,
-            })[:20]
-            plan = self.repo.create_agent_page_plan(
-                self.hunt_id, cursor, identity, {"status": "complete"},
-                items,
-             owner_token=self.owner_token)
+            plan, capped = self._incident_index()
+            if capped is not None:
+                return capped
+            cursor = plan["cursor"]
         total = int(plan["item_count"])
         rows = self.repo.agent_page_items(
             self.hunt_id, cursor, offset=(args.page - 1) * INCIDENT_PAGE_SIZE,
@@ -833,6 +805,63 @@ class Toolbox:
             data={"incidents": headers, "page": args.page, "cursor": cursor},
             more=args.page * INCIDENT_PAGE_SIZE < total,
         )
+
+    def _incident_index(self) -> tuple[dict | None, dict | None]:
+        """The hunt's incident index as a stored page plan (the same snapshot for the same graph), or, past the
+        bounded materialization cap, None and the partial result that says incident correlation is unassessed."""
+        identity = {"kind": "incident_index"}
+        counts = {
+            "reportable_findings": self.repo.candidate_count_lanes(self.hunt_id, REPORTABLE_LANES),
+            "expansion_links": self.repo.expansion_link_count(self.hunt_id),
+            "coverage_cells": self.repo.rule_cell_count(self.hunt_id),
+            "entities": self.repo.entity_count(self.hunt_id),
+            "expansion_link_payload_bytes": self.repo.expansion_link_payload_bytes(self.hunt_id),
+        }
+        over_cap = (
+            counts["reportable_findings"] > MATERIALIZE_FINDING_LIMIT
+            or counts["expansion_links"] > MATERIALIZE_LINK_LIMIT
+            or counts["coverage_cells"] > MATERIALIZE_COVERAGE_LIMIT
+            or counts["entities"] > MATERIALIZE_ENTITY_LIMIT
+            or counts["expansion_link_payload_bytes"] > MATERIALIZE_LINK_BYTES_LIMIT
+        )
+        if over_cap:
+            return None, _result(
+                "partial", coverage={"status": "partial", "gaps": [{
+                    "reason": "incident correlation exceeded the bounded materialization cap",
+                }]}, counts={"returned": 0, "total": None}, data={"incidents": [],
+                    "assessment": {
+                        "status": "unassessed_at_materialization_cap", "counts": counts,
+                        "omission": "incident membership and links were not materialized",
+                        "fetch": ("use list_findings page=1 for the complete finding index; "
+                                  "incident correlation remains explicitly unassessed"),
+                    }}, more=False,
+            )
+        graph, incidents = self._incident_graph()
+        links_by_id = {link["id"]: link for link in graph["links"]}
+        items = []
+        for incident in incidents.values():
+            header = {
+                "alias": incident["alias"],
+                "member_count": len(incident["finding_ids"]),
+                "link_count": len(incident["link_ids"]),
+                "host_count": len(incident["hosts"]),
+                "account_count": len(incident["accounts"]),
+                "open_end_count": sum(
+                    len(values) for values in incident.get("open_ends", {}).values()
+                ),
+                "fetch": f"get_incident incident={incident['alias']} page=1",
+            }
+            items.append({
+                "header": header, "incident": incident,
+                "links": [links_by_id[link_id] for link_id in incident["link_ids"]],
+            })
+        items.sort(key=lambda item: item["header"]["alias"])
+        cursor = "J" + digest({
+            "identity": identity, "items": items,
+        })[:20]
+        plan = self.repo.create_agent_page_plan(
+            self.hunt_id, cursor, identity, {"status": "complete"}, items, owner_token=self.owner_token)
+        return plan, None
 
     def _get_incident(self, args: GetIncidentArgs) -> dict:
         incident_id = self.aliases.resolve(args.incident, {"I"})
@@ -852,10 +881,19 @@ class Toolbox:
                 return self._semantic_refusal("cursor_required", "a continuation page requires its cursor")
             indexed = self.repo.agent_incident_index_item(self.hunt_id, args.incident)
             if indexed is None or indexed["incident"]["id"] != incident_id:
-                return self._semantic_refusal(
-                    "incident_index_required",
-                    "call list_incidents page=1 before reading this incident",
-                )
+                # an incident alias from the dossier or a hypothesis: index the hunt's incidents now, as
+                # list_incidents would, and read it from that snapshot
+                _plan, capped = self._incident_index()
+                if capped is not None:
+                    return capped
+                indexed = self.repo.agent_incident_index_item(self.hunt_id, args.incident)
+            if indexed is None or indexed["incident"]["id"] != incident_id:
+                return _result("refused", data={"error": {
+                    "code": "incident_not_in_index",
+                    "message": "this alias names no incident in the hunt's current incident index; call "
+                               "list_incidents page=1 for the current incidents",
+                    "reasons": [refusal_reason("incident", "not_in_incident_index")],
+                }})
             incident = indexed["incident"]
             links_by_id = {link["id"]: link for link in indexed["links"]}
             items = []
@@ -1044,6 +1082,15 @@ class Toolbox:
             raise UnknownAlias(f"unknown entity alias {alias!r} in hunt {self.hunt_id}")
         roles = {"host": "host", "account": "actor", "ip": "src", "domain": "subject"}
         return EntityRef(kind=entity["kind"], value=entity["value"], role=roles.get(entity["kind"], ""))
+
+    def followable_kinds(self, finding_id: str) -> tuple[str, ...] | None:
+        """The follow_link kinds the executor can follow from this finding, in the order the tool lists them; None
+        when no executor says (every kind then goes to follow_link, which reports its own outcome)."""
+        decide = getattr(self.executor, "followable_links", None)
+        if decide is None:
+            return None
+        kinds = set(decide(finding_id))
+        return tuple(kind for kind in FOLLOW_LINK_KINDS if kind in kinds)
 
     @staticmethod
     def _semantic_refusal(code: str, message: str) -> dict:
@@ -1275,6 +1322,16 @@ class Toolbox:
         if self.executor is None or self.session_id is None:
             return _result("unsupported", data={"error": {
                 "code": "pivot_unavailable", "message": "the hunt layer did not provide a link fetcher",
+            }})
+        followable = self.followable_kinds(anchor["id"])
+        if followable is not None and args.link_type not in followable:
+            # the anchor's records carry no typed key for this kind: refused before any source query
+            return _result("refused", data={"error": {
+                "code": "link_not_followable",
+                "message": ("this anchor's cited records carry no typed key for that link kind; the kinds it "
+                            "supports are " + (", ".join(followable) or "none")),
+                "follow_link_kinds": list(followable),
+                "reasons": [refusal_reason("link_type", "not_followable")],
             }})
         result = self.executor.follow_link(
             self.session_id, anchor["id"], args.link_type, args.window,

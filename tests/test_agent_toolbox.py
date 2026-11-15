@@ -557,18 +557,24 @@ def test_identical_incident_reads_reuse_one_content_addressed_plan():
     assert after == before
 
 
-def test_get_incident_without_persisted_index_never_rebuilds_the_hunt_graph(monkeypatch):
+def test_get_incident_without_persisted_index_builds_it_once_and_refuses_an_alias_outside_it(monkeypatch):
     repo = _repo(2)
     toolbox = Toolbox(repo, "h1")
     repo.get_or_create_agent_alias("h1", "I", "incident-without-index")
-    monkeypatch.setattr(toolbox, "_incident_graph", lambda: (
-        (_ for _ in ()).throw(AssertionError("get_incident rebuilt the whole hunt graph"))
-    ))
+    built = []
+    graph = toolbox._incident_graph
+    monkeypatch.setattr(toolbox, "_incident_graph", lambda: built.append(1) or graph())
 
     result = toolbox.execute("get_incident", {"incident": "I1", "page": 1})
 
+    # the index is built as list_incidents would build it; an alias that names no incident in it is refused
     assert result["status"] == "refused"
-    assert result["data"]["error"]["code"] == "incident_index_required"
+    assert result["data"]["error"]["code"] == "incident_not_in_index"
+    assert result["data"]["error"]["reasons"] == ["incident: not_in_incident_index"]
+    assert len(built) == 1
+    current = toolbox.execute("list_incidents", {"page": 1})["data"]["incidents"][0]["alias"]
+    assert toolbox.execute("get_incident", {"incident": current, "page": 1})["status"] == "complete"
+    assert len(built) == 2      # list_incidents above; the read itself used the stored index
 
 
 def test_filtered_coverage_preserves_canonical_every_rule_there_meaning():
