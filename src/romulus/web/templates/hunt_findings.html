@@ -7,7 +7,7 @@
   <nav class="seg" aria-label="Filter by lane">
     <a href="{{ url(h.id, '/findings', rule=fv.rule) }}"{% if not fv.lane %} aria-current="true"{% endif %}>{% if fv.has_rank %}Report order{% else %}All reportable{% endif %} <b>{{ head.reportable }}</b></a>
     {% for ln in ['urgent', 'high', 'lead', 'context', 'suppressed'] %}
-    <a class="l-{{ ln }}" href="{{ url(h.id, '/findings', lane=ln, rule=fv.rule) }}"{% if fv.lane == ln %} aria-current="true"{% endif %}>{{ ln }} <b>{{ head.lanes.get(ln, 0) }}</b></a>
+    <a class="l-{{ ln }}" href="{{ url(h.id, '/findings', lane=ln, rule=fv.rule) }}"{% if fv.lane == ln %} aria-current="true"{% endif %}>{{ ln }} <b>{{ head.lanes_all.get(ln, 0) }}</b>{% if head.agent_lanes.get(ln) %} <span class="kind" title="from the AI agent, unconfirmed">incl. {{ head.agent_lanes.get(ln) }} AI</span>{% endif %}</a>
     {% endfor %}
   </nav>
   <form method="get" action="{{ url(h.id, '/findings') }}" role="search">

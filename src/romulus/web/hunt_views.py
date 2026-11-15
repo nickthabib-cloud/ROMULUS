@@ -88,10 +88,21 @@ def header(repo, hunt: dict, user: dict, tab: str) -> dict:
                                            t.report_manifest.c.created_at)
                                     .where(t.report_manifest.c.hunt_id == hunt_id)
                                     .order_by(t.report_manifest.c.revision.desc()).limit(1)).mappings().first()
-    lanes = repo.lane_counts(hunt_id)
+        # one grouped read over ix_candidate_hunt_provenance_lane: deterministic and AI agent findings per lane
+        counted = connection.execute(select(t.candidate.c.provenance, t.candidate.c.lane, func.count()).where(
+            t.candidate.c.hunt_id == hunt_id).group_by(t.candidate.c.provenance, t.candidate.c.lane)).all()
+    lanes, agent_lanes, lanes_all = {}, {}, {}
+    for provenance, lane, count in counted:
+        target = agent_lanes if provenance == "agent" else lanes
+        target[lane] = target.get(lane, 0) + count
+        lanes_all[lane] = lanes_all.get(lane, 0) + count
     return {"tab": tab, "tabs": [{"key": key, "label": label, "url": hunt_url(hunt_id, suffix)}
                                  for key, label, suffix in TABS],
-            "lanes": lanes, "reportable": sum(lanes.get(lane, 0) for lane in RANKED_LANES),
+            # `lanes` counts deterministic findings (as the live stream does); the lists include agent findings
+            "lanes": lanes, "agent_lanes": agent_lanes, "lanes_all": lanes_all,
+            "agent_total": sum(agent_lanes.values()),
+            "reportable": sum(lanes_all.get(lane, 0) for lane in RANKED_LANES),
+            "agent_reportable": sum(agent_lanes.get(lane, 0) for lane in RANKED_LANES),
             "ai_state": ai_state, "has_agent": run is not None,
             "live": agent_views.stream_live(repo, hunt, run), "stream_cursor": repo.agent_change_max_seq(hunt_id),
             "latest_report": dict(latest) if latest else None,

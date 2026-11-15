@@ -17,15 +17,15 @@
 
 <div class="tiles">
   {% for ln in ['urgent', 'high', 'lead', 'context'] %}
-  <a class="tile l-{{ ln }}" href="{{ url(h.id, '/findings', lane=ln) }}"><div class="t-label">{{ ln }}</div><div class="t-value">{{ head.lanes.get(ln, 0) }}</div><div class="t-sub">{% if ln == 'context' %}context only{% else %}rule estimate{% endif %}</div></a>
+  <a class="tile l-{{ ln }}" href="{{ url(h.id, '/findings', lane=ln) }}"><div class="t-label">{{ ln }}</div><div class="t-value">{{ head.lanes_all.get(ln, 0) }}</div><div class="t-sub">{% if head.agent_lanes.get(ln) %}incl. {{ head.agent_lanes.get(ln) }} from the AI agent{% elif ln == 'context' %}context only{% else %}rule estimate{% endif %}</div></a>
   {% endfor %}
   {% if ov.ranked %}
   <a class="tile" href="{{ url(h.id, '/findings') }}"><div class="t-label">Reported</div><div class="t-value">{{ ov.reported_total }}</div><div class="t-sub">{% for s in ov.sections %}{{ s.count }} {{ s.title }}{% if not loop.last %} · {% endif %}{% endfor %}</div></a>
   {% else %}
-  <div class="tile"><div class="t-label">Suppressed</div><div class="t-value">{{ head.lanes.get('suppressed', 0) }}</div><div class="t-sub">not reported</div></div>
+  <div class="tile"><div class="t-label">Suppressed</div><div class="t-value">{{ head.lanes_all.get('suppressed', 0) }}</div><div class="t-sub">not reported</div></div>
   {% endif %}
 </div>
-{{ lane_bar(head.lanes) }}
+{{ lane_bar(head.lanes_all) }}
 
 <div class="cols">
   <div class="stack">

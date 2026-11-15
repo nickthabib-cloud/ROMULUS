@@ -8,8 +8,8 @@ from sqlalchemy import event
 
 from romulus.store import schema as t
 from romulus.store.db import utcnow
-from romulus.web import hunt_views
 from romulus.store.repo import FINAL_RANK_PASS
+from romulus.web import hunt_views
 from romulus.web.finding_order import finding_page, ranked_finding_page, segment_sizes
 from tests import test_web_agent_a6
 from tests.test_agent_store_r2 import NOW, _candidate, _repo
@@ -112,7 +112,7 @@ def test_findings_tab_filters_by_lane_and_rule(setup):
     assert client.get("/hunts/h1/findings", params={"rule": "r" * 300}).status_code == 400
 
 
-def test_rule_filter_walks_the_order_index_without_a_sort():
+def test_rule_filter_seeks_the_rule_order_index():
     repo = _repo()
     _seed(repo, [_candidate(f"f{i:04}") for i in range(120)])
     statements = []
@@ -123,8 +123,8 @@ def test_rule_filter_walks_the_order_index_without_a_sort():
     with repo.engine.connect() as connection:
         plans = [" ".join(str(row) for row in connection.exec_driver_sql("EXPLAIN QUERY PLAN " + sql, params))
                  for sql, params in list(statements)]
-    # the hunt's order index, in order: bounded memory and no temporary sort (a sparse rule walks the hunt's range)
-    assert plans and all("USING INDEX ix_candidate_finding_order" in plan for plan in plans)
+    # the rule's own range of ix_candidate_rule_order, in importance order, with no temporary sort
+    assert plans and all("ix_candidate_rule_order (hunt_id=? AND rule_id=?" in plan for plan in plans)
     assert all("TEMP B-TREE" not in plan for plan in plans)
 
 
@@ -235,6 +235,22 @@ def test_analyst_header_has_no_delete_or_reassess(setup):
     assert "Publish new report revision" in html
     assert "delete-dialog" not in html and "/hunts/h1/delete" not in html and "Re-run assessment" not in html
     assert client.get("/hunts/h1/delete").status_code == 403
+
+
+def test_counts_say_which_findings_they_cover(setup):
+    client, repo, cid, *_ = setup
+    lane = repo.candidate(cid)["lane"]
+    _seed(repo, [_candidate("agent-1", lane=lane, provenance="agent")])
+    html = client.get("/hunts/h1/findings").text
+    # header lane chips count deterministic findings, as the live stream does; agent findings are named beside them
+    assert 'title="Deterministic findings by lane">Deterministic' in html
+    assert f'<b data-lane-count="{lane}">1</b>' in html and "+ 1 AI agent · unconfirmed" in html
+    # the Findings tab and its lane filters count what the list shows, agent findings included
+    assert re.search(r'Findings <span class="count" title="Reportable findings, including 1 from the AI agent">2</span>',
+                     html)
+    assert len(_ids(html)) == 2 and "incl. 1 AI" in html
+    dialog = html.split('<dialog id="delete-dialog"', 1)[1].split("</dialog>", 1)[0]
+    assert "(including 1 from the AI agent)" in dialog and f"2 {lane}" in dialog
 
 
 def test_header_links_the_latest_report(setup):
