@@ -1034,6 +1034,10 @@ def _ai_assessment(repo: Repo, hunt_id: str, *, stored_only: bool = False) -> di
                       "The prior body is retained for review.")
         if source == "agent" and isinstance(model.get("fallback"), dict):
             header += " " + fallback_sentence(model["fallback"], model.get("model_requested"))
+        # the work the assessment rests on: other agent calls a fallback model wrote
+        fallbacks = fallback_view(repo, hunt_id)
+        if fallbacks and any(purpose != "assess" for purpose in fallbacks["by_purpose"]):
+            header += " Agent calls behind it: " + fallbacks["note"]
         return {"source": source, "header": header, "model": model, "body": row["body"],
                 "checker": row["checker"], "revision": row["revision"], **({"stale": True} if stale else {})}
     # Preserve the byte-for-byte renderer output for hunts that predate the persisted agent phase.

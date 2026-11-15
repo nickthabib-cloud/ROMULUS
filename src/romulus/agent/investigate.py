@@ -485,8 +485,16 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                                    owner_token=owner_token, purpose=purpose)
         admission.register(toolbox)
         tools = _session_tools(toolbox)
-        followable = (toolbox.followable_kinds if getattr(toolbox.executor, "followable_links", None) is not None
-                      else None)
+        followable = None
+        if getattr(toolbox.executor, "followable_links", None) is not None:
+            # remembered across the dossier rebuilds below: each unfinished expansion anchor is planned once per
+            # session (they are at most the dossier's materialization cap of reportable findings)
+            known: dict[str, tuple[str, ...] | None] = {}
+
+            def followable(finding_id: str) -> tuple[str, ...]:
+                if finding_id not in known:
+                    known[finding_id] = toolbox.followable_kinds(finding_id)
+                return known[finding_id] or ()
         system_text = prompts["system.md"]
         if purpose == "orient":
             orientation = prompts["orient.md"]
@@ -563,10 +571,11 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 return finish("failed", _deterministic_tool_summary(tool_history, hypothesis_changes),
                               f"budget:{reservation.retry_budget}" if reservation.retry_budget else
                               "provider_unavailable")
-            except Exception as exc:
-                if is_lease_lost(exc):
-                    raise
+            except BaseException as exc:
+                # settled on every exit: a reservation left behind would hold a sibling's call waiting
                 budget_gate.settle(reservation)
+                if is_lease_lost(exc) or not isinstance(exc, Exception):
+                    raise
                 return finish("failed", f"Provider call failed: {type(exc).__name__}: {exc}"[:2000],
                               "provider_error")
             budget_gate.settle(reservation, result=result)
@@ -640,8 +649,9 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                         reasons = tool_result_reasons(tool_result)
                         if call.name == "finish_session" and _overlong_summary(call.arguments, reasons):
                             overlong_summaries += 1
-                            tool_result, reasons = _overlong_finish(toolbox, call.arguments["summary"],
-                                                                    overlong_summaries)
+                            # after the context wrap-up there is no further turn to correct it in
+                            tool_result, reasons = _overlong_finish(
+                                toolbox, call.arguments["summary"], 2 if context_wrap_sent else overlong_summaries)
                 raw_args = call.raw_arguments.encode("utf-8")
                 if call.arguments is not None:
                     stored_args = call.arguments

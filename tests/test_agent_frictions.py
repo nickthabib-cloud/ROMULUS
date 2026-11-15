@@ -47,7 +47,7 @@ def _hunt(tmp_path, name="frictions"):
 # ---- the budget reservation -------------------------------------------------------------------------------------
 
 def _weighted_limits(*, fallback: bool) -> BudgetLimits:
-    # the live run's shape: a 2M weighted token budget, cache writes at 1.25, the refusal fallback on
+    # a 2M weighted token budget, cache writes counted at 1.25, the refusal fallback on
     return BudgetLimits(200, 2_000_000, 3600, 0.0, 0.0, 0.0, model="m", refusal_fallback=fallback,
                         cache_read_token_weight=0.1, cache_write_token_weight=1.25)
 
@@ -69,7 +69,7 @@ def test_a_call_waits_for_a_sibling_reservation_instead_of_stopping_at_half_the_
     prompt, output = 90_000, 64_096
     worst = limits.worst_tokens(prompt, output)
     hold = 300_000                                   # 15% of the budget kept for the assessment
-    # the live stop: 52% spent, and this call's worst case beside a sibling's in flight and the hold is over the limit
+    # 52% spent: this call's worst case beside a sibling's in flight and the hold is over the limit, alone it fits
     assert budget.budget_tokens + 2 * worst + hold > limits.max_tokens
     assert budget.budget_tokens + worst + hold <= limits.max_tokens
     sibling = gate.reserve(prompt, output, "investigate")
@@ -79,7 +79,7 @@ def test_a_call_waits_for_a_sibling_reservation_instead_of_stopping_at_half_the_
     def second():
         try:
             got.append(gate.reserve(prompt, output, "investigate"))
-        except BudgetExhausted as exc:      # the stop this fix removes
+        except BudgetExhausted as exc:      # a stop caused only by the sibling's transient reservation
             errors.append(exc)
     thread = threading.Thread(target=second)
     thread.start()
@@ -160,6 +160,33 @@ def test_an_over_long_summary_is_refused_once_with_its_length_then_kept_cut_to_f
     engine.dispose()
 
 
+def test_after_the_context_wrap_up_an_over_long_summary_is_kept_at_once(tmp_path):
+    engine, repo = _hunt(tmp_path, "context-wrap")
+    settings = Settings(home=tmp_path)
+    too_long = ToolCall("f1", "finish_session", {"summary": "The lead stays open. " * 200}, "{}")
+    # a context window this small puts the first request past 85%: the controller asks for the wrap-up at once
+    provider = ScriptedProvider([response(tool_calls=[too_long])], context=2000, output=64)
+    budget = AgentBudget.from_usage(BudgetLimits.from_settings(settings), repo.agent_usage("h1"), clock=lambda: 0.0)
+
+    outcome = _run_session(settings, repo, "h1", provider, _BudgetGate(budget, settings),
+                           lambda session: Toolbox(repo, "h1", session_id=session), _prompt_set(),
+                           purpose="investigate", hypothesis=_open_hypothesis(repo))
+
+    assert "Context is nearly full" in provider.requests[0].messages[-1]["content"]
+    assert outcome["state"] == "context_full" and outcome["summary"].endswith(SUMMARY_TRUNCATED)
+    assert repo.agent_refusal_counts("h1")["by_tool"]["finish_session"] == {"summary: truncated_by_product": 1}
+    engine.dispose()
+
+
+def _open_hypothesis(repo):
+    now = datetime.now(UTC)
+    repo.save_agent_hypothesis({"id": "hyp-w", "hunt_id": "h1", "statement": "Review the wrap-up hypothesis here",
+                                "techniques": [], "entity_ids": [], "status": "open", "confidence": "low",
+                                "questions": ["q"], "created_session_id": None, "sessions_run": 0,
+                                "created_at": now, "updated_at": now})
+    return repo.agent_hypotheses("h1")[0]
+
+
 # ---- follow_link offers only kinds the executor can follow ---------------------------------------------------------
 
 class _Executor:
@@ -219,6 +246,25 @@ def test_the_planner_says_followable_exactly_when_fetch_would_not_answer_unsuppo
             assert followable == (fetched.status != "unsupported"), (item.finding_id, kind)
 
 
+def test_the_hunt_executor_asks_the_link_planner_and_refuses_without_source_work():
+    from romulus.hunt.agent_tools import HuntToolExecutor
+    repo = toolbox_repo(2)                        # process records with an account and a host, but no process ID
+    pivot = FakePivot([])
+    pivot.source_queries = 0
+    executor = HuntToolExecutor(repo, "h1", pivot, LinkFetcher(pivot, T0, T0 + (T1 - T0) * 6), T0,
+                                T0 + (T1 - T0) * 6)
+    toolbox = Toolbox(repo, "h1", executor=executor, session_id="s1")
+    kinds = toolbox.execute("get_finding", {"finding": "F1"})["data"]["finding"]["follow_link_kinds"]
+    assert "process_lineage" not in kinds and "account" in kinds
+    assert kinds == list(executor.followable_links("finding-00"))
+
+    refused = toolbox.execute("follow_link", {"anchor": "F1", "link_type": "process_lineage"})
+
+    assert refused["data"]["error"]["reasons"] == ["link_type: not_followable"]
+    assert pivot.calls == [] and pivot.source_queries == 0
+    assert not [row for row in repo.expansion_links("h1") if row["link_type"].startswith("agent_follow_")]
+
+
 def test_the_dossier_marks_tiers_and_links_follow_link_cannot_follow():
     from romulus.agent.aliases import AliasBook
     from romulus.agent.dossier import _expansion
@@ -257,6 +303,23 @@ def test_get_incident_takes_an_issued_incident_alias_without_list_incidents_firs
     assert detail["status"] == "complete" and set(detail["data"]["incident"]["members"]) == {"F1", "F2"}
     refused = toolbox.execute("get_incident", {"incident": "3", "page": 1})       # a list position is not an alias
     assert refused["status"] == "refused" and refused["data"]["error"]["code"] == "invalid_arguments"
+
+
+def test_get_incident_reads_the_aliases_the_dossier_and_the_controller_issue():
+    from romulus.agent.admission import AgentAdmission
+    from romulus.agent.dossier import build_dossier
+    from romulus.agent.investigate import _controller_open_hypotheses
+    repo = toolbox_repo(2)
+    dossier_alias = build_dossier(repo, "h1", token_budget=24_000).page(1)["incidents"][0]["alias"]
+    admission = AgentAdmission(Settings(home="."), repo, "h1", "orient-1", purpose="orient")
+    _controller_open_hypotheses(Settings(home="."), repo, "h1", "orient-1", admission)
+    statement = repo.agent_hypotheses("h1")[0]["statement"]
+    assert statement.startswith(f"Investigate incident {dossier_alias}:")
+    toolbox = Toolbox(repo, "h1")         # a fresh session: list_incidents was never called
+
+    detail = toolbox.execute("get_incident", {"incident": dossier_alias, "page": 1})
+
+    assert detail["status"] == "complete" and set(detail["data"]["incident"]["members"]) == {"F1", "F2"}
 
 
 # ---- the per-session tool-call allowance ---------------------------------------------------------------------------
@@ -323,8 +386,10 @@ def test_a_fallback_written_assessment_says_so_and_the_manifest_counts_fallbacks
                 result=declined, limits=limits)
 
     header = _ai_assessment(repo, "h1")["header"]
-    assert header.endswith("Written by fallback model claude-fallback-model after the configured model "
-                           "scripted-model declined (category: cyber).")
+    assert ("Written by fallback model claude-fallback-model after the configured model scripted-model declined "
+            "(category: cyber).") in header
+    # the other agent calls a fallback model wrote are named in the header too
+    assert "Agent calls behind it: 2 agent call(s) (assess 1, investigate 1) were written by fallback" in header
     fallbacks = _ai_agent(repo, "h1", {"ai_agent": {"provider": "scripted"}})["usage"]["fallbacks"]
     assert fallbacks["calls"] == 2 and fallbacks["by_purpose"] == {"assess": 1, "investigate": 1}
     assert fallbacks["by_category"] == {"cyber": 1, "unknown": 1}
