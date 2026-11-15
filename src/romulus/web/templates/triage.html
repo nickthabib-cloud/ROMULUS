@@ -6,7 +6,8 @@
 <p>No AI triage pass has run for this hunt. The findings are in the deterministic report order, which is authoritative.</p>
 {% else %}
 <h1>{{ view.label }}</h1>
-<p class="warn">AI-generated and unconfirmed. A model proposed which finding groups to review first; lanes, ranks, the Reported set, citations and the deterministic report order are unchanged.</p>
+<p class="warn">AI-generated and unconfirmed. A model proposed which finding groups to review first; only the findings it was shown for each promoted group (at most three) move ahead in the triage order. Lanes, ranks, the Reported set, citations and the deterministic report order are unchanged.</p>
+{% if not view.order_verified %}<p>Staleness here is checked by finding count and final ranking; the report and the export verify the whole order.</p>{% endif %}
 {% if view.stale %}<p class="warn"><b>Stale:</b> the hunt's findings or final ranking changed after this triage pass.</p>{% endif %}
 {% if view.last_attempt %}<p class="warn"><b>A later triage attempt failed:</b> {{ view.last_attempt.reason }}</p>{% endif %}
 <table class="grid"><tbody>
@@ -24,7 +25,7 @@
 {% for group in section.promoted %}<tr>
 <td>{{ group.position }}</td><td>{{ group.group_id }}</td><td>{{ group.rule_id }}</td>
 <td>{{ group.entity.kind }}{% if group.entity.value %}: {{ group.entity.value }}{% endif %}</td>
-<td>{{ group.finding_count }}</td><td>{{ group.best_position }}</td><td>{{ group.assessment }}</td>
+<td>{{ group.moved }} moved{% if group.in_deterministic_place %}, {{ group.in_deterministic_place }} more in deterministic place{% endif %}{% if group.case_findings %} · {{ group.case_findings }} found by an investigator case{% endif %}</td><td>{{ group.best_position }}</td><td>{{ group.assessment }}</td>
 <td>{{ group.incident_label or '' }}</td><td>{{ group.rationale }}</td>
 <td>{% for cite in group.cites %}<a href="/findings/{{ cite | urlencode }}">{{ cite }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</td>
 </tr>{% endfor %}

@@ -255,8 +255,9 @@ def _triage_section(m: dict) -> list[str]:
            ("A model read deterministic group cards (one per rule and primary target in a report section) and "
             "proposed which groups an analyst should see first. Within each section at most "
             f"{esc((view.get('settings') or {}).get('promote_per_lane', 'the configured number of'))} groups it "
-            "assessed as likely or possible attack are listed here, ahead of the rest; every other finding keeps "
-            "its deterministic place. Lanes, ranks, the Reported set and citations are unchanged. This is "
+            "assessed as likely or possible attack are listed here. In the triage order only the findings it was "
+            "shown for each (at most three) move ahead; the rest of each group and every other finding keep their "
+            "deterministic place. Lanes, ranks, the Reported set and citations are unchanged. This is "
             "AI-generated and unconfirmed."), "",
            f"- Status: {esc(view.get('status') or 'unknown')}"
            + (f" ({esc(view['reason'])})" if view.get("reason") else ""),
@@ -278,13 +279,14 @@ def _triage_section(m: dict) -> list[str]:
             out += ["No group promoted; the deterministic order stands.", ""]
             continue
         out += [("| Triage # | Group | Rule | Target | Findings | Deterministic position | Assessment | "
-                 "Incident label | Rationale | Cites |"), "|---:|---|---|---|---:|---:|---|---|---|---|"]
+                 "Incident label | Rationale | Cites |"), "|---:|---|---|---|---|---:|---|---|---|---|"]
         for group in section["promoted"]:
             entity = group.get("entity") or {}
             cites = ", ".join(f"[{esc(c)}](#f-{c})" for c in group.get("cites") or [])
             out.append(f"| {group['position']} | {esc(group['group_id'])} | {esc(group['rule_id'])} | "
                        f"{cell(_entity_text(entity) if entity.get('value') else entity.get('kind') or 'unattributed')} | "
-                       f"{group['finding_count']} | {group['best_position']} | {esc(group.get('assessment'))} | "
+                       f"{group.get('moved', 0)} moved, {group.get('in_deterministic_place', 0)} more in "
+                       f"deterministic place | {group['best_position']} | {esc(group.get('assessment'))} | "
                        f"{esc(group.get('incident_label') or '')} | {cell(group.get('rationale') or '')} | {cites} |")
         out.append("")
     return out

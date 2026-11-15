@@ -42,11 +42,12 @@ def register_agent_routes(app, repo, need, page):
 
     @app.get("/hunts/{hunt_id}/triage", response_class=HTMLResponse)
     def triage(request: Request, hunt_id: str):
-        """The AI triage order, from the same builder the report manifest uses; templates escape every field."""
+        """The AI triage order, from the same builder the report manifest uses; templates escape every field. The page
+        checks staleness by finding count and final ranking; the report and the export verify the whole order."""
         from romulus.report.triage import triage_view
         user = need(request)
         h = hunt(hunt_id)
-        return page(request, "triage.html", user, h=h, view=triage_view(repo, hunt_id))
+        return page(request, "triage.html", user, h=h, view=triage_view(repo, hunt_id, verify_order=False))
 
     @app.get("/hunts/{hunt_id}/hypotheses/{hid}", response_class=HTMLResponse)
     def hypothesis(request: Request, hunt_id: str, hid: str):
