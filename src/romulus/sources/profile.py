@@ -53,6 +53,41 @@ OPS_BY_TYPE: dict[str, set[str]] = {
 AGGREGATABLE = {
     "keyword", "constant_keyword", "ip", "long", "integer", "short", "boolean", "date", "wildcard",
 }
+# A mapping can switch off a field's index or its doc values (ECS templates map event.original with neither). The
+# field's type then carries a qualifier, so no predicate claims to search a field the source cannot search and no
+# aggregation reads one without doc values: not indexed and without doc values, nothing; not indexed with doc values,
+# aggregation only; indexed without doc values, every predicate of its type and no aggregation.
+NOT_INDEXED = ":not_indexed"
+DOC_VALUES_ONLY = ":doc_values_only"
+NO_DOC_VALUES = ":no_doc_values"
+_BASE_AGGREGATABLE = frozenset(AGGREGATABLE)
+OPS_BY_TYPE.update({kind + NO_DOC_VALUES: set(OPS_BY_TYPE[kind]) for kind in _BASE_AGGREGATABLE})
+AGGREGATABLE |= {kind + DOC_VALUES_ONLY for kind in _BASE_AGGREGATABLE}
+
+
+def _off(value) -> bool:
+    return value is False or (isinstance(value, str) and value.strip().lower() == "false")
+
+
+def mapped_kind(spec: dict) -> str:
+    """A mapping entry's type, qualified when its index or doc values are switched off."""
+    kind = spec.get("type", "object")
+    has_doc_values = kind in _BASE_AGGREGATABLE and not _off(spec.get("doc_values"))
+    if _off(spec.get("index")):
+        return kind + (DOC_VALUES_ONLY if has_doc_values else NOT_INDEXED)
+    if kind in _BASE_AGGREGATABLE and not has_doc_values:
+        return kind + NO_DOC_VALUES
+    return kind
+
+
+def presence_searchable(fields: dict, name: str) -> bool:
+    """Whether a source query can test `name` for presence: a contract spec with that op, or a mapped type with it."""
+    value = fields.get(name)
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return "exists" in OPS_BY_TYPE.get(value, set())
+    return "exists" in (getattr(value, "ops", None) or ())
 
 
 class FieldSpec(BaseModel):
@@ -253,9 +288,9 @@ def flatten_mapping(mapping: dict) -> dict[str, str]:
                     out[full] = "mixed"
                 walk(full + ".", spec["properties"])
             else:
-                record(full, spec.get("type", "object"))
+                record(full, mapped_kind(spec))
             for sub, sspec in spec.get("fields", {}).items():
-                record(f"{full}.{sub}", sspec.get("type", "object"))
+                record(f"{full}.{sub}", mapped_kind(sspec))
 
     for body in mapping.values():
         walk("", body.get("mappings", {}).get("properties", {}))
@@ -915,7 +950,7 @@ def _text_profile(client, target: str, field_types: dict, datasets: dict, datase
             query = {"bool": {"filter": [
                 *[_missing_dataset(field_types, name) for name in ("event.dataset", "data_stream.dataset")],
                 {"bool": {"should": [{"exists": {"field": name}} for name in ("message", "event.original")
-                                       if name in field_types], "minimum_should_match": 1}},
+                                       if presence_searchable(field_types, name)], "minimum_should_match": 1}},
                 {"bool": {"should": sources, "minimum_should_match": 1}},
             ]}}
             module = _aggregation_field(field_types, "event.module") if "event.module" in field_types else None
@@ -951,7 +986,7 @@ def mixed_text_query(fields) -> dict:
     superset; record-level dispatch still rejects them as text rather than guessing their source.
     """
     return {"bool": {"filter": [{"bool": {"should": [
-        {"exists": {"field": name}} for name in ("message", "event.original") if name in fields
+        {"exists": {"field": name}} for name in ("message", "event.original") if presence_searchable(fields, name)
     ], "minimum_should_match": 1}}], "must_not": [
         {"exists": {"field": name}} for name in ("winlog", "Event.System", "Channel", "EventID", "SourceName")
     ]}}
@@ -1256,7 +1291,7 @@ def _text_missing_host_count(client, target, contract):
     from romulus.sources.models import Predicate
 
     payload = [{"exists": {"field": name}} for name in ("message", "event.original")
-               if contract.spec(name, os_family="linux") is not None]
+               if (spec := contract.spec(name, os_family="linux")) is not None and "exists" in spec.ops]
     if not payload or contract.ecar:
         return 0
     host = contract.spec("host.name", os_family="linux")
