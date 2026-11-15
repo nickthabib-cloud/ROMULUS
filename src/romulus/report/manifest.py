@@ -904,8 +904,10 @@ def _ai_agent(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dict:
     phase = repo.latest_audit(hunt_id, "hunt.ai_agent_summary")
     usage = repo.agent_usage(hunt_id)
     calls = repo.model_calls(hunt_id)
-    # tokens: raw; budget_tokens: weighted by price, what the token budget holds
-    shown = {k: usage[k] for k in ("calls", "tokens", "budget_tokens", "cost_usd", "estimated")}
+    shown = {k: usage[k] for k in ("calls", "tokens", "cost_usd", "estimated")}
+    if usage["calls"]:
+        # tokens are raw; budget tokens are weighted by price, and are what the token budget holds
+        shown["budget_tokens"] = usage["budget_tokens"]
     shown["billed_failures"] = sum(bool((row.get("options") or {}).get("billed_failure")) for row in calls)
     if usage["models_reported"]:
         shown["models_reported"] = usage["models_reported"]
