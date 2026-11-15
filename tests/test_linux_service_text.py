@@ -388,9 +388,10 @@ def test_resolver_queries_reach_existing_dns_rules_without_field_translation():
         assert tunnel.evaluated == 1 and tunnel.missing_required == 0
         zone.consume([_typed("named", "client @0xabc 192.0.2.2#51234 (example.org): query: example.org IN AXFR + (192.0.2.53)")])
         assert zone.evaluated == 1 and zone.missing_required == 0
-        # dnsmasq query format does not identify the local server: no fabricated server.
+        # dnsmasq's query line names no address of its own: the server is the logging host, never a made-up address
         zone.consume([_typed("dnsmasq", "query[AXFR] example.org from 192.0.2.2")])
-        assert zone.missing_required == 1
+        assert zone.evaluated == 2 and zone.missing_required == 0
+        assert ("192.0.2.2", "host resolver.example.test", "transfer", "example.org") in set(zone.groups.keys())
     finally:
         tunnel.release_state()
         zone.release_state()

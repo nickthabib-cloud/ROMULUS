@@ -10,7 +10,11 @@ Typed fields read (no record text is ever searched):
   server as the source), so the server is the endpoint on a DNS port and the client the other one. A question
   (a query or transaction record) is written as the client sent it, so when its ports do not tell (DNS on a
   site-configured port, or a server-to-server query from port 53 to port 53) its source is the client. An answer whose
-  ports do not tell leaves the roles unknown: it is counted as missing, and no server is named.
+  ports do not tell leaves the roles unknown: it is counted as missing, and no server is named, unless it names its
+  recipient as `client.ip` (a resolver's own log of the answer it sent, such as dnsmasq's with log-queries=extra).
+- `dns.server_logged`: a question written by the DNS server that received it (dnsmasq, unbound and BIND query logs).
+  When such a record names no destination address, its server is the record's host; only the zone-transfer rule,
+  which groups by server, reads it.
 - `dns.question.names` (a list) or `dns.question.name`, and `dns.question.type`: the question. When the list is
   present every name in it is evaluated (a session record may hold several questions); otherwise the scalar name
   is. Rules that read names and types read them from question records (queries and transaction records) only: in
@@ -216,7 +220,21 @@ def endpoints(event: TypedEvent, record_role: str | None = None) -> tuple[str | 
         return src, dst
     if side == "source":
         return dst, src
+    # A resolver's own log of an answer it sent names that answer's recipient as `client.ip` and no endpoint of its
+    # own, so the client is known and the server is not. Read for answers only: a question with `client.ip` is not
+    # oriented by it.
+    client = event.get("client.ip")
+    if (record_role or role(event)) == "answer" and isinstance(client, str) and client:
+        return client, None
     return None, None
+
+
+def logging_server(event: TypedEvent) -> str | None:
+    """The server of a question its DNS server logged itself without naming its own address: the record's host
+    ("host <name>"), or None for any other record."""
+    if event.get("dns.server_logged") is True and isinstance(event.host, str) and event.host.strip():
+        return f"host {event.host}"
+    return None
 
 
 def server_side(event: TypedEvent, record_role: str | None = None) -> str | None:
@@ -544,7 +562,7 @@ class _ZoneGroup:
 
 class DnsZoneTransferOrAnyRequest(_DnsAggregate):
     id = "net.dns_zone_transfer_or_any_request"
-    version = "6"
+    version = "7"
     title = "DNS zone-transfer (AXFR/IXFR) or ANY question sent by one client to one server"
     required_fields = ()
     severity, lane = "medium", "lead"
@@ -566,7 +584,9 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
         "telemetry": "dns_query: dns.type, dns.question.name, dns.question.type, dns.response_code, source and "
                      "destination ip and port (the server is the endpoint on the DNS port) (Suricata EVE dns: present "
                      "and normalized in the lab profile; a session indexer's DNS block reads the same typed fields "
-                     "once it is normalized)",
+                     "once it is normalized). A DNS server's own query log (dnsmasq, unbound) names no server "
+                     "address: its question's server is the logging host (dns.server_logged), which never takes the "
+                     "high lane",
         "fidelity": "direct observation of the question type in a typed field: 'requested' is proven by a query "
                     "record; 'answered' only by an answer record with rcode NOERROR, which does not show how many "
                     "zone records were sent; nothing here proves the zone's content left the server",
@@ -605,6 +625,8 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
                 continue
             record_role = role(event)
             client, server = endpoints(event, record_role) if record_role else (None, None)
+            if server is None and client is not None and record_role in ("query", "transaction"):
+                server = logging_server(event)
             question_type = qtype(event.get("dns.question.type"))
             if record_role is None or client is None or server is None or question_type is None:
                 self.missing_required += 1
@@ -687,6 +709,10 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
                 if asked:
                     claim = (f"{client} sent {sum(asked.values())} DNS question record(s) ({_tally(asked)}) {subject} "
                              f"to {server} ({group.span.text()}).")
+                    if server.startswith("host "):
+                        claim += (" The server is the host whose own DNS log recorded the questions; that log names "
+                                  "no server address and writes its answers without their question type, so the "
+                                  "answers are not tied to these questions.")
                 else:
                     claim = (f"{client} received {sum(replies.values())} answer record(s) from {server} to "
                              f"{'/'.join(types)} question(s) {subject} ({group.span.text()}); the question records "
@@ -700,6 +726,8 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
                                   "answer records do not show how many zone records were sent.")
                     elif all(c in ("REFUSED", "NOTAUTH", "NOTIMP") for (_t, c) in replies):
                         claim += " The server refused or did not implement every answered question."
+                elif server.startswith("host "):
+                    claim += " Whether the server answered is not established."
                 else:
                     claim += (" No answer record for these questions was retrieved, so whether the server answered is "
                               "not established.")
@@ -1170,7 +1198,7 @@ class _Address:
 
 class DnsNxdomainBurst(_DnsAggregate):
     id = "net.dns_nxdomain_burst"
-    version = "7"
+    version = "8"
     title = "Many NXDOMAIN answers to one client within ten minutes"
     required_fields = ()
     severity, lane = "high", "lead"
@@ -1200,8 +1228,9 @@ class DnsNxdomainBurst(_DnsAggregate):
                     "interval, the shape of algorithmically generated domain lookups",
         "telemetry": "dns_query answer records: dns.response_code, source/destination ip and port (the server is "
                      "the endpoint on the DNS port, the client the other; a record whose ports do not tell is not "
-                     "evaluated), dns.question.name (optional, for distinct names) (Suricata EVE dns v2 answer "
-                     "records: present in the lab profile)",
+                     "evaluated unless it names its recipient as client.ip, as dnsmasq's reply lines do with "
+                     "log-queries=extra), dns.question.name (optional, for distinct names) (Suricata EVE dns v2 "
+                     "answer records: present in the lab profile)",
         "fidelity": "direct observation of the rcode the client was sent; a deviation in volume, not proof of "
                     "malware",
         "benign_and_cost": "search-domain suffixing, stale software, DNSBL lookups, forwarders; one grouped "
