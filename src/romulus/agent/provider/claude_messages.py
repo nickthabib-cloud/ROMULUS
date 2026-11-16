@@ -62,6 +62,7 @@ from romulus.agent.provider.base import (
     parse_tool_arguments,
 )
 from romulus.agent.provider.egress import EgressDecision
+from romulus.agent.provider.fallbacks import refusal_fallback_on
 from romulus.agent.provider.openai_compatible import probe_calls
 from romulus.agent.refusals import EXTRA, bounded, reason
 from romulus.config import MIN_SECRET_LENGTH, Settings, redact_text
@@ -656,7 +657,8 @@ class ClaudeMessagesProvider(ChatProvider):
         self.sdk = anthropic
         self.httpx2 = httpx2
         self.base_url = endpoint_url(settings).rstrip("/")
-        self.betas = (FALLBACK_BETA,) if settings.agent_refusal_fallback == "default" else ()
+        # only for a model the server-side fallback serves (romulus.agent.provider.fallbacks)
+        self.betas = (FALLBACK_BETA,) if refusal_fallback_on(settings) else ()
         self._window: int | None = None
         self._grammar_refused: set[str] = set()     # tool sets the API refused to compile strict
         key = settings.agent_api_key.get_secret_value()

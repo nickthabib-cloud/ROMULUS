@@ -9,7 +9,8 @@ read price is the input price (cache reads never cost more than uncached input).
 the input price, or for the anthropic provider 1.25 times it, the documented price of the five-minute cache
 writes that adapter makes. The worst case of the next call prices its whole prompt at the dearest of the three.
 
-With the anthropic refusal fallback on, another model may answer a call the configured model declined, at its
+With the anthropic refusal fallback on (AGENT_REFUSAL_FALLBACK=default, for a model the fallback serves: see
+`romulus.agent.provider.fallbacks`), another model may answer a call the configured model declined, at its
 own prices, after the declined attempt was billed too. Each billed attempt is priced by the model that served it
 (an attempt whose model is unknown at the dearer of the two price lists), and the worst case of the next call
 reserves one full attempt at each model's prices.
@@ -28,6 +29,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from romulus.agent.provider.base import ChatResult, estimate_tokens
+from romulus.agent.provider.fallbacks import refusal_fallback_on
 from romulus.config import Settings
 
 # the anthropic adapter's cache writes use the default five-minute lifetime, priced at 1.25x the input price
@@ -78,7 +80,7 @@ class BudgetLimits:
         write = s.agent_price_cache_write_per_mtok
         if not write and anthropic:
             write = s.agent_price_input_per_mtok * ANTHROPIC_CACHE_WRITE_MULTIPLIER
-        fallback = anthropic and s.agent_refusal_fallback == "default"
+        fallback = refusal_fallback_on(s)
         return cls(s.agent_max_calls, s.agent_max_tokens, s.agent_max_wall_seconds, s.agent_max_cost_usd,
                    s.agent_price_input_per_mtok, s.agent_price_output_per_mtok,
                    s.agent_price_cache_read_per_mtok, write, s.agent_model.strip(), fallback,
@@ -213,6 +215,22 @@ class BudgetLimits:
     def worst_tokens(self, prompt_tokens: int, completion_tokens: int) -> int:
         return self.worst_prompt_tokens(prompt_tokens) + completion_tokens * self.attempts_reserved
 
+    def worst_tokens_cached(self, prompt_tokens: int, cached_tokens: int, completion_tokens: int) -> int:
+        """The most budget tokens a call can count when the first `cached_tokens` of its prompt are held in the
+        configured model's prompt cache: that prefix at the cache-read weight, the rest of the prompt at the dearest
+        weight, and the full output allowance. With the refusal fallback on, the fallback model's attempt is added
+        whole: it shares no cache, so its prompt is counted at the dearest weight, with its own full output. Without
+        a cached prefix (or token weights) this is `worst_tokens`."""
+        cached = max(0, min(cached_tokens, prompt_tokens))
+        if not cached or not self.weighted:
+            return self.worst_tokens(prompt_tokens, completion_tokens)
+        dearest = max(1.0, self.cache_read_token_weight, self.cache_write_token_weight)
+        main = math.ceil(round(cached * self.cache_read_token_weight + (prompt_tokens - cached) * dearest, 6))
+        total = main + completion_tokens
+        if self.refusal_fallback:
+            total += math.ceil(round(prompt_tokens * dearest, 6)) + completion_tokens
+        return total
+
     @property
     def priced(self) -> bool:
         return bool(self.price_input_per_mtok or self.price_output_per_mtok)
@@ -316,13 +334,15 @@ class AgentBudget:
     def wall_seconds(self) -> float:
         return self.wall_seconds_before + (self.clock() - self.started)
 
-    def check(self, prompt_tokens_est: int, max_output_tokens: int) -> None:
+    def check(self, prompt_tokens_est: int, max_output_tokens: int, *, worst_tokens: int | None = None) -> None:
         """`max_output_tokens` is the provider's `output_limit(request)`: for adapters whose models think, it
-        includes the thinking allowance."""
+        includes the thinking allowance. `worst_tokens` replaces the call's worst case in budget tokens when the
+        caller knows a tighter one (a prompt prefix already in the provider's cache)."""
         lim = self.limits
         if self.calls + 1 > lim.max_calls:
             raise BudgetExhausted("calls", f"{self.calls} of {lim.max_calls} calls used")
-        worst = lim.worst_tokens(prompt_tokens_est, max_output_tokens)
+        worst = (lim.worst_tokens(prompt_tokens_est, max_output_tokens) if worst_tokens is None
+                 else worst_tokens)
         if self.budget_tokens + worst > lim.max_tokens:
             raise BudgetExhausted("tokens", f"{self.budget_tokens} of {lim.max_tokens} budget tokens (weighted by "
                                             f"price) used; the next call could use up to {worst}")

@@ -382,15 +382,14 @@ def test_session_stop_conditions_are_persisted_and_do_not_skip_assessment(tmp_pa
         "priority_reasons": [], "gate_results": {}, "benign_alternatives": [], "next_checks": [],
         "group_key": "c1", "source_case_id": None, "source_anchor_id": None, "source_link_id": None,
     })
-    opened = ToolCall("open", "open_hypothesis", {"statement": "Review this bounded stop-condition hypothesis"}, "{}")
     finish = ToolCall("finish", "finish_session", {"summary": "The bounded review session is complete."}, "{}")
     body = {"overall": [], "key_steps": [], "confidence": {"overall": "low", "reasons": []},
             "alternatives": [], "gaps": [], "next_checks": []}
     settings = Settings(home=tmp_path, agent_max_tool_calls_per_session=1 if mode == "capped" else 25)
     if mode == "capped":
-        provider = ScriptedProvider([response(tool_calls=[opened]),
-                                     response(tool_calls=[ToolCall("again", "open_hypothesis",
-                                                                   {"statement": "Another bounded hypothesis"}, "{}")]),
+        # one read spends the read limit; a reply that only reads again ends the session capped
+        provider = ScriptedProvider([response(tool_calls=[ToolCall("read", "list_findings", {"page": 1}, "{}")]),
+                                     response(tool_calls=[ToolCall("again", "list_findings", {"page": 1}, "{}")]),
                                      response(tool_calls=[finish]), response(parsed=body)])
     elif mode == "context_full":
         provider = ScriptedProvider([response(tool_calls=[finish]), response(tool_calls=[finish]),
@@ -422,8 +421,8 @@ def test_invalid_tool_arguments_consume_the_per_session_call_budget(tmp_path):
     repo.create_hunt("h1", {"window": {}, "targets": [], "ai_agent": {"requested": True}}, "d", "test")
     _detection_finished(repo, "h1")
     settings = Settings(home=tmp_path, agent_max_tool_calls_per_session=1)
-    invalid = ToolCall("bad", "open_hypothesis", None, "{", error="tool arguments were not valid JSON")
-    second = ToolCall("again", "open_hypothesis", {"statement": "A bounded hypothesis after the cap"}, "{}")
+    invalid = ToolCall("bad", "list_findings", None, "{", error="tool arguments were not valid JSON")
+    second = ToolCall("again", "list_findings", {"page": 1}, "{}")
     provider = ScriptedProvider([response(tool_calls=[invalid]), response(tool_calls=[second])])
     limits = BudgetLimits.from_settings(settings)
     budget = AgentBudget.from_usage(limits, repo.agent_usage("h1"), clock=lambda: 0.0)
@@ -448,7 +447,7 @@ def test_a_refused_wrap_up_finish_gets_one_corrected_call(tmp_path, second):
     repo.create_hunt("h1", {"window": {}, "targets": [], "ai_agent": {"requested": True}}, "d", "test")
     _detection_finished(repo, "h1")
     settings = Settings(home=tmp_path, agent_max_tool_calls_per_session=1)
-    opened = ToolCall("open", "open_hypothesis", {"statement": "Review this bounded wrap-up hypothesis"}, "{}")
+    opened = ToolCall("read", "list_findings", {"page": 1}, "{}")       # spends the read limit
     too_long = ToolCall("f1", "finish_session", {"summary": "s" * 2001}, "{}")
     fixed = ToolCall("f2", "finish_session", {"summary": "The orientation opened one hypothesis."}, "{}")
     too_short = ToolCall("f3", "finish_session", {"summary": "short"}, "{}")
@@ -593,7 +592,7 @@ def test_mission_scale_40_hypotheses_four_sessions_and_25_tools_stays_within_cap
                     and message.get("content", "").startswith("{"))
         hypothesis = json.loads(user)["hypothesis"]
         alias = hypothesis["alias"]
-        if any("Tool-call limit reached" in str(message.get("content", "")) for message in request.messages):
+        if any(message.get("role") == "tool" for message in request.messages):
             return response(tool_calls=[ToolCall("finish", "finish_session",
                                                  {"summary": "The bounded scale session is complete."}, "{}")])
         questions = [] if len(hypothesis["previous_sessions"]) >= 3 else ["continue evidence review"]
