@@ -15,6 +15,22 @@
   {% if ov.analyst_flags_more %}{{ ov.analyst_flags_more }} more flags on <a href="{{ url(h.id, '/run') }}#investigations">Run details</a>.{% endif %}</div></div>
 {% endif %}
 
+{% if ov.assessment %}
+{% set nv = ov.assessment %}
+{% if nv.narrative is defined %}
+<section class="panel ai-surface" id="narrative">
+  <div class="panel-head"><h2>What likely happened (AI hypothesis, unconfirmed)</h2><span class="ai-label">AI-generated · unconfirmed</span>
+    <div class="end"><a href="{{ url(h.id, '/assessment') }}">Full assessment →</a></div></div>
+  <div class="panel-body">
+    <p class="small"><b>{{ nv.header }}</b></p>
+    {% include 'narrative.html' %}
+  </div>
+</section>
+{% else %}
+<div class="notice ai" id="narrative"><div><b>What likely happened (AI hypothesis, unconfirmed).</b> {% include 'narrative.html' %}</div><a class="end" href="{{ url(h.id, '/assessment') }}">AI assessment</a></div>
+{% endif %}
+{% endif %}
+
 <div class="tiles">
   {% for ln in ['urgent', 'high', 'lead', 'context'] %}
   <a class="tile l-{{ ln }}" href="{{ url(h.id, '/findings', lane=ln) }}"><div class="t-label">{{ ln }}</div><div class="t-value">{{ head.lanes_all.get(ln, 0) }}</div><div class="t-sub">{% if head.agent_lanes.get(ln) %}incl. {{ head.agent_lanes.get(ln) }} from the AI agent{% elif ln == 'context' %}context only{% else %}rule estimate{% endif %}</div></a>

@@ -2,6 +2,8 @@
 {% from 'agent_macros.html' import cites %}
 {% if ai_panel.assessment %}
 <p><b>{{ ai_panel.assessment.header }}</b></p>
+<h4 id="narrative">What likely happened (AI hypothesis, unconfirmed)</h4>
+{% set nv = ai_panel.assessment %}{% include 'narrative.html' %}
 {% for section in ai_panel.assessment.sections %}<h4>{{ section.name }}</h4><ul class="statements">
 {% for sentence in section.sentences %}<li>{{ sentence.text }} <span class="cites">{{ cites(sentence.cites) }}</span> <span class="kind">({{ sentence.kind }})</span>{% if sentence.suspicious_content %} <b class="flag">Cites only content flagged as possible prompt injection.</b>{% endif %}{% if sentence.cites_more %} {{ sentence.cites_more }} more citations · <a href="/hunts/{{ h.id | urlencode }}#reports">Complete report</a>{% endif %}</li>{% endfor %}
 </ul>{% if section.more %}<p class="help small">{{ section.more }} more sentences · <a href="/hunts/{{ h.id | urlencode }}#reports">Complete report</a></p>{% endif %}{% endfor %}
