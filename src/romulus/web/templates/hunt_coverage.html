@@ -1,0 +1,40 @@
+{% extends "hunt_base.html" %}
+{% block tab_title %}Coverage · {% endblock %}
+{% block tab %}
+<p class="help small">What each rule searched. ROMULUS reports what it finds; it never claims that nothing is there. <b>Searched in full</b> means every partition in scope was evaluated and none matched: a statement about the search, not about the network. <b>Searched in part</b> means some partitions were partial, failed, or had records missing required fields: those are blind spots, listed with their reasons. <b>No data in scope</b> means the rule had nothing to read.</p>
+<div class="toolbar">
+  <nav class="seg" aria-label="Filter by search result">
+    <a href="{{ page_url(1, '') }}"{% if not cv.show %} aria-current="true"{% endif %}>All rules <b>{{ cv.all }}</b></a>
+    {% for key, label in cv.classes %}<a href="{{ page_url(1, key) }}"{% if cv.show == key %} aria-current="true"{% endif %}>{{ label }} <b>{{ cv.counts[key] }}</b></a>{% endfor %}
+  </nav>
+  <span class="end">{% if cv.total %}{{ cv.first }}–{{ cv.last }} of {{ cv.total }}{% else %}0 rules{% endif %}</span>
+</div>
+<div class="table-wrap"><table class="grid">
+<thead><tr><th>Rule</th><th class="n">Records evaluated</th><th>Search result</th><th>Cell states</th></tr></thead>
+<tbody>
+{% for r in cv.rows %}
+<tr class="cov-{{ r.class }}"><td class="mono">{{ r.rule_id }}</td><td class="n">{{ r.records_evaluated }}</td><td>{{ r.search_result }}</td>
+<td class="mono small">{% for k, v in r.states.items() %}{{ k }}={{ v }} {% endfor %}</td></tr>
+{% else %}
+<tr><td colspan="4" class="empty">No rules in this group.</td></tr>
+{% endfor %}
+</tbody>
+</table></div>
+<div class="pager">
+  <span>Page limit: 50. {% if cv.more %}{{ cv.more }} more{% else %}no more rules after this page{% endif %}. Partly searched and unresolved rules are listed first.</span>
+  <span class="links">{% if cv.page > 1 %}<a class="btn ghost sm" href="{{ page_url(cv.page - 1) }}">← Previous</a>{% endif %}{% if cv.page < cv.pages %}<a class="btn ghost sm" href="{{ page_url(cv.page + 1) }}">Next rules →</a>{% endif %}</span>
+</div>
+
+{% if zeek_visibility %}
+<section class="panel">
+  <div class="panel-head"><h2>Zeek sensor visibility</h2></div>
+  <div class="panel-body">
+  <p>Preview of {{ zeek_visibility.preview | length }} of {{ zeek_visibility.snapshot.count }} statements.
+  Complete detail is retained in the report appendix {{ zeek_visibility.snapshot.filename }}.</p>
+  <ul>{% for note in zeek_visibility.notes + zeek_visibility.unresolved %}<li>{{ note }}</li>{% endfor %}
+  {% for row in zeek_visibility.preview %}<li>{{ row.reason }}</li>{% endfor %}</ul>
+  {% if zeek_visibility_bundled %}<a href="/reports/{{ h.id }}/{{ zeek_visibility.snapshot.filename }}">Complete visibility appendix (JSONL)</a>{% endif %}
+  </div>
+</section>
+{% endif %}
+{% endblock %}

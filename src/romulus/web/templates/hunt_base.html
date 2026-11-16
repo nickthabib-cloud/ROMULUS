@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}{% block tab_title %}{% endblock %}{{ h.id }} · ROMULUS{% endblock %}
+{% block content %}
+{% set url = head.hunt_url %}
+<div class="hunt-head" data-stream-cursor="{{ head.stream_cursor }}"{% if head.live %} data-live="true" data-stream="/hunts/{{ h.id }}/stream?after_seq={{ head.stream_cursor }}" id="live"{% endif %}>
+  <div class="crumbs"><a href="/">Hunts</a> / </div>
+  <div class="head-row">
+    <h1>{{ h.id }}</h1>
+    <div class="head-chips">
+      <span class="state s-{{ h.execution_state }}" id="live-state" title="Execution state">{{ h.execution_state }}</span>
+      {% if h.detection_result %}<span class="chip" title="Detection result">{{ h.detection_result }}</span>{% endif %}
+      {% if head.ai_state %}<span class="ai-label" title="AI agent state">AI · {{ head.ai_state }}</span>{% endif %}
+      {% if head.live %}<span class="chip live-dot" title="This page receives live updates"><span class="dot"></span>live</span>{% endif %}
+    </div>
+    <div class="head-actions">
+      {% if head.latest_report %}<a class="btn ghost sm" href="/reports/{{ h.id }}/{{ head.latest_report.id }}.md" title="Latest technical report (Markdown), revision {{ head.latest_report.revision }}">Report r{{ head.latest_report.revision }}</a>{% endif %}
+      <details class="menu">
+        <summary class="btn ghost sm" aria-label="Hunt actions">Actions
+          <svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></summary>
+        <div class="menu-list" role="menu">
+          <div class="label-row">Reports</div>
+          <form method="post" action="/hunts/{{ h.id }}/report"><input type="hidden" name="csrf" value="{{ csrf }}">
+            <button type="submit" role="menuitem">Publish new report revision</button></form>
+          {% if head.latest_report %}
+          <a role="menuitem" href="/reports/{{ h.id }}/{{ head.latest_report.id }}.md">Technical report (Markdown), r{{ head.latest_report.revision }}</a>
+          <a role="menuitem" href="/reports/{{ h.id }}/{{ head.latest_report.id }}.docx">Executive report (Word), r{{ head.latest_report.revision }}</a>
+          <a role="menuitem" href="/reports/{{ h.id }}/{{ head.latest_report.id }}.json">Report manifest (JSON), r{{ head.latest_report.revision }}</a>
+          {% endif %}
+          <a role="menuitem" href="{{ url(h.id) }}#reports">All report revisions</a>
+          {% if user.r == 'lead' and head.has_agent %}
+          <div class="sep"></div><div class="label-row">AI agent</div>
+          {% if head.reassess_refusal %}<span class="disabled" title="{{ head.reassess_refusal }}">Re-run assessment (unavailable)</span>
+          {% else %}<form method="post" action="/hunts/{{ h.id | urlencode }}/agent/reassess"><input type="hidden" name="csrf" value="{{ csrf }}">
+            <button type="submit" role="menuitem">Re-run assessment</button></form>{% endif %}
+          {% endif %}
+          {% if user.r == 'lead' %}
+          <div class="sep"></div>
+          <a role="menuitem" class="danger" href="/hunts/{{ h.id }}/delete" data-dialog="delete-dialog">Delete hunt…</a>
+          {% endif %}
+        </div>
+      </details>
+    </div>
+  </div>
+  <div class="head-meta">
+    <span>Window (UTC) <b>{{ h.manifest.window.start }}</b> → <b>{{ h.manifest.window.end }}</b></span>
+    <span>Sources <b>{{ h.manifest.targets | join(', ') }}</b></span>
+    <span class="lanes-inline" title="Deterministic findings by lane">Deterministic {% for ln in ['urgent', 'high', 'lead', 'context'] %}<a class="lane-count l-{{ ln }}" href="{{ url(h.id, '/findings', lane=ln) }}">{{ ln }} <b data-lane-count="{{ ln }}">{{ head.lanes.get(ln, 0) }}</b></a>{% endfor %}</span>
+    {% if head.agent_total %}<a class="ai-label" href="/hunts/{{ h.id | urlencode }}/agent/findings" title="Findings the AI agent proposed; listed with the others, not in the deterministic counts">+ {{ head.agent_total }} AI agent · unconfirmed</a>{% endif %}
+  </div>
+  <nav class="tabs" aria-label="Hunt sections">
+    {% for t in head.tabs %}<a href="{{ t.url }}"{% if t.key == head.tab %} aria-current="page"{% endif %}>{{ t.label }}{% if t.key == 'findings' %} <span class="count" title="Reportable findings{% if head.agent_reportable %}, including {{ head.agent_reportable }} from the AI agent{% endif %}">{{ head.reportable }}</span>{% elif t.key in ('assessment', 'triage') %} <span class="tab-ai" title="Model-written">AI</span>{% endif %}</a>{% endfor %}
+  </nav>
+</div>
+
+{% if agent_message %}<div class="notice warn">{{ agent_message }}</div>{% endif %}
+<section id="newfeed" class="panel feed" hidden><div class="panel-head"><h2>New since this page loaded</h2></div><div class="panel-body"><ul id="feed"></ul></div></section>
+
+{% block tab %}{% endblock %}
+
+{% if user.r == 'lead' %}
+<dialog id="delete-dialog" aria-labelledby="delete-dialog-title">
+  <form method="post" action="/hunts/{{ h.id }}/delete">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="dialog-body">
+      <h2 id="delete-dialog-title">Delete hunt <span class="mono">{{ h.id }}</span>?</h2>
+      <p class="warn"><b>This permanently deletes the hunt and cannot be undone.</b></p>
+      <p>It removes {{ head.lanes_all.get('urgent', 0) }} urgent, {{ head.lanes_all.get('high', 0) }} high, {{ head.lanes_all.get('lead', 0) }} lead, {{ head.lanes_all.get('context', 0) }} context and {{ head.lanes_all.get('suppressed', 0) }} suppressed findings{% if head.agent_total %} (including {{ head.agent_total }} from the AI agent){% endif %} with their analyst decisions, its report revisions and files, cases, search tasks and stored events.
+        Evidence another hunt still cites is kept for that hunt; the deletion stays in the audit log.
+        <a href="/hunts/{{ h.id }}/delete">Full deletion preview</a>.</p>
+      <label>Type the hunt ID <b class="mono">{{ h.id }}</b> to confirm
+        <input name="confirm" autocomplete="off" spellcheck="false" data-expected="{{ h.id }}" required></label>
+    </div>
+    <div class="dialog-foot">
+      <button type="button" class="ghost" data-close>Cancel</button>
+      <button type="submit" class="btn-danger" disabled>Delete permanently</button>
+    </div>
+  </form>
+</dialog>
+{% endif %}
+{% endblock %}

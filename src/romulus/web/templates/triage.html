@@ -1,36 +1,40 @@
-{% extends 'base.html' %}
-{% block content %}
-<p><a href="/hunts/{{ h.id | urlencode }}">← hunt {{ h.id }}</a></p>
+{% extends 'hunt_base.html' %}
+{% block tab_title %}Triage · {% endblock %}
+{% block tab %}
 {% if not view %}
-<h1>AI triage order</h1>
-<p>No AI triage pass has run for this hunt. The findings are in the deterministic report order, which is authoritative.</p>
+<section class="panel"><div class="panel-head"><h2>AI triage order</h2><span class="ai-label">model-proposed</span></div>
+<div class="panel-body"><p>No AI triage pass has run for this hunt. The findings are in the deterministic report order, which is authoritative.</p></div></section>
 {% else %}
-<h1>{{ view.label }}</h1>
-<p class="warn">AI-generated and unconfirmed. A model proposed which finding groups to review first; likely before possible attack and the most buried first, since triage exists to surface what the deterministic order buried; only the findings it cited for each promoted group (at most three) move ahead in the triage order. Lanes, ranks, the Reported set, citations and the deterministic report order are unchanged.</p>
-{% if not view.order_verified %}<p>Staleness here is checked by finding count and final ranking; the report and the export verify the whole order.</p>{% endif %}
-{% if view.stale %}<p class="warn"><b>Stale:</b> the hunt's findings or order changed after this triage pass.</p>{% endif %}
-{% if view.verification_error %}<p class="warn"><b>Unverified:</b> {{ view.verification_error }}</p>{% endif %}
-{% if view.last_attempt %}<p class="warn"><b>A later triage attempt failed:</b> {{ view.last_attempt.reason }}</p>{% endif %}
-<table class="grid"><tbody>
-<tr><th>Status</th><td>{{ view.status }}{% if view.reason %} ({{ view.reason }}){% endif %}</td></tr>
-<tr><th>Groups</th><td>{% set g = view.groups or {} %}{{ g.total or 0 }} in total, {{ g.eligible or 0 }} eligible, {{ g.triaged or 0 }} triaged, {{ g.not_triaged or 0 }} not triaged (deterministic order kept), {{ g.excluded_agent or 0 }} of agent proposals not triaged</td></tr>
-<tr><th>Assessments</th><td>{% for name, count in (g.by_assessment or {}).items() %}{{ name }}: {{ count }}{% if not loop.last %}, {% endif %}{% else %}none{% endfor %}</td></tr>
-<tr><th>Dropped model output</th><td>{% for name, count in (view.dropped or {}).items() %}{{ name }}: {{ count }}{% if not loop.last %}, {% endif %}{% else %}none{% endfor %}</td></tr>
-<tr><th>Model</th><td>{{ (view.provider or {}).provider or 'unknown' }}/{{ view.model or 'unknown' }} · pass {{ view.pass }} · prompt digest {{ (view.prompt_digest or '')[:16] }}</td></tr>
-<tr><th>Usage</th><td>{% set u = view.usage or {} %}{{ u.calls or 0 }} calls, {{ u.input_tokens or 0 }} prompt and {{ u.output_tokens or 0 }} output tokens</td></tr>
-</tbody></table>
+<section class="panel ai-surface">
+  <div class="panel-head"><h2>{{ view.label }}</h2><span class="ai-label">model-proposed · unconfirmed</span></div>
+  <div class="panel-body">
+    <div class="notice ai"><span>AI-generated and unconfirmed. A model proposed which finding groups to review first; likely before possible attack and the most buried first, since triage exists to surface what the deterministic order buried; only the findings it cited for each promoted group (at most three) move ahead in the triage order. Lanes, ranks, the Reported set, citations and the deterministic report order are unchanged.</span></div>
+    {% if not view.order_verified %}<p class="help small">Staleness here is checked by finding count and final ranking; the report and the export verify the whole order.</p>{% endif %}
+    {% if view.stale %}<div class="notice warn"><span><b>Stale:</b> the hunt's findings or order changed after this triage pass.</span></div>{% endif %}
+    {% if view.verification_error %}<div class="notice warn"><span><b>Unverified:</b> {{ view.verification_error }}</span></div>{% endif %}
+    {% if view.last_attempt %}<div class="notice warn"><span><b>A later triage attempt failed:</b> {{ view.last_attempt.reason }}</span></div>{% endif %}
+  </div>
+  <div class="table-wrap"><table class="grid small"><tbody>
+  <tr><th>Status</th><td>{{ view.status }}{% if view.reason %} ({{ view.reason }}){% endif %}</td></tr>
+  <tr><th>Groups</th><td>{% set g = view.groups or {} %}{{ g.total or 0 }} in total, {{ g.eligible or 0 }} eligible, {{ g.triaged or 0 }} triaged, {{ g.not_triaged or 0 }} not triaged (deterministic order kept), {{ g.excluded_agent or 0 }} of agent proposals not triaged</td></tr>
+  <tr><th>Assessments</th><td>{% for name, count in (g.by_assessment or {}).items() %}{{ name }}: {{ count }}{% if not loop.last %}, {% endif %}{% else %}none{% endfor %}</td></tr>
+  <tr><th>Dropped model output</th><td>{% for name, count in (view.dropped or {}).items() %}{{ name }}: {{ count }}{% if not loop.last %}, {% endif %}{% else %}none{% endfor %}</td></tr>
+  <tr><th>Model</th><td class="mono">{{ (view.provider or {}).provider or 'unknown' }}/{{ view.model or 'unknown' }} · pass {{ view.pass }} · prompt digest {{ (view.prompt_digest or '')[:16] }}</td></tr>
+  <tr><th>Usage</th><td>{% set u = view.usage or {} %}{{ u.calls or 0 }} calls, {{ u.input_tokens or 0 }} prompt and {{ u.output_tokens or 0 }} output tokens</td></tr>
+  </tbody></table></div>
+</section>
 {% for section in view.sections %}
 <h2>{{ section.title }}</h2>
-{% if not section.promoted %}<p>No group promoted; the deterministic order stands.</p>{% else %}
-<table class="grid"><thead><tr><th>Triage #</th><th>Group</th><th>Rule</th><th>Target</th><th>Findings</th><th>Deterministic position</th><th>Assessment</th><th>Incident label</th><th>Rationale</th><th>Cites</th></tr></thead><tbody>
+{% if not section.promoted %}<p class="help">No group promoted; the deterministic order stands.</p>{% else %}
+<div class="table-wrap"><table class="grid"><thead><tr><th>Triage #</th><th>Group</th><th>Rule</th><th>Target</th><th>Findings</th><th>Deterministic position</th><th>Assessment</th><th>Incident label</th><th>Rationale <span class="ai-label">AI</span></th><th>Cites</th></tr></thead><tbody>
 {% for group in section.promoted %}<tr>
-<td>{{ group.position }}</td><td>{{ group.group_id }}</td><td>{{ group.rule_id }}</td>
-<td>{{ group.entity.kind }}{% if group.entity.value %}: {{ group.entity.value }}{% endif %}</td>
-<td>{% if group.nothing_cited %}promoted, nothing cited{% else %}{{ group.moved }} moved{% endif %}{% if group.in_deterministic_place %}, {{ group.in_deterministic_place }} in deterministic place{% endif %}{% if group.case_findings %} · {{ group.case_findings }} found by an investigator case{% endif %}</td><td>{{ group.best_position }}</td><td>{{ group.assessment }}</td>
+<td class="n">{{ group.position }}</td><td class="mono small">{{ group.group_id }}</td><td class="mono small">{{ group.rule_id }}</td>
+<td class="mono small">{{ group.entity.kind }}{% if group.entity.value %}: {{ group.entity.value }}{% endif %}</td>
+<td>{% if group.nothing_cited %}promoted, nothing cited{% else %}{{ group.moved }} moved{% endif %}{% if group.in_deterministic_place %}, {{ group.in_deterministic_place }} in deterministic place{% endif %}{% if group.case_findings %} · {{ group.case_findings }} found by an investigator case{% endif %}</td><td class="n">{{ group.best_position }}</td><td>{{ group.assessment }}</td>
 <td>{{ group.incident_label or '' }}</td><td>{{ group.rationale }}</td>
-<td>{% for cite in group.cites %}<a href="/findings/{{ cite | urlencode }}">{{ cite }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</td>
+<td class="mono small">{% for cite in group.cites %}<a href="/findings/{{ cite | urlencode }}">{{ cite }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</td>
 </tr>{% endfor %}
-</tbody></table>{% endif %}
+</tbody></table></div>{% endif %}
 {% endfor %}
 {% endif %}
 {% endblock %}

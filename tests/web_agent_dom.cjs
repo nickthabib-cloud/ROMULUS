@@ -25,6 +25,9 @@ class Element {
       if (selector === 'a[href^="/findings/"]') return node.tagName === 'A' && (node.href || '').startsWith('/findings/');
       if (selector === 'a[data-finding-id]') return node.tagName === 'A' && node.dataset.findingId !== undefined;
       if (selector.startsWith('.')) return node.className.split(' ').includes(selector.slice(1));
+      // menus, dialogs and lane counters: absent from this fixture
+      if (['details.menu[open]', 'a[data-dialog]', 'dialog input[data-expected]', 'dialog [data-close]'].includes(selector)
+          || selector.startsWith('[data-lane-count=')) return false;
       throw Error('Unsupported DOM selector: ' + selector);
     };
     return this.children.flatMap(child => [...(matches(child) ? [child] : []), ...child.querySelectorAll(selector)]);
@@ -39,6 +42,7 @@ function fixture() {
   document.append(...Object.values(ids));
   document.getElementById = id => ids[id];
   document.createElement = tag => new Element(tag);
+  document.addEventListener = () => {};
   let source;
   class EventSource {
     constructor() { source = this; this.listeners = {}; this.closed = false; }

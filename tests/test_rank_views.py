@@ -226,7 +226,7 @@ def test_a_large_hunt_pages_completely_in_report_order():
 
 
 def _visible(client, **params):
-    page = client.get("/hunts/h1", params=params)
+    page = client.get("/hunts/h1/findings", params=params)
     assert page.status_code == 200
     return page.text, re.findall(r'data-finding-id="([^"]+)"', page.text)
 
@@ -247,7 +247,7 @@ def test_the_hunt_page_lists_report_order_with_sections_and_keeps_lane_views(web
     assert len(ids) == 50 and ids[0] == "c-urgent"
     assert text.index(">confirmed<") < text.index(">reported<") < text.index(">ranked, not reported<")
     assert "report order" in text and "Rule estimate" in text and "host:h-t" in text
-    cursor = re.search(r'href="\?lane=&amp;after=([^"]+)"', text).group(1)
+    cursor = re.search(r'href="/hunts/h1/findings\?after=([^"]+)">Next findings', text).group(1)
     rest_text, rest = _visible(client, after=cursor)
     assert rest[-1] == "z-agent" and "not ranked (stored after the last ranking pass)" in rest_text
     assert len(set(ids + rest)) == 66
@@ -255,10 +255,10 @@ def test_the_hunt_page_lists_report_order_with_sections_and_keeps_lane_views(web
     assert _visible(client, lane="urgent")[1] == ["c-urgent"]
     assert _visible(client, lane="suppressed")[1] == ["x-suppressed"]
     assert _visible(client, lane="context")[1] == ["x-context"]
-    assert client.get("/hunts/h1", params={"after": "W10"}).status_code == 400
+    assert client.get("/hunts/h1/findings", params={"after": "W10"}).status_code == 400
     # a lane cursor is not a report-order cursor
     lead_cursor = finding_page(web_repo, "h1", lane="lead", limit=1)[2]
-    assert client.get("/hunts/h1", params={"after": lead_cursor}).status_code == 400
+    assert client.get("/hunts/h1/findings", params={"after": lead_cursor}).status_code == 400
 
 
 def test_a_hunt_without_ranking_or_agent_run_is_paged_in_the_rule_estimate_order(web_setup):
@@ -268,7 +268,7 @@ def test_a_hunt_without_ranking_or_agent_run_is_paged_in_the_rule_estimate_order
     _copy_into(web_repo, unranked)
     text, ids = _visible(client)
     assert len(ids) == 50 and ids[0] == "c-urgent" and "report order" not in text
-    cursor = re.search(r'href="\?lane=&amp;after=([^"]+)"', text).group(1)
+    cursor = re.search(r'href="/hunts/h1/findings\?after=([^"]+)">Next findings', text).group(1)
     _, rest = _visible(client, after=cursor)
     assert len(set(ids + rest)) == 65 and "x-suppressed" not in ids + rest
 

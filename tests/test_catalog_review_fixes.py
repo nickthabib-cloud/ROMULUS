@@ -306,8 +306,11 @@ def test_stored_windows_profile_cannot_claim_linux_scope_in_detail_or_filter(per
         {'username': 'reader', 'role': 'analyst'}))
     detail = client.get('/catalog/rules/host.exec_from_temp_dir')
     assert detail.status_code == 200
-    assert 'not applicable: OS windows outside rule scope in win' in detail.text
-    assert 'runs on win' not in detail.text
+    # the catalog page does not show applicability; the browser keeps it for exports and filters
+    assert 'Applicability' not in detail.text and 'outside rule scope' not in detail.text
+    texts = [row['text'] for row in CatalogBrowser(repo).detail('host.exec_from_temp_dir')['applicability']]
+    assert 'not applicable: OS windows outside rule scope in win' in texts
+    assert 'runs on win' not in texts
     filtered = client.get('/catalog', params={'q': 'host.exec_from_temp_dir', 'applicability': 'runs'})
     assert 'href="/catalog/rules/host.exec_from_temp_dir"' not in filtered.text
 

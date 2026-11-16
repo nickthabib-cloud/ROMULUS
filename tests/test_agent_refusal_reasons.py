@@ -175,7 +175,7 @@ def test_the_web_panel_shows_refusal_counts_by_tool_and_reason_without_values(se
                                    "name": name, "arguments": {"summary": SENTINEL, SENTINEL: SENTINEL},
                                    "arguments_truncated": False, "status": "refused", "result_digest": "d",
                                    "refusal_reasons": reasons, "model_call_id": None, "created_at": now})
-    body = client.get("/hunts/h1").text
+    body = client.get("/hunts/h1/run").text
     assert "Refused model calls" in body
     assert "<td>finish_session</td><td><code>summary: string_too_short</code></td><td>2</td>" in body
     assert "<td>open_hypothesis</td><td><code>*: extra_forbidden</code></td><td>1</td>" in body

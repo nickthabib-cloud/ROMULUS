@@ -1,7 +1,7 @@
-{% extends 'base.html' %}
+{% extends 'hunt_base.html' %}
 {% from 'agent_macros.html' import cites as render_cites, more %}
-{% block content %}
-<p><a href="/hunts/{{ h.id | urlencode }}/hypotheses">← hypotheses</a></p>
+{% block tab %}
+<p class="crumbs"><a href="/hunts/{{ h.id | urlencode }}/assessment">AI assessment</a> / <a href="/hunts/{{ h.id | urlencode }}/hypotheses">Hypotheses</a> /</p>
 <h1>AI-generated hypothesis</h1>
 <p>{{ hypothesis.statement }}</p><p>{{ hypothesis.status }} · {{ hypothesis.confidence }} confidence · {{ hypothesis.sessions_run }} sessions</p>
 <h2>Questions</h2><ul>{% for question in questions %}<li>{{ question }}</li>{% endfor %}</ul>

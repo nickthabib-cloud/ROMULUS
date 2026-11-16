@@ -1,0 +1,72 @@
+{% extends "hunt_base.html" %}
+{% from 'ui_macros.html' import finding_claim %}
+{% block tab_title %}Findings · {% endblock %}
+{% block tab %}
+{% set url = head.hunt_url %}
+<div class="toolbar">
+  <nav class="seg" aria-label="Filter by lane">
+    <a href="{{ url(h.id, '/findings', rule=fv.rule) }}"{% if not fv.lane %} aria-current="true"{% endif %}>{% if fv.has_rank %}Report order{% else %}All reportable{% endif %} <b>{{ head.reportable }}</b></a>
+    {% for ln in ['urgent', 'high', 'lead', 'context', 'suppressed'] %}
+    <a class="l-{{ ln }}" href="{{ url(h.id, '/findings', lane=ln, rule=fv.rule) }}"{% if fv.lane == ln %} aria-current="true"{% endif %}>{{ ln }} <b>{{ head.lanes_all.get(ln, 0) }}</b>{% if head.agent_lanes.get(ln) %} <span class="kind" title="from the AI agent, unconfirmed">incl. {{ head.agent_lanes.get(ln) }} AI</span>{% endif %}</a>
+    {% endfor %}
+  </nav>
+  <form method="get" action="{{ url(h.id, '/findings') }}" role="search">
+    {% if fv.lane %}<input type="hidden" name="lane" value="{{ fv.lane }}">{% endif %}
+    <label>Rule <input name="rule" value="{{ fv.rule }}" maxlength="256" placeholder="exact rule ID" class="mono"></label>
+    <button type="submit" class="sm ghost">Filter</button>
+    {% if fv.rule %}<a href="{{ url(h.id, '/findings', lane=fv.lane) }}" class="small">Clear rule</a>{% endif %}
+  </form>
+  <span class="end">{{ fv.rows | length }} shown · {{ fv.more }} more</span>
+</div>
+
+{% if fv.ranked %}
+<p class="help small">In report order: confirmed findings, then findings on entities that meet the evidence bar, then the other ranked findings, each by rank. The rule estimate is each rule's own lane. Findings stored after the last ranking pass (an AI agent's pivots and proposals) are not ranked: a confirmed one is listed with the confirmed findings, the others after every ranked finding, in the rule estimate's order.</p>
+<div class="table-wrap"><table class="grid">
+<thead><tr><th>Rank</th><th>Rule estimate</th><th>Sev</th><th>Conf</th><th>Time (UTC)</th><th>Entity</th><th>Rule</th><th>Claim</th></tr></thead>
+<tbody>
+{% set ns = namespace(title="") %}
+{% for c in fv.rows %}
+{% if fv.segment_titles[c.segment] != ns.title %}{% set ns.title = fv.segment_titles[c.segment] %}
+<tr class="section-head"><th colspan="8">{{ ns.title }}</th></tr>
+{% endif %}
+<tr class="row-{{ c.lane }}">
+  <td class="mono">{% if c.score is not none %}{{ '%g' | format(c.score) }}{% else %}not ranked{% endif %}</td>
+  <td><span class="pill l-{{ c.lane }}">{{ c.lane }}</span></td>
+  <td>{{ c.severity }}</td><td>{{ c.confidence }}</td>
+  <td class="mono nowrap">{{ c.ts.strftime('%m-%d %H:%M:%S') if c.ts is not none else 'Not recorded' }}</td>
+  <td class="mono small">{% if c.entity is not none %}{{ c.entity_kind }}:{{ c.entity }}{% elif c.section is not none %}unattributed{% endif %}</td>
+  <td class="mono small"><a href="{{ url(h.id, '/findings', rule=c.rule_id) }}" title="Only this rule">{{ c.rule_id }}</a></td>
+  <td class="claim-cell">{{ finding_claim(c, h) }}</td>
+</tr>
+{% else %}
+<tr><td colspan="8" class="empty">No reportable findings.</td></tr>
+{% endfor %}
+</tbody>
+</table></div>
+{% else %}
+{% if fv.lane or fv.rule %}<p class="help small">In the rule estimate's order{% if fv.lane %}, lane <b>{{ fv.lane }}</b>{% endif %}{% if fv.rule %}, rule <b class="mono">{{ fv.rule }}</b>{% endif %}.</p>
+{% else %}<p class="help small">This hunt has no final ranking yet; the reportable findings are in the rule estimate's order.</p>{% endif %}
+<div class="table-wrap"><table class="grid">
+<thead><tr><th>Lane</th><th>Sev</th><th>Conf</th><th>Time (UTC)</th><th>Entity</th><th>Rule</th><th>Claim</th></tr></thead>
+<tbody>
+{% for c in fv.rows %}
+<tr class="row-{{ c.lane }}">
+  <td><span class="pill l-{{ c.lane }}">{{ c.lane }}</span></td>
+  <td>{{ c.severity }}</td><td>{{ c.confidence }}</td>
+  <td class="mono nowrap">{{ c.ts.strftime('%m-%d %H:%M:%S') if c.ts is not none else 'Not recorded' }}</td>
+  <td class="mono small">{{ c.entity_label or '' }}</td>
+  <td class="mono small"><a href="{{ url(h.id, '/findings', lane=fv.lane, rule=c.rule_id) }}" title="Only this rule">{{ c.rule_id }}</a></td>
+  <td class="claim-cell">{{ finding_claim(c, h) }}</td>
+</tr>
+{% else %}
+<tr><td colspan="7" class="empty">{% if fv.lane or fv.rule %}No findings match these filters.{% else %}No reportable findings.{% endif %}</td></tr>
+{% endfor %}
+</tbody>
+</table></div>
+{% endif %}
+
+<div class="pager">
+  <span>Page limit: 50. {{ fv.rows | length }} shown · {% if fv.more %}{{ fv.more }} more{% else %}no more findings after this page{% endif %}{% if fv.after %} (earlier pages not counted){% endif %}.</span>
+  <span class="links">{% if fv.first_url %}<a class="btn ghost sm" href="{{ fv.first_url }}">← First page</a>{% endif %}{% if fv.next_url %}<a class="btn ghost sm" href="{{ fv.next_url }}">Next findings →</a>{% endif %}</span>
+</div>
+{% endblock %}

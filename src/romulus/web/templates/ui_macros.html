@@ -1,0 +1,29 @@
+{# Shared building blocks for the hunt workspace. Every value is autoescaped. #}
+
+{% macro lane_bar(lanes) -%}
+{% set order = ['urgent', 'high', 'lead', 'context', 'suppressed'] %}
+{% set total = namespace(n=0, x=0) %}{% for ln in order %}{% set total.n = total.n + lanes.get(ln, 0) %}{% endfor %}
+{% if total.n %}
+<svg class="lane-bar" viewBox="0 0 1000 8" preserveAspectRatio="none" role="img" aria-label="Findings by lane: {% for ln in order %}{{ ln }} {{ lanes.get(ln, 0) }}{% if not loop.last %}, {% endif %}{% endfor %}">
+  {% for ln in order %}{% set w = (lanes.get(ln, 0) * 1000 / total.n) %}{% if w %}<rect class="l-{{ ln }}" x="{{ '%.2f' | format(total.x) }}" y="0" width="{{ '%.2f' | format(w) }}" height="8"><title>{{ ln }}: {{ lanes.get(ln, 0) }}</title></rect>{% set total.x = total.x + w %}{% endif %}{% endfor %}
+</svg>
+{% endif %}
+{%- endmacro %}
+
+{% macro finding_claim(c, h, limit=220) -%}
+<a href="/findings/{{ c.id }}" data-finding-id="{{ c.id }}">{{ c.claim | truncate(limit) }}</a>{% if c.provenance == "agent" %} <b class="agent-provenance">AI agent · unconfirmed</b>{% if c.agent_hypothesis_id %} · <a href="/hunts/{{ h.id | urlencode }}/hypotheses/{{ c.agent_hypothesis_id | urlencode }}">Hypothesis</a>{% endif %}{% endif %}
+{%- endmacro %}
+
+{# A long text as a one-line summary that opens to the full text. `item` has summary, more and full. #}
+{% macro blob(item) -%}
+{% if item.more %}<details class="blob"><summary><span>{{ item.summary }}</span><span class="expand" aria-hidden="true"></span></summary><div class="full">{{ item.full }}</div></details>
+{%- else %}{{ item.summary or '—' }}{% endif %}
+{%- endmacro %}
+
+{# Key/value rows from hunt_views.detail_rows: scalars inline, nested values summarised with a bounded JSON view. #}
+{% macro detail_table(rows, empty='Nothing recorded.') -%}
+<div class="table-wrap"><table class="grid small"><tbody>
+{% for row in rows %}<tr><th class="mono">{{ row.key }}</th><td>{% if row.json is not none %}<details class="blob"><summary><span>{{ row.summary }}</span><span class="expand" aria-hidden="true"></span></summary><pre class="json">{{ row.json }}</pre></details>{% else %}{{ blob(row) }}{% endif %}</td></tr>
+{% else %}<tr><td class="empty">{{ empty }}</td></tr>{% endfor %}
+</tbody></table></div>
+{%- endmacro %}

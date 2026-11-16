@@ -32,11 +32,11 @@ def test_urgent_findings_lead_the_default_and_filtered_pages(web_setup):
     rows, remaining, cursor = finding_page(repo, "h1")
     assert [row["id"] for row in rows[:2]] == ["zzz-urgent-1", "zzz-urgent-2"]
     assert len(rows) == 50 and remaining == 353 and cursor
-    page = client.get("/hunts/h1")
+    page = client.get("/hunts/h1/findings")
     assert page.status_code == 200
     visible = re.findall(r'data-finding-id="([^"]+)"', page.text)
     assert len(visible) == 50 and visible[:2] == ["zzz-urgent-1", "zzz-urgent-2"]
-    filtered_page = client.get("/hunts/h1", params={"lane": "urgent"})
+    filtered_page = client.get("/hunts/h1/findings", params={"lane": "urgent"})
     assert re.findall(r'data-finding-id="([^"]+)"', filtered_page.text) == [
         "zzz-urgent-1", "zzz-urgent-2"]
     filtered, _, _ = finding_page(repo, "h1", predicates=(t.candidate.c.lane == "urgent",))
@@ -120,7 +120,7 @@ def test_malformed_cursor_has_http_400(web_setup):
     client = web_setup[0]
     test_web_agent_a6.run_row(web_setup[1])
     for cursor in BAD_CURSORS:
-        response = client.get("/hunts/h1", params={"after": cursor})
+        response = client.get("/hunts/h1/findings", params={"after": cursor})
         assert response.status_code == 400, (cursor, response.status_code)
 
 
@@ -147,7 +147,7 @@ def test_sql_unsafe_cursors_have_http_400(web_setup):
     client = web_setup[0]
     test_web_agent_a6.run_row(web_setup[1])
     for cursor in SQL_UNSAFE_CURSORS:
-        assert client.get("/hunts/h1", params={"after": cursor}).status_code == 400
+        assert client.get("/hunts/h1/findings", params={"after": cursor}).status_code == 400
 
 
 def test_order_query_uses_covering_sort_index_and_bounded_seek():
