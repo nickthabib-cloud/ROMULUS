@@ -6,7 +6,7 @@ import re
 import unicodedata
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -26,8 +26,9 @@ from romulus.agent.provider.base import estimate_tokens
 from romulus.agent.refusals import reason, validation_reasons
 from romulus.agent.safety import injection_flags
 from romulus.agent.toolbox import argument_schema
+from romulus.detect.metadata import ATTACK_TACTICS
 from romulus.report.incidents import build_incident_graph
-from romulus.report.manifest import coverage_for_hunt
+from romulus.report.manifest import NARRATIVE_PARAGRAPHS, NARRATIVE_SENTENCES, coverage_for_hunt
 from romulus.store.db import digest, utcnow
 
 
@@ -40,20 +41,27 @@ class _Strict(BaseModel):
 TEXT_LIMIT = 500
 CITE_LIMIT = 20
 SECTION_LIMITS = {"overall": 8, "key_steps": 30, "reasons": 10, "alternatives": 10, "gaps": 10, "next_checks": 10}
+# A narrative paragraph's phase label; the paragraph and sentence bounds are the report manifest's (NARRATIVE_*).
+PHASE_LIMIT = 80
+# An RFC 3339 date and time with a UTC offset, the only form a narrative time span takes (ASCII digits only).
+DATE_TIME = re.compile(r"(?P<date>\d{4}-\d{2}-\d{2})[Tt ](?P<time>\d{2}:\d{2}:\d{2}(?:\.\d+)?)"
+                       r"(?P<offset>[Zz]|[+-]\d{2}:\d{2})", re.ASCII)
 
 
 def _section(what: str, limit: int) -> str:
     return f"{what} At most {limit}; any past {limit} are dropped and counted."
 
 
+_TEXT = f"One concise sentence, at most {TEXT_LIMIT} characters; an empty or longer one is dropped and counted."
+_CITES = (f"Aliases supplied for this hunt that support the sentence (such as F12 or E3), one per item, at most "
+          f"{CITE_LIMIT} (the rest are dropped). A sentence without a citation, or with anything but an alias issued "
+          "in this hunt, is dropped.")
+
+
 class Sentence(_Strict):
-    text: str = Field(description=(
-        f"One concise sentence, at most {TEXT_LIMIT} characters; an empty or longer one is dropped and counted."))
+    text: str = Field(description=_TEXT)
     # plain strings: the checker drops a sentence citing anything that is not an alias issued in this hunt, and counts it
-    cites: list[str] = Field(description=(
-        f"Aliases supplied for this hunt that support the sentence (such as F12 or E3), one per item, at most "
-        f"{CITE_LIMIT} (the rest are dropped). A sentence without a citation, or with anything but an alias issued "
-        "in this hunt, is dropped."))
+    cites: list[str] = Field(description=_CITES)
     kind: Literal["observed", "inferred", "hypothesis"] = Field(description=(
         "observed: recorded in the cited records; inferred: reasoned from them; hypothesis: proposed, unconfirmed."))
 
@@ -69,10 +77,39 @@ class Confidence(_Strict):
     reasons: list[Sentence] = Field(description=_section("Why.", SECTION_LIMITS["reasons"]))
 
 
+class NarrativeSentence(_Strict):
+    text: str = Field(description=_TEXT)
+    cites: list[str] = Field(description=_CITES)
+    kind: Literal["observed", "inferred", "uncertain"] = Field(description=(
+        "observed: recorded in the cited records; inferred: a link or step reasoned from them, not recorded; "
+        "uncertain: where the evidence is thin or missing and the step is unknown."))
+
+
+class TimeSpan(_Strict):
+    start: str = Field(description=(
+        "When this part of the story began, as an RFC 3339 time with a UTC offset read from a cited finding, inside "
+        "the hunt window; or empty when unknown. Any other value is cleared and counted."))
+    end: str = Field(description="When it ended, in the same form as start; or empty.")
+
+
+class NarrativeParagraph(_Strict):
+    time_span: TimeSpan
+    phase: str = Field(description=(
+        f"A short label for this part of the story, at most {PHASE_LIMIT} characters, such as an ATT&CK tactic "
+        "name (Initial Access, Lateral Movement); a longer one is cleared and counted."))
+    sentences: list[NarrativeSentence] = Field(description=(
+        f"{NARRATIVE_SENTENCES[0]} to {NARRATIVE_SENTENCES[1]} sentences, each cited; any past "
+        f"{NARRATIVE_SENTENCES[1]} are dropped and counted, and a paragraph left with none is dropped."))
+
+
 class AssessmentBody(_Strict):
     overall: list[Sentence] = Field(description=_section("The overall assessment.", SECTION_LIMITS["overall"]))
     key_steps: list[KeyStep] = Field(description=_section("The attack path's key steps, in time order.",
                                                           SECTION_LIMITS["key_steps"]))
+    narrative: list[NarrativeParagraph] = Field(description=(
+        "One coherent hypothesis of what most plausibly happened, from initial access to objective, in "
+        f"chronological order: {NARRATIVE_PARAGRAPHS[0]} to {NARRATIVE_PARAGRAPHS[1]} paragraphs (fewer only when "
+        f"the findings cannot support more); any past {NARRATIVE_PARAGRAPHS[1]} are dropped and counted."))
     confidence: Confidence
     alternatives: list[Sentence] = Field(description=_section("Benign or other explanations.",
                                                               SECTION_LIMITS["alternatives"]))
@@ -92,7 +129,7 @@ ABSENCE_PHRASES: tuple[AbsencePhrase, ...] = (
     AbsencePhrase(("clean",)), AbsencePhrase(("uncompromised",)), AbsencePhrase(("did", "not")),
     *(AbsencePhrase(("not", word), 3) for word in ("compromised", "malicious", "affected", "breached")),
     *(AbsencePhrase(("no", word), 3) for word in
-      ("compromise", "evidence", "sign", "signs", "indication", "trace")),
+      ("compromise", "evidence", "sign", "signs", "indication", "trace", "record", "records")),
     *(AbsencePhrase(("nothing", word), 3) for word in ("malicious", "suspicious", "found")),
 )
 # Deliberately finite: common Cyrillic/Greek Latin lookalikes, after NFKC and case folding.
@@ -222,7 +259,8 @@ def check_assessment(repo, hunt_id: str, body: dict, *, owner_token=None) -> tup
     aliases = AliasBook(repo, hunt_id, owner_token=owner_token)
     counts = {"removed_uncited": 0, "removed_unknown_alias": 0, "downgraded_observed": 0,
               "removed_absence_claim": 0, "labelled_suspicious_only": 0, "removed_empty": 0,
-              "removed_over_length": 0, "trimmed_citations": 0, "dropped_over_cap": 0}
+              "removed_over_length": 0, "trimmed_citations": 0, "dropped_over_cap": 0,
+              "removed_empty_paragraph": 0, "cleared_narrative_time": 0, "cleared_narrative_phase": 0}
     suspicious_cache: dict[str, bool] = {}
 
     def check(sentence: dict, section: str) -> dict | None:
@@ -254,7 +292,80 @@ def check_assessment(repo, hunt_id: str, body: dict, *, owner_token=None) -> tup
     for section in ("alternatives", "gaps", "next_checks"):
         checked[section] = capped([value for item in checked[section]
                                    if (value := check(item, section)) is not None], section)
+    checked["narrative"] = _check_narrative(checked["narrative"], check, counts, _hunt_window(repo, hunt_id))
     return checked, {key: value for key, value in counts.items() if value}
+
+
+def _hunt_window(repo, hunt_id: str) -> tuple[datetime | None, datetime | None]:
+    window = ((repo.get_hunt(hunt_id) or {}).get("manifest") or {}).get("window") or {}
+    return _utc_time(window.get("start")), _utc_time(window.get("end"))
+
+
+def _utc_time(value) -> datetime | None:
+    """An RFC 3339 time with a UTC offset (date and time), in UTC; None for anything else. A stored datetime without
+    an offset is UTC, as the store keeps it."""
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    match = DATE_TIME.fullmatch(value.strip()) if isinstance(value, str) else None
+    if match is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(f"{match['date']}T{match['time']}"
+                                        f"{'+00:00' if match['offset'] in 'Zz' else match['offset']}")
+    except ValueError:            # a well-formed but impossible time, such as hour 25
+        return None
+    return parsed.astimezone(UTC)
+
+
+def _span_time(value: str, window: tuple[datetime | None, datetime | None]) -> datetime | None:
+    moment = _utc_time(value)
+    start, end = window
+    if moment is None or (start is not None and moment < start) or (end is not None and moment > end):
+        return None
+    return moment
+
+
+def _span_text(moment: datetime | None) -> str:
+    return "" if moment is None else moment.isoformat().replace("+00:00", "Z")
+
+
+def _phase_tactic(phase: str) -> str | None:
+    """The ATT&CK tactic a phase label names (Lateral Movement, command and control), or None."""
+    name = re.sub(r"[^a-z]+", "-", phase.casefold().replace("&", " and ")).strip("-")
+    return name if name in ATTACK_TACTICS else None
+
+
+def _check_narrative(paragraphs: list[dict], check, counts: dict, window) -> list[dict]:
+    """Every narrative sentence goes through the same checks as the other sections (citations, absence claims,
+    length, the observed label); then a time that is not an RFC 3339 time inside the hunt window, and a phase label
+    past its cap or stating an absence, are cleared; paragraphs left empty are dropped; the caps are applied. Each
+    change is counted."""
+    out = []
+    for paragraph in paragraphs:
+        sentences = [value for item in paragraph["sentences"] if (value := check(item, "narrative")) is not None]
+        counts["dropped_over_cap"] += max(0, len(sentences) - NARRATIVE_SENTENCES[1])
+        if not sentences:
+            counts["removed_empty_paragraph"] += 1
+            continue
+        span = {}
+        for side in ("start", "end"):
+            raw = paragraph["time_span"][side].strip()
+            span[side] = _span_time(raw, window) if raw else None
+            if raw and span[side] is None:
+                counts["cleared_narrative_time"] += 1
+        if span["start"] is not None and span["end"] is not None and span["start"] > span["end"]:
+            span = {"start": None, "end": None}
+            counts["cleared_narrative_time"] += 2
+        phase = " ".join(paragraph["phase"].split())
+        if len(phase) > PHASE_LIMIT or (phase and any(_contains_phrase(phase, rule) for rule in ABSENCE_PHRASES)):
+            phase = ""
+            counts["cleared_narrative_phase"] += 1
+        tactic = _phase_tactic(phase) if phase else None
+        out.append({"time_span": {side: _span_text(span[side]) for side in ("start", "end")}, "phase": phase,
+                    **({"tactic": tactic} if tactic else {}),
+                    "sentences": sentences[:NARRATIVE_SENTENCES[1]]})
+    counts["dropped_over_cap"] += max(0, len(out) - NARRATIVE_PARAGRAPHS[1])
+    return out[:NARRATIVE_PARAGRAPHS[1]]
 
 
 def _report_findings(repo, hunt_id: str) -> list[dict]:
@@ -334,7 +445,8 @@ def _assessment_input(repo, hunt_id: str, token_budget: int, *, owner_token=None
                        "hosts": incident["hosts"], "accounts": incident["accounts"],
                        "attack_tactics": incident["attack_tactics"], "findings": len(members)},
             "top_findings": [{"alias": aliases.alias_for("F", row["id"]), "lane": row["lane"],
-                              "claim": row["claim"][:240]} for row in top],
+                              "time": _span_text(_utc_time(row.get("ts"))), "claim": row["claim"][:240]}
+                             for row in top],
             "links": [{"alias": aliases.alias_for("L", link["id"]), "type": link["link_type"],
                        "strength": link["style"], "anchor": aliases.alias_for("F", link["anchor_finding_id"]),
                        "targets": [aliases.alias_for("F", item) for item in link["target_finding_ids"]],
@@ -357,7 +469,8 @@ def _assessment_input(repo, hunt_id: str, token_budget: int, *, owner_token=None
         })
     output = {"hypotheses": cards,
               "agent_findings": [{"alias": aliases.alias_for("F", row["id"]), "claim": row["claim"],
-                                  "lane": row["lane"], "hypothesis": (
+                                  "lane": row["lane"], "time": _span_text(_utc_time(row.get("ts"))),
+                                  "hypothesis": (
                                       aliases.alias_for("H", row["agent_hypothesis_id"])
                                       if row.get("agent_hypothesis_id") else None)}
                                  for row in repo.candidates(hunt_id, ["urgent", "high", "lead"])

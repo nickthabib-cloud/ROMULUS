@@ -32,7 +32,7 @@ END = START + timedelta(hours=1)
 IP = "198.51.100.7"
 TARGET = "romulus-host-fixture"
 EMPTY_ASSESSMENT = {
-    "overall": [], "key_steps": [], "confidence": {"overall": "low", "reasons": []},
+    "overall": [], "key_steps": [], "narrative": [], "confidence": {"overall": "low", "reasons": []},
     "alternatives": [], "gaps": [], "next_checks": [],
 }
 

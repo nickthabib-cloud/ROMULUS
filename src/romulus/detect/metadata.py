@@ -16,6 +16,8 @@ _TACTICS = frozenset({'reconnaissance', 'resource-development', 'initial-access'
                      'credential-access', 'discovery',
                      'lateral-movement', 'collection', 'command-and-control', 'exfiltration', 'impact',
                      'inhibit-response-function', 'impair-process-control'})
+# The ATT&CK tactic names (Enterprise and ICS) a rule or a label may name.
+ATTACK_TACTICS = _TACTICS
 
 
 # Tactics for techniques the vendored ATT&CK release (Enterprise and ICS) does not define. Every technique is

@@ -22,7 +22,7 @@ from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
 from tests.agent_scripted import ScriptedProvider, response
 
-ASSESSMENT = {"overall": [], "key_steps": [], "confidence": {"overall": "low", "reasons": []},
+ASSESSMENT = {"overall": [], "key_steps": [], "narrative": [], "confidence": {"overall": "low", "reasons": []},
               "alternatives": [], "gaps": [], "next_checks": []}
 
 

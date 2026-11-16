@@ -30,7 +30,7 @@ from tests.agent_scripted import ScriptedProvider, response
 from tests.test_agent_toolbox import _repo as toolbox_repo
 from tests.test_expansion_links import T0, T1, FakePivot, anchor, cases, event, window
 
-BODY = {"overall": [], "key_steps": [], "confidence": {"overall": "low", "reasons": []},
+BODY = {"overall": [], "key_steps": [], "narrative": [], "confidence": {"overall": "low", "reasons": []},
         "alternatives": [], "gaps": [], "next_checks": []}
 
 
