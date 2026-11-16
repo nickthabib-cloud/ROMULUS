@@ -364,6 +364,7 @@ svg.timeline .link { stroke-width: 2; fill: none; }
 svg.timeline .link-observed { stroke: var(--ink-2); }
 svg.timeline .link-inferred { stroke: var(--muted); stroke-dasharray: 6 4; }
 svg.timeline .link-analyst { stroke: var(--warn); stroke-dasharray: 2 4; }
+svg.timeline .link-agent { stroke: var(--ai); stroke-dasharray: 6 4; }
 svg.timeline .mark { stroke: var(--surface); stroke-width: 1.5; transition: r var(--fast); }
 svg.timeline a:hover .mark { stroke: var(--ink); }
 svg.timeline .m-urgent { fill: var(--urgent); } svg.timeline .m-high { fill: var(--high); } svg.timeline .m-lead { fill: var(--lead); }
