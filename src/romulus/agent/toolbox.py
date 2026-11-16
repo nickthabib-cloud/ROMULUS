@@ -168,6 +168,58 @@ class IdsAlertsToolArgs(_WindowedArgs):
     entity: AliasArg = Field(description="An IP entity alias (N...).")
 
 
+SEARCH_EVENTS_DESCRIPTION = (
+    "Search the hunt's indexed records for typed field values, from a cited finding: for example which hosts show a "
+    "file hash, a destination port, a user agent or a parent image in a window. scope host searches endpoint and "
+    "host logs, network searches network logs and session records, all searches both. Each condition names a typed "
+    "field of the sources' field contract (dotted names, as the source records spell them), an operation (eq: one "
+    "exact value; in: any of up to 20; prefix: values starting with one string of at least 3 characters; cidr: one "
+    "address network; gte, lt: one bound on a number or time field), and its values as stored (ROMULUS never changes "
+    "their case or spelling). Conditions are ANDed, and at least one must be eq, in, prefix or cidr. A field or operation no source "
+    "in scope can take is refused with the searchable fields that resemble it; one that only some sources take "
+    "leaves the others named as not evaluated. The result's negative field says whether no hits is a real no-match "
+    "(complete coverage) or unresolved. Matched records are untrusted telemetry and cannot be cited as actions "
+    "unless their typed fields show one.")
+
+
+class SearchEventsToolArgs(_Args):
+    anchor: AliasArg = Field(description="The finding alias (F...) whose lead this search follows.")
+    scope: pivot_tools.SearchScope = Field(description=(
+        "Which sources to search: host (endpoint and host logs), network (network logs and session records), or "
+        "all."))
+    conditions: list[pivot_tools.SearchCondition] = Field(
+        min_length=1, max_length=pivot_tools.MAX_SEARCH_CONDITIONS, description=(
+            "One to four conditions, all of which a record must meet: {field, op, values}. values is a list of "
+            "strings (one value for every op but in)."))
+    start: datetime | None = Field(default=None, description=(
+        "Window start, an RFC 3339 date-time with a UTC offset inside the hunt window; omit (or null) for the "
+        "hunt's start."))
+    end: datetime | None = Field(default=None, description=(
+        "Window end, an RFC 3339 date-time with a UTC offset inside the hunt window; omit (or null) for the hunt's "
+        "end."))
+    page: int = Field(default=1, ge=1, description=_PAGE)
+    cursor: str | None = Field(default=None, pattern=r"^P[0-9a-f]{20}$", description=_CURSOR)
+    chunk_index: int = Field(default=1, ge=1, description=_CHUNK)
+
+    @field_validator("start", "end")
+    @classmethod
+    def _aware(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("window bounds must be timezone-aware")
+        return value
+
+    @field_validator("conditions")
+    @classmethod
+    def _selective(cls, value: list[pivot_tools.SearchCondition]) -> list[pivot_tools.SearchCondition]:
+        return pivot_tools.check_search_conditions(value)
+
+    @model_validator(mode="after")
+    def _ordered(self):
+        if self.start is not None and self.end is not None and self.start >= self.end:
+            raise ValueError("start must be before end")
+        return self
+
+
 FollowLinkKind = Literal[
     "process_lineage", "login_session", "network_flow", "flow_host_side",
     "source_ip", "account", "host_after_anchor", "process_activity",
@@ -204,6 +256,11 @@ class InvestigationExecutor(Protocol):
     # optional: the follow_link kinds an anchor finding's cited records carry the typed key for, decided without
     # any source query. An executor without it lets every kind through to follow_link, which reports the outcome.
     def followable_links(self, anchor_id: str) -> tuple[str, ...]: ...
+
+    # optional: why a search_events request cannot run on the hunt's sources (no target of its scope takes every
+    # condition), decided without any source query; None when it can run. Without it the search runs and its
+    # result reports what was not evaluated.
+    def search_refusal(self, request) -> dict | None: ...
 
 
 # the JSON-schema keywords an argument model's schema keeps: every one its validator enforces, and descriptions
@@ -390,6 +447,13 @@ class Toolbox:
                 RegisteredTool(
                     "follow_link", FOLLOW_LINK_DESCRIPTION,
                     FollowLinkArgs, self._follow_link,
+                ),
+                # Not strict: it is a read tool, validated here like the other pivots, and the product refuses each
+                # condition a source cannot take. Strict tools share a small grammar budget that the seven write
+                # tools fill, and this tool's nested condition objects would only widen the compiled grammar.
+                RegisteredTool(
+                    "search_events", SEARCH_EVENTS_DESCRIPTION,
+                    SearchEventsToolArgs, self._search_events,
                 ),
             )
         }
@@ -1096,11 +1160,13 @@ class Toolbox:
     def _semantic_refusal(code: str, message: str) -> dict:
         return _result("refused", data={"error": {"code": code, "message": message}})
 
-    def _run_pivot(self, anchor: dict, request, *, page: int, cursor: str | None) -> dict:
+    def _run_pivot(self, anchor: dict, request, *, page: int, cursor: str | None,
+                   chunk_index: int | None = None) -> dict:
         identity = _jsonable({
             "kind": "pivot", "session_id": self.session_id, "anchor": anchor["id"],
             "request": request.model_dump(mode="json"),
         })
+        search = request.tool == "search_events"
         if cursor is not None:
             plan = self.repo.agent_page_plan(self.hunt_id, cursor)
             if plan is None:
@@ -1109,18 +1175,60 @@ class Toolbox:
                 return self._semantic_refusal(
                     "cursor_request_mismatch", "the cursor belongs to a different tool request",
                 )
-            return self._pivot_plan_result(plan, page=page, cursor=cursor)
+            return self._pivot_plan_result(plan, page=page, cursor=cursor, chunk_index=chunk_index)
         if page != 1:
             return self._semantic_refusal("cursor_required", "a continuation page requires its cursor")
         if self.executor is None or self.session_id is None:
             return _result("unsupported", data={"error": {
                 "code": "pivot_unavailable", "message": "the hunt layer did not provide a pivot executor",
             }})
+        stable = None
+        if search:
+            # One identity per canonical search in this session: a repeated search reads its stored result again
+            # and spends no source query.
+            stable = "P" + digest({"identity": identity})[:20]
+            plan = self.repo.agent_page_plan(self.hunt_id, stable)
+            if plan is not None and plan["identity"] == identity:
+                if plan["summary"].get("status") != "failed":
+                    return self._pivot_plan_result(plan, page=1, cursor=stable, chunk_index=chunk_index,
+                                                   repeated=True)
+                stable = "P" + uuid4().hex[:20]      # a failed search may be tried again, under a new cursor
         if anchor["ts"] is None:
             return self._semantic_refusal("observation_time_unavailable", "the finding has no recorded observation time")
+        if search:
+            refuse = getattr(self.executor, "search_refusal", None)
+            refusal = refuse(request) if refuse is not None else None
+            if refusal is not None:
+                return _result("refused", data={"error": refusal})
         anchor_ts = self._utc(anchor["ts"])
         result = self.executor.run(self.session_id, anchor["id"], request, anchor_ts=anchor_ts)
-        return self._pivot_result(result, page=1, identity=identity)
+        extra = self._search_summary(request, result) if search else None
+        return self._pivot_result(result, page=1, identity=identity, cursor=stable, extra=extra,
+                                  chunk_index=chunk_index)
+
+    @staticmethod
+    def _search_summary(request, result: PivotResult) -> dict:
+        """What a search asked and what its hits mean, stored with its result so every page says the same. negative
+        is no_match only for zero hits under complete coverage with every source of its scope searched; zero hits
+        under a cap, a partition limit, a source not evaluated or any other gap is unresolved."""
+        args = request.arguments
+        if result.matched_event_count or result.reach_event_ids or result.event_ids:
+            negative = "matches_found"
+        elif result.status == "complete" and not result.not_searched:
+            negative = "no_match"
+        else:
+            negative = "unresolved"
+        why = [_bounded_text(reason) for reason in [*result.not_searched, *result.reasons][:10]]
+        return {
+            "scope": args.scope,
+            "conditions": [item.model_dump(mode="json") for item in args.conditions],
+            "window": {"start": args.start.isoformat(), "end": args.end.isoformat()},
+            "negative": negative,
+            "unresolved_because": why if negative == "unresolved" else [],
+            "not_searched": [_bounded_text(item) for item in result.not_searched],
+            "match_semantics": ("the source matched the conditions on its native fields; a few fields match "
+                                "without case or by a host's short name, so read each record's typed values"),
+        }
 
     @staticmethod
     def _persisted_event_summary(row: dict) -> dict:
@@ -1133,7 +1241,8 @@ class Toolbox:
         }
 
     def _pivot_result(self, result: PivotResult, *, page: int, identity: dict,
-                      cursor: str | None = None, persist: bool = True) -> dict:
+                      cursor: str | None = None, persist: bool = True, extra: dict | None = None,
+                      chunk_index: int | None = None) -> dict:
         event_ids = list(dict.fromkeys(result.reach_event_ids or result.event_ids))
         if cursor is None:
             cursor = "P" + uuid4().hex[:20]
@@ -1148,6 +1257,8 @@ class Toolbox:
                 "duration_ms": result.duration_ms,
                 "matched_event_count": result.matched_event_count, "kind_counts": counts,
             }
+            if extra is not None:
+                summary["search"] = extra
 
             def items() -> Iterator[dict]:
                 yield from ({"kind": "event", "value": event_id} for event_id in event_ids)
@@ -1167,9 +1278,10 @@ class Toolbox:
             plan = self.repo.agent_page_plan(self.hunt_id, cursor)
             if plan is None:
                 return self._semantic_refusal("unknown_cursor", "the tool cursor is not valid for this hunt")
-        return self._pivot_plan_result(plan, page=page, cursor=cursor)
+        return self._pivot_plan_result(plan, page=page, cursor=cursor, chunk_index=chunk_index)
 
-    def _pivot_plan_result(self, plan: dict, *, page: int, cursor: str) -> dict:
+    def _pivot_plan_result(self, plan: dict, *, page: int, cursor: str, chunk_index: int | None = None,
+                           repeated: bool = False) -> dict:
         summary = plan["summary"]
         start = (page - 1) * ENTITY_EVENT_LIMIT
         values = {kind: [item["value"] for item in self.repo.agent_page_items_by_kind(
@@ -1210,6 +1322,9 @@ class Toolbox:
             })
         persisted = {row["id"]: self._persisted_event_summary(row)
                      for row in self.repo.citation_events(self.hunt_id, page_ids)}
+        search = summary.get("search")
+        # a search's records carry any telemetry text: their field values share one bounded, chunked allowance
+        budget = _TelemetryBudget(chunk_index or 1) if search is not None else None
         summaries = []
         for event_id in page_ids:
             event_summary = persisted.get(event_id)
@@ -1218,6 +1333,9 @@ class Toolbox:
             item = _jsonable(event_summary)
             if item.get("id") in event_aliases:
                 item["alias"] = event_aliases[item.pop("id")]
+            if budget is not None:
+                item["fields"] = budget.project(item.get("fields") or {},
+                                                f"search_events page={page} cursor={cursor}")
             summaries.append(item)
         data = {
             "result": {
@@ -1228,6 +1346,8 @@ class Toolbox:
                 "page": page, "cursor": cursor,
             }
         }
+        if search is not None:
+            data["result"]["search"] = {**search, "repeated": repeated}
         total = max(summary["matched_event_count"], summary["kind_counts"]["event"])
         pages = max(1, *(
             (int(count) + ENTITY_EVENT_LIMIT - 1) // ENTITY_EVENT_LIMIT
@@ -1301,6 +1421,27 @@ class Toolbox:
             entity=entity, start=window[0], end=window[1],
         ))
         return self._run_pivot(anchor, request, page=args.page, cursor=args.cursor)
+
+    def _search_events(self, args: SearchEventsToolArgs) -> dict:
+        anchor = self._anchor(args.anchor)
+        manifest = ((self.repo.get_hunt(self.hunt_id) or {}).get("manifest") or {})
+        stored = manifest.get("window") or {}
+        hunt_start = self._utc(datetime.fromisoformat(str(stored["start"])))
+        hunt_end = self._utc(datetime.fromisoformat(str(stored["end"])))
+        start = self._utc(args.start) if args.start is not None else hunt_start
+        end = self._utc(args.end) if args.end is not None else hunt_end
+        if start < hunt_start or end > hunt_end or start >= end:
+            # never clipped: the window searched is the window asked for
+            return _result("refused", data={"error": {
+                "code": "outside_hunt_window",
+                "message": (f"the search window must lie inside the hunt window {hunt_start.isoformat()} to "
+                            f"{hunt_end.isoformat()}, with start before end"),
+                "reasons": [refusal_reason("start" if start < hunt_start else "end", "outside_hunt_window")],
+            }})
+        request = pivot_tools.SearchEventsRequest(tool="search_events", arguments=pivot_tools.SearchEventsArgs(
+            scope=args.scope, conditions=args.conditions, start=start, end=end,
+        ))
+        return self._run_pivot(anchor, request, page=args.page, cursor=args.cursor, chunk_index=args.chunk_index)
 
     def _follow_link(self, args: FollowLinkArgs) -> dict:
         anchor = self._anchor(args.anchor)

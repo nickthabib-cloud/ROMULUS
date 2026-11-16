@@ -1,6 +1,8 @@
 """Hunt-layer execution of validated, source-neutral investigator pivots."""
 from __future__ import annotations
 
+import difflib
+import ipaddress
 import json
 import math
 import re
@@ -14,12 +16,16 @@ from pathlib import Path
 from time import perf_counter
 
 from romulus.agent.models import EntityRef, PivotCoverage, PivotResult, PivotTimeRange
+from romulus.agent.refusals import reason as refusal_reason
 from romulus.agent.tools import (
+    SEARCH_OPS,
     AuthActivityRequest,
     EntityTimelineRequest,
     IdsAlertsRequest,
     ProcessTreeArgs,
     ProcessTreeRequest,
+    SearchCondition,
+    SearchEventsRequest,
     ToolRequest,
 )
 from romulus.detect.bounded import StateBudget
@@ -55,7 +61,7 @@ from romulus.evidence.zeek_catalog import ELASTIC, MALCOLM, SECURITY_ONION, ZEEK
 from romulus.hunt.publish import publish_match
 from romulus.hunt.windows_filters import nxlog_windows_group
 from romulus.site import SiteFacts, absent_site_facts
-from romulus.sources.compile import time_unit
+from romulus.sources.compile import CompileError, _intent_os_family, compile_es, time_unit
 from romulus.sources.es import ElasticClient, SourceError
 from romulus.sources.execute import execute
 from romulus.sources.models import Completeness, Predicate, SearchIntent, SearchOutcome, Window
@@ -631,6 +637,154 @@ def _link_task_kind(executor) -> str:
     """Keep borrowed executor methods compatible while separating agent link work."""
     return "agent_follow_link" if getattr(executor, "source_query_scope", None) == "agent" else "expansion_link"
 
+
+# The agent's typed search (search_events). One search may name every target of its scope, and has no entity to
+# narrow it, so it holds fewer records than an entity pivot: each leaf query keeps at most SEARCH_LEAF_RECORDS, so
+# one target holds at most MAX_PIVOT_PARTITIONS leaves x (head, tail and the two anchor samples) x that many, and
+# once MAX_SEARCH_RECORDS rows were fetched the targets not yet searched are named as not evaluated. Whatever a
+# hunt's size, one search therefore holds at most MAX_SEARCH_RECORDS + MAX_SEARCH_TARGET_RECORDS rows.
+SEARCH_LEAF_RECORDS = 1_000
+MAX_SEARCH_TARGET_RECORDS = MAX_PIVOT_PARTITIONS * MAX_SAMPLE_QUERIES * SEARCH_LEAF_RECORDS
+MAX_SEARCH_RECORDS = 10_000
+SEARCH_PURPOSE = "agent:search_events"
+# How many similar searchable fields a refusal or a not-evaluated reason names, and how many targets a refusal lists.
+SEARCH_SIMILAR_FIELDS = 20
+SEARCH_REASON_SIMILAR = 5
+SEARCH_REFUSAL_TARGETS = 10
+# The query clauses a compiled agent search may contain. Every value the model wrote reaches the source as the value
+# of one of them (term, terms, prefix, range; a wildcard only in the compiler's escaped exact-value form; a phrase only
+# for a value longer than a text field's keyword subfield keeps). Never query_string, regexp, script or match.
+SEARCH_CLAUSES = frozenset({"bool", "term", "terms", "prefix", "range", "wildcard", "match_phrase", "exists"})
+_STRING_KINDS = frozenset({"keyword", "constant_keyword", "wildcard", "flattened"})
+_INTEGER_KINDS = frozenset({"long", "integer", "short"})
+_INTEGER_TEXT = re.compile(r"[+-]?[0-9]{1,19}")
+_NAME_TOKENS = re.compile(r"[._]")
+
+
+def _text(value, limit: int = 200) -> str:
+    text = " ".join(str(value).split())
+    return text if len(text) <= limit else f"{text[:limit]}…"
+
+
+def _scoped(contract: FieldContract, scope: str) -> bool:
+    return scope == "all" or (scope == "network") == _is_network(contract.target, contract)
+
+
+def search_values(kind: str, op: str, values: list[str]) -> list:
+    """The condition's values as the field's native type takes them, else ValueError. A string field takes each value
+    exactly as written; an address, number, time or boolean must parse as one (a time with its UTC offset)."""
+    base = kind.split(":", 1)[0]
+    out: list = []
+    for text in values:
+        if base in _STRING_KINDS:
+            out.append(text)
+        elif base == "ip":
+            out.append(str(ipaddress.ip_network(text, strict=False)) if op == "cidr"
+                       else str(ipaddress.ip_address(text)))
+        elif base in _INTEGER_KINDS:
+            if not _INTEGER_TEXT.fullmatch(text):
+                raise ValueError(f"a {base} field takes whole numbers")
+            out.append(int(text))
+        elif base in {"double", "float"}:
+            number = float(text)
+            if not math.isfinite(number):
+                raise ValueError(f"a {base} field takes finite numbers")
+            out.append(number)
+        elif base == "date":
+            moment = datetime.fromisoformat(text)
+            if moment.tzinfo is None:
+                raise ValueError("a date value needs its UTC offset")
+            out.append(moment.astimezone(UTC).isoformat())
+        elif base == "boolean":
+            if text not in ("true", "false"):
+                raise ValueError("a boolean field takes true or false")
+            out.append(text == "true")
+        else:
+            raise ValueError(f"values of a {kind} field are not searchable")
+    return out
+
+
+def _search_predicate(contract: FieldContract, condition: SearchCondition,
+                      os_family: str | None) -> tuple[Predicate | None, str | None]:
+    """One condition as a predicate on this target, or why the target cannot evaluate it."""
+    field_name, op = condition.field, condition.op
+    if field_name == contract.time_field:
+        return None, f"field {field_name} is the time field: set start and end instead"
+    spec = contract.spec(field_name, os_family=os_family)
+    if spec is None:
+        return None, f"field {field_name} / op {op} not supported: no such field"
+    variants = (spec, *spec.alternatives)
+    if any(op not in variant.ops for variant in variants):
+        supported = sorted(set.intersection(*(set(variant.ops) for variant in variants)) & set(SEARCH_OPS))
+        return None, (f"field {field_name} / op {op} not supported: this {spec.type} field takes "
+                      f"{', '.join(supported) or 'no search operation'}")
+    def kind(variant) -> str:
+        # equality on analyzed text is compiled against its keyword subfields: its values are strings
+        return "keyword" if variant.exact and op in {"eq", "in"} else variant.type
+
+    try:
+        parsed = search_values(kind(spec), op, condition.values)
+        for variant in spec.alternatives:
+            search_values(kind(variant), op, condition.values)
+    except ValueError as error:
+        return None, f"field {field_name} / op {op}: value not valid for a {spec.type} field ({error})"
+    return Predicate(field=field_name, op=op, value=parsed if op == "in" else parsed[0]), None
+
+
+def _unsafe_clause(node) -> str | None:
+    """The first clause type outside SEARCH_CLAUSES in a compiled query, else None."""
+    if isinstance(node, list):
+        return next((found for item in node if (found := _unsafe_clause(item)) is not None), None)
+    if not isinstance(node, dict):
+        return None
+    for kind, body in node.items():
+        if kind not in SEARCH_CLAUSES:
+            return kind
+        if kind == "bool":
+            for key, value in body.items():
+                if key in {"filter", "must", "should", "must_not"}:
+                    found = _unsafe_clause(value)
+                    if found is not None:
+                        return found
+    return None
+
+
+def _similar_fields(contracts: list[FieldContract], field_name: str) -> tuple[list[dict], int]:
+    """Up to SEARCH_SIMILAR_FIELDS searchable typed fields of these contracts whose names share a word with, or read
+    like, `field_name`, with the agent search ops each takes; and how many searchable fields there are in all."""
+    wanted = {token for token in _NAME_TOKENS.split(field_name.lower()) if token}
+    matcher = difflib.SequenceMatcher(b=field_name.lower(), autojunk=False)
+    found: dict[str, dict] = {}
+    searchable: set[str] = set()
+    for contract in contracts:
+        for name, spec in contract.fields.items():
+            ops = set(spec.ops).intersection(SEARCH_OPS)
+            if not ops or name == contract.time_field:
+                continue
+            searchable.add(name)
+            entry = found.get(name)
+            if entry is None:
+                overlap = len(wanted.intersection(_NAME_TOKENS.split(name.lower())))
+                matcher.set_seq1(name.lower())
+                ratio = matcher.ratio()
+                if not overlap and ratio < 0.6:
+                    continue
+                entry = found[name] = {"field": name, "ops": set(), "rank": (-overlap, -ratio, name)}
+            entry["ops"].update(ops)
+    ranked = sorted(found.values(), key=lambda item: item["rank"])[:SEARCH_SIMILAR_FIELDS]
+    return [{"field": item["field"], "ops": sorted(item["ops"])} for item in ranked], len(searchable)
+
+
+@dataclass
+class SearchPlan:
+    """An agent search planned over the targets of its scope: an intent for each target that can evaluate every
+    condition, a coverage cell naming each one that cannot, and a refusal when none can."""
+
+    intents: list[SearchIntent]
+    coverage: list[PivotCoverage]
+    refusal: dict | None = None
+
+
 class PivotExecutor:
     """Translate accepted tools to safe intents, then normalize and directly detect results."""
 
@@ -742,6 +896,9 @@ class PivotExecutor:
         return temporal(outcome)
 
     def _intents(self, request: ToolRequest) -> list[SearchIntent]:
+        if isinstance(request, SearchEventsRequest):
+            # planned on its own: never the unfiltered fall-through below
+            return self.plan_search(request).intents
         args = request.arguments
         window = Window(start=args.start, end=args.end)
         intents: list[SearchIntent] = []
@@ -940,10 +1097,108 @@ class PivotExecutor:
 
     def plan(self, request: ToolRequest) -> tuple[list[SearchIntent], list[PivotCoverage]]:
         """Plan executable intents and every known unresolved dataset cell together."""
+        if isinstance(request, SearchEventsRequest):
+            planned = self.plan_search(request)
+            return planned.intents, planned.coverage
         intents = self._intents(request)
         return intents, [*self._unsearchable_ip_coverage(request, intents),
                          *_nxlog_mixed_coverage(self.contracts, request),
                          *_text_host_coverage(self.contracts, self.dataset_inventory, intents)]
+
+    def plan_search(self, request: SearchEventsRequest) -> SearchPlan:
+        """Plan an agent search over every target of its scope, without any source query. A target evaluates the
+        search only when its contract takes every condition (field, op and each value's type) and the compiled
+        query holds only literal-value clauses; a condition is never dropped, so a target that cannot take one is a
+        coverage cell naming what it could not evaluate, never zero hits. When no target can, the plan is a refusal
+        naming the searchable fields that resemble each condition's."""
+        args = request.arguments
+        window = Window(start=args.start, end=args.end)
+        flavor = getattr(getattr(self.client, "settings", None), "es_flavor", "elasticsearch")
+        targets = [contract for _target, contract in sorted(self.contracts.items())
+                   if contract is not None and _scoped(contract, args.scope)]
+        intents: list[SearchIntent] = []
+        skipped: list[tuple[str, str, str | None]] = []   # (target, problem, the condition's field when one)
+        for contract in targets:
+            # a condition naming logical Linux datasets selects the Linux layout's fields, as the compiler does
+            provisional = SearchIntent(kind="raw", target=contract.target, window=window, filters=[
+                Predicate(field=item.field, op=item.op, value=item.values if item.op == "in" else item.values[0])
+                for item in args.conditions])
+            os_family = _intent_os_family(provisional)
+            predicates: list[Predicate] = []
+            problem = field_name = None
+            for condition in args.conditions:
+                predicate, problem = _search_predicate(contract, condition, os_family)
+                if predicate is None:
+                    field_name = condition.field
+                    break
+                predicates.append(predicate)
+            if problem is None:
+                intent = SearchIntent(kind="raw", target=contract.target, window=window, filters=predicates,
+                                      max_records=SEARCH_LEAF_RECORDS, purpose=SEARCH_PURPOSE)
+                try:
+                    unsafe = _unsafe_clause(compile_es(intent, contract, flavor).body["query"])
+                except (CompileError, ValueError, TypeError) as error:
+                    problem = f"the conditions cannot be compiled exactly for this source ({_text(error)})"
+                else:
+                    if unsafe is not None:
+                        problem = f"the conditions compile to a {unsafe} clause, which agent search does not send"
+            if problem is None:
+                intents.append(intent)
+            else:
+                skipped.append((contract.target, problem, field_name))
+        coverage = []
+        for target, problem, field_name in skipped:
+            reason = f"not evaluated: {target}: {problem}"
+            if field_name is not None:
+                similar, _count = _similar_fields([self.contracts[target]], field_name)
+                if similar:
+                    reason += "; similar searchable fields: " + ", ".join(
+                        item["field"] for item in similar[:SEARCH_REASON_SIMILAR])
+            coverage.append(PivotCoverage(
+                target=target, dataset=None, start=args.start, end=args.end, status="partial",
+                reasons=[reason], returned=0, total=None,
+                unresolved_ranges=[_range(args.start, args.end, reason)],
+            ))
+        if not intents:
+            return SearchPlan([], coverage, self._search_refusal(request, targets, skipped))
+        scoped = {contract.target: contract for contract in targets}
+        coverage.extend(_nxlog_mixed_coverage(scoped, request))
+        coverage.extend(_text_host_coverage(scoped, self.dataset_inventory, intents))
+        return SearchPlan(intents, coverage)
+
+    def search_refusal(self, request: SearchEventsRequest) -> dict | None:
+        """The refusal an agent search gets before any source query, or None when some target can evaluate it."""
+        return self.plan_search(request).refusal
+
+    @staticmethod
+    def _search_refusal(request: SearchEventsRequest, targets: list[FieldContract],
+                        skipped: list[tuple[str, str, str | None]]) -> dict:
+        scope = request.arguments.scope
+        if not targets:
+            return {"code": "scope_has_no_source", "message": (
+                f"this hunt has no {scope} source to search; scope host searches endpoint and host logs, network "
+                "searches network logs and sessions, all searches both"),
+                "reasons": [refusal_reason("scope", "no_source")]}
+        failing = {field_name for _target, _problem, field_name in skipped if field_name is not None}
+        conditions = []
+        for condition in request.arguments.conditions:
+            if condition.field not in failing:
+                continue
+            similar, count = _similar_fields(targets, condition.field)
+            conditions.append({"field": condition.field, "op": condition.op, "similar_fields": similar,
+                               "searchable_field_count": count})
+        problems = [{"target": target, "problem": _text(problem)} for target, problem, _field in skipped]
+        return {
+            "code": "search_unsupported",
+            "message": (f"no {scope} source can evaluate every condition, so nothing was searched; each target's "
+                        "problem is listed, and similar_fields names searchable typed fields that resemble each "
+                        "condition's field, with the operations each takes"),
+            "reasons": [refusal_reason("conditions[].field", "unsupported_field") if failing
+                        else refusal_reason("conditions", "not_compilable")],
+            "conditions": conditions,
+            "targets": problems[:SEARCH_REFUSAL_TARGETS],
+            "targets_omitted": max(0, len(problems) - SEARCH_REFUSAL_TARGETS),
+        }
 
     @staticmethod
     def _intent_dataset(intent: SearchIntent) -> str | None:
@@ -1584,6 +1839,10 @@ class PivotExecutor:
 
     @staticmethod
     def _retain(request: ToolRequest, event: TypedEvent) -> bool:
+        if isinstance(request, SearchEventsRequest):
+            # the source matched the typed conditions on the contract's native fields: every record it returned is
+            # the search's answer (a record no normalizer read is named by the search, never dropped silently)
+            return True
         args = request.arguments
         windows_host = event.get("host.os.family") == "windows" or event.normalizer.startswith("windows-")
 
@@ -1747,8 +2006,21 @@ class PivotExecutor:
         coverage: list[PivotCoverage] = list(planning_coverage)
         successful_outcomes = 0
         incomplete = bool(planning_coverage)
+        search = isinstance(request, SearchEventsRequest)
+        search_fetched = 0
 
         for intent in intents:
+            if search and search_fetched >= MAX_SEARCH_RECORDS:
+                # the search's shared row bound: each target not yet searched is named, never counted as no match
+                reason = f"search_record_limit:{MAX_SEARCH_RECORDS}: not evaluated: {intent.target}"
+                incomplete = True
+                reasons.append(reason)
+                coverage.append(PivotCoverage(
+                    target=intent.target, dataset=None, start=intent.window.start, end=intent.window.end,
+                    status="partial", reasons=[reason], returned=0, total=None,
+                    unresolved_ranges=[_range(intent.window.start, intent.window.end, reason)],
+                ))
+                continue
             fingerprint = digest({
                 "case_id": case_id,
                 "tool": request.model_dump(mode="json"),
@@ -1790,8 +2062,13 @@ class PivotExecutor:
                         f"{record['_index']}/{record['_id']}": record["_source"]
                         for record in outcome.records
                     }
-                    events, _skips, errors = normalize_hits(outcome.records,
-                                                            surrogate_free=getattr(outcome, "surrogate_free", False))
+                    search_fetched += outcome.returned
+                    contract = self.contracts[intent.target]
+                    # a plain Zeek target's records are read through its contract, as a link fetch reads them
+                    options = {"contract": contract} if search and contract.zeek_sensor else {}
+                    events, skips, errors = normalize_hits(outcome.records,
+                                                           surrogate_free=getattr(outcome, "surrogate_free", False),
+                                                           **options)
                     if any(event.family == "script_block" for event in events):
                         events = script_blocks.consume(events, sources)
                         sources.update(script_blocks.sources_for(events))
@@ -1799,6 +2076,9 @@ class PivotExecutor:
                         *self._ip_normalization_reasons(leaf_intent, outcome.records),
                         *_script_metadata_reasons(events),
                         *windows_identity_reasons(events),
+                        # a matched record no normalizer read is a match the search cannot show: named, not dropped
+                        *([f"records_not_normalized:{count}:{_text(why)}" for why, count in sorted(skips.items())
+                           if count] if search else []),
                     ]
                     if script_blocks.refusal_reason:
                         normalization_reasons.append(

@@ -7,7 +7,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 EntityKind = Literal["host", "account", "ip", "domain"]
-ToolName = Literal["entity_timeline", "auth_activity", "process_tree", "ids_alerts"]
+ToolName = Literal["entity_timeline", "auth_activity", "process_tree", "ids_alerts", "search_events"]
 DecisionAction = Literal["pivot", "escalate", "park_as_lead", "close", "spawn"]
 
 
@@ -168,4 +168,7 @@ class PivotResult(BaseModel):
     coverage: list[PivotCoverage] = Field(default_factory=list)
     reasons: list[str] = Field(default_factory=list)
     duration_ms: int = 0
+    # Sources a pivot could not reach at all (no coverage cell describes them), each named with why: a negative
+    # beside any of them is unresolved.
+    not_searched: list[str] = Field(default_factory=list)
 

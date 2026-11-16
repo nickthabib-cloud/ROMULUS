@@ -212,6 +212,7 @@ _TOOL_ALIAS_PATHS = {
     "entity_profile": ("entity.alias", "entity.events.*.alias"),
     "entity_timeline": _PIVOT_PATHS, "auth_activity": _PIVOT_PATHS,
     "process_tree": _PIVOT_PATHS, "ids_alerts": _PIVOT_PATHS, "follow_link": _PIVOT_PATHS,
+    "search_events": _PIVOT_PATHS,
     "open_hypothesis": ("hypothesis",), "update_hypothesis": ("hypothesis",),
     "propose_finding": ("finding", "duplicate"), "propose_link": ("link",),
 }
@@ -220,7 +221,8 @@ _ARGUMENT_ALIAS_PATHS = {
     "get_incident": ("incident",), "entity_profile": ("entity",),
     "entity_timeline": ("anchor", "entity"), "auth_activity": ("anchor", "entity"),
     "process_tree": ("anchor", "process"), "ids_alerts": ("anchor", "entity"),
-    "follow_link": ("anchor",), "open_hypothesis": ("entities.*", "supporting.*"),
+    "follow_link": ("anchor",), "search_events": ("anchor",),
+    "open_hypothesis": ("entities.*", "supporting.*"),
     "update_hypothesis": ("hypothesis", "add_support.*", "add_contradiction.*"),
     "propose_finding": ("cites.*", "hypothesis"), "propose_link": ("from", "to", "cites.*"),
     "add_note": ("target", "cites.*"), "request_rule": ("cites.*",),

@@ -215,7 +215,7 @@ build and refuses a mismatch before fetching more records. Older manifests retai
 
 - `web` and `cli` may import anything below them, but nothing imports `web` or `cli`.
 - `detect`, `decide`, and `report` never import `sources` adapters directly. They work on stored typed data.
-- `agent` emits validated typed pivots without importing any module under `romulus.sources`. The hunt-layer pivot executor converts them to `SearchIntent`s and owns source access.
+- `agent` emits validated typed pivots without importing any module under `romulus.sources`. The hunt-layer pivot executor converts them to `SearchIntent`s and owns source access. This includes the agent's typed search (`search_events`): the agent validates its shape (scope, operations, value counts and lengths), and the executor checks each condition against each target's field contract, compiles it, and refuses or lists as not evaluated whatever a target cannot take.
 - `baseline` defines source-neutral typed keys and imports neither `hunt` orchestration nor `sources` adapters.
 - `store` imports no domain logic packages.
 
