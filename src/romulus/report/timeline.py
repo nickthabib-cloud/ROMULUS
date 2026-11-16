@@ -27,11 +27,11 @@ def _x(ts: datetime, start: datetime, end: datetime) -> float:
     return round(LEFT + frac * (WIDTH - LEFT - RIGHT), 1)
 
 
-def _style(style) -> str:
-    """The drawing style of a stored link. A link the AI agent's pivot recorded carries the strength
-    `agent_hypothesis` and is drawn as an agent hypothesis. A strength this layout does not know is drawn as an
+def _style(style, link_type: str = "") -> str:
+    """The drawing style of a stored link. A link the AI agent recorded (strength `agent_hypothesis`, or a link
+    type named `agent_…`) is drawn as an agent hypothesis. A strength this layout does not know is drawn as an
     inferred link (dashed, a hypothesis), never as observed."""
-    if style == "agent_hypothesis":
+    if style == "agent_hypothesis" or str(link_type).startswith("agent_"):
         return "agent"
     return style if style in LINK_STYLES else "inferred"
 
@@ -85,9 +85,9 @@ def build_timeline(findings: list[dict], edges: list[dict], analyst_links: list[
 
     hidden["findings_on_hidden_rows"] = sum(1 for f in shown if _rows_of(f) and f["id"] not in primary)
     links = []
-    candidates = [{"from": e["from"], "to": e["to"], "style": _style(e["style"]),
+    candidates = [{"from": e["from"], "to": e["to"], "style": (style := _style(e["style"], e["link_type"])),
                    "label": e["link_type"].replace("_", " ") + (
-                       " (AI agent hypothesis, unconfirmed)" if _style(e["style"]) == "agent" else "")}
+                       " (AI agent hypothesis, unconfirmed)" if style == "agent" else "")}
                   for e in edges]
     candidates += [{"from": a["from_finding"], "to": a["to_finding"], "style": "analyst",
                     "label": f"{a['relation']} (analyst assertion, not proven)"} for a in analyst_links]

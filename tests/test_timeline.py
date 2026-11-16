@@ -37,13 +37,15 @@ def test_rows_marks_and_link_styles():
 def test_agent_pivot_links_and_unknown_strengths_are_drawn_as_hypotheses():
     findings = [finding("A", 10), finding("B", 20), finding("C", 30)]
     edges = [{"from": "A", "to": "B", "style": "agent_hypothesis", "link_type": "agent_search_events"},
-             {"from": "B", "to": "C", "style": "some_future_strength", "link_type": "flow_host_side"}]
+             {"from": "B", "to": "C", "style": "some_future_strength", "link_type": "flow_host_side"},
+             {"from": "A", "to": "C", "style": "some_future_strength", "link_type": "agent_follow_link"}]
     tl = build_timeline(findings, edges, [], T0, T0 + timedelta(hours=1))
     links = {(li["from"], li["to"]): li for li in tl["links"]}
     assert links[("A", "B")]["style"] == "agent" and "AI agent hypothesis, unconfirmed" in links[("A", "B")]["label"]
     assert links[("B", "C")]["style"] == "inferred"                    # never drawn as observed
+    assert links[("A", "C")]["style"] == "agent"                       # an agent link type stays the agent's
     tl = build_timeline(findings, edges, [], T0, T0 + timedelta(hours=1), styles=["observed"])
-    assert tl["hidden"]["links_by_style"] == {"agent": 1, "inferred": 1}
+    assert tl["hidden"]["links_by_style"] == {"agent": 2, "inferred": 1}
 
 
 def test_filters_report_what_they_hide():
