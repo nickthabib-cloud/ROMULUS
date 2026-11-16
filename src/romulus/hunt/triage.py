@@ -1,8 +1,10 @@
 """Run the AI triage pass on a finished hunt under the agent lease, and export the triage order.
 
-The pass runs after the agent phase when the agent is enabled, or on demand (`romulus triage <hunt>`). It claims the
-hunt's agent lease, so it never overlaps detection, the agent, deletion or maintenance, and always releases it without
-touching the agent's state; a hunt with no agent record is left with none. It stages under the hunt's stage
+When the agent is enabled the pass runs inside the agent phase, under that phase's lease, after the investigation and
+before the assessment (whose input carries its verdicts); when the phase ran none (it reused an assessment, or ended
+early) it runs after the phase. It also runs on demand (`romulus triage <hunt>`). Outside the agent phase it claims
+the hunt's agent lease, so it never overlaps detection, the agent, deletion or maintenance, and always releases it
+without touching the agent's state; a hunt with no agent record is left with none. It stages under the hunt's stage
 directory, held to the site's stage byte budget. Every failure stays inside the pass: it is recorded, and the report
 keeps its deterministic order.
 """
@@ -34,6 +36,54 @@ def stage_limits(s: Settings) -> dict:
     return {"workdir": str(s.stage_path), "max_bytes": int(budget.disk_total), "reserve_bytes": int(budget.reserve)}
 
 
+def _ready(s: Settings, readiness):
+    """The triage model's readiness: `readiness` when it is for that model, else checked again."""
+    from romulus.agent.provider import agent_readiness
+    if readiness is None or getattr(readiness, "model", s.agent_model.strip()) != s.agent_model.strip():
+        readiness = agent_readiness(s)
+    return readiness
+
+
+def _pass(s: Settings, repo: Repo, hunt_id: str, owner: str, heartbeat, *, provider, readiness, build, force: bool,
+          source: str) -> dict:
+    """One pass under a lease `owner` already holds: never raises for anything but a lost lease; a failure is
+    recorded and returned as the summary."""
+    try:
+        if provider is None:
+            from romulus.agent.provider import build_provider
+            provider = (build or build_provider)(s, readiness=readiness)
+        return run_triage_pass(s, repo, hunt_id, provider, owner_token=owner, heartbeat=heartbeat, force=force,
+                               model_source=source, **stage_limits(s))
+    except Exception as exc:
+        if is_lease_lost(exc):
+            raise
+        log.exception("AI triage pass failed")
+        summary = {"label": LABEL, "status": "failed", "reason": f"triage_error: {type(exc).__name__}: {exc}"[:500],
+                   "at": str(utcnow())}
+        try:
+            repo.audit("system", TRIAGE_FAILED, hunt_id, summary, owner_token=owner)
+        except Exception as failure:
+            if is_lease_lost(failure):
+                raise
+            log.exception("could not record the triage failure")
+        return summary
+
+
+def run_triage_in_phase(s: Settings, repo: Repo, hunt_id: str, *, owner_token: str, heartbeat, readiness=None,
+                        build: Callable | None = None, provider=None) -> dict:
+    """Run one triage pass inside the agent phase, under the agent lease that phase holds (no claim or release):
+    after the investigation and before the assessment, which reads its verdicts. The same model and provider choice
+    as `run_triage`; a completed pass with the same digest is reused. Raises only for a lost lease."""
+    _chosen, source = triage_model(s)
+    s = triage_settings(s)
+    if provider is None:
+        readiness = _ready(s, readiness)
+        if not readiness.ready:
+            return {"status": "skipped", "reason": f"provider_not_ready: {readiness.message()}"}
+    return _pass(s, repo, hunt_id, owner_token, heartbeat, provider=provider, readiness=readiness, build=build,
+                 force=False, source=source)
+
+
 def run_triage(s: Settings, repo: Repo, hunt_id: str, *, provider=None, readiness=None, force: bool = False,
                build: Callable | None = None, model: str | None = None) -> dict:
     """Claim the agent lease, run one triage pass and release the lease. Never raises for a provider, budget or
@@ -44,9 +94,7 @@ def run_triage(s: Settings, repo: Repo, hunt_id: str, *, provider=None, readines
     _chosen, source = triage_model(s, model)
     s = triage_settings(s, model)
     if provider is None:
-        from romulus.agent.provider import agent_readiness, build_provider
-        if readiness is None or getattr(readiness, "model", s.agent_model.strip()) != s.agent_model.strip():
-            readiness = agent_readiness(s)
+        readiness = _ready(s, readiness)
         if not readiness.ready:
             return {"status": "skipped", "reason": f"provider_not_ready: {readiness.message()}"}
     try:
@@ -56,10 +104,8 @@ def run_triage(s: Settings, repo: Repo, hunt_id: str, *, provider=None, readines
     summary: dict = {"status": "partial", "reason": "lease_lost"}
     try:
         with _agent_heartbeat(repo, hunt_id, owner, _lease_seconds(s)) as heartbeat:
-            if provider is None:
-                provider = (build or build_provider)(s, readiness=readiness)
-            summary = run_triage_pass(s, repo, hunt_id, provider, owner_token=owner, heartbeat=heartbeat, force=force,
-                                      model_source=source, **stage_limits(s))
+            summary = _pass(s, repo, hunt_id, owner, heartbeat, provider=provider, readiness=readiness, build=build,
+                            force=force, source=source)
     except Exception as exc:
         if is_lease_lost(exc):
             return summary

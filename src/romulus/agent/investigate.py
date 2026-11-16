@@ -21,6 +21,7 @@ from romulus.agent.admission import (
 )
 from romulus.agent.assessment import SECRET_GUARD_SUMMARY, assess_output, run_assessment, template_assessment
 from romulus.agent.dossier import build_dossier
+from romulus.agent.grounding import triage_context
 from romulus.agent.provider import (
     AgentBudget,
     BudgetExhausted,
@@ -61,6 +62,8 @@ class AgentPhaseResult:
     refusals: dict = field(default_factory=dict)
     # sessions the secret guard ended, by setting name (never a value)
     secret_guard: dict = field(default_factory=dict)
+    # the AI triage pass run before the assessment (its summary), when the phase ran one
+    triage: dict | None = None
 
     def as_dict(self) -> dict:
         out = {"status": self.state, "reason": self.reason, "prompt_digests": self.prompt_digests,
@@ -68,6 +71,8 @@ class AgentPhaseResult:
                "unworked": self.unworked, "usage": self.usage, "refusals": self.refusals}
         if self.secret_guard:
             out["secret_guard"] = self.secret_guard
+        if self.triage is not None:
+            out["ai_triage"] = self.triage
         return out
 
 
@@ -971,22 +976,45 @@ def recover_agent_finalization(repo: Repo, hunt_id: str, *, owner_token=None) ->
 def run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
                     toolbox_factory: Callable[[str], Toolbox], owner_token: str | None = None,
                     clock: Callable[[], float] = monotonic,
-                    heartbeat: Callable[[], None] | None = None) -> AgentPhaseResult:
-    """Run bounded agent work; losing ownership never triggers another fenced write."""
+                    heartbeat: Callable[[], None] | None = None,
+                    triage: Callable[[Callable[[], None]], dict] | None = None) -> AgentPhaseResult:
+    """Run bounded agent work; losing ownership never triggers another fenced write. `triage(heartbeat)` runs the AI
+    triage pass under this phase's lease and returns its summary; given, it runs after the investigation and before
+    the assessment, whose input then carries its verdicts."""
     try:
         return _run_agent_phase(settings, repo, hunt_id, provider=provider, toolbox_factory=toolbox_factory,
-                                owner_token=owner_token, clock=clock, heartbeat=heartbeat)
+                                owner_token=owner_token, clock=clock, heartbeat=heartbeat, triage=triage)
     except Exception as exc:
         if not is_lease_lost(exc):
             raise
         return AgentPhaseResult("partial", "lease_lost", {}, {})
 
 
+def _triage_before_assess(repo: Repo, hunt_id: str, triage, budget: AgentBudget,
+                          heartbeat: Callable[[], None]) -> dict:
+    """Run the triage pass (its own budget and model) and keep its wall time out of the agent's budget. It reads only
+    deterministic findings, so it never depends on the assessment. Any failure but a lost lease is its summary."""
+    started = budget.clock()
+    try:
+        if not repo.reportable_count(hunt_id):
+            return {"status": "skipped", "reason": "no surfaced findings"}
+        return triage(heartbeat)
+    except Exception as exc:
+        if is_lease_lost(exc):
+            raise
+        log.exception("AI triage before the assessment failed")
+        return {"status": "failed", "reason": f"triage_error: {type(exc).__name__}: {exc}"[:300]}
+    finally:
+        budget.exclude_wall(budget.clock() - started)
+
+
 def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
                     toolbox_factory: Callable[[str], Toolbox], owner_token: str | None = None,
                     clock: Callable[[], float] = monotonic,
-                    heartbeat: Callable[[], None] | None = None) -> AgentPhaseResult:
-    """Run persisted sessions before atomically finalizing their deterministic result projection."""
+                    heartbeat: Callable[[], None] | None = None,
+                    triage: Callable[[Callable[[], None]], dict] | None = None) -> AgentPhaseResult:
+    """Run persisted sessions before atomically finalizing their deterministic result projection. The phases run in
+    order: orient, investigate, the AI triage pass (when given), assess."""
     heartbeat = heartbeat or (lambda: None)
     heartbeat()
     hunt = repo.get_hunt(hunt_id)
@@ -1084,12 +1112,17 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
             break
 
     existing_assessments = repo.agent_assessments(hunt_id)
+    triage_summary = None
     if existing_assessments and existing_assessments[-1].get("source") == "agent" and not assessment_stale:
         assessment = {"revision": existing_assessments[-1]["revision"], "body": existing_assessments[-1]["body"]}
     else:
+        # the triage pass runs only when an assessment is about to: its verdicts are part of the assess input
+        if triage is not None:
+            triage_summary = _triage_before_assess(repo, hunt_id, triage, budget, heartbeat)
+        context = triage_context(triage_summary, enabled=triage is not None or settings.agent_triage == "on")
         try:
             assessment = run_assessment(settings, repo, hunt_id, provider, budget, owner_token=owner_token,
-                                        clock=clock, heartbeat=heartbeat)
+                                        clock=clock, heartbeat=heartbeat, triage=context)
         except Exception as exc:
             if is_lease_lost(exc):
                 raise
@@ -1123,9 +1156,10 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
     if consecutive_outages >= 2 and not assessment_fault:
         state = "partial"
     reason = "; ".join(dict.fromkeys([*sorted(limits_hit), *reasons])) or None
-    usage = repo.agent_usage(hunt_id)
+    # the agent's own calls: the triage pass spends from its own budget and reports its usage in its summary
+    usage = repo.agent_usage(hunt_id, exclude_purposes=(TRIAGE_PURPOSE,))
     provider_data = {**provider_data, "models_reported": usage.get("models_reported", [])}
     heartbeat()
     result = AgentPhaseResult(state, reason, prompt_digests, provider_data, all_sessions,
-                              sorted(limits_hit), _unworked(repo, hunt_id), usage)
+                              sorted(limits_hit), _unworked(repo, hunt_id), usage, triage=triage_summary)
     return _finalize(repo, hunt_id, result, started_at=start, owner_token=owner_token)

@@ -226,8 +226,16 @@ def _ai_agent_phase(s: Settings, repo: Repo, hunt_id: str, manifest: dict, owner
                 s, repo, hunt_id, client=client, contracts=contracts, session_id=session_id,
                 owner_token=owner_token, heartbeat=heartbeat,
             )
+            triage = None
+            if s.agent_triage == "on":
+                from romulus.hunt.triage import run_triage_in_phase
+
+                def triage(phase_heartbeat):
+                    # the triage pass under this phase's lease, before the assessment reads its verdicts
+                    return run_triage_in_phase(s, repo, hunt_id, owner_token=owner_token, heartbeat=phase_heartbeat,
+                                               readiness=readiness, build=build_provider)
             return run_agent_phase(s, repo, hunt_id, provider=provider, toolbox_factory=toolbox_factory,
-                                   owner_token=owner_token, heartbeat=heartbeat).as_dict()
+                                   owner_token=owner_token, heartbeat=heartbeat, triage=triage).as_dict()
     except Exception as exc:
         if is_lease_lost(exc):
             return {"status": "partial", "reason": "lease_lost", "unworked": []}
@@ -565,9 +573,13 @@ def run_hunt(s: Settings, hunt_id: str, on_candidate=None, expand: bool | None =
 
 
 def _triage_after_agent(s: Settings, repo: Repo, hunt_id: str, manifest: dict, agent_summary: dict) -> dict | None:
-    """Run the AI triage pass once the agent phase has ended and released its lease, when the hunt asked for the agent,
+    """The AI triage pass the agent phase ran before its assessment, else one run now that the phase has ended and
+    released its lease (the phase reused its assessment, or ended before it), when the hunt asked for the agent,
     triage is on and the provider is ready. A hunt with no surfaced finding makes no call. Never raises: triage only
     orders a separate view, and its failure is recorded without touching the hunt or the agent's result."""
+    if isinstance(agent_summary.get("ai_triage"), dict):
+        # run once per phase: a second pass would replace the verdicts the stored narrative was checked against
+        return agent_summary["ai_triage"]
     try:
         if s.agent_triage != "on" or not (manifest.get("ai_agent") or {}).get("requested", False):
             return None
