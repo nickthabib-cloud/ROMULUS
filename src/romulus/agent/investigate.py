@@ -265,6 +265,16 @@ def _prompt_set() -> dict[str, str]:
     return {name: _prompt(name) for name in names}
 
 
+def _agent_usage(repo: Repo, hunt_id: str) -> dict:
+    """The agent's own calls: the triage pass spends from its own budget and reports its usage in its summary."""
+    return repo.agent_usage(hunt_id, exclude_purposes=(TRIAGE_PURPOSE,))
+
+
+def _triage_record(summary: dict) -> dict:
+    """What the phase's stored summary keeps of its triage pass (the pass's full summary is stored on its own)."""
+    return {key: summary[key] for key in ("status", "reason", "pass", "reused", "model") if key in summary}
+
+
 def _store_template(repo: Repo, hunt_id: str, reason: str, *, owner_token=None) -> dict:
     existing = repo.agent_assessments(hunt_id)
     if existing:
@@ -295,10 +305,13 @@ def _finalize(repo: Repo, hunt_id: str, result: AgentPhaseResult, *, started_at=
     _place_late_ranks(repo, hunt_id, owner_token=owner_token)
     result.refusals = repo.agent_refusal_counts(hunt_id)
     result.secret_guard = repo.agent_secret_guard_counts(hunt_id)
+    stored = result.as_dict()
+    if result.triage is not None:
+        stored["ai_triage"] = _triage_record(result.triage)
     repo.finalize_agent_run(hunt_id, {
         "state": result.state, "reason": result.reason, "prompt_digests": result.prompt_digests,
         "provider": result.provider, "started_at": started_at, "ended_at": utcnow(),
-    }, owner_token=owner_token, summary=result.as_dict())
+    }, owner_token=owner_token, summary=stored)
     return result
 
 
@@ -307,7 +320,7 @@ def skip_agent_phase(settings: Settings, repo: Repo, hunt_id: str, reason: str, 
     """Record an off or unavailable phase without touching deterministic hunt state."""
     _store_template(repo, hunt_id, reason, owner_token=owner_token)
     result = AgentPhaseResult("skipped", reason[:500], prompt_digests or {}, provider or {},
-                              usage=repo.agent_usage(hunt_id))
+                              usage=_agent_usage(repo, hunt_id))
     return _finalize(repo, hunt_id, result, owner_token=owner_token)
 
 
@@ -320,7 +333,7 @@ def fail_agent_phase(repo: Repo, hunt_id: str, reason: str, *, owner_token=None)
             return AgentPhaseResult("partial", "lease_lost", {}, {}).as_dict()
         reason = f"{reason}; template_error:{type(exc).__name__}"[:500]
     result = AgentPhaseResult("failed", reason[:500], existing.get("prompt_digests") or {},
-                              existing.get("provider") or {}, usage=repo.agent_usage(hunt_id))
+                              existing.get("provider") or {}, usage=_agent_usage(repo, hunt_id))
     try:
         return _finalize(repo, hunt_id, result, started_at=existing.get("started_at") or utcnow(),
                          owner_token=owner_token).as_dict()
@@ -967,7 +980,7 @@ def recover_agent_finalization(repo: Repo, hunt_id: str, *, owner_token=None) ->
         recovered = AgentPhaseResult("partial", reason,
                                      existing.get("prompt_digests") or {},
                                      existing.get("provider") or {}, session_views,
-                                     usage=repo.agent_usage(hunt_id))
+                                     usage=_agent_usage(repo, hunt_id))
         return _finalize(repo, hunt_id, recovered, started_at=existing.get("started_at"),
                          owner_token=owner_token)
     return None
@@ -1029,14 +1042,14 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
     existing = repo.agent_run(hunt_id)
     if existing and existing.get("state") == "completed" and repo.agent_assessments(hunt_id):
         return AgentPhaseResult("completed", existing.get("reason"), existing.get("prompt_digests") or {},
-                                existing.get("provider") or provider_data, usage=repo.agent_usage(hunt_id))
+                                existing.get("provider") or provider_data, usage=_agent_usage(repo, hunt_id))
     _recover_running_sessions(repo, hunt_id, owner_token=owner_token)
     budget = _budget(settings, hunt["manifest"], repo, hunt_id, clock)
     gate = _BudgetGate(budget, settings, assess_output=assess_output(settings, provider).limit)
     start = existing.get("started_at") if existing and existing.get("started_at") else utcnow()
     repo.save_agent_run({"hunt_id": hunt_id, "state": "running", "reason": None,
                          "prompt_digests": prompt_digests,
-                         "provider": {**provider_data, "models_reported": repo.agent_usage(hunt_id).get("models_reported", [])},
+                         "provider": {**provider_data, "models_reported": _agent_usage(repo, hunt_id).get("models_reported", [])},
                          "started_at": start, "ended_at": None}, owner_token=owner_token)
     all_sessions = []
     limits_hit: set[str] = set()
@@ -1156,8 +1169,7 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
     if consecutive_outages >= 2 and not assessment_fault:
         state = "partial"
     reason = "; ".join(dict.fromkeys([*sorted(limits_hit), *reasons])) or None
-    # the agent's own calls: the triage pass spends from its own budget and reports its usage in its summary
-    usage = repo.agent_usage(hunt_id, exclude_purposes=(TRIAGE_PURPOSE,))
+    usage = _agent_usage(repo, hunt_id)
     provider_data = {**provider_data, "models_reported": usage.get("models_reported", [])}
     heartbeat()
     result = AgentPhaseResult(state, reason, prompt_digests, provider_data, all_sessions,

@@ -113,6 +113,49 @@ def test_without_a_final_ranking_reported_follows_the_lanes_of_the_headline_resu
     assert not grounding.EvidenceStrength(repo, "h1", OFF).findings([cid])[cid].reported
 
 
+def test_verdicts_are_read_by_group_on_an_unranked_hunt_and_reported_is_not_only_confirmed():
+    repo = ta._hunt(filler=10, ranked=False)
+    run_triage_in_phase(ta.settings(), repo, "h1", owner_token=None, heartbeat=lambda: None,
+                        provider=ta.FakeTriage(ta.by_rule({"r.attack"})))
+    found = grounding.EvidenceStrength(repo, "h1", USED).findings(["z-attack-0", "f-0001", "f-0000"])
+    assert found["z-attack-0"].triage == "likely_attack" and found["f-0001"].triage == "likely_benign"
+    assert found["f-0000"].reported and not found["f-0000"].confirmed                     # lane high, unranked
+    # ranked: a lead finding on a confirmed entity is Reported without being confirmed, and anchors a phase
+    ranked = ta._repo()
+    ta._insert(ranked, [ta._row("c-urgent", "r.confirmed", lane="urgent", host="quiet"),
+                        ta._row("q-lead", "r.q", lane="lead", host="quiet"),
+                        ta._row("o-lead", "r.o", lane="lead", host="other")])
+    from romulus.hunt.rank import PASS_FINAL, compute_rank_pass
+    compute_rank_pass(ranked, "h1", PASS_FINAL)
+    strength = grounding.EvidenceStrength(ranked, "h1", OFF).findings(["q-lead", "o-lead"])
+    assert strength["q-lead"].reported and not strength["q-lead"].confirmed and strength["q-lead"].strong
+    assert not strength["o-lead"].reported
+    checked, counts = check_assessment(ranked, "h1", _reply([_p([_s(_f(ranked, "q-lead"))], "Discovery"),
+                                                             _p([_s(_f(ranked, "o-lead"))], "Discovery")]),
+                                       triage=OFF)
+    assert [p["phase"] for p in checked["narrative"]] == ["Discovery", "Context"]
+    assert counts == {"phase_weakly_supported": 1}
+
+
+def test_an_assessment_outside_the_phase_reads_the_latest_pass_unless_triage_is_off(tmp_path):
+    from romulus.agent.assessment import run_assessment
+    from romulus.agent.provider import AgentBudget, BudgetLimits
+    repo = _hunt()
+    seen = {}
+
+    def answer(request):
+        seen["input"] = json.loads(request.messages[1]["content"].split("\n", 1)[1])
+        return response(parsed=_reply([_p([_s(_f(repo, "f-0001"))], "Persistence")]))
+    for value, expected in (("on", {"verdicts": "available", "status": "complete", "pass": 1}),
+                            ("off", {"verdicts": "unavailable", "status": "off"})):
+        budget = AgentBudget.from_usage(BudgetLimits(10, 1_000_000, 600, 0, 0, 0), {}, clock=lambda: 0.0)
+        result = run_assessment(Settings(home=tmp_path, agent_triage=value), repo, "h1",
+                                ScriptedProvider([answer]), budget, clock=lambda: 0.0)
+        assert seen["input"]["triage"] == expected
+        assert result["body"]["narrative"][0]["support_reason"] == (
+            "triaged_likely_benign" if value == "on" else "no_reported_finding")
+
+
 def test_triage_context_says_whether_verdicts_are_available():
     assert triage_context(None, enabled=False).view() == {"verdicts": "unavailable", "status": "off"}
     assert triage_context(None).view() == {"verdicts": "unavailable", "status": "not_run"}
@@ -282,8 +325,11 @@ def test_the_phase_runs_orient_investigate_triage_then_assess_under_one_lease(tm
     assert [p["phase"] for p in stored["body"]["narrative"]] == ["Lateral Movement", "Context"]
     assert stored["checker"] == {"phase_weakly_supported": 1, "weakly_supported_benign_triage": 1,
                                  "labelled_uncertain_benign_triage": 1}
-    # the phase result carries the pass; its own usage leaves the triage calls out
+    # the phase result carries the pass; the stored phase summary keeps a short record of it (the pass's full
+    # summary is stored on its own); its own usage leaves the triage calls out
     assert result.state == "completed" and result.as_dict()["ai_triage"]["status"] == "complete"
+    record = repo.latest_audit("h1", "hunt.ai_agent_summary")["detail"]["ai_triage"]
+    assert record == {"status": "complete", "reason": None, "pass": 1, "model": "fake-triage-model"}
     assert result.usage["calls"] == 3 == len(provider.requests)
     assert repo.agent_usage("h1", purposes=(TRIAGE_PURPOSE,))["calls"] == len(triage_provider.requests) > 0
 
