@@ -9,7 +9,8 @@ read price is the input price (cache reads never cost more than uncached input).
 the input price, or for the anthropic provider 1.25 times it, the documented price of the five-minute cache
 writes that adapter makes. The worst case of the next call prices its whole prompt at the dearest of the three.
 
-With the anthropic refusal fallback on, another model may answer a call the configured model declined, at its
+With the anthropic refusal fallback on (AGENT_REFUSAL_FALLBACK=default, for a model the fallback serves: see
+`romulus.agent.provider.fallbacks`), another model may answer a call the configured model declined, at its
 own prices, after the declined attempt was billed too. Each billed attempt is priced by the model that served it
 (an attempt whose model is unknown at the dearer of the two price lists), and the worst case of the next call
 reserves one full attempt at each model's prices.
@@ -28,6 +29,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from romulus.agent.provider.base import ChatResult, estimate_tokens
+from romulus.agent.provider.fallbacks import refusal_fallback_on
 from romulus.config import Settings
 
 # the anthropic adapter's cache writes use the default five-minute lifetime, priced at 1.25x the input price
@@ -78,7 +80,7 @@ class BudgetLimits:
         write = s.agent_price_cache_write_per_mtok
         if not write and anthropic:
             write = s.agent_price_input_per_mtok * ANTHROPIC_CACHE_WRITE_MULTIPLIER
-        fallback = anthropic and s.agent_refusal_fallback == "default"
+        fallback = refusal_fallback_on(s)
         return cls(s.agent_max_calls, s.agent_max_tokens, s.agent_max_wall_seconds, s.agent_max_cost_usd,
                    s.agent_price_input_per_mtok, s.agent_price_output_per_mtok,
                    s.agent_price_cache_read_per_mtok, write, s.agent_model.strip(), fallback,

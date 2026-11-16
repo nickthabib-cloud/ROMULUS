@@ -101,6 +101,31 @@ def test_the_fallback_attempt_is_reserved_only_when_the_fallback_is_on():
     assert plain.worst_tokens_cached(1000, 900, 100) == plain.worst_tokens(1000, 100) == 1100
 
 
+@pytest.mark.parametrize(("model", "fallback", "reserved"), [
+    ("claude-haiku-5-5", "default", False),       # no server-side fallback: no attempt that can never happen
+    ("claude-opus-5-5", "default", True), ("claude-fable-5-2", "default", True),
+    ("claude-unknown-9", "default", True),        # unknown: the safe over-reservation
+    ("claude-opus-5-5", "off", False),
+])
+def test_a_fallback_attempt_is_reserved_only_for_a_model_it_can_serve(tmp_path, model, fallback, reserved):
+    settings = Settings(home=tmp_path, agent_provider="anthropic", agent_model=model,
+                        agent_refusal_fallback=fallback)
+    limits = BudgetLimits.from_settings(settings)
+    assert limits.refusal_fallback is reserved
+    assert limits.attempts_reserved == (2 if reserved else 1)
+    single = limits.worst_tokens_cached(228_158, 219_000, OUTPUT)
+    assert single == int(21_900 + (228_158 - 219_000) * 1.25 + 0.5) + OUTPUT + (285_198 + OUTPUT if reserved else 0)
+
+
+def test_the_banner_mentions_a_fallback_answer_only_when_one_can_happen():
+    from romulus.agent.provider import egress_banners
+    usage = {"remote_calls": [{"endpoint_host": "api.example", "model": "m", "calls": 3}]}
+    served = {"options": {"refusal_fallback": "default"}}
+    unserved = {"options": {"refusal_fallback": "default", "refusal_fallback_served": False}}
+    assert "refusal-fallback" in egress_banners(served, usage)[0]
+    assert "refusal-fallback" not in egress_banners(unserved, usage)[0]
+
+
 def _growing_session(monkeypatch, tmp_path, *, clock, spent=800_000, second=None, name="grow"):
     engine, repo = _hunt(tmp_path, name)
     first = _reply([READ], prompt=220_000, write=219_000, completion=3000)

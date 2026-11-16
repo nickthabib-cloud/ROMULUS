@@ -41,6 +41,7 @@ from romulus.agent.provider.egress import (
     classify,
     system_resolver,
 )
+from romulus.agent.provider.fallbacks import refusal_fallback_on
 from romulus.config import Settings
 from romulus.store.db import digest
 
@@ -89,6 +90,9 @@ class AgentReadiness:
             out["options"] = {"effort": s.agent_effort, "max_output_tokens": s.agent_max_output_tokens,
                               "thinking_tokens": s.agent_thinking_tokens,
                               "refusal_fallback": s.agent_refusal_fallback}
+            if s.agent_refusal_fallback == "default" and not refusal_fallback_on(s):
+                # asked for, but the model has no server-side fallback: none is requested or reserved
+                out["options"]["refusal_fallback_served"] = False
         elif self.provider == "openai_responses":
             out["options"] = {"effort": s.agent_effort, "max_output_tokens": s.agent_max_output_tokens,
                               "thinking_tokens": s.agent_thinking_tokens}
@@ -112,7 +116,7 @@ def missing_prices(s: Settings) -> list[str]:
     output prices; a priced anthropic agent also needs the cache-read price (its prompt cache is always on) and,
     with the refusal fallback on, the fallback model's prices: without any one of them the cost is undercounted."""
     anthropic = s.agent_provider == "anthropic"
-    fallback = anthropic and s.agent_refusal_fallback == "default"
+    fallback = refusal_fallback_on(s)
     fallback_prices = [("AGENT_PRICE_FALLBACK_INPUT_PER_MTOK", s.agent_price_fallback_input_per_mtok),
                        ("AGENT_PRICE_FALLBACK_OUTPUT_PER_MTOK", s.agent_price_fallback_output_per_mtok),
                        ("AGENT_PRICE_FALLBACK_CACHE_READ_PER_MTOK", s.agent_price_fallback_cache_read_per_mtok)]
@@ -261,7 +265,8 @@ def record_failure(repo, provider: ChatProvider, *, hunt_id: str, purpose: str, 
 def egress_banners(configured: dict | None, usage: dict) -> list[str]:
     """Banners a hunt or report carries about remote model endpoints: one per remote host and model that
     actually received calls (from the stored call rows), else one for a configured remote endpoint."""
-    fallback = ((configured or {}).get("options") or {}).get("refusal_fallback") == "default"
+    options = (configured or {}).get("options") or {}
+    fallback = options.get("refusal_fallback") == "default" and options.get("refusal_fallback_served") is not False
     also = (" A call the provider's safety classifier declined may have been answered by its refusal-fallback "
             "model on the same host." if fallback else "")
     banners = [f"Telemetry excerpts were sent to {r['endpoint_host']} ({r['model']}) by the AI agent "
