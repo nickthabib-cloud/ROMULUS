@@ -48,7 +48,7 @@ from romulus.evidence.normalize import (
     is_elastic_suricata,
     normalize_hits,
 )
-from romulus.evidence.typed import VERBATIM_FIELDS, TypedEvent
+from romulus.evidence.typed import TypedEvent
 from romulus.evidence.windows import windows_identity_reasons
 from romulus.evidence.windows_catalog import (
     WINDOWS_CHANNELS,
@@ -74,7 +74,7 @@ from romulus.sources.compile import (
 from romulus.sources.es import ElasticClient, SourceError
 from romulus.sources.execute import execute
 from romulus.sources.models import Completeness, Predicate, SearchIntent, SearchOutcome, Window
-from romulus.sources.profile import LIMITED_KINDS, FieldContract
+from romulus.sources.profile import LIMITED_KINDS, VERBATIM_FIELDS, FieldContract
 from romulus.store.db import digest
 from romulus.store.repo import Repo
 

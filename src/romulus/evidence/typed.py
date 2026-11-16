@@ -15,21 +15,6 @@ NETWORK_OBSERVER_FAMILIES = {
 }
 
 
-# Typed fields whose value equals the stored value of the same-named native field, declared with the native mapping
-# types under which that holds whatever the shipper's spelling: the source compares addresses and integers by value,
-# and every normalizer that reads these fields from a stored field copies the value unchanged (an address in its
-# canonical text, a port as an integer). A search can call zero hits a confirmed absence only on fields declared
-# here; every other field is derived (case folded, a canonical account form, a short host name, parsed from text,
-# or not yet verified) and zero hits on it stay unresolved. A field joins only after every normalizer that emits it
-# is checked to copy it unchanged.
-VERBATIM_FIELDS: dict[str, frozenset[str]] = {
-    "source.ip": frozenset({"ip"}),
-    "destination.ip": frozenset({"ip"}),
-    "source.port": frozenset({"long", "integer", "short"}),
-    "destination.port": frozenset({"long", "integer", "short"}),
-}
-
-
 class Outcome(StrEnum):
     success = "success"
     failure = "failure"

@@ -51,6 +51,19 @@ OPS_BY_TYPE: dict[str, set[str]] = {
     # is never used for a value predicate.
     "flattened": {"eq", "in", "not_in", "prefix", "contains", "exists", "missing"},
 }
+# Typed fields whose value equals the stored value of the same-named native field, declared with the native mapping
+# types under which that holds whatever the shipper's spelling: the source compares addresses and integers by value,
+# and every normalizer that reads these fields from a stored field copies the value unchanged (an address in its
+# canonical text, a port as an integer). An agent search calls zero hits a confirmed absence only on fields declared
+# here, searched on their own stored field; every other field is derived (case folded, a canonical account form, a
+# short host name, parsed from text, or not yet verified) and zero hits on it stay unresolved. A field joins only
+# after every normalizer that emits it is checked to copy it unchanged.
+VERBATIM_FIELDS: dict[str, frozenset[str]] = {
+    "source.ip": frozenset({"ip"}),
+    "destination.ip": frozenset({"ip"}),
+    "source.port": frozenset({"long", "integer", "short"}),
+    "destination.port": frozenset({"long", "integer", "short"}),
+}
 AGGREGATABLE = {
     "keyword", "constant_keyword", "ip", "long", "integer", "short", "boolean", "date", "wildcard",
 }
