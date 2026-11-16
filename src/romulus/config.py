@@ -426,14 +426,20 @@ def triage_settings(settings: Settings, model: str | None = None) -> Settings:
     return settings if chosen == settings.agent_model else settings.model_copy(update={"agent_model": chosen})
 
 
+def secret_settings(settings: Settings) -> list[tuple[str, str]]:
+    """Every configured (non-empty) secret as (environment name, value), in field order. Callers report only the
+    name: a value never leaves this list."""
+    names = {field: key for key, field in ENV_MAP.items()}
+    return [(names.get(name, name.upper()), getattr(settings, name).get_secret_value())
+            for name in type(settings).model_fields
+            if isinstance(getattr(settings, name), SecretStr) and getattr(settings, name).get_secret_value()]
+
+
 def short_secrets(settings: Settings) -> list[str]:
     """The environment names of configured secrets shorter than MIN_SECRET_LENGTH (never their values or lengths).
     Text that short also turns up in ordinary words, so redacting it distorts prompts and reports, and below 4
     characters it is not redacted at all."""
-    names = {field: key for key, field in ENV_MAP.items()}
-    return sorted(names.get(name, name.upper()) for name in type(settings).model_fields
-                  if isinstance(getattr(settings, name), SecretStr)
-                  and 0 < len(getattr(settings, name).get_secret_value()) < MIN_SECRET_LENGTH)
+    return sorted(name for name, value in secret_settings(settings) if len(value) < MIN_SECRET_LENGTH)
 
 
 # how JSON encoders that escape HTML-significant characters write them (lower- and upper-case hex)
@@ -451,17 +457,28 @@ def _secret_forms(secret: str) -> set[str]:
 def redact_text(text: str, settings: Settings) -> str:
     """Remove any configured secret value from free text (logs, error messages): as written, as escaped inside a
     JSON string, and as a service's masked echo of a long key (its first characters, asterisks, its last four)."""
-    for name in type(settings).model_fields:
-        value = getattr(settings, name)
-        if isinstance(value, SecretStr):
-            secret = value.get_secret_value()
-            if secret and len(secret) >= 4:
-                for form in sorted(_secret_forms(secret), key=len, reverse=True):
-                    text = text.replace(form, "<redacted>")
-                if len(secret) >= MASKED_SECRET_MIN_LENGTH and "****" in text:
-                    # Key characters only, bounded and delimited: never spans punctuation or starts inside a word,
-                    # and stays linear on long runs.
-                    masked = (r"(?<![A-Za-z0-9_-])" + re.escape(secret[:3]) + r"[A-Za-z0-9_-]{0,64}\*{4,64}"
-                              r"[A-Za-z0-9_-]{0,16}?" + re.escape(secret[-4:]) + r"(?![A-Za-z0-9_-])")
-                    text = re.sub(masked, "<redacted>", text)
+    return redact_counted(text, settings, None)
+
+
+def redact_counted(text: str, settings: Settings, counts: dict[str, int] | None) -> str:
+    """`redact_text`, adding to `counts` how many replacements each secret's setting (by environment name) needed.
+    The counts carry names and numbers only: never a value or the text around it."""
+    for name, secret in secret_settings(settings):
+        if len(secret) < 4:
+            continue
+        replaced = 0
+        for form in sorted(_secret_forms(secret), key=len, reverse=True):
+            found = text.count(form)
+            if found:
+                replaced += found
+                text = text.replace(form, "<redacted>")
+        if len(secret) >= MASKED_SECRET_MIN_LENGTH and "****" in text:
+            # Key characters only, bounded and delimited: never spans punctuation or starts inside a word,
+            # and stays linear on long runs.
+            masked = (r"(?<![A-Za-z0-9_-])" + re.escape(secret[:3]) + r"[A-Za-z0-9_-]{0,64}\*{4,64}"
+                      r"[A-Za-z0-9_-]{0,16}?" + re.escape(secret[-4:]) + r"(?![A-Za-z0-9_-])")
+            text, found = re.subn(masked, "<redacted>", text)
+            replaced += found
+        if replaced and counts is not None:
+            counts[name] = counts.get(name, 0) + replaced
     return text

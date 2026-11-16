@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import ipaddress
+import math
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -19,6 +21,7 @@ from romulus.config import (
     MIN_SECRET_LENGTH,
     Settings,
     redact_text,
+    secret_settings,
     short_secrets,
     triage_settings,
 )
@@ -363,6 +366,86 @@ def check_secret_lengths(s: Settings) -> Check:
                  "redacted); use longer secrets")
 
 
+# A secret-typed setting is weak when any of these measures holds (doctor warns, never fails):
+# - it is under WEAK_SINGLE_CLASS_BELOW characters and uses one character class: all letters (either case), all
+#   digits, or all other characters. Ordinary words are all letters. A longer single-class value is left to the
+#   entropy measure, since a long random string of letters is strong.
+# - its estimated entropy, its length times the Shannon entropy of its own character distribution, is under
+#   WEAK_ENTROPY_BITS. The estimate is at most length x log2(length), so any value under about 12 characters scores
+#   below the threshold (such a value is weak whatever its characters); a 32-character random key scores about 150.
+# - it occurs as a whole word, in any case, in the product's own source or templates: public text the agent's secret
+#   guard would also match.
+# No wordlist is bundled with the product, so dictionary words are found by the first and last measures.
+# Secrets shorter than MIN_SECRET_LENGTH are reported by check_secret_lengths instead.
+WEAK_ENTROPY_BITS = 40.0
+WEAK_SINGLE_CLASS_BELOW = 32
+SOURCE_SUFFIXES = frozenset({".py", ".html", ".md", ".js", ".css", ".mako", ".txt", ".json", ".yml", ".yaml",
+                             ".toml", ".sql", ".j2"})
+SOURCE_FILE_MAX_BYTES = 8 * 2**20
+COARSE_LENGTH = 16     # the only length a warning gives: "under 16 characters"
+_WORD = "A-Za-z0-9_"
+
+
+def _entropy_bits(value: str) -> float:
+    counts: dict[str, int] = {}
+    for ch in value:
+        counts[ch] = counts.get(ch, 0) + 1
+    n = len(value)
+    return -n * sum(c / n * math.log2(c / n) for c in counts.values())
+
+
+def _single_class(value: str) -> bool:
+    classes = {"letter" if ch.isalpha() else "digit" if ch.isdigit() else "other" for ch in value}
+    return len(classes) == 1
+
+
+def _source_words(values: list[str], root: Path) -> set[str]:
+    """The values that occur as a whole word (any case) in the text files under `root`. Each file is read once."""
+    pending = {value: re.compile(rf"(?<![{_WORD}]){re.escape(value)}(?![{_WORD}])", re.IGNORECASE)
+               for value in values}
+    found: set[str] = set()
+    for path in sorted(root.rglob("*")):
+        if not pending:
+            break
+        try:
+            if path.suffix.lower() not in SOURCE_SUFFIXES or not path.is_file() \
+                    or path.stat().st_size > SOURCE_FILE_MAX_BYTES:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        lowered = text.lower()
+        for value, pattern in list(pending.items()):
+            if value.lower() in lowered and pattern.search(text):
+                found.add(value)
+                del pending[value]
+    return found
+
+
+def check_secret_strength(s: Settings, source_root: Path | None = None) -> Check:
+    """Warn about secret-typed settings that are low-entropy or dictionary-like (the measures above). Names only:
+    never a value, which measure fired, or a length beyond "under 16 characters"."""
+    secrets = [(name, value) for name, value in secret_settings(s) if len(value) >= MIN_SECRET_LENGTH]
+    if not secrets:
+        return Check("secrets.strength", "ok", "no secret long enough to judge is configured")
+    weak = {name for name, value in secrets
+            if (len(value) < WEAK_SINGLE_CLASS_BELOW and _single_class(value))
+            or _entropy_bits(value) < WEAK_ENTROPY_BITS}
+    rest = [value for name, value in secrets if name not in weak]
+    if rest:
+        in_source = _source_words(rest, source_root or Path(__file__).resolve().parent)
+        weak |= {name for name, value in secrets if value in in_source}
+    if not weak:
+        return Check("secrets.strength", "ok", "no configured secret is low-entropy or dictionary-like")
+    shown = ", ".join(f"{name} (under {COARSE_LENGTH} characters)" if len(value) < COARSE_LENGTH else name
+                      for name, value in secrets if name in weak)
+    return Check("secrets.strength", "warn",
+                 f"{shown}: low-entropy or dictionary-like. A weak secret is easier to guess, and the AI agent's "
+                 "secret guard matches its text wherever it appears: telemetry holding that text is redacted before "
+                 "the model sees it, hiding parts of those records, and a model reply that writes it ends that "
+                 "investigation session. Use a long random value", {"settings": sorted(weak)})
+
+
 def check_tshark(s: Settings) -> Check:
     exe = shutil.which(s.tshark_bin)
     if not exe:
@@ -575,6 +658,7 @@ def run_all(s: Settings, env_file: Path | None = None) -> list[Check]:
     checks += check_agent(s)
     checks += check_triage_model(s)
     checks.append(check_secret_lengths(s))
+    checks.append(check_secret_strength(s))
     checks.append(check_tshark(s))
     checks += check_paths(s, env_file)
     checks.append(check_site(s))

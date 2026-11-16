@@ -567,8 +567,8 @@ agent_session = Table(
     Column("started_at", DateTime(timezone=True), nullable=False),
     Column("ended_at", DateTime(timezone=True)),
     CheckConstraint("purpose IN ('orient','investigate','assess')", name="ck_agent_session_purpose"),
-    CheckConstraint("state IN ('running','finished','capped','context_full','refused','failed','interrupted','budget')",
-                    name="ck_agent_session_state"),
+    CheckConstraint("state IN ('running','finished','capped','context_full','refused','failed','interrupted','budget',"
+                    "'secret_guard')", name="ck_agent_session_state"),
     CheckConstraint("length(summary) <= 2000", name="ck_agent_session_summary"),
 )
 Index("ix_agent_session_hunt_id", agent_session.c.hunt_id)

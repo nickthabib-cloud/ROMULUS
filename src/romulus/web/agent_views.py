@@ -178,7 +178,12 @@ def panel(repo, hunt, usage, *, with_assessment=True):
             # why the model's tool calls and assessment answers were refused: counts by tool and reason
             "refused_calls": repo.agent_refusal_counts(hunt["id"]),
             # calls a fallback model answered after the configured model declined, and calls left declined
-            "fallbacks": fallback_view(repo, hunt["id"])}
+            "fallbacks": fallback_view(repo, hunt["id"]),
+            # what the secret guard did, by setting name only: replacements outgoing redaction made in telemetry
+            # sent to the model, and sessions ended because a reply held a secret's text
+            "redactions": dict((usage or {}).get("redactions") or {}),
+            "output_redactions": dict((usage or {}).get("output_redactions") or {}),
+            "secret_guard": repo.agent_secret_guard_counts(hunt["id"])}
 
 
 def hypotheses_page(repo, hunt_id, after=""):

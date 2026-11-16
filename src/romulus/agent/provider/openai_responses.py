@@ -23,8 +23,9 @@ Responses are sent with store=false, so they are not saved for later retrieval (
 applies): reasoning crosses turns as encrypted reasoning items. Each reply's output items travel in the provider
 state of its assistant message (ChatResult.assistant_message()) and are replayed unchanged in their place. An
 assistant turn without provider state (history from another provider) is sent from its text and tool calls alone. A
-state that is malformed or holds anything else, a turn whose text or tool calls no longer match its state, or one
-that holds a configured secret raises HistoryError before anything is sent.
+state that is malformed or holds anything else, or a turn whose text or tool calls no longer match its state, raises
+HistoryError before anything is sent; one that holds a configured secret's text raises its subclass
+SecretGuardTripped, which names the setting and the part of the turn, never the value.
 
 A refusal in the reply, a content-filter stop, and a response that failed under a safety policy are refused. Usage
 maps input_tokens (cached tokens included) to prompt tokens, output_tokens (reasoning included) to completion tokens,
@@ -58,11 +59,13 @@ from romulus.agent.provider.base import (
     ChatResult,
     HistoryError,
     ProviderUnavailable,
+    SecretGuardTripped,
     ToolCall,
     TransientFailure,
     Usage,
     error_message,
     parse_tool_arguments,
+    secret_trips,
 )
 from romulus.agent.provider.claude_messages import (
     _long_secrets,
@@ -178,17 +181,18 @@ def _kept(item: dict) -> dict:
     return kept
 
 
-def _plain_texts(items: list[dict]) -> list[str]:
-    """Every readable string a replayed reply carries (encrypted reasoning is opaque and never readable)."""
+def _plain_texts(items: list[dict]) -> list[tuple[str, str]]:
+    """Every readable string a replayed reply carries, with the part of the turn it is (see SECRET_GUARD_PARTS);
+    encrypted reasoning is opaque and never readable."""
     out = []
     for item in items:
         if item["type"] == "function_call":
-            out += [item["arguments"], item["name"]]
+            out += [("tool_input_streamed", item["arguments"]), ("tool_name", item["name"])]
         elif item["type"] == "message":
-            out += [p.get("text") or p.get("refusal") or "" for p in item["content"]]
+            out += [("text", p.get("text") or p.get("refusal") or "") for p in item["content"]]
         else:
-            out += [str(p.get("text", "")) for key in ("summary", "content") for p in item.get(key) or []
-                    if isinstance(p, dict)]
+            out += [("thinking", str(p.get("text", ""))) for key in ("summary", "content")
+                    for p in item.get(key) or [] if isinstance(p, dict)]
     return out
 
 
@@ -432,8 +436,9 @@ class OpenAIResponsesProvider(ChatProvider):
         if not same_calls or _text(original) != stored_text:
             raise HistoryError(f"assistant message {n} was changed after the model produced it; its reasoning no "
                                "longer matches the turn. Sessions must be append-only or start fresh")
-        if any(secret in text for secret in _long_secrets(self.s) for text in _plain_texts(items)):
-            raise HistoryError(f"assistant message {n} holds a configured secret; it is never sent")
+        trips = secret_trips(_plain_texts(items), _long_secrets(self.s))
+        if trips:
+            raise SecretGuardTripped(n, trips)
         return copy.deepcopy(items)
 
     # ---- reply ------------------------------------------------------------------------------------------------

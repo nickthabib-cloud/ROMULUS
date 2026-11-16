@@ -43,7 +43,7 @@ from romulus.agent.provider import (
     record_call,
     record_failure,
 )
-from romulus.agent.provider.base import estimate_tokens
+from romulus.agent.provider.base import estimate_tokens, redact_value
 from romulus.agent.provider.budget import Charge
 from romulus.agent.refusals import reason
 from romulus.agent.safety import injection_flags
@@ -107,7 +107,11 @@ DROP_REASONS = {
     "missing_rationale": "groups[].rationale: missing", "overlong_rationale": "groups[].rationale: too_long",
     "malformed_cites": "groups[].cites: type_mismatch", "too_many_cites": "groups[].cites: too_many_items",
     "foreign_citation": "groups[].cites[]: foreign_citation",
+    "redacted_incident_label": "groups[].incident_label: redacted",
 }
+# A label that held a configured secret's text: cleared, its verdict kept (counted with the drops, but not one).
+REDACTED_LABEL = "redacted_incident_label"
+REDACTED = "<redacted>"
 
 
 def _prompt() -> str:
@@ -275,6 +279,11 @@ def validate(parsed, chunk_ids: dict[str, list[str]]) -> tuple[dict[str, dict], 
         seen.add(group)
         assessment, label = item.get("assessment"), item.get("incident_label")
         rationale, cites = item.get("rationale"), item.get("cites")
+        if isinstance(label, str) and REDACTED in label:
+            # the label held a configured secret's text (the answer was redacted before validation): the verdict is
+            # kept without it, and counted; it is not dropped
+            drops[REDACTED_LABEL] += 1
+            label = None
         if assessment not in ASSESSMENTS:
             drops["bad_assessment"] += 1
         elif label not in (None, "") and (not isinstance(label, str) or not _LABEL.fullmatch(label)):
@@ -487,17 +496,19 @@ def _call(settings, repo, hunt_id, provider, request, budget: TriageBudget, prom
         log.exception("triage call failed")
         return "provider_error"
     budget.charge(result)
+    # the verdicts' rationales and labels are stored, ordered and shown: never with a configured secret's text (the
+    # call's record counts the replacements)
     verdicts, chunk_drops = ({}, Counter({result.status: 1})) if not result.ok else validate(
-        result.parsed, {group: shown[group] for group in numbers})
+        redact_value(result.parsed, settings), {group: shown[group] for group in numbers})
     reasons: Counter = Counter()
     for drop, count in chunk_drops.items():
         reasons[DROP_REASONS.get(drop, reason("$", drop))] += count
     record_call(repo, provider, hunt_id=hunt_id, purpose=TRIAGE_PURPOSE, request=request, result=result,
-                limits=limits, validation={"ok": result.ok and not chunk_drops,
+                limits=limits, validation={"ok": result.ok and all(drop == REDACTED_LABEL for drop in chunk_drops),
                                            "errors": ([result.error] if result.error else [])
                                            + [f"{drop}: {count}" for drop, count in sorted(chunk_drops.items())],
                                            "reasons": dict(sorted(reasons.items()))},
-                owner_token=owner_token)
+                owner_token=owner_token, settings=settings)
     if not result.ok:
         return result.status
     drops.update(chunk_drops)
