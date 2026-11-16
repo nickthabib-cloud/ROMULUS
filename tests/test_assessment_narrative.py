@@ -81,10 +81,10 @@ def test_the_narrative_round_trips_through_the_response_schema_and_validation(re
     assert counts == {}
     assert checked["narrative"] == [
         {"time_span": {"start": IN_WINDOW, "end": IN_WINDOW}, "phase": "Credential Access",
-         "tactic": "credential-access",
+         "tactic": "credential-access", "support": {"reported": 1},
          "sentences": [_s("ev1"), _s("ev1", "The read likely served credential theft.", "inferred")]},
         {"time_span": {"start": "", "end": ""}, "phase": "Initial Access", "tactic": "initial-access",
-         "sentences": [_s("ev1", "How the actor reached web01 is unknown.", "uncertain")]}]
+         "support": {"reported": 1}, "sentences": [_s("ev1", "How the actor reached web01 is unknown.", "uncertain")]}]
     # the kinds are the narrative's three; the other sections' "hypothesis" is not one of them
     for kind in ("hypothesis", "fact"):
         broken = _reply([_p([_s(alias, kind=kind)])])
@@ -292,8 +292,9 @@ def test_docx_carries_the_labelled_narrative_as_plain_text(repo, tmp_path, monke
     assert values.index(TITLE) > next(i for i, v in enumerate(values) if v.startswith("AI-generated hypothesis"))
     assert f"1. Credential Access · {IN_WINDOW}" in values
     assert f"inferred: {HOSTILE} [ev1]" in values
-    assert all(node.tag.rsplit("}", 1)[-1] in {"document", "body", "p", "r", "rPr", "b", "t", "sectPr", "pgSz",
-                                               "pgMar"} for node in document.iter())
+    # muted lines (the support mix) add only italics and a grey colour
+    assert all(node.tag.rsplit("}", 1)[-1] in {"document", "body", "p", "r", "rPr", "b", "i", "color", "t", "sectPr",
+                                               "pgSz", "pgMar"} for node in document.iter())
 
 
 def test_old_and_template_manifests_render_no_narrative_section(repo, tmp_path, monkeypatch):

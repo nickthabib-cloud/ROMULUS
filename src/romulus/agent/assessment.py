@@ -5,6 +5,7 @@ import json
 import re
 import unicodedata
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
@@ -14,7 +15,7 @@ from sqlalchemy.exc import IntegrityError
 
 from romulus.agent.aliases import AliasBook
 from romulus.agent.dossier import build_dossier
-from romulus.agent.grounding import EvidenceStrength, TriageContext, stored_triage_context
+from romulus.agent.grounding import SUPPORT_CATEGORIES, EvidenceStrength, TriageContext, stored_triage_context
 from romulus.agent.provider import (
     AgentBudget,
     BudgetExhausted,
@@ -32,7 +33,13 @@ from romulus.agent.toolbox import argument_schema
 from romulus.detect.metadata import ATTACK_TACTICS
 from romulus.report.incidents import build_incident_graph
 from romulus.report.manifest import NARRATIVE_PARAGRAPHS, NARRATIVE_SENTENCES, coverage_for_hunt
-from romulus.report.markdown import CONTEXT_PHASE, WEAK_BENIGN, WEAK_NO_REPORTED, WEAK_UNKNOWN
+from romulus.report.markdown import (
+    CONTEXT_PHASE,
+    WEAK_BENIGN,
+    WEAK_MODEL_CONTEXT,
+    WEAK_NO_REPORTED,
+    WEAK_UNKNOWN,
+)
 from romulus.store.db import digest, utcnow
 
 
@@ -319,7 +326,7 @@ def check_assessment(repo, hunt_id: str, body: dict, *, owner_token=None,
               "removed_narrative_negation": 0, "labelled_uncertain": 0,
               "downgraded_observed_weak_evidence": 0, "phase_weakly_supported": 0,
               "weakly_supported_benign_triage": 0, "labelled_uncertain_benign_triage": 0,
-              "weakly_supported_unknown_support": 0}
+              "weakly_supported_unknown_support": 0, "model_labelled_context": 0}
     suspicious_cache: dict[str, bool] = {}
 
     def check(sentence: dict, section: str) -> dict | None:
@@ -459,7 +466,13 @@ def _ground_paragraph(paragraph: dict, strengths: dict, counts: dict) -> dict:
       - a cited evidence record has more findings than the lookup reads: its support could not be determined, and
         unknown support never counts as strong;
       - otherwise: no reported finding is cited.
-    Nothing is removed; each weakly supported paragraph is counted once, under its reason."""
+    - a paragraph the model itself labelled context (its label starts with "Context") is shown as context the same
+      way, whatever it cites.
+    A cite is strong when its finding is confirmed, triaged as likely or possible attack, or Reported without a
+    likely-benign verdict (`grounding.FindingStrength.strong`): one strong cite keeps a paragraph's label. Every
+    paragraph records its support mix, the count of its distinct cites in each `SUPPORT_CATEGORIES` category, so the
+    analyst sees how much of it rests on what. Nothing is removed; each weakly supported paragraph is counted once,
+    under its reason."""
     sentences = []
     for sentence in paragraph["sentences"]:
         refs = sentence.pop(REFS)
@@ -467,11 +480,17 @@ def _ground_paragraph(paragraph: dict, strengths: dict, counts: dict) -> dict:
             sentence = {**sentence, "kind": "inferred"}
             counts["downgraded_observed_weak_evidence"] += 1
         sentences.append((sentence, refs))
-    cites = [strengths[ref] for _sentence, refs in sentences for ref in refs]
-    out = {**paragraph, "sentences": [sentence for sentence, _refs in sentences]}
-    if any(item.strong for item in cites):
+    distinct = list(dict.fromkeys(ref for _sentence, refs in sentences for ref in refs))
+    cites = [strengths[ref] for ref in distinct]
+    mix = Counter(item.category for item in cites)
+    support = {name: mix[name] for name in SUPPORT_CATEGORIES if mix[name]}
+    out = {**paragraph, "sentences": [sentence for sentence, _refs in sentences], "support": support}
+    if unicodedata.normalize("NFKC", paragraph["phase"]).casefold().startswith(CONTEXT_PHASE.casefold()):
+        reason = WEAK_MODEL_CONTEXT
+        counts["model_labelled_context"] += 1
+    elif any(item.strong for item in cites):
         return out
-    if cites and all(item.benign for item in cites):
+    elif cites and all(item.benign for item in cites):
         reason = WEAK_BENIGN
         counts["weakly_supported_benign_triage"] += 1
         for sentence in out["sentences"]:

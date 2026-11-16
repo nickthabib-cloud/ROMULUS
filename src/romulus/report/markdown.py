@@ -42,8 +42,10 @@ NARRATIVE_TITLE = "What likely happened (AI hypothesis, unconfirmed)"
 NARRATIVE_NOTE = ("The model's theory of what most plausibly happened, pieced together from the cited findings. It may "
                   "be wrong: each sentence is labelled observed (shown by the cited records), inferred (reasoned "
                   "between them) or uncertain (the evidence is thin or missing). A paragraph marked weakly "
-                  "supported cites no reported, confirmed or likely-attack finding (or its support could not be "
-                  "determined): read it as context, not as a step of the attack.")
+                  "supported cites no confirmed, attack-triaged or reported finding (one triaged likely benign does "
+                  "not count), the model labelled it context, or its support could not be determined: read it as "
+                  "context, not as a step of the attack. The support line under each paragraph counts what its "
+                  "citations rest on.")
 NARRATIVE_EMPTY = ("The assessment has no narrative: the model wrote none, or the checker removed every sentence "
                    "(see the checker changes below).")
 
@@ -54,9 +56,26 @@ CONTEXT_PHASE = "Context"
 WEAK_NO_REPORTED = "no_reported_finding"
 WEAK_BENIGN = "triaged_likely_benign"
 WEAK_UNKNOWN = "support_unknown"
+WEAK_MODEL_CONTEXT = "model_labelled_context"
 WEAK_REASONS = {WEAK_NO_REPORTED: "no reported finding cited",
                 WEAK_BENIGN: "cited activity was triaged as likely benign",
-                WEAK_UNKNOWN: "support could not be determined (citation cap)"}
+                WEAK_UNKNOWN: "support could not be determined (citation cap)",
+                WEAK_MODEL_CONTEXT: "labelled context by the model"}
+# A paragraph's support mix: how many of its distinct cites fall in each category, strongest first (the checker
+# derives it from stored ranks and triage verdicts only).
+SUPPORT_LABELS = {"confirmed": "confirmed", "attack": "triaged possible or likely attack",
+                  "reported": "reported, no benign verdict", "unknown": "unknown (citation cap)",
+                  "benign": "triaged likely benign", "other": "not reported"}
+SUPPORT_LIMIT = 10_000
+
+
+def narrative_support(paragraph: dict) -> str:
+    """A paragraph's support mix as one line, such as "Support: 1 triaged possible or likely attack, 11 triaged
+    likely benign" (empty when none was recorded)."""
+    support = paragraph.get("support") if isinstance(paragraph.get("support"), dict) else {}
+    parts = [f"{support[name]} {label}" for name, label in SUPPORT_LABELS.items()
+             if isinstance(support.get(name), int) and support[name] > 0]
+    return "Support: " + ", ".join(parts) + "." if parts else ""
 WEAK_LABEL = "weakly supported"
 
 
@@ -113,9 +132,11 @@ def _assessment_section(m: dict) -> list[str]:
         out += [f"### {NARRATIVE_TITLE}", "", NARRATIVE_NOTE, ""]
         for number, paragraph in enumerate(assessment["narrative"], 1):
             weak = narrative_weak_reason(paragraph)
+            support = narrative_support(paragraph)
             out += [f"**{number}. {esc(narrative_heading(paragraph))}**", "",
                     *([f"*{esc(weak)}*", ""] if weak else []),
-                    *[sentence(item) for item in paragraph["sentences"]], ""]
+                    *[sentence(item) for item in paragraph["sentences"]], "",
+                    *([f"*{esc(support)}*", ""] if support else [])]
         if not assessment["narrative"]:
             out += [NARRATIVE_EMPTY, ""]
         out += ["### Assessment details", ""]

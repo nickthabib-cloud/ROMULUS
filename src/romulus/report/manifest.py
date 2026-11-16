@@ -17,7 +17,7 @@ from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.hunt.publish import subject_event_ids
 from romulus.hunt.rank import PASS_FINAL, rank_summary, rank_unranked
 from romulus.report.incidents import build_incident_graph, incident_narrative
-from romulus.report.markdown import WEAK_NO_REPORTED, WEAK_REASONS
+from romulus.report.markdown import SUPPORT_LABELS, SUPPORT_LIMIT, WEAK_NO_REPORTED, WEAK_REASONS
 from romulus.report.triage import LABEL as TRIAGE_LABEL
 from romulus.report.triage import triage_view
 from romulus.store import schema as t
@@ -1038,6 +1038,9 @@ def narrative_paragraphs(value) -> list[dict]:
         weak = paragraph.get("weakly_supported") is True
         reason = paragraph.get("support_reason")
         model_phase = paragraph.get("model_phase")
+        stored = paragraph.get("support") if isinstance(paragraph.get("support"), dict) else {}
+        support = {name: stored[name] for name in SUPPORT_LABELS
+                   if type(stored.get(name)) is int and 0 < stored[name] <= SUPPORT_LIMIT}
         out.append({"time_span": {side: span.get(side) if isinstance(span.get(side), str) else ""
                                   for side in ("start", "end")},
                     "phase": paragraph.get("phase") if isinstance(paragraph.get("phase"), str) else "",
@@ -1046,6 +1049,7 @@ def narrative_paragraphs(value) -> list[dict]:
                         "support_reason": reason if reason in WEAK_REASONS else WEAK_NO_REPORTED,
                         **({"model_phase": model_phase[:200]} if isinstance(model_phase, str) and model_phase
                            else {})} if weak else {}),
+                    **({"support": support} if support else {}),
                     "sentences": sentences})
     return out
 

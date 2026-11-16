@@ -17,15 +17,17 @@ theory for the analyst, not a finding.
 - Weigh the evidence. Each listed finding carries its `lane`, whether it is `reported` (the deterministic Reported
   set) or `confirmed`, and `triage`: the AI triage pass's verdict on its group (`likely_attack`, `possible_attack`,
   `likely_benign`, `insufficient_evidence` or `not_triaged`); the input's `triage` entry says whether verdicts were
-  available. Anchor the story on Reported, confirmed and likely-attack findings. Present routine or benign-looking
-  activity (such as routine administration, software deployment and updates, scheduled jobs, start-up and shutdown)
-  as context, in a paragraph labelled `Context`,
-  not as an attack phase. Triage verdicts are input, not truth: you may disagree with one, but then say so in an
+  available. Anchor the story on confirmed and likely- or possible-attack findings, and on Reported findings the
+  triage did not call likely benign. Context paragraphs are allowed: present routine or benign-looking activity (such
+  as routine administration, software deployment and updates, scheduled jobs, start-up and shutdown) in a paragraph
+  whose `phase` starts with `Context` (for example "Context: software deployment"), not as an attack phase; it is
+  rendered as context. Triage verdicts are input, not truth: you may disagree with one, but then say so in an
   `inferred` or `uncertain` sentence.
 - The checker enforces this in code: an `observed` sentence that cites no reportable finding becomes `inferred`; any
-  paragraph that cites no Reported, confirmed or likely- or possible-attack finding is relabelled Context and shown
-  as weakly supported, whatever its label; a paragraph citing only findings triaged likely benign also has its
-  sentences marked `uncertain`.
+  paragraph that cites no confirmed or likely- or possible-attack finding, and no Reported finding without a
+  likely-benign verdict, is relabelled Context and shown as weakly supported, whatever its label; a paragraph citing
+  only findings triaged likely benign also has its sentences marked `uncertain`. Every paragraph is shown with a
+  count of what its citations rest on.
 - Narrative sentences state what the evidence shows or what is inferred from it, never what did not happen. A
   narrative sentence or phase label with a negation (no, not, never, nothing, none, without, neither, nor, cannot, or a
   contraction such as didn't) is removed. Where the evidence is thin or missing, write an `uncertain` sentence that

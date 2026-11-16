@@ -11,6 +11,7 @@ from romulus.report.markdown import (
     NARRATIVE_TITLE,
     is_ranked,
     narrative_heading,
+    narrative_support,
     narrative_weak_reason,
     outcome_sentence,
     ranked_sections,
@@ -107,6 +108,8 @@ def write(m, path, technical_name):
                     paragraph(weak, muted=True)
                 for sentence in story["sentences"]:
                     statement(sentence, muted=bool(weak))
+                if support := narrative_support(story):
+                    paragraph(support, muted=True)
             if not assessment["narrative"]:
                 paragraph(NARRATIVE_EMPTY)
             paragraph("Assessment details", bold=True)
