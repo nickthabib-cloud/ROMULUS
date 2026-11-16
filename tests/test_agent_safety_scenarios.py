@@ -289,7 +289,9 @@ def test_unflagged_encoded_instructions_cannot_add_a_mutating_tool(scenario, tex
     before = _floor(repo)
     provider = _run(repo, aliases, [_call("close", "close_finding", {"finding": aliases["finding"]})])
     assert _tool_results(provider)["close"]["status"] == "unsupported"
-    assert next(row for row in repo.agent_tool_calls("h1") if row["name"] == "close_finding")["status"] == "unsupported"
+    # a tool name that is not registered is model text: it is stored as "?", never as written
+    assert next(row for row in repo.agent_tool_calls("h1") if row["name"] == "?")["status"] == "unsupported"
+    assert all(row["name"] != "close_finding" for row in repo.agent_tool_calls("h1"))
     assert repo.agent_notes("h1") == [] and _floor(repo) == before
 
 

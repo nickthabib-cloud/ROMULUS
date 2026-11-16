@@ -984,6 +984,7 @@ class ClaudeMessagesProvider(ChatProvider):
         replayed = ([(b["type"], b.get("text") or b.get("thinking") or "") for b in blocks
                      if b["type"] in ("text", "thinking")]
                     + [("tool_input_streamed", s[2]) for s in stored]
+                    + [("tool_name", s[1]) for s in stored]
                     + [("tool_input_parsed", json.dumps(b["input"])) for b in blocks if b["type"] == "tool_use"])
         trips = secret_trips(replayed, _long_secrets(self.s))
         if trips:

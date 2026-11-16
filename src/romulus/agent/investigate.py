@@ -530,12 +530,23 @@ def _cache_positions(messages: list[dict]) -> int:
 
 
 def _without_secrets(call: ToolCall, settings: Settings) -> ToolCall:
-    """The tool call with every configured secret's text removed from its arguments (unchanged when none holds any)."""
+    """The tool call with every configured secret's text removed from its name and arguments (unchanged when none
+    holds any)."""
+    name = redact_text(call.name, settings)
     arguments = redact_value(call.arguments, settings) if call.arguments is not None else None
     raw = redact_text(call.raw_arguments, settings)
-    if arguments == call.arguments and raw == call.raw_arguments:
+    if name == call.name and arguments == call.arguments and raw == call.raw_arguments:
         return call
-    return replace(call, arguments=arguments, raw_arguments=raw)
+    return replace(call, name=name, arguments=arguments, raw_arguments=raw)
+
+
+# How a tool call to a name that is not a registered tool is stored, counted and summarised: the model made the name
+# up, and a made-up name is model text that is never kept.
+UNKNOWN_TOOL = "?"
+
+
+def _stored_name(name: str, toolbox: Toolbox) -> str:
+    return name if name in toolbox.registry else UNKNOWN_TOOL
 
 
 def _deterministic_tool_summary(calls: list[tuple[str, str]], changes: list[dict]) -> str:
@@ -776,7 +787,8 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                         arguments = call.arguments if call.arguments is not None else raw
                         refused = {"status": "refused", "errors": ["context is nearly full; only finish_session is allowed"]}
                         repo.save_agent_tool_call({"id": _id("atc"), "hunt_id": hunt_id, "session_id": session_id,
-                                                   "seq": call_seq, "name": call.name, "arguments": arguments,
+                                                   "seq": call_seq, "name": _stored_name(call.name, toolbox),
+                                                   "arguments": arguments,
                                                    "arguments_truncated": len(call.raw_arguments.encode()) > 8192,
                                                    "status": "refused", "result_digest": digest(refused),
                                                    "refusal_reasons": [reason("$", "tool_call_limit")],
@@ -832,13 +844,14 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 status = tool_result.get("status", "failed")
                 admission.issue_aliases(tool_result, tool_name=call.name)
                 repo.save_agent_tool_call({"id": _id("atc"), "hunt_id": hunt_id, "session_id": session_id,
-                                           "seq": call_seq, "name": call.name, "arguments": stored_args,
+                                           "seq": call_seq, "name": _stored_name(call.name, toolbox),
+                                           "arguments": stored_args,
                                            "arguments_truncated": truncated, "status": status,
                                            "result_digest": digest(tool_result), "refusal_reasons": reasons,
                                            "model_call_id": model_call_id, "created_at": utcnow()},
                                           owner_token=owner_token)
                 repo.update_agent_session(session_id, hunt_id, {"tool_calls": tool_count}, owner_token=owner_token)
-                tool_history.append((call.name, status))
+                tool_history.append((_stored_name(call.name, toolbox), status))
                 if call.name == "update_hypothesis" and status == "complete":
                     hypothesis_changes.append(tool_result.get("data") or {})
                 messages.append({"role": "tool", "tool_call_id": call.id,

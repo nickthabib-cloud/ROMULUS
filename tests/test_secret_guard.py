@@ -454,8 +454,8 @@ def test_triage_verdicts_are_stored_exported_reported_and_shown_without_the_secr
         user = body["messages"][0]["content"]
         user = user if isinstance(user, str) else "".join(block.get("text", "") for block in user)
         cards = json.loads(user[user.index(DATA_BEGIN + "\n") + len(DATA_BEGIN) + 1:user.index("\n" + DATA_END)])
-        # a label is a short slug: one holding the secret's text no longer fits it once redacted, so that verdict
-        # is dropped as malformed; the others keep a plain label and a rationale holding the text
+        # a label holding the secret's text is cleared (its verdict kept and counted); the others keep a plain
+        # label, and every rationale holds the text
         answer = {"groups": [test_ai_triage.verdict(card, "likely_attack",
                                                     label=f"reset-{SENTINEL.lower()}" if i == 0 else "web-chain",
                                                     rationale=f"The account was set to {SENTINEL} here.")
@@ -469,12 +469,14 @@ def test_triage_verdicts_are_stored_exported_reported_and_shown_without_the_secr
                                agent_triage_call_output_tokens=2048)
     p, _ = provider(settings, endpoint)
     summary = run_triage_pass(settings, repo, "h1", p)
-    assert summary["groups"]["triaged"] > 0 and summary["dropped"] == {"bad_incident_label": len(requests)}
+    assert summary["dropped"] == {"redacted_incident_label": len(requests)}
+    assert summary["groups"]["triaged"] == summary["groups"]["eligible"]          # no verdict was lost
     with engine.connect() as connection:
         rows = [dict(row) for row in connection.execute(select(t.ai_triage_group)).mappings()]
     with_verdict = [row for row in rows if row["rationale"]]
     assert with_verdict and all(row["rationale"] == "The account was set to <redacted> here." for row in with_verdict)
-    assert {row["incident_label"] for row in with_verdict} == {"web-chain"}
+    assert {row["incident_label"] for row in with_verdict} == {"web-chain", None}
+    assert sum(row["incident_label"] is None for row in with_verdict) == len(requests)
     written = repo.agent_usage("h1")["output_redactions"]
     assert written["ES_PASSWORD"] >= len(with_verdict) and written["ARKIME_PASSWORD"] == len(requests)
     write_export(repo, "h1", tmp_path / "order.json")
@@ -562,3 +564,48 @@ def test_an_error_quoting_the_model_is_stored_redacted(tmp_path, caplog):
     assert stored["options"]["output_redactions"] == {"ARKIME_PASSWORD": 1}       # the stored call's name
     assert secret not in _every_stored_value(engine) and secret not in caplog.text
     engine.dispose()
+
+
+def test_a_redacted_triage_label_is_cleared_and_counted_and_its_verdict_kept():
+    from romulus.agent.triage import validate
+    item = {"group_id": "G1", "assessment": "likely_attack", "rationale": "Evidence on the card.", "cites": ["c1"]}
+    verdicts, drops = validate({"groups": [{**item, "incident_label": "reset-<redacted>"},
+                                           {**item, "group_id": "G2", "incident_label": "Not A Slug!"},
+                                           {**item, "group_id": "G3", "incident_label": "web-chain"}]},
+                               {"G1": ["c1"], "G2": ["c1"], "G3": ["c1"]})
+    assert verdicts["G1"]["incident_label"] is None and verdicts["G1"]["assessment"] == "likely_attack"
+    assert "G2" not in verdicts                               # a label malformed for any other reason still drops
+    assert verdicts["G3"]["incident_label"] == "web-chain"
+    assert drops == {"redacted_incident_label": 1, "bad_incident_label": 1}
+
+
+def test_an_invented_tool_name_holding_the_secret_is_never_stored_and_trips_on_replay(setup, caplog):
+    pytest.importorskip("anthropic")
+    from tests.test_agent_provider_claude import (
+        THINKING,
+        Endpoint,
+        claude_settings,
+        provider,
+        reply,
+        text,
+        tool_use,
+    )
+    caplog.set_level(logging.DEBUG)
+    client, repo, *_ = setup
+    test_web_agent_a6.run_row(repo, state="partial", reason="secret_guard")
+    settings = claude_settings(arkime_password=SENTINEL)
+    endpoint = Endpoint(reply([THINKING, text("Calling."), tool_use("{}", name=SENTINEL)], stop="tool_use"),
+                        reply([text("never sent")]))
+    p, _ = provider(settings, endpoint)
+    budget = AgentBudget.from_usage(BudgetLimits.from_settings(settings), repo.agent_usage("h1"), clock=lambda: 0.0)
+    outcome = _run_session(settings, repo, "h1", p, _BudgetGate(budget, settings),
+                           lambda session: Toolbox(repo, "h1", session_id=session), _prompt_set(), purpose="orient")
+    assert outcome["state"] == "secret_guard" and len(endpoint.calls) == 1
+    events = [row["detail"] for row in repo.audit_trail("h1", SECRET_GUARD_ACTION)[0]]
+    assert ("ARKIME_PASSWORD", "tool_name") in {(event["setting"], event["part"]) for event in events}
+    assert [row["name"] for row in repo.agent_tool_calls("h1")] == ["?"]
+    assert "?" in repo.agent_refusal_counts("h1")["by_tool"]
+    assert "Session stopped after ?: " in outcome["summary"]
+    pages = [client.get(f"/hunts/h1{suffix}").text for suffix in ("", "/run", "/hypotheses")]
+    assert SENTINEL not in _every_stored_value(repo.engine) and SENTINEL not in caplog.text
+    assert all(SENTINEL not in page for page in pages)
