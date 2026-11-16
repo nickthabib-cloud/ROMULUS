@@ -146,7 +146,9 @@ def test_an_observed_narrative_sentence_citing_only_ai_output_is_downgraded(repo
     checked, counts = check_assessment(repo, "h1", _reply([_p([_s(alias, "The AI proposal shows execution.")])]))
     assert checked["narrative"][0]["sentences"] == [_s("ai-finding", "The AI proposal shows execution.",
                                                        "inferred")]
-    assert counts == {"downgraded_observed": 1}
+    # nor does the agent's own proposal hold up an attack phase: the paragraph is context, weakly supported
+    assert checked["narrative"][0]["phase"] == "Context" and checked["narrative"][0]["weakly_supported"]
+    assert counts == {"downgraded_observed": 1, "phase_weakly_supported": 1}
 
 
 def test_an_injection_string_in_a_claim_stays_data(repo):
@@ -159,9 +161,12 @@ def test_an_injection_string_in_a_claim_stays_data(repo):
     alias = AliasBook(repo, "h1").alias_for("E", event.id)
     text = "The process ran a command that said: " + INJECTION
     checked, counts = check_assessment(repo, "h1", _reply([_p([_s(alias, text)])]))
-    # kept verbatim as text, labelled as resting only on flagged content, and nothing else in the reply changed
-    assert checked["narrative"][0]["sentences"] == [{**_s(event.id, text), "suspicious_content": True}]
-    assert counts == {"labelled_suspicious_only": 1}
+    # kept verbatim as text, labelled as resting only on flagged content, and nothing else in the reply changed but
+    # the evidence rules: no finding cites the record, so the sentence is inferred and the phase is context
+    assert checked["narrative"][0]["sentences"] == [{**_s(event.id, text, "inferred"), "suspicious_content": True}]
+    assert checked["narrative"][0]["phase"] == "Context"
+    assert counts == {"labelled_suspicious_only": 1, "downgraded_observed_weak_evidence": 1,
+                      "phase_weakly_supported": 1}
     assert checked["overall"] == [] and checked["confidence"] == {"overall": "medium", "reasons": []}
 
 

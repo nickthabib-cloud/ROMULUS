@@ -547,9 +547,10 @@ def test_assessment_input_trims_all_sections_and_refuses_an_oversized_prompt(tmp
             "updated_at": now,
         })
 
-    context = _assessment_input(repo, "h1", token_budget=80)
+    # the floor: empty sections, the omission message and the triage status
+    context = _assessment_input(repo, "h1", token_budget=100)
     serialized = json.dumps(context["data"], sort_keys=True, ensure_ascii=False, default=str)
-    assert estimate_tokens(serialized) <= 80
+    assert estimate_tokens(serialized) <= 100
     assert context["data"]["omitted"]["other_hypotheses"] > 0
     assert "remain in the report" in context["data"]["omitted"]["message"]
 
