@@ -34,6 +34,18 @@ def test_rows_marks_and_link_styles():
     assert "analyst assertion, not proven" in analyst_link["label"]
 
 
+def test_agent_pivot_links_and_unknown_strengths_are_drawn_as_hypotheses():
+    findings = [finding("A", 10), finding("B", 20), finding("C", 30)]
+    edges = [{"from": "A", "to": "B", "style": "agent_hypothesis", "link_type": "agent_search_events"},
+             {"from": "B", "to": "C", "style": "some_future_strength", "link_type": "flow_host_side"}]
+    tl = build_timeline(findings, edges, [], T0, T0 + timedelta(hours=1))
+    links = {(li["from"], li["to"]): li for li in tl["links"]}
+    assert links[("A", "B")]["style"] == "agent" and "AI agent hypothesis, unconfirmed" in links[("A", "B")]["label"]
+    assert links[("B", "C")]["style"] == "inferred"                    # never drawn as observed
+    tl = build_timeline(findings, edges, [], T0, T0 + timedelta(hours=1), styles=["observed"])
+    assert tl["hidden"]["links_by_style"] == {"agent": 1, "inferred": 1}
+
+
 def test_filters_report_what_they_hide():
     findings = [finding("A", 10), finding("B", 20, lane="lead", entities=(("ip", "203.0.113.8", "src"),))]
     edges = [{"from": "A", "to": "B", "style": "inferred", "link_type": "source_ip"}]

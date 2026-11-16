@@ -27,6 +27,15 @@ def _x(ts: datetime, start: datetime, end: datetime) -> float:
     return round(LEFT + frac * (WIDTH - LEFT - RIGHT), 1)
 
 
+def _style(style) -> str:
+    """The drawing style of a stored link. A link the AI agent's pivot recorded carries the strength
+    `agent_hypothesis` and is drawn as an agent hypothesis. A strength this layout does not know is drawn as an
+    inferred link (dashed, a hypothesis), never as observed."""
+    if style == "agent_hypothesis":
+        return "agent"
+    return style if style in LINK_STYLES else "inferred"
+
+
 def _rows_of(finding: dict) -> list[tuple[str, str]]:
     out = []
     for kind, value, role in finding.get("entities") or []:
@@ -76,9 +85,10 @@ def build_timeline(findings: list[dict], edges: list[dict], analyst_links: list[
 
     hidden["findings_on_hidden_rows"] = sum(1 for f in shown if _rows_of(f) and f["id"] not in primary)
     links = []
-    candidates = [{"from": e["from"], "to": e["to"], "style": e["style"],
+    candidates = [{"from": e["from"], "to": e["to"], "style": _style(e["style"]),
                    "label": e["link_type"].replace("_", " ") + (
-                       " (AI agent hypothesis, unconfirmed)" if e["style"] == "agent" else "")} for e in edges]
+                       " (AI agent hypothesis, unconfirmed)" if _style(e["style"]) == "agent" else "")}
+                  for e in edges]
     candidates += [{"from": a["from_finding"], "to": a["to_finding"], "style": "analyst",
                     "label": f"{a['relation']} (analyst assertion, not proven)"} for a in analyst_links]
     for link in sorted(candidates, key=lambda li: (LINK_STYLES.index(li["style"]), li["from"], li["to"], li["label"])):
