@@ -143,7 +143,7 @@ CONFIDENCE_ABSENCE_PHRASES = tuple(phrase for phrase in ABSENCE_PHRASES if phras
 # The narrative states what the evidence shows or what is inferred from it, never what did not happen: a narrative
 # sentence or phase label with any of these words is dropped (a sentence) or cleared (a label). Bare contractions
 # are listed because the apostrophe can be left out; "n't" itself becomes "not".
-NEGATIONS = frozenset({"no", "not", "never", "nothing", "none", "without", "neither", "nor"})
+NEGATIONS = frozenset({"no", "not", "never", "nothing", "none", "without", "neither", "nor", "cannot"})
 BARE_CONTRACTIONS = frozenset({"aint", "arent", "cant", "couldnt", "didnt", "doesnt", "dont", "hadnt", "hasnt",
                                "havent", "isnt", "mustnt", "neednt", "shant", "shouldnt", "wasnt", "werent", "wont",
                                "wouldnt"})

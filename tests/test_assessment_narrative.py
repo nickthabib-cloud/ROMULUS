@@ -365,6 +365,9 @@ NEGATED = [
     "The actor hasn’t returned.",               # typographic apostrophe
     "The actor wasnʼt seen again.",             # modifier-letter apostrophe
     "The actor didnt return.",                       # apostrophe left out
+    "The actor cannot have reached the domain controller.",
+    "The actor CANNOT have reached the domain controller.",
+    "The actor can't have reached the domain controller.",
     "Host B was nоt involved.",                 # Cyrillic o
     "Host B was n\u200bot involved.",                # zero-width space inside the word
     "Host B was ＮＯＴ involved.",       # fullwidth letters
