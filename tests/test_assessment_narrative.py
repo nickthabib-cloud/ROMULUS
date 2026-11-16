@@ -350,3 +350,75 @@ def test_the_web_says_why_there_is_no_narrative(setup):
         connection.execute(t.agent_assessment.delete())
         connection.execute(t.agent_run.delete())
     assert 'id="narrative"' not in client.get("/hunts/h1").text
+
+
+# --------------------------------------------------------------------------------------------- negations and records
+NEGATED = [
+    "The attacker never accessed the domain controller.",
+    "Host B was not involved.",
+    "There was no lateral movement.",
+    "Nothing indicates persistence.",
+    "None of the other hosts ran the tool.",
+    "The actor moved without using the VPN.",
+    "Neither the proxy nor the firewall logged it.",
+    "The actor hasn't returned.",                    # ("didn't" is already an absence claim: "did not")
+    "The actor hasn’t returned.",               # typographic apostrophe
+    "The actor wasnʼt seen again.",             # modifier-letter apostrophe
+    "The actor didnt return.",                       # apostrophe left out
+    "Host B was nоt involved.",                 # Cyrillic o
+    "Host B was n\u200bot involved.",                # zero-width space inside the word
+    "Host B was ＮＯＴ involved.",       # fullwidth letters
+]
+
+
+@pytest.mark.parametrize("text", NEGATED)
+def test_a_negated_narrative_sentence_is_dropped(repo, text):
+    alias = AliasBook(repo, "h1").alias_for("E", "ev1")
+    checked, counts = check_assessment(repo, "h1", _reply([_p([_s(alias, text, "inferred"), _s(alias)])]))
+    assert checked["narrative"][0]["sentences"] == [_s("ev1")]
+    assert counts == {"removed_narrative_negation": 1}
+
+
+def test_an_explicit_unknown_is_kept_as_uncertain_and_negated_phases_are_cleared(repo):
+    alias = AliasBook(repo, "h1").alias_for("E", "ev1")
+    body = _reply([
+        _p([_s(alias, "It is unknown whether the actor reached the domain controller.", "inferred"),
+            _s(alias, "Unknown whether the account was not already shared.", "uncertain")], phase="No exfiltration"),
+        _p([_s(alias)], phase="Persistence wasn't established"),
+        _p([_s(alias)], phase="Notable access"),                         # "not" only inside a word: kept
+    ])
+    checked, counts = check_assessment(repo, "h1", body)
+    first = checked["narrative"][0]
+    assert [s["kind"] for s in first["sentences"]] == ["uncertain", "uncertain"] and first["phase"] == ""
+    assert [p["phase"] for p in checked["narrative"]] == ["", "", "Notable access"]
+    assert counts == {"labelled_uncertain": 1, "cleared_narrative_phase": 2}
+    # the other sections keep their own phrase list
+    other = _reply([])
+    other["overall"] = [_s(alias, "There was no lateral movement.", "inferred")]
+    checked, counts = check_assessment(repo, "h1", other)
+    assert checked["overall"] == [_s("ev1", "There was no lateral movement.", "inferred")] and counts == {}
+
+
+def test_record_phrases_spare_dns_record_types_and_confidence_reasons(repo):
+    alias = AliasBook(repo, "h1").alias_for("E", "ev1")
+    body = _reply([])
+    body["overall"] = [_s(alias, f"The lookup returned no {kind} record for the address.", "inferred")
+                       for kind in ("PTR", "A", "AAAA", "TXT", "MX", "CNAME", "NS", "SOA")]
+    body["overall"].append(_s(alias, "There are no records of the logon.", "inferred"))
+    body["key_steps"] = [{"time": None, "tactic": None,
+                          "sentence": _s(alias, "No DNS SRV records answered the query.", "inferred")}]
+    body["confidence"]["reasons"] = [_s(alias, "There are no records from host B after 14:00.", "inferred")]
+    checked, counts = check_assessment(repo, "h1", body)
+    assert len(checked["overall"]) == 8 and len(checked["key_steps"]) == 1
+    assert checked["confidence"]["reasons"][0]["text"].startswith("There are no records from host B")
+    assert counts == {"removed_absence_claim": 1}
+
+
+def test_a_stored_window_without_an_offset_is_read_as_utc(repo):
+    from romulus.agent.assessment import _hunt_window
+    repo.create_hunt("naive", {"window": {"start": "2024-11-18T10:00:00", "end": "2024-11-18T17:30:00"},
+                               "targets": []}, "d", "test")
+    start, end = _hunt_window(repo, "naive")
+    assert (start.isoformat(), end.isoformat()) == ("2024-11-18T10:00:00+00:00", "2024-11-18T17:30:00+00:00")
+    repo.create_hunt("odd", {"window": {"start": "noon", "end": None}, "targets": []}, "d", "test")
+    assert _hunt_window(repo, "odd") == (None, None)

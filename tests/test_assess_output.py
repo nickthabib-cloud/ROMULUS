@@ -128,3 +128,22 @@ def test_the_investigation_holds_the_effective_allowance_for_the_assessment(tmp_
                                 toolbox_factory=lambda session: Toolbox(repo, "h1", session_id=session))
     assert seen == [ASSESS_OUTPUT_FLOOR]
     assert provider.requests[-1].max_output_tokens == ASSESS_OUTPUT_FLOOR
+
+
+def test_the_floor_is_capped_at_a_third_of_a_known_context_window(tmp_path):
+    s, provider = _adapter("ollama", agent_context_tokens=0, ollama_num_ctx=16_384)
+    allowance = assess_output(s, provider)
+    assert (allowance.max_output_tokens, allowance.limit) == (16_384 // 3, 16_384 // 3)
+    assert "capped at a third of the 16384-token context window (5461 tokens)" in allowance.note
+    # at the default 8192-token window the cap is below the configured allowance, which stands; the cap is stated
+    s, provider = _adapter("ollama", agent_context_tokens=0)
+    allowance = assess_output(s, provider)
+    assert allowance.max_output_tokens is None and allowance.limit == 4096 and "8192-token context" in allowance.note
+    # and the assess session says so
+    repo, _ = _repo_with_finding()
+    s = Settings(home=tmp_path)
+    scripted = NoThinkingRoom([response(parsed=BODY)], s, context=16_384)
+    budget = AgentBudget.from_usage(BudgetLimits(10, 1_000_000, 600, 0, 0, 0), {}, clock=lambda: 0.0)
+    assert run_assessment(s, repo, "h1", scripted, budget, clock=lambda: 0.0) is not None
+    assert scripted.requests[0].max_output_tokens == 5461
+    assert "a third of the 16384-token context window" in repo.agent_sessions("h1", purpose="assess")[-1]["summary"]

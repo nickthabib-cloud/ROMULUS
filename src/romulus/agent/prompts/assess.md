@@ -14,9 +14,10 @@ theory for the analyst, not a finding.
   of the findings it cites, or empty start and end when they give none.
 - Cite the findings that support every sentence. Mark a sentence `observed` only when the cited records show it;
   mark every link or step you reason between findings `inferred`, never `observed`.
-- Where the evidence is thin or missing, say so in an `uncertain` sentence ("it is unknown how the account was
-  obtained") and cite the findings on either side of the gap. Never write that something did not happen, that no
-  record or no evidence shows it, or that a host is clean: such sentences are removed. Statements about what the
+- Narrative sentences state what the evidence shows or what is inferred from it, never what did not happen. A
+  narrative sentence or phase label with a negation (no, not, never, nothing, none, without, neither, nor, or a
+  contraction such as didn't) is removed. Where the evidence is thin or missing, write an `uncertain` sentence that
+  begins "It is unknown whether ..." and cite the findings on either side of the gap. Statements about what the
   hunt searched completely and found nothing for belong in `gaps` ("the hunt found no evidence of ..."), only where
   the input shows that coverage was complete; otherwise call it unknown.
 - Keep the most plausible story in the narrative and put competing explanations in `alternatives`.
