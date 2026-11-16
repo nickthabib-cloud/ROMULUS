@@ -1184,6 +1184,27 @@ class Repo:
             raise ValueError("agent page item quota exceeded")
         return items
 
+    def agent_page_headroom(self, hunt_id: str, identity: dict) -> tuple[int, int]:
+        """How many more page plans and page items the session that `identity` names may store."""
+        with self.engine.connect() as connection:
+            session = self._plan_session(identity)
+            plans = int(connection.execute(select(func.count()).select_from(t.agent_page_plan).where(
+                t.agent_page_plan.c.hunt_id == hunt_id,
+                func.coalesce(func.json_extract(t.agent_page_plan.c.identity, "$.session_id"), "read-only") == session,
+            )).scalar_one())
+            items = int(connection.execute(select(func.count()).select_from(
+                t.agent_page_item.join(t.agent_page_plan, and_(
+                    t.agent_page_plan.c.hunt_id == t.agent_page_item.c.hunt_id,
+                    t.agent_page_plan.c.cursor == t.agent_page_item.c.cursor,
+                )),
+            ).where(
+                t.agent_page_plan.c.hunt_id == hunt_id,
+                func.coalesce(func.json_extract(
+                    t.agent_page_plan.c.identity, "$.session_id",
+                ), "read-only") == session,
+            )).scalar_one())
+        return max(0, AGENT_PAGE_PLAN_LIMIT - plans), max(0, AGENT_PAGE_ITEM_LIMIT - items)
+
     def agent_page_plan(self, hunt_id: str, cursor: str) -> dict | None:
         query = select(t.agent_page_plan).where(
             t.agent_page_plan.c.hunt_id == hunt_id, t.agent_page_plan.c.cursor == cursor,

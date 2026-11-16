@@ -59,6 +59,8 @@ TELEMETRY_RESPONSE_BYTES = 24_000
 RAW_RECORDS_PER_EVIDENCE_PAGE = 2
 # how many derived cursors a search that keeps failing is retried under before it is no longer deduplicated
 SEARCH_RETRY_KEYS = 4
+# how many reasons a search result gives for why it is not exhaustive; the rest are counted
+SEARCH_REASONS_SHOWN = 10
 _RULE_IDS = frozenset(playbook.id for playbook in ALL_PLAYBOOKS)
 _ALIAS_PATTERN = r"^[FIENL][1-9][0-9]*$"
 AliasArg = Annotated[str, Field(pattern=_ALIAS_PATTERN)]
@@ -1187,8 +1189,10 @@ class Toolbox:
         stable = None
         if search:
             # One identity per canonical search in this session: a repeated search reads its stored result again
-            # and spends no source query. A failed search may be tried again, each try under the next derived
-            # cursor, so a later repeat still finds the try that succeeded.
+            # and spends no source query. A failed search is stored too, and may be tried again under the next
+            # derived cursor, so a later repeat finds the try that succeeded; past the last try the last failure is
+            # returned, never run again.
+            plan = None
             for attempt in range(SEARCH_RETRY_KEYS):
                 stable = "P" + digest({"identity": identity, "attempt": attempt})[:20]
                 plan = self.repo.agent_page_plan(self.hunt_id, stable)
@@ -1198,7 +1202,7 @@ class Toolbox:
                     return self._pivot_plan_result(plan, page=1, cursor=stable, chunk_index=chunk_index,
                                                    repeated=True)
             else:
-                stable = None                       # past the derived tries: a fresh cursor, never deduplicated
+                return self._pivot_plan_result(plan, page=1, cursor=stable, chunk_index=chunk_index, repeated=True)
         if anchor["ts"] is None:
             return self._semantic_refusal("observation_time_unavailable", "the finding has no recorded observation time")
         if search:
@@ -1206,8 +1210,27 @@ class Toolbox:
             refusal = refuse(request) if refuse is not None else None
             if refusal is not None:
                 return _result("refused", data={"error": refusal})
+            # the result must fit the session's stored page items: checked before any source query is spent
+            bound = getattr(self.executor, "search_item_bound", None)
+            needed = bound(request) if bound is not None else 0
+            plans_left, items_left = self.repo.agent_page_headroom(self.hunt_id, identity)
+            if plans_left < 1 or items_left < needed:
+                return _result("refused", data={"error": {
+                    "code": "page_quota",
+                    "message": (f"this session's stored tool results leave {items_left} page items and "
+                                f"{plans_left} result pages, and a search may need up to {needed} items; nothing "
+                                "was searched. Finish the session, or rely on results already returned."),
+                    "reasons": [refusal_reason("$", "page_quota")],
+                }})
         anchor_ts = self._utc(anchor["ts"])
-        result = self.executor.run(self.session_id, anchor["id"], request, anchor_ts=anchor_ts)
+        if search:
+            try:
+                result = self.executor.run(self.session_id, anchor["id"], request, anchor_ts=anchor_ts)
+            except Exception as exc:  # noqa: BLE001 -- a failed search is stored, so a repeat does not spend again
+                result = PivotResult(status="failed", reasons=[
+                    _bounded_text(f"search failed: {type(exc).__name__}: {exc}")])
+        else:
+            result = self.executor.run(self.session_id, anchor["id"], request, anchor_ts=anchor_ts)
         extra = self._search_summary(request, result) if search else None
         return self._pivot_result(result, page=1, identity=identity, cursor=stable, extra=extra,
                                   chunk_index=chunk_index)
@@ -1218,34 +1241,41 @@ class Toolbox:
         is no_match only for zero hits under complete coverage with every source of its scope searched; zero hits
         under a cap, a partition limit, a source not evaluated or any other gap is unresolved."""
         args = request.arguments
+        # every matching record of every source in scope was read, on fields whose stored value is the typed one:
+        # only then do the hits name every host, and only then is zero hits a confirmed absence
+        exhaustive = result.status == "complete" and not result.not_searched and not result.zero_caveats
         if result.matched_event_count or result.reach_event_ids or result.event_ids:
             negative = "matches_found"
-        elif result.status == "complete" and not result.not_searched:
+        elif exhaustive:
             negative = "no_match"
         else:
             negative = "unresolved"
-        why = [_bounded_text(reason) for reason in [*result.not_searched, *result.reasons][:10]]
-        exhaustive = result.status == "complete" and not result.not_searched
+        why = [*result.not_searched, *result.zero_caveats, *result.reasons] if not exhaustive else []
         return {
             "scope": args.scope,
             "conditions": [item.model_dump(mode="json") for item in args.conditions],
             "window": {"start": args.start.isoformat(), "end": args.end.isoformat()},
             "negative": negative,
-            # every matching record of every source in scope was read: only then do the hits name every host
             "exhaustive": exhaustive,
-            "unresolved_because": why if not exhaustive else [],
+            "unresolved_because": [_bounded_text(reason) for reason in why[:SEARCH_REASONS_SHOWN]],
+            "unresolved_because_omitted": max(0, len(why) - SEARCH_REASONS_SHOWN),
             "not_searched": [_bounded_text(item) for item in result.not_searched],
-            "match_semantics": ("the source matched the conditions on its native fields; a few fields match "
-                                "without case or by a host's short name, so read each record's typed values"),
+            "discarded": result.discarded,
+            "match_semantics": ("each hit was re-checked on its typed value (without case; a Windows host by its "
+                                "short name) or, for a stored field, on its stored value; records the source matched "
+                                "that failed the re-check are counted in discarded, never shown as matches"),
         }
 
     @staticmethod
-    def _persisted_event_summary(row: dict) -> dict:
+    def _persisted_event_summary(row: dict, first: tuple[str, ...] = ()) -> dict:
+        """A retained event's bounded summary: sixteen typed fields, those named in `first` (a search's own fields)
+        before the rest, so a summary never cuts them."""
         event = TypedEvent.model_validate(row["event"])
+        ordered = sorted(event.fields.items(), key=lambda item: (item[0] not in first, item[0]))
         return {
             "id": event.id, "family": event.family, "ts": event.ts.isoformat(), "host": event.host,
             "outcome": str(event.outcome),
-            "fields": {name: field.value for name, field in sorted(event.fields.items())[:16]},
+            "fields": {name: field.value for name, field in ordered[:16]},
             "caveats": event.caveats[:5],
         }
 
@@ -1329,9 +1359,10 @@ class Toolbox:
                 "kind": _bounded_text(item["kind"]), "value": _bounded_text(item["value"]),
                 "role": _bounded_text(item["role"]),
             })
-        persisted = {row["id"]: self._persisted_event_summary(row)
-                     for row in self.repo.citation_events(self.hunt_id, page_ids)}
         search = summary.get("search")
+        first = tuple(item["field"] for item in (search or {}).get("conditions", []))
+        persisted = {row["id"]: self._persisted_event_summary(row, first)
+                     for row in self.repo.citation_events(self.hunt_id, page_ids)}
         # a search's records carry any telemetry text: their field values share one bounded, chunked allowance
         budget = _TelemetryBudget(chunk_index or 1) if search is not None else None
         summaries = []
@@ -1343,8 +1374,12 @@ class Toolbox:
             if item.get("id") in event_aliases:
                 item["alias"] = event_aliases[item.pop("id")]
             if budget is not None:
-                item["fields"] = budget.project(item.get("fields") or {},
-                                                f"search_events page={page} cursor={cursor}")
+                # the searched fields first and on their own, so neither the field limit nor a chunk cuts them
+                fields = item.get("fields") or {}
+                searched = {name: fields.pop(name) for name in first if name in fields}
+                route = f"search_events page={page} cursor={cursor}"
+                item["searched_fields"] = budget.project(searched, route)
+                item["fields"] = budget.project(fields, route)
             summaries.append(item)
         data = {
             "result": {

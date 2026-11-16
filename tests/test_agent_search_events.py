@@ -5,7 +5,9 @@ on the way to Elasticsearch is the code under test. No test reaches a real model
 """
 from __future__ import annotations
 
+import ipaddress
 import json
+import re
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
@@ -21,7 +23,7 @@ from romulus.hunt import pivot as pivot_module
 from romulus.hunt.agent_tools import HuntToolExecutor
 from romulus.hunt.links import LinkFetcher
 from romulus.hunt.pivot import MAX_PIVOT_PARTITIONS, PivotExecutor
-from romulus.sources.compile import _escape_wildcard
+from romulus.sources.compile import _escape_wildcard, utf16_length
 from romulus.sources.es import SourceBudgetExhausted
 from romulus.sources.profile import FieldContract, FieldSpec, contract_from_types
 from romulus.store.db import make_engine, migrate, utcnow
@@ -34,32 +36,57 @@ SESSION = "as-search"
 
 # ---- fixtures ----------------------------------------------------------------------------------------------------
 
-def _dns(target: str, number: int, ts: datetime, name: str = "example.test") -> dict:
-    """One Suricata DNS record as an Elastic shipper stores it: it normalizes to one dns_query event."""
+def _dns(target: str, number: int, ts: datetime, name: str = "example.test", port: int = 53) -> dict:
+    """One Suricata DNS record as an Elastic shipper stores it, its EVE line beside the fields the shipper parsed:
+    it normalizes to one dns_query event, and the fake source matches its stored fields."""
     body = {"timestamp": ts.isoformat(), "event_type": "dns", "src_ip": "10.0.0.8", "dest_ip": "10.0.0.53",
-            "proto": "UDP", "dns": {"type": "query", "rrname": name, "rrtype": "A"}}
+            "dest_port": port, "proto": "UDP", "dns": {"type": "query", "rrname": name, "rrtype": "A"}}
     return {"_id": f"{target}-{number}", "_index": target, "_source": {
         "@timestamp": ts.isoformat().replace("+00:00", "Z"), "host": {"name": "sensor"},
-        "event": {"dataset": "suricata.eve.dns", "original": json.dumps(body)}}}
+        "event": {"dataset": "suricata.eve.dns", "original": json.dumps(body)},
+        "dns": {"question": {"name": name}}, "source": {"ip": "10.0.0.8"},
+        "destination": {"ip": "10.0.0.53", "port": port}}}
 
 
-def _window(body: dict) -> tuple[datetime, datetime]:
-    bounds = body["query"]["bool"]["filter"][0]["range"]["@timestamp"]
-    return datetime.fromisoformat(bounds["gte"]), datetime.fromisoformat(bounds["lt"])
+def _stamp(value) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def _wildcard_regex(pattern: str) -> re.Pattern:
+    """Elasticsearch's wildcard syntax: * and ? are wildcards, a backslash makes the next character literal."""
+    out, index = [], 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\" and index + 1 < len(pattern):
+            out.append(re.escape(pattern[index + 1]))
+            index += 2
+            continue
+        out.append(".*" if char == "*" else "." if char == "?" else re.escape(char))
+        index += 1
+    return re.compile("".join(out), re.DOTALL)
 
 
 class FakeES:
-    """Answers each compiled raw query from fixed records (or a generator for mission-scale totals), honouring the
-    query's time window, order and record cap, and keeps every body it was sent."""
+    """A source that evaluates the compiled query itself, as Elasticsearch would on keyword fields: term, terms,
+    prefix and wildcard compare the stored text exactly (case-sensitive unless a wildcard asks otherwise, or the field
+    has a lowercase normalizer in `caseless`), an address term compares addresses (a network contains them), a range
+    compares times or numbers, and a value longer than its field's ignore_above (`limits`, UTF-16 code units) is not
+    indexed. `generated` targets claim a total and make records on demand, for mission-scale volumes."""
 
     version = "8.19.0"
 
     class settings:
         es_flavor = "elasticsearch"
 
-    def __init__(self, records: dict[str, list[dict]] | None = None, generated: dict[str, int] | None = None):
+    def __init__(self, records: dict[str, list[dict]] | None = None, generated: dict[str, int] | None = None,
+                 limits: dict[str, int] | None = None, caseless: set[str] | None = None):
         self.records = records or {}
-        self.generated = generated or {}          # target -> claimed total per query (records made on demand)
+        self.generated = generated or {}
+        self.limits = limits or {}
+        self.caseless = caseless or set()
         self.bodies: list[tuple[str, dict]] = []
         self.returned = 0
 
@@ -67,13 +94,90 @@ class FakeES:
     def point_in_time(self, _target):
         yield object()
 
+    def _indexed(self, source: dict, path: str) -> list:
+        values = pivot_module._stored_values(source, path)
+        limit = self.limits.get(path)
+        return [value for value in values
+                if not (isinstance(value, str) and limit is not None and utf16_length(value) > limit)]
+
+    def _equal(self, stored, wanted, path: str) -> bool:
+        if isinstance(stored, (dict, list)) or stored is None:
+            return False
+        try:
+            address = ipaddress.ip_address(str(stored))
+            address = getattr(address, "ipv4_mapped", None) or address
+            if "/" in str(wanted):
+                return address in ipaddress.ip_network(str(wanted), strict=False)
+            other = ipaddress.ip_address(str(wanted))
+            return address == (getattr(other, "ipv4_mapped", None) or other)
+        except ValueError:
+            pass
+        if isinstance(wanted, (int, float)) and not isinstance(wanted, bool):
+            try:
+                return float(stored) == float(wanted)
+            except (TypeError, ValueError):
+                return False
+        text = ("true" if stored else "false") if isinstance(stored, bool) else str(stored)
+        wanted = ("true" if wanted else "false") if isinstance(wanted, bool) else str(wanted)
+        return text.casefold() == wanted.casefold() if path in self.caseless else text == wanted
+
+    def matches(self, clause: dict, source: dict) -> bool:
+        (kind, body), = clause.items()
+        if kind == "bool":
+            required = [*body.get("filter", []), *body.get("must", [])]
+            if not all(self.matches(item, source) for item in required):
+                return False
+            if any(self.matches(item, source) for item in body.get("must_not", [])):
+                return False
+            should = body.get("should", [])
+            need = body.get("minimum_should_match", 0 if required else 1) if should else 0
+            return sum(self.matches(item, source) for item in should) >= need
+        if kind == "exists":
+            return bool(pivot_module._stored_values(source, body["field"]))
+        (path, spec), = body.items()
+        values = self._indexed(source, path)
+        if kind == "term":
+            wanted = spec["value"] if isinstance(spec, dict) else spec
+            return any(self._equal(value, wanted, path) for value in values)
+        if kind == "terms":
+            return any(self._equal(value, wanted, path) for value in values for wanted in spec)
+        if kind == "prefix":
+            return any(isinstance(value, str) and value.startswith(spec["value"]) for value in values)
+        if kind == "wildcard":
+            caseless = spec.get("case_insensitive") or path in self.caseless
+            flags = re.DOTALL | (re.IGNORECASE if caseless else 0)
+            pattern = _wildcard_regex(spec["value"]).pattern
+            return any(isinstance(value, str) and re.fullmatch(pattern, value, flags) is not None
+                       for value in values)
+        if kind == "range":
+            for value in values:
+                moment = _stamp(value) if isinstance(value, str) else None
+                ok = True
+                for bound_name, bound in spec.items():
+                    if bound_name not in {"gte", "lt"}:
+                        continue
+                    if moment is not None and _stamp(bound) is not None:
+                        left, right = moment, _stamp(bound)
+                    else:
+                        try:
+                            left, right = float(value), float(bound)
+                        except (TypeError, ValueError):
+                            ok = False
+                            break
+                    ok = ok and (left >= right if bound_name == "gte" else left < right)
+                if ok:
+                    return True
+            return False
+        raise AssertionError(f"the fake source does not evaluate {kind}")
+
     def iterate(self, q, max_records, page_size=None, pit=None, on_query=None, deadline=None, clock=None):
         if on_query is not None and not on_query():
             raise SourceBudgetExhausted("source query budget exhausted")
         self.bodies.append((q.target, q.body))
-        start, end = _window(q.body)
         descending = q.body["sort"][0]["@timestamp"]["order"] == "desc"
         if q.target in self.generated:
+            bounds = q.body["query"]["bool"]["filter"][0]["range"]["@timestamp"]
+            start, end = _stamp(bounds["gte"]), _stamp(bounds["lt"])
             total = self.generated[q.target]
             span = (end - start) / max(1, max_records)
             moments = [start + span * index for index in range(min(total, max_records))]
@@ -82,7 +186,7 @@ class FakeES:
             hits = [_dns(q.target, int(moment.timestamp() * 1e6), moment) for moment in moments]
         else:
             matching = [record for record in self.records.get(q.target, [])
-                        if start <= datetime.fromisoformat(record["_source"]["@timestamp"]) < end]
+                        if self.matches(q.body["query"], record["_source"])]
             # ties at one instant are ordered by document, as the source's _shard_doc tiebreak does
             matching.sort(key=lambda record: (record["_source"]["@timestamp"], record["_id"]), reverse=descending)
             total = len(matching)
@@ -95,7 +199,7 @@ class FakeES:
 def _keyword_contract(target: str, role: str = "network", **extra: str) -> FieldContract:
     return contract_from_types(target, {
         "@timestamp": "date", "event.dataset": "keyword", "dns.question.name": "keyword",
-        "destination.ip": "ip", "destination.port": "long", "event.duration": "double", **extra,
+        "source.ip": "ip", "destination.ip": "ip", "destination.port": "long", "event.duration": "double", **extra,
     }, role=role, os_family="linux" if role == "host" else None)
 
 
@@ -125,9 +229,9 @@ def _hunt(path=None) -> Repo:
 
 
 def _toolbox(repo: Repo, contracts: dict, client: FakeES, *, budget: int | None = None,
-             packet_sources: tuple[str, ...] = ()) -> Toolbox:
+             packet_sources: tuple[str, ...] = (), inventory: dict | None = None) -> Toolbox:
     pivot = PivotExecutor(repo, client, "h1", contracts, source_query_budget=budget,
-                          source_query_scope="agent" if budget is not None else None)
+                          source_query_scope="agent" if budget is not None else None, dataset_inventory=inventory)
     fetcher = LinkFetcher(pivot, T, END)
     executor = HuntToolExecutor(repo, "h1", pivot, fetcher, T, END, packet_sources=packet_sources)
     return Toolbox(repo, "h1", executor=executor, session_id=SESSION)
@@ -139,6 +243,9 @@ def _search(toolbox: Toolbox, conditions, *, scope="network", **extra) -> dict:
 
 
 DNS = [{"field": "dns.question.name", "op": "eq", "values": ["example.test"]}]
+# a condition on a field declared verbatim (an address stored as an address): zero hits on it can be a no-match
+VERBATIM = [{"field": "destination.ip", "op": "eq", "values": ["10.0.0.53"]}]
+ABSENT = [{"field": "destination.ip", "op": "eq", "values": ["192.0.2.99"]}]
 
 
 # ---- schema and validation ---------------------------------------------------------------------------------------
@@ -282,9 +389,10 @@ def test_zero_hits_beside_an_unevaluated_target_is_unresolved_never_no_match():
 
 
 def test_zero_hits_under_complete_coverage_is_a_real_no_match():
-    repo, client = _hunt(), FakeES({"net-a": [], "net-b": []})
+    records = [_dns("net-a", 1, T + timedelta(minutes=3)), _dns("net-b", 2, T + timedelta(minutes=4))]
+    repo, client = _hunt(), FakeES({"net-a": records[:1], "net-b": records[1:]})
     contracts = {"net-a": _keyword_contract("net-a"), "net-b": _keyword_contract("net-b")}
-    response = _search(_toolbox(repo, contracts, client), DNS)
+    response = _search(_toolbox(repo, contracts, client), ABSENT)
     assert response["status"] == "complete"
     search = response["data"]["result"]["search"]
     assert search["negative"] == "no_match" and search["unresolved_because"] == []
@@ -297,9 +405,13 @@ def test_packet_captures_are_named_as_not_searched_and_keep_a_zero_unresolved():
     repo, client = _hunt(), FakeES({"net-a": []})
     toolbox = _toolbox(repo, {"net-a": _keyword_contract("net-a")}, client,
                        packet_sources=("packet captures behind arkime-sessions (Arkime viewer and TShark)",))
-    response = _search(toolbox, DNS)
+    response = _search(toolbox, ABSENT)
     search = response["data"]["result"]["search"]
-    assert search["negative"] == "unresolved"
+    assert search["negative"] == "unresolved" and search["exhaustive"] is False
+    # the source not searched makes the tool result and its coverage partial, with a gap that names it
+    assert response["status"] == "partial" and response["coverage"]["status"] == "partial"
+    assert any(gap["target"] == "packet captures behind arkime-sessions (Arkime viewer and TShark)"
+               for gap in response["coverage"]["gaps"])
     assert search["not_searched"] == [(
         "packet captures behind arkime-sessions (Arkime viewer and TShark): not searched (scope unsupported for "
         "agent search)")]
@@ -308,7 +420,8 @@ def test_packet_captures_are_named_as_not_searched_and_keep_a_zero_unresolved():
 def test_records_no_normalizer_reads_are_named_not_dropped():
     repo = _hunt()
     odd = {"_id": "odd", "_index": "net-a", "_source": {"@timestamp": (T + timedelta(minutes=2)).isoformat(),
-                                                         "event": {"dataset": "custom.thing"}}}
+                                                         "event": {"dataset": "custom.thing"},
+                                                         "dns": {"question": {"name": "example.test"}}}}
     client = FakeES({"net-a": [odd]})
     response = _search(_toolbox(repo, {"net-a": _keyword_contract("net-a")}, client), DNS)
     assert response["status"] == "partial"
@@ -552,8 +665,8 @@ def test_each_search_spends_the_hunt_source_query_budget():
     repo = _hunt()
     client = FakeES({"net-a": []})
     toolbox = _toolbox(repo, {"net-a": _keyword_contract("net-a")}, client, budget=1)
-    first = _search(toolbox, DNS)
-    second = _search(toolbox, [{"field": "dns.question.name", "op": "eq", "values": ["other.test"]}])
+    first = _search(toolbox, ABSENT)
+    second = _search(toolbox, [{"field": "destination.ip", "op": "eq", "values": ["192.0.2.98"]}])
     assert first["data"]["result"]["search"]["negative"] == "no_match"
     assert second["status"] == "partial"
     assert second["data"]["result"]["search"]["negative"] == "unresolved"
@@ -702,3 +815,297 @@ def test_a_failed_search_is_retried_and_its_successful_retry_is_then_deduplicate
     assert third["data"]["result"]["search"]["repeated"] is True
     assert third["data"]["result"]["cursor"] == second["data"]["result"]["cursor"]
     assert len(client.bodies) == 2
+
+
+# ---- negatives need verbatim fields ------------------------------------------------------------------------------
+
+def _windows_contract_and_record():
+    from tests.windows_fixtures import LogicalWindowsEvent, windows_hit
+
+    event = LogicalWindowsEvent(
+        "Security", "Microsoft-Windows-Security-Auditing", 4624, "WS01.corp.example", 77, "2024-11-18T14:10:00Z",
+        {"SubjectUserSid": "S-1-5-18", "SubjectUserName": "WS01$", "TargetUserSid": "S-1-5-21-1-2-3-500",
+         "TargetUserName": "Administrator", "TargetDomainName": "CORP", "LogonType": "3",
+         "IpAddress": "198.51.100.9", "IpPort": "51515", "LogonId": "0x1"})
+    hit = windows_hit(event, "winlogbeat_8")
+    hit.update(_index="win-a", _id="win-77")
+
+    def flat(node, prefix=""):
+        out = {}
+        for key, value in node.items():
+            out.update(flat(value, f"{prefix}{key}.") if isinstance(value, dict)
+                       else {prefix + key: "date" if key == "@timestamp" else "keyword"})
+        return out
+
+    contract = contract_from_types("win-a", flat(hit["_source"]), role="host", os_family="windows",
+                                   datasets=["windows.security"], index_limits={})
+    return contract, hit
+
+
+@pytest.mark.parametrize("conditions, expect", [
+    # values copied from the typed event: the canonical sid form, the short host name, the case-folded user name
+    ([{"field": "auth.target_account", "op": "in", "values": ["sid:s-1-5-21-1-2-3-500"]}], "matches_found"),
+    ([{"field": "auth.target_account", "op": "eq", "values": ["sid:s-1-5-21-1-2-3-500"]}], "matches_found"),
+    ([{"field": "host.name", "op": "in", "values": ["ws01", "ws02"]}], "matches_found"),
+    ([{"field": "host.name", "op": "eq", "values": ["ws01"]}], "matches_found"),
+    ([{"field": "user.name", "op": "eq", "values": ["ws01$"]}], "unresolved"),
+    ([{"field": "user.name", "op": "in", "values": ["ws01$"]}], "unresolved"),
+    ([{"field": "user.name", "op": "prefix", "values": ["ws0"]}], "unresolved"),
+    ([{"field": "source.ip", "op": "eq", "values": ["198.51.100.10"]}], "unresolved"),
+])
+def test_a_value_copied_from_a_typed_event_is_a_hit_or_unresolved_never_no_match(conditions, expect):
+    contract, hit = _windows_contract_and_record()
+    repo, client = _hunt(), FakeES({"win-a": [hit]})
+    response = _search(_toolbox(repo, {"win-a": contract}, client), conditions, scope="host")
+    search = response["data"]["result"]["search"]
+    assert search["negative"] == expect, response["data"]["result"]
+    assert search["exhaustive"] is False
+    if expect == "unresolved":
+        field_name = conditions[0]["field"]
+        assert (f"{field_name}: typed values are derived from the stored value (case/form/text); zero hits are not "
+                "a confirmed absence") in search["unresolved_because"]
+
+
+def test_an_in_on_a_special_field_is_sent_as_each_value_s_equality_form():
+    contract, _hit = _windows_contract_and_record()
+    executor = PivotExecutor(_hunt(), FakeES(), "h1", {"win-a": contract})
+    plan = executor.plan_search(_request([{"field": "auth.target_account", "op": "in",
+                                           "values": ["sid:s-1-5-21-1-2-3-500", "name:corp\\bob"]}], scope="host"))
+    body = json.dumps(pivot_module.compile_es(plan.intents[0], contract).body)
+    assert '"terms"' not in body and "sid:" not in body and "name:" not in body
+    assert '"value": "s-1-5-21-1-2-3-500", "case_insensitive": true' in body
+    assert '"value": "bob", "case_insensitive": true' in body
+
+
+@pytest.mark.parametrize("field_name", ["user.entity_id", "auth.target_account", "host.name", "event.channel"])
+def test_a_prefix_on_a_canonical_or_case_folded_field_is_refused_saying_why(field_name):
+    contract, hit = _windows_contract_and_record()
+    repo, client = _hunt(), FakeES({"win-a": [hit]})
+    response = _search(_toolbox(repo, {"win-a": contract}, client),
+                       [{"field": field_name, "op": "prefix", "values": ["abc"]}], scope="host")
+    assert response["status"] == "refused"
+    problem = response["data"]["error"]["targets"][0]["problem"]
+    assert f"field {field_name} / op prefix refused: its typed value is" in problem
+    assert client.bodies == []
+
+
+def test_a_hash_typed_in_another_case_than_stored_is_unresolved():
+    contract = _keyword_contract("net-a", **{"file.hash.sha256": "keyword"})
+    record = _dns("net-a", 1, T + timedelta(minutes=2))
+    record["_source"]["file"] = {"hash": {"sha256": "AB" * 32}}
+    repo, client = _hunt(), FakeES({"net-a": [record]})
+    response = _search(_toolbox(repo, {"net-a": contract}, client),
+                       [{"field": "file.hash.sha256", "op": "eq", "values": ["ab" * 32]}])
+    search = response["data"]["result"]["search"]
+    assert response["status"] == "complete" and search["negative"] == "unresolved"
+    assert any(why.startswith("file.hash.sha256: typed values are derived") for why in search["unresolved_because"])
+
+
+def test_superset_rows_the_re_check_refutes_are_discarded_never_matches():
+    # a lowercase normalizer on the stored field: the source matches another case, the stored value does not
+    repo = _hunt()
+    client = FakeES({"net-a": [_dns("net-a", 1, T + timedelta(minutes=2))]}, caseless={"dns.question.name"})
+    response = _search(_toolbox(repo, {"net-a": _keyword_contract("net-a")}, client),
+                       [{"field": "dns.question.name", "op": "eq", "values": ["EXAMPLE.test"]}])
+    search = response["data"]["result"]["search"]
+    assert search["discarded"] == 1 and search["negative"] == "unresolved"
+    assert response["data"]["result"]["evidence"] == []
+
+
+def test_a_text_parsed_host_dataset_keeps_an_address_search_unresolved():
+    contract = _keyword_contract("host-a", role="host", message="match_only_text")
+    for inventory, dataset in (({"host-a": ["linux.syslog", "linux.audit"]}, "linux.syslog"), (None, None)):
+        repo, client = _hunt(), FakeES({"host-a": []})
+        response = _search(_toolbox(repo, {"host-a": contract}, client, inventory=inventory),
+                           [{"field": "source.ip", "op": "eq", "values": ["198.51.100.9"]}], scope="host")
+        assert response["status"] == "partial"
+        assert response["data"]["result"]["search"]["negative"] == "unresolved"
+        reasons = response["data"]["result"]["reasons"]
+        assert any(reason.startswith(f"dataset_text_parsed:{dataset or 'inventory unknown'}") for reason in reasons)
+    # the same search on a target that maps no text payload can be a confirmed no-match
+    repo, client = _hunt(), FakeES({"host-b": []})
+    response = _search(_toolbox(repo, {"host-b": _keyword_contract("host-b", role="host")}, client,
+                                inventory={"host-b": ["linux.audit"]}),
+                       [{"field": "source.ip", "op": "eq", "values": ["198.51.100.9"]}], scope="host")
+    assert response["data"]["result"]["search"]["negative"] == "no_match"
+
+
+# ---- index length limits -----------------------------------------------------------------------------------------
+
+LIMITED_MAPPING = {
+    "idx-1": {"mappings": {"properties": {
+        "@timestamp": {"type": "date"}, "cmd": {"type": "keyword", "ignore_above": 64},
+        "free": {"type": "keyword"},
+        "proc": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
+    }}},
+    "idx-2": {"mappings": {"properties": {"cmd": {"type": "keyword", "ignore_above": 128}}}},
+}
+
+
+def _limited_contract() -> FieldContract:
+    from romulus.sources.profile import flatten_mapping, keyword_index_limits
+
+    limits = keyword_index_limits(LIMITED_MAPPING)
+    assert limits == {"cmd": 64, "free": None, "proc.keyword": 256}         # the smallest across indices
+    return contract_from_types("net-a", flatten_mapping(LIMITED_MAPPING), role="network", index_limits=limits)
+
+
+def test_a_prefix_on_a_limited_keyword_misses_long_values_and_is_unresolved():
+    long_line = "powershell.exe -enc " + "A" * 100
+    record = _dns("net-a", 1, T + timedelta(minutes=2))
+    record["_source"].update(cmd=long_line, free=long_line)
+    repo, client = _hunt(), FakeES({"net-a": [record]}, limits={"cmd": 64})
+    toolbox = _toolbox(repo, {"net-a": _limited_contract()}, client)
+    response = _search(toolbox, [{"field": "cmd", "op": "prefix", "values": ["powershell.exe -enc"]}])
+    search = response["data"]["result"]["search"]
+    assert search["negative"] == "unresolved"
+    assert ("cmd: values longer than 64 characters are not indexed in cmd, so a prefix cannot see them"
+            in search["unresolved_because"])
+    # a keyword with no limit names none; the long value is found
+    response = _search(toolbox, [{"field": "free", "op": "prefix", "values": ["powershell.exe -enc"]}])
+    search = response["data"]["result"]["search"]
+    assert search["negative"] == "matches_found"
+    assert not any("not indexed" in why for why in search["unresolved_because"])
+
+
+def test_an_equality_value_past_the_limit_in_utf16_units_is_not_evaluated():
+    contract = _limited_contract()
+    executor = PivotExecutor(_hunt(), FakeES(), "h1", {"net-a": contract})
+    astral = "\U0001f600" * 33                      # 33 characters, 66 UTF-16 code units: past 64
+    for value in ("x" * 65, astral):
+        plan = executor.plan_search(_request([{"field": "cmd", "op": "eq", "values": [value]}]))
+        assert plan.intents == []
+        assert "a value longer than 64 characters is not indexed by cmd" in json.dumps(plan.refusal)
+    plan = executor.plan_search(_request([{"field": "cmd", "op": "eq", "values": ["\U0001f600" * 32]}]))
+    assert plan.refusal is None
+
+
+def test_an_unknown_limit_keeps_an_equality_zero_unresolved():
+    executor = PivotExecutor(_hunt(), FakeES(), "h1", {"net-a": _keyword_contract("net-a")})
+    plan = executor.plan_search(_request(DNS))
+    assert ("dns.question.name: the index length limit of dns.question.name is unknown; a longer stored value is "
+            "not indexed") in plan.caveats
+
+
+def test_the_reviewer_text_and_keyword_probe_shapes():
+    from romulus.sources.profile import flatten_mapping, keyword_index_limits, keyword_subfield_limits
+
+    mapping = {"idx": {"mappings": {"properties": {
+        "@timestamp": {"type": "date"},
+        "Channel": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
+        "EventID": {"type": "long"},
+        "Hostname": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
+        "CommandLine": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
+        "Image": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
+    }}}}
+    contract = contract_from_types("win-a", flatten_mapping(mapping), role="host", os_family="windows",
+                                   keyword_limits=keyword_subfield_limits(mapping),
+                                   index_limits=keyword_index_limits(mapping))
+    executor = PivotExecutor(_hunt(), FakeES(), "h1", {"win-a": contract})
+    plan = executor.plan_search(_request([{"field": "CommandLine.keyword", "op": "prefix",
+                                           "values": ["powershell.exe -enc"]}], scope="host"))
+    assert any("values longer than 256 characters are not indexed in CommandLine.keyword" in caveat
+               for caveat in plan.caveats)
+    plan = executor.plan_search(_request([{"field": "process.command_line", "op": "prefix",
+                                           "values": ["powershell.exe -enc"]}], scope="host"))
+    assert plan.intents == [] and plan.refusal["code"] == "search_unsupported"
+
+
+# ---- page items, failures and what was not searched --------------------------------------------------------------
+
+def test_a_search_is_refused_before_any_query_when_the_session_has_no_page_item_headroom(monkeypatch):
+    repo, client = _hunt(), FakeES({"net-a": []})
+    monkeypatch.setattr(Repo, "agent_page_headroom", lambda self, hunt_id, identity: (5, 100))
+    response = _search(_toolbox(repo, {"net-a": _keyword_contract("net-a")}, client), DNS)
+    assert response["status"] == "refused" and response["data"]["error"]["code"] == "page_quota"
+    assert response["data"]["error"]["reasons"] == ["$: page_quota"]
+    assert client.bodies == []
+
+
+def test_a_search_failing_every_try_is_stored_and_stops_spending():
+    from romulus.sources.es import SourceError
+
+    class DownES(FakeES):
+        def iterate(self, q, max_records, **kwargs):
+            self.bodies.append((q.target, q.body))
+            raise SourceError("connection refused")
+            yield
+
+    repo, client = _hunt(), DownES()
+    toolbox = _toolbox(repo, {"net-a": _keyword_contract("net-a")}, client)
+    responses = [_search(toolbox, DNS) for _ in range(6)]
+    assert all(response["status"] == "failed" for response in responses)
+    assert len(client.bodies) == 4                       # one per derived try, then the stored failure
+    assert responses[-1]["data"]["result"]["search"]["repeated"] is True
+
+
+def test_an_executor_that_raises_leaves_a_stored_failed_result():
+    class Raising:
+        runs = 0
+
+        def run(self, *_args, **_kwargs):
+            Raising.runs += 1
+            raise RuntimeError("boom")
+
+        def follow_link(self, *_args, **_kwargs):
+            raise AssertionError
+
+    repo = _hunt()
+    toolbox = Toolbox(repo, "h1", executor=Raising(), session_id=SESSION)
+    responses = [_search(toolbox, DNS) for _ in range(5)]
+    assert responses[0]["status"] == "failed"
+    assert "search failed: RuntimeError: boom" in responses[0]["data"]["result"]["reasons"]
+    assert Raising.runs == 4 and responses[-1]["data"]["result"]["search"]["repeated"] is True
+
+
+def test_a_reach_link_with_an_unsearched_source_is_stored_partial():
+    repo = _hunt()
+    client = FakeES({"net-a": [_dns("net-a", 1, T + timedelta(minutes=2))]})
+    toolbox = _toolbox(repo, {"net-a": _keyword_contract("net-a")}, client, packet_sources=("pcap-behind-net-a",))
+    response = _search(toolbox, VERBATIM)
+    assert response["status"] == "partial"
+    link, = [row for row in repo.expansion_links("h1") if row["link_type"] == "agent_search_events"]
+    assert link["status"] == "partial"
+    assert any(cell["target"] == "pcap-behind-net-a" and cell["status"] == "partial" for cell in link["coverage"])
+
+
+def test_listed_entities_and_skip_reasons_are_bounded_per_search(monkeypatch):
+    monkeypatch.setattr(pivot_module, "MAX_SEARCH_ENTITIES", 1)
+    monkeypatch.setattr(pivot_module, "MAX_SEARCH_SKIP_REASONS", 1)
+    odd = [{"_id": f"odd-{name}", "_index": "net-a", "_source": {
+        "@timestamp": (T + timedelta(minutes=n)).isoformat(), "event": {"dataset": f"custom.{name}"},
+        "dns": {"question": {"name": "example.test"}}}} for n, name in enumerate("abc", 1)]
+    records = [_dns("net-a", 1, T + timedelta(minutes=9)), *odd]
+    repo, client = _hunt(), FakeES({"net-a": records})
+    response = _search(_toolbox(repo, {"net-a": _keyword_contract("net-a")}, client), DNS)
+    result = response["data"]["result"]
+    assert len(result["entities"]) == 1
+    assert any(reason.startswith("search_entities_listed:1:of:") for reason in result["reasons"])
+    skip = [reason for reason in result["reasons"] if reason.startswith("records_not_normalized:")]
+    assert len([reason for reason in skip if "past the first 1" not in reason]) == 1
+    assert any("other reasons past the first 1" in reason for reason in skip)
+
+
+def test_reasons_past_ten_are_counted_and_similar_field_names_are_bounded():
+    targets = {f"net-{n:02d}": contract_from_types(f"net-{n:02d}", {"@timestamp": "date"}, role="network")
+               for n in range(12)}
+    targets["net-a"] = _keyword_contract("net-a")
+    repo, client = _hunt(), FakeES({"net-a": []})
+    search = _search(_toolbox(repo, targets, client), DNS)["data"]["result"]["search"]
+    assert len(search["unresolved_because"]) == 10 and search["unresolved_because_omitted"] > 0
+    long_name = "file.hash." + "a" * 300
+    contract = contract_from_types("net-a", {"@timestamp": "date", long_name: "keyword"}, role="network")
+    refusal = PivotExecutor(_hunt(), FakeES(), "h1", {"net-a": contract}).plan_search(_request(
+        [{"field": "hash.sha256", "op": "eq", "values": ["x"]}])).refusal
+    assert all(len(item["field"]) <= 129 for item in refusal["conditions"][0]["similar_fields"])
+
+
+def test_the_searched_fields_are_never_cut_from_an_event_summary():
+    # a Windows logon has more than sixteen typed fields, and source.ip sorts past the sixteenth
+    contract, hit = _windows_contract_and_record()
+    repo, client = _hunt(), FakeES({"win-a": [hit]})
+    response = _search(_toolbox(repo, {"win-a": contract}, client),
+                       [{"field": "host.name", "op": "eq", "values": ["ws01"]},
+                        {"field": "source.ip", "op": "eq", "values": ["198.51.100.9"]}], scope="host")
+    summary, = response["data"]["result"]["event_summaries"]
+    assert summary["searched_fields"] == {"host.name": "ws01", "source.ip": "198.51.100.9"}

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from romulus.agent.models import EntityRef, PivotResult
+from romulus.agent.models import EntityRef, PivotCoverage, PivotResult
 from romulus.agent.toolbox import FOLLOW_LINK_KINDS, Toolbox
 from romulus.agent.tools import SearchEventsRequest
 from romulus.config import Settings
@@ -82,6 +82,11 @@ class HuntToolExecutor:
         target of its scope can evaluate every condition."""
         return self.pivot.search_refusal(request)
 
+    def search_item_bound(self, request: SearchEventsRequest) -> int:
+        """The most page items one search's result can hold (PivotExecutor.search_item_bound), plus its named
+        unsearched sources."""
+        return self.pivot.search_item_bound(request) + len(self.packet_sources) + len(self.uncontracted_targets)
+
     def run(self, session_id: str, anchor_id: str, request, *, anchor_ts: datetime | None) -> PivotResult:
         link_type = _PIVOT_LINK_TYPES.get(request.tool)
         if link_type is None:
@@ -107,7 +112,17 @@ class HuntToolExecutor:
                           *(f"{target}: not searched (no field contract for this target)"
                             for target in self.uncontracted_targets)]
             if unsearched:
-                result = result.model_copy(update={"not_searched": unsearched})
+                # a source the search could not read makes it partial everywhere its outcome is kept: the tool
+                # result, its coverage, and the reach link
+                gaps = [PivotCoverage(target=item.split(":", 1)[0], dataset=None, start=request.arguments.start,
+                                      end=request.arguments.end, status="partial", reasons=[item], returned=0,
+                                      total=None)
+                        for item in unsearched]
+                result = result.model_copy(update={
+                    "not_searched": unsearched, "coverage": [*result.coverage, *gaps],
+                    "reasons": sorted({*result.reasons, *unsearched}),
+                    "status": "partial" if result.status == "complete" else result.status,
+                })
         reach_ids = list(getattr(result, "reach_event_ids", []) or result.event_ids)
         link_id = "agent-link-" + digest({
             "hunt_id": self.hunt_id, "anchor_id": anchor_id,
