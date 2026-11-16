@@ -334,6 +334,10 @@ class AgentBudget:
     def wall_seconds(self) -> float:
         return self.wall_seconds_before + (self.clock() - self.started)
 
+    def exclude_wall(self, seconds: float) -> None:
+        """Leave `seconds` that another pass spent (on its own budget) out of this budget's wall time."""
+        self.started += max(0.0, seconds)
+
     def check(self, prompt_tokens_est: int, max_output_tokens: int, *, worst_tokens: int | None = None) -> None:
         """`max_output_tokens` is the provider's `output_limit(request)`: for adapters whose models think, it
         includes the thinking allowance. `worst_tokens` replaces the call's worst case in budget tokens when the

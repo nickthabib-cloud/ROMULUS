@@ -180,6 +180,10 @@ td.lead { color: var(--lead); font-weight: 600; }
 .narrative-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
 .ns.k-inferred { font-style: italic; }
 .ns.k-uncertain { color: var(--muted); text-decoration: underline dotted; text-underline-offset: 3px; }
+/* a weakly supported paragraph (context, not an attack step): muted throughout, its reason shown under the label */
+.narrative > li.weak { color: var(--muted); }
+.narrative > li.weak .narrative-head b { font-weight: 600; font-style: italic; }
+.narrative > li.weak .ns { color: var(--muted); }
 .notice p { margin: 2px 0 0; }
 
 /* ---------- notices ---------- */

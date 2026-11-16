@@ -1,0 +1,573 @@
+"""The AI narrative is grounded in what the cited activity is, not only in that it is cited (fake providers).
+
+The AI triage pass runs inside the agent phase, after the investigation and before the assessment, under the phase's
+lease and on its own budget; its verdicts and each listed finding's evidence strength reach the assess input. The
+checker then holds every narrative paragraph to the deterministic evidence: an attack-phase label needs a Reported,
+confirmed or likely-attack finding, an observed sentence needs a reportable finding, and a paragraph resting only on
+benign-triaged activity is shown as weakly supported. Nothing is removed, and every renderer shows the labels.
+"""
+from __future__ import annotations
+
+import json
+from copy import deepcopy
+from types import SimpleNamespace
+from xml.etree import ElementTree
+from zipfile import ZipFile
+
+import pytest
+
+from romulus.agent import grounding
+from romulus.agent import provider as provider_port
+from romulus.agent.aliases import AliasBook
+from romulus.agent.assessment import _assessment_input, check_assessment
+from romulus.agent.grounding import TriageContext, triage_context
+from romulus.agent.investigate import run_agent_phase
+from romulus.agent.provider.base import ToolCall
+from romulus.agent.toolbox import Toolbox
+from romulus.agent.triage import latest_summary
+from romulus.config import Settings
+from romulus.hunt import run as hunt_run
+from romulus.hunt.rank import place_late_findings
+from romulus.hunt.triage import run_triage_in_phase, write_export
+from romulus.report import executive, markdown
+from romulus.report.manifest import build_manifest, narrative_paragraphs
+from romulus.store.db import make_engine, migrate, utcnow
+from romulus.store.repo import TRIAGE_PURPOSE, Repo
+from tests import test_ai_triage as ta
+from tests import test_web_agent_a6
+from tests.agent_scripted import ScriptedProvider, response
+from tests.test_agent_render_a6 import _docx
+from tests.test_report import _repo_with_finding
+
+IN_WINDOW = "2024-11-18T10:30:00Z"
+USED = TriageContext(True, "complete", 1)
+OFF = TriageContext(False, "off")
+
+
+@pytest.fixture(autouse=True)
+def _stage(tmp_path):
+    ta._STAGE[:] = [tmp_path / "stage"]
+    yield
+
+
+def _hunt():
+    """A ranked hunt: two confirmed findings, unreported filler groups, the attack rule r.attack deep in the order
+    and one agent proposal; triaged with r.attack likely attack and every other group likely benign."""
+    repo = ta._hunt(filler=10)
+    summary = run_triage_in_phase(ta.settings(), repo, "h1", owner_token=None, heartbeat=lambda: None,
+                                  provider=ta.FakeTriage(ta.by_rule({"r.attack"})))
+    assert summary["status"] == "complete"
+    return repo
+
+
+def _file_hunt(tmp_path, name="hunt"):
+    """The same hunt, untriaged, in a file database: the agent phase runs its sessions on worker threads."""
+    engine = make_engine(tmp_path / f"{name}.sqlite")
+    migrate(engine)
+    return ta._hunt(filler=10, repo=Repo(engine))
+
+
+def _s(alias, text="The recorded activity ran on the host.", kind="observed"):
+    return {"text": text, "cites": [alias] if isinstance(alias, str) else alias, "kind": kind}
+
+
+def _p(sentences, phase):
+    return {"time_span": {"start": IN_WINDOW, "end": IN_WINDOW}, "phase": phase, "sentences": sentences}
+
+
+def _reply(narrative):
+    return {"overall": [], "key_steps": [], "narrative": narrative,
+            "confidence": {"overall": "medium", "reasons": []}, "alternatives": [], "gaps": [], "next_checks": []}
+
+
+def _f(repo, finding_id):
+    return AliasBook(repo, "h1").alias_for("F", finding_id)
+
+
+# ------------------------------------------------------------------------------------------------ evidence strength
+def test_strength_reads_lane_reported_confirmed_and_the_group_verdict():
+    repo = _hunt()
+    found = grounding.EvidenceStrength(repo, "h1", USED).findings(
+        ["c-urgent", "f-0001", "z-attack-0", "zz-agent", "missing"])
+    assert found["c-urgent"].view() == {"lane": "urgent", "reported": True, "confirmed": True,
+                                        "triage": "likely_benign"}
+    assert found["c-urgent"].strong and not found["c-urgent"].benign      # confirmed outranks a benign verdict
+    assert found["f-0001"].view() == {"lane": "lead", "reported": False, "confirmed": False,
+                                      "triage": "likely_benign"}
+    assert found["f-0001"].benign and not found["f-0001"].strong
+    assert found["z-attack-0"].triage == "likely_attack" and found["z-attack-0"].strong
+    # the agent's own proposal is never triaged and never supports the narrative
+    assert found["zz-agent"].triage == "not_triaged" and not found["zz-agent"].reportable
+    assert "missing" not in found
+    # without a usable pass every finding reads as not triaged
+    off = grounding.EvidenceStrength(repo, "h1", OFF).findings(["z-attack-0"])
+    assert off["z-attack-0"].triage == "not_triaged" and not off["z-attack-0"].strong
+
+
+def test_without_a_final_ranking_reported_follows_the_lanes_of_the_headline_result():
+    repo, cid = _repo_with_finding()
+    assert repo.detection_result("h1")[1] == "reportable_findings"
+    assert grounding.EvidenceStrength(repo, "h1", OFF).findings([cid])[cid].reported      # lane high
+    with repo.engine.begin() as connection:
+        connection.exec_driver_sql("UPDATE candidate SET lane = 'lead'")
+    assert not grounding.EvidenceStrength(repo, "h1", OFF).findings([cid])[cid].reported
+
+
+def test_verdicts_are_read_by_group_on_an_unranked_hunt_and_reported_is_not_only_confirmed():
+    repo = ta._hunt(filler=10, ranked=False)
+    run_triage_in_phase(ta.settings(), repo, "h1", owner_token=None, heartbeat=lambda: None,
+                        provider=ta.FakeTriage(ta.by_rule({"r.attack"})))
+    found = grounding.EvidenceStrength(repo, "h1", USED).findings(["z-attack-0", "f-0001", "f-0000"])
+    assert found["z-attack-0"].triage == "likely_attack" and found["f-0001"].triage == "likely_benign"
+    assert found["f-0000"].reported and not found["f-0000"].confirmed                     # lane high, unranked
+    # ranked: a lead finding on a confirmed entity is Reported without being confirmed, and anchors a phase
+    ranked = ta._repo()
+    ta._insert(ranked, [ta._row("c-urgent", "r.confirmed", lane="urgent", host="quiet"),
+                        ta._row("q-lead", "r.q", lane="lead", host="quiet"),
+                        ta._row("o-lead", "r.o", lane="lead", host="other")])
+    from romulus.hunt.rank import PASS_FINAL, compute_rank_pass
+    compute_rank_pass(ranked, "h1", PASS_FINAL)
+    strength = grounding.EvidenceStrength(ranked, "h1", OFF).findings(["q-lead", "o-lead"])
+    assert strength["q-lead"].reported and not strength["q-lead"].confirmed and strength["q-lead"].strong
+    assert not strength["o-lead"].reported
+    checked, counts = check_assessment(ranked, "h1", _reply([_p([_s(_f(ranked, "q-lead"))], "Discovery"),
+                                                             _p([_s(_f(ranked, "o-lead"))], "Discovery")]),
+                                       triage=OFF)
+    assert [p["phase"] for p in checked["narrative"]] == ["Discovery", "Context"]
+    assert counts == {"phase_weakly_supported": 1}
+
+
+def test_an_assessment_outside_the_phase_reads_the_latest_pass_unless_triage_is_off(tmp_path):
+    from romulus.agent.assessment import run_assessment
+    from romulus.agent.provider import AgentBudget, BudgetLimits
+    repo = _hunt()
+    seen = {}
+
+    def answer(request):
+        seen["input"] = json.loads(request.messages[1]["content"].split("\n", 1)[1])
+        return response(parsed=_reply([_p([_s(_f(repo, "f-0001"))], "Persistence")]))
+    for value, expected in (("on", {"verdicts": "available", "status": "complete", "pass": 1}),
+                            ("off", {"verdicts": "unavailable", "status": "off"})):
+        budget = AgentBudget.from_usage(BudgetLimits(10, 1_000_000, 600, 0, 0, 0), {}, clock=lambda: 0.0)
+        result = run_assessment(Settings(home=tmp_path, agent_triage=value), repo, "h1",
+                                ScriptedProvider([answer]), budget, clock=lambda: 0.0)
+        assert seen["input"]["triage"] == expected
+        assert result["body"]["narrative"][0]["support_reason"] == (
+            "triaged_likely_benign" if value == "on" else "no_reported_finding")
+
+
+def test_triage_context_says_whether_verdicts_are_available():
+    assert triage_context(None, enabled=False).view() == {"verdicts": "unavailable", "status": "off"}
+    assert triage_context(None).view() == {"verdicts": "unavailable", "status": "not_run"}
+    assert triage_context({"status": "failed", "reason": "provider_unavailable"}).view() == {
+        "verdicts": "unavailable", "status": "failed"}
+    assert triage_context({"status": "partial", "pass": 3}).view() == {"verdicts": "available",
+                                                                       "status": "partial", "pass": 3}
+
+
+# ----------------------------------------------------------------------------------------------- the evidence rules
+def test_an_attack_phase_citing_only_unreported_benign_triaged_findings_becomes_weakly_supported_context():
+    repo = _hunt()
+    body = _reply([_p([_s(_f(repo, "f-0001")), _s(_f(repo, "f-0003"), "This likely set up persistence.",
+                                                    "inferred")], "Persistence")])
+    checked, counts = check_assessment(repo, "h1", deepcopy(body), triage=USED)
+    paragraph = checked["narrative"][0]
+    assert paragraph["phase"] == "Context" and "tactic" not in paragraph
+    assert paragraph["weakly_supported"] and paragraph["support_reason"] == "triaged_likely_benign"
+    assert paragraph["model_phase"] == "Persistence"
+    # nothing is removed: both sentences stay, marked uncertain
+    assert [(s["text"], s["kind"]) for s in paragraph["sentences"]] == [
+        ("The recorded activity ran on the host.", "uncertain"), ("This likely set up persistence.", "uncertain")]
+    assert counts == {"weakly_supported_benign_triage": 1, "labelled_uncertain_benign_triage": 2}
+    # without verdicts the same paragraph cites no Reported finding: context, its sentences as written
+    checked, counts = check_assessment(repo, "h1", deepcopy(body), triage=OFF)
+    paragraph = checked["narrative"][0]
+    assert paragraph["phase"] == "Context" and paragraph["support_reason"] == "no_reported_finding"
+    assert [s["kind"] for s in paragraph["sentences"]] == ["observed", "inferred"]
+    assert counts == {"phase_weakly_supported": 1}
+
+
+def test_a_paragraph_citing_a_reported_confirmed_or_likely_attack_finding_keeps_its_phase():
+    repo = _hunt()
+    for cited in ("c-urgent", "z-attack-0"):
+        body = _reply([_p([_s(_f(repo, cited)), _s(_f(repo, "f-0001"), "A routine job ran.", "inferred")],
+                          "Lateral Movement")])
+        checked, counts = check_assessment(repo, "h1", body, triage=USED)
+        paragraph = checked["narrative"][0]
+        assert paragraph["phase"] == "Lateral Movement" and paragraph["tactic"] == "lateral-movement"
+        assert "weakly_supported" not in paragraph and counts == {}
+        assert [s["kind"] for s in paragraph["sentences"]] == ["observed", "inferred"]
+    # a confirmed finding triaged likely benign still anchors the phase: the deterministic evidence outranks the model
+    checked, counts = check_assessment(repo, "h1", _reply([_p([_s(_f(repo, "c-urgent"))], "Impact")]), triage=USED)
+    assert checked["narrative"][0]["phase"] == "Impact" and counts == {}
+
+
+def test_any_label_without_strong_support_is_weakly_supported_whatever_it_says():
+    repo = _hunt()
+    body = _reply([_p([_s(_f(repo, "f-0001"), kind="inferred")], "Routine provisioning"),
+                   _p([_s([_f(repo, "f-0001"), _f(repo, "z-attack-1")], kind="inferred")], "Staging"),
+                   _p([_s(_f(repo, "f-0003"), kind="inferred")], "Exploitation of the web server"),
+                   _p([_s(_f(repo, "f-0005"), kind="inferred")], "")])
+    checked, counts = check_assessment(repo, "h1", body, triage=OFF)
+    labels = [(p["phase"], p.get("model_phase"), p.get("support_reason")) for p in checked["narrative"]]
+    # a free-text label is no way around the rule: it becomes Context, the model's words kept beside it
+    assert labels == [("Context", "Routine provisioning", "no_reported_finding"),
+                      ("Context", "Staging", "no_reported_finding"),       # no verdicts: r.attack is not strong
+                      ("Context", "Exploitation of the web server", "no_reported_finding"),
+                      ("Context", None, "no_reported_finding")]
+    assert counts == {"phase_weakly_supported": 4}
+    checked, counts = check_assessment(repo, "h1", body, triage=USED)
+    first = checked["narrative"][0]
+    assert first["phase"] == "Context" and first["support_reason"] == "triaged_likely_benign"
+    assert first["sentences"][0]["kind"] == "uncertain"
+    assert checked["narrative"][1]["phase"] == "Staging" and "weakly_supported" not in checked["narrative"][1]
+    assert counts == {"weakly_supported_benign_triage": 3, "labelled_uncertain_benign_triage": 3}
+
+
+def test_an_observed_sentence_needs_a_reportable_finding():
+    repo = _hunt()
+    ta._insert(repo, [ta._row("ctx-1", "r.context", lane="context", host="victim")])
+    with repo.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO typed_event (id, hunt_id, family, ts, host, raw_ids, normalizer, event) VALUES "
+            "('uncited-event', 'h1', 'process_exec', '2024-11-18 10:30:00', 'victim', '[]', 't', '{}')")
+    event = AliasBook(repo, "h1").alias_for("E", "uncited-event")
+    body = _reply([_p([_s(_f(repo, "ctx-1"), "A context record shows the logon."),
+                       _s(event, "An uncited record shows the process."),
+                       _s(_f(repo, "z-attack-2"), "The attack rule fired.")], "Execution")])
+    checked, counts = check_assessment(repo, "h1", body, triage=USED)
+    paragraph = checked["narrative"][0]
+    assert [s["kind"] for s in paragraph["sentences"]] == ["inferred", "inferred", "observed"]
+    assert paragraph["phase"] == "Execution" and counts == {"downgraded_observed_weak_evidence": 2}
+
+
+def test_an_evidence_record_stands_for_its_findings_and_an_incomplete_lookup_is_never_strong(monkeypatch):
+    repo, _cid = _repo_with_finding()
+    with repo.engine.begin() as connection:
+        connection.exec_driver_sql("UPDATE candidate SET lane = 'lead'")     # reportable, not Reported
+    event = AliasBook(repo, "h1").alias_for("E", "ev1")
+    body = _reply([_p([_s(event, "The process read the credential store.")], "Credential Access")])
+    checked, counts = check_assessment(repo, "h1", deepcopy(body), triage=OFF)
+    assert checked["narrative"][0]["phase"] == "Context" and checked["narrative"][0]["sentences"][0]["kind"] == (
+        "observed")                                                            # the record's finding is reportable
+    assert counts == {"phase_weakly_supported": 1}
+    # more findings cite the record than the lookup reads: support of unknown strength is weak, and says so
+    with repo.engine.begin() as connection:
+        connection.exec_driver_sql("UPDATE candidate SET lane = 'high'")     # Reported, but past the lookup's cap
+    monkeypatch.setattr(grounding, "EVENT_FINDINGS", 0)
+    checked, counts = check_assessment(repo, "h1", deepcopy(body), triage=OFF)
+    paragraph = checked["narrative"][0]
+    assert paragraph["phase"] == "Context" and paragraph["support_reason"] == "support_unknown"
+    assert paragraph["model_phase"] == "Credential Access" and paragraph["sentences"][0]["kind"] == "observed"
+    assert counts == {"weakly_supported_unknown_support": 1}
+    assert markdown.narrative_weak_reason(paragraph) == (
+        "Weakly supported: support could not be determined (citation cap); the model labelled it Credential "
+        "Access.")
+
+
+def test_the_evidence_fields_never_enter_the_response_schema():
+    from romulus.agent.assessment import ASSESSMENT_SCHEMA
+    text = json.dumps(ASSESSMENT_SCHEMA)
+    assert "weakly_supported" not in text and "support_reason" not in text and "model_phase" not in text
+
+
+# ------------------------------------------------------------------------------------------------- the assess input
+def test_the_assess_input_gives_each_listed_finding_its_evidence_strength_and_nothing_more():
+    repo = _hunt()
+    data = _assessment_input(repo, "h1", token_budget=200_000, triage=USED)["data"]
+    assert data["triage"] == {"verdicts": "available", "status": "complete", "pass": 1}
+    cards = {card["alias"]: card for incident in data["incidents"] for card in incident["top_findings"]}
+    attack = cards.get(_f(repo, "z-attack-0"))
+    confirmed = cards[_f(repo, "c-urgent")]
+    assert {key: confirmed[key] for key in ("lane", "reported", "confirmed", "triage")} == {
+        "lane": "urgent", "reported": True, "confirmed": True, "triage": "likely_benign"}
+    assert attack is None or attack["triage"] == "likely_attack"
+    assert all(set(card) == {"alias", "lane", "time", "claim", "reported", "confirmed", "triage"}
+               for card in cards.values())
+    # an agent proposal is never presented as Reported evidence
+    assert data["agent_findings"][0]["triage"] == "not_triaged" and "reported" not in data["agent_findings"][0]
+    text = json.dumps(data)
+    for internal in ("score", "rank_position", "rank_reasons", "rationale", "incident_label", "best_position"):
+        assert internal not in text
+    off = _assessment_input(repo, "h1", token_budget=200_000, triage=OFF)["data"]
+    assert off["triage"] == {"verdicts": "unavailable", "status": "off"}
+    assert {card["triage"] for incident in off["incidents"] for card in incident["top_findings"]} == {"not_triaged"}
+
+
+# ------------------------------------------------------------------------------------- the phase order, end to end
+def _assessment_body(repo):
+    return _reply([_p([_s(_f(repo, "z-attack-0"))], "Lateral Movement"),
+                   _p([_s(_f(repo, "f-0001"))], "Persistence")])
+
+
+def _agent_script(repo, seen: dict):
+    finish = [ToolCall("f", "finish_session", {"summary": "The evidence review is complete."}, "{}")]
+
+    def assess(request):
+        seen["assess_input"] = json.loads(request.messages[1]["content"].split("\n", 1)[1])
+        seen["sessions_at_assess"] = [row["purpose"] for row in repo.agent_sessions("h1")]
+        return response(parsed=_assessment_body(repo))
+    return ScriptedProvider([response(tool_calls=finish), response(tool_calls=finish), assess])
+
+
+def _phase_settings(**overrides):
+    return ta.settings(agent_max_initial_hypotheses=1, **overrides)
+
+
+def test_the_phase_runs_orient_investigate_triage_then_assess_under_one_lease(tmp_path):
+    repo = _file_hunt(tmp_path)
+    owner = repo.claim_agent_lease("h1", 600)["lease_owner"]
+    seen: dict = {}
+    triage_provider = ta.FakeTriage(ta.by_rule({"r.attack"}))
+
+    def triage(heartbeat):
+        seen["sessions_at_triage"] = [row["purpose"] for row in repo.agent_sessions("h1")]
+        seen["lease_at_triage"] = repo.agent_run("h1")["lease_owner"]
+        return run_triage_in_phase(_phase_settings(), repo, "h1", owner_token=owner, heartbeat=heartbeat,
+                                   provider=triage_provider)
+    provider = _agent_script(repo, seen)
+    result = run_agent_phase(_phase_settings(), repo, "h1", provider=provider, owner_token=owner,
+                             toolbox_factory=lambda session: Toolbox(repo, "h1", session_id=session),
+                             clock=lambda: 0.0, triage=triage)
+    # orient and investigate ran before triage; the assessment after it, reading its verdicts
+    assert seen["sessions_at_triage"] == ["orient", "investigate"]
+    assert seen["sessions_at_assess"] == ["orient", "investigate", "assess"]
+    # the pass ran under the phase's own lease: no second claim (it would have been refused)
+    assert seen["lease_at_triage"] == owner
+    assert seen["assess_input"]["triage"] == {"verdicts": "available", "status": "complete", "pass": 1}
+    verdicts = {card["triage"] for incident in seen["assess_input"]["incidents"]
+                for card in incident["top_findings"]}
+    assert {"likely_attack", "likely_benign"} <= verdicts
+    # the stored narrative was checked against those verdicts
+    stored = repo.agent_assessments("h1")[-1]
+    assert [p["phase"] for p in stored["body"]["narrative"]] == ["Lateral Movement", "Context"]
+    assert stored["checker"] == {"weakly_supported_benign_triage": 1, "labelled_uncertain_benign_triage": 1}
+    # the phase result carries the pass; the stored phase summary keeps a short record of it (the pass's full
+    # summary is stored on its own); its own usage leaves the triage calls out
+    assert result.state == "completed" and result.as_dict()["ai_triage"]["status"] == "complete"
+    record = repo.latest_audit("h1", "hunt.ai_agent_summary")["detail"]["ai_triage"]
+    assert record == {"status": "complete", "reason": None, "pass": 1, "model": "fake-triage-model"}
+    assert result.usage["calls"] == 3 == len(provider.requests)
+    # the agent's late finding was placed into the final ranking before the pass: the view stays current after the
+    # phase finalizes, in the manifest and in the web's own check
+    from romulus.report.triage import triage_view
+    assert repo.agent_run("h1")["state"] == "completed" and not repo.unranked_findings("h1")
+    assert build_manifest(repo, "h1", "test")["ai_triage"]["stale"] is False
+    assert triage_view(repo, "h1")["stale"] is False
+    assert repo.agent_usage("h1", purposes=(TRIAGE_PURPOSE,))["calls"] == len(triage_provider.requests) > 0
+
+
+def test_the_in_phase_pass_is_reused_on_the_same_digest_and_late_findings_never_make_it_stale(tmp_path):
+    repo = ta._hunt(filler=10)
+    provider = ta.FakeTriage(ta.by_rule({"r.attack"}))
+    first = run_triage_in_phase(ta.settings(), repo, "h1", owner_token=None, heartbeat=lambda: None,
+                                provider=provider)
+    calls = len(provider.requests)
+    second = run_triage_in_phase(ta.settings(), repo, "h1", owner_token=None, heartbeat=lambda: None,
+                                 provider=provider)
+    assert second.get("reused") and second["prompt_digest"] == first["prompt_digest"]
+    assert len(provider.requests) == calls
+    # the agent's proposal is placed into the final ranking when the phase finishes: the pass stays current
+    assert place_late_findings(repo, "h1") is not None
+    header = write_export(repo, "h1", tmp_path / "order.json")
+    assert header["stale"] is False and header["pass"] == first["pass"]
+
+
+def test_the_hunt_uses_the_in_phase_pass_and_runs_no_second_one(monkeypatch):
+    repo = ta._hunt(filler=10)
+    built = []
+    monkeypatch.setattr(hunt_run, "agent_readiness", lambda s, *_a: SimpleNamespace(ready=True, model=s.agent_model))
+
+    def build(s, **_kw):
+        built.append(ta.FakeTriage(ta.by_rule({"r.attack"})))
+        return built[-1]
+    monkeypatch.setattr(hunt_run, "build_provider", build)
+    in_phase = {"status": "complete", "pass": 7}
+    result = hunt_run._with_agent_result({"hunt_id": "h1"}, repo, {"status": "completed", "ai_triage": in_phase},
+                                         settings=ta.settings(), manifest={"ai_agent": {"requested": True}})
+    assert result["ai_triage"] == in_phase and built == []
+    # a phase that ran none (it reused its assessment) leaves the pass to after the phase, as before
+    result = hunt_run._with_agent_result({"hunt_id": "h1"}, repo, {"status": "completed"},
+                                         settings=ta.settings(), manifest={"ai_agent": {"requested": True}})
+    assert result["ai_triage"]["status"] == "complete" and len(built) == 1
+
+
+def test_the_hunt_agent_phase_builds_the_triage_hook_on_the_triage_model(monkeypatch, tmp_path):
+    repo = _file_hunt(tmp_path)
+    seen: dict = {}
+    models = []
+    def ready(s, *_a):
+        return SimpleNamespace(ready=True, model=s.agent_model)
+    monkeypatch.setattr(hunt_run, "agent_readiness", ready)
+    monkeypatch.setattr(provider_port, "agent_readiness", ready)              # the triage model's own check
+
+    def build(s, **_kw):
+        models.append(s.agent_model)
+        if s.agent_model != "triage-model":
+            return _agent_script(repo, seen)
+        triage = ta.FakeTriage(ta.by_rule({"r.attack"}))
+        triage.model = s.agent_model
+        return triage
+    monkeypatch.setattr(hunt_run, "build_provider", build)
+    from romulus.hunt import agent_tools
+    monkeypatch.setattr(agent_tools, "build_agent_toolbox",
+                        lambda s, repo, hunt_id, session_id, **_kw: Toolbox(repo, hunt_id, session_id=session_id))
+    s = _phase_settings(agent_model="agent-model", agent_triage_model="triage-model")
+    manifest = {"ai_agent": {"requested": True}}
+    summary = hunt_run._ai_agent_phase(s, repo, "h1", manifest, None, None, {})
+    assert models == ["agent-model", "triage-model"]
+    assert seen["sessions_at_assess"] == ["orient", "investigate", "assess"]
+    assert summary["ai_triage"]["status"] == "complete" and summary["ai_triage"]["model"] == "triage-model"
+    combined = hunt_run._with_agent_result({"hunt_id": "h1"}, repo, summary, settings=s, manifest=manifest)
+    assert combined["ai_triage"] == summary["ai_triage"] and models == ["agent-model", "triage-model"]
+    # off: no hook, and the assessment says triage was off
+    repo2 = _file_hunt(tmp_path, "off")
+    seen.clear()
+    monkeypatch.setattr(hunt_run, "build_provider", lambda s, **_kw: _agent_script(repo2, seen))
+    summary = hunt_run._ai_agent_phase(_phase_settings(agent_triage="off"), repo2, "h1", manifest, None, None, {})
+    assert "ai_triage" not in summary and seen["assess_input"]["triage"] == {"verdicts": "unavailable",
+                                                                             "status": "off"}
+
+
+def _run_phase(repo, triage, *, clock=lambda: 0.0, **settings):
+    seen: dict = {}
+    provider = _agent_script(repo, seen)
+    result = run_agent_phase(_phase_settings(**settings), repo, "h1", provider=provider,
+                             toolbox_factory=lambda session: Toolbox(repo, "h1", session_id=session),
+                             clock=clock, triage=triage)
+    return result, seen
+
+
+def test_a_failed_or_raising_triage_pass_leaves_the_assessment_as_it_was(tmp_path):
+    for number, (hook, status) in enumerate( ((lambda _hb: {"status": "failed", "reason": "provider_unavailable"}, "failed"),
+                         (lambda _hb: 1 / 0, "failed"),
+                         (None, "not_run"))):
+        repo = _file_hunt(tmp_path, f"run{number}")
+        result, seen = _run_phase(repo, hook)
+        assert result.state == "completed"
+        assert seen["assess_input"]["triage"] == {"verdicts": "unavailable", "status": status}
+        stored = repo.agent_assessments("h1")[-1]
+        # no verdicts: neither cited finding is Reported or confirmed, so both paragraphs are context, their
+        # sentences as written
+        assert stored["checker"] == {"phase_weakly_supported": 2}
+        if hook is not None:
+            assert result.as_dict()["ai_triage"]["status"] == "failed"
+        if number == 1:
+            assert "ZeroDivisionError" in result.as_dict()["ai_triage"]["reason"]
+
+
+def test_triage_wall_time_and_calls_are_not_charged_to_the_agent_budget(tmp_path):
+    repo = _file_hunt(tmp_path)
+    now = [0.0]
+
+    def slow(heartbeat):
+        now[0] += 10_000.0                         # longer than the agent's whole wall budget
+        return run_triage_in_phase(ta.settings(), repo, "h1", owner_token=None, heartbeat=heartbeat,
+                                   provider=ta.FakeTriage(ta.by_rule({"r.attack"})))
+    result, seen = _run_phase(repo, slow, clock=lambda: now[0], agent_max_wall_seconds=600)
+    assert result.state == "completed" and "assess_input" in seen
+    assert "wall-clock" not in str(result.reason) and repo.agent_assessments("h1")[-1]["source"] == "agent"
+    # the agent's budget counts only its own calls: the triage pass's are its own
+    assert result.usage["calls"] == 3 and repo.agent_usage("h1")["calls"] > 3
+
+
+def test_a_reused_assessment_runs_no_triage_in_the_phase(tmp_path):
+    repo = _file_hunt(tmp_path)
+    first, _seen = _run_phase(repo, None)
+    calls = []
+    second = run_agent_phase(_phase_settings(), repo, "h1", provider=ScriptedProvider([]),
+                             toolbox_factory=lambda session: Toolbox(repo, "h1", session_id=session),
+                             clock=lambda: 0.0, triage=lambda hb: calls.append(1) or {"status": "complete"})
+    assert first.state == "completed" and second.state == "completed" and calls == []
+    assert "ai_triage" not in second.as_dict()
+
+
+# ----------------------------------------------------------------------------------------------------------- render
+HOSTILE_PHASE = "<Persistence>"
+
+
+def _weak_assessment(repo, tmp_path):
+    """A stored model assessment with one supported and one weakly supported paragraph."""
+    from romulus.agent.assessment import run_assessment
+    from romulus.agent.provider import AgentBudget, BudgetLimits
+    body = _reply([_p([_s(_f(repo, "z-attack-0"))], "Lateral Movement"),
+                   _p([_s(_f(repo, "f-0001"), "<script>alert(1)</script> ran on boot.")], HOSTILE_PHASE)])
+    budget = AgentBudget.from_usage(BudgetLimits(10, 100_000, 600, 0, 0, 0), repo.agent_usage("h1"),
+                                    clock=lambda: 0.0)
+    result = run_assessment(Settings(home=tmp_path), repo, "h1", ScriptedProvider([response(parsed=body)]), budget,
+                            clock=lambda: 0.0, triage=triage_context(latest_summary(repo, "h1")))
+    assert result is not None
+    weak = result["body"]["narrative"][1]
+    assert weak["phase"] == "Context" and weak["model_phase"] == HOSTILE_PHASE
+    return result
+
+
+def _manifest(repo):
+    manifest = build_manifest(repo, "h1", "test")
+    manifest["revision"] = {"number": 1, "id": "h1-r1", "supersedes": None}
+    return manifest
+
+
+def test_the_manifest_carries_the_weak_labels_and_drops_anything_else():
+    paragraphs = narrative_paragraphs([
+        {"time_span": {}, "phase": "Context", "tactic": "persistence", "weakly_supported": True,
+         "support_reason": "made-up", "model_phase": "Persistence", "extra": "x",
+         "sentences": [{"text": "t", "kind": "uncertain", "cites": ["F1"]}]},
+        {"time_span": {}, "phase": "Impact", "weakly_supported": "yes", "sentences": [{"text": "t", "kind": "observed",
+                                                                                      "cites": []}]}])
+    assert paragraphs[0] == {"time_span": {"start": "", "end": ""}, "phase": "Context", "weakly_supported": True,
+                             "support_reason": "no_reported_finding", "model_phase": "Persistence",
+                             "sentences": [{"text": "t", "kind": "uncertain", "cites": ["F1"]}]}
+    assert "weakly_supported" not in paragraphs[1]                     # an old or malformed body is not weak
+
+
+def test_markdown_and_docx_label_weak_paragraphs_and_escape_them(tmp_path, monkeypatch):
+    repo = _hunt()
+    _weak_assessment(repo, tmp_path)
+    manifest = _manifest(repo)
+    text = markdown.render(manifest)
+    section = text[text.index("## AI assessment"):]
+    assert "**1. Lateral Movement · " in section
+    assert f"**2. Context (weakly supported) · {IN_WINDOW}**" in section
+    assert ("*Weakly supported: cited activity was triaged as likely benign; the model labelled it "
+            "\\<Persistence\\>.*") in section
+    assert "<Persistence>" not in text and "<script>" not in text
+    path = _docx(tmp_path, monkeypatch, manifest)
+    with ZipFile(path) as archive:
+        document = ElementTree.fromstring(archive.read("word/document.xml"))
+    word = executive._WORD
+    paragraphs = [(["".join(t.text or "" for t in p.iter(f"{{{word}}}t"))],
+                   [node.tag.rsplit("}", 1)[-1] for node in p.iter()]) for p in document.iter(f"{{{word}}}p")]
+    heading = next(tags for texts, tags in paragraphs if texts[0].startswith("2. Context (weakly supported)"))
+    assert "i" in heading and "color" in heading                      # muted
+    reason = next(tags for texts, tags in paragraphs
+                  if texts[0] == ("Weakly supported: cited activity was triaged as likely benign; the model labelled "
+                                  "it <Persistence>."))
+    assert "i" in reason
+    supported = next(tags for texts, tags in paragraphs if texts[0].startswith("1. Lateral Movement"))
+    assert "i" not in supported and "color" not in supported
+
+
+web_setup = test_web_agent_a6.setup
+
+
+def test_the_web_shows_weak_paragraphs_muted_with_their_reason_escaped(web_setup):
+    client, repo, cid, *_ = web_setup
+    test_web_agent_a6.run_row(repo)
+    ta._insert(repo, [ta._row("lead-1", "r.lead", lane="lead", host="web01")])     # reportable, not Reported
+    body = _reply([_p([_s(_f(repo, "lead-1"), "The process read the credential store.")], HOSTILE_PHASE),
+                   _p([_s(_f(repo, cid), "The read was done by the attacker.", "inferred")], "Objective")])
+    checked, counts = check_assessment(repo, "h1", body, triage=OFF)
+    assert counts == {"phase_weakly_supported": 1}
+    repo.save_agent_assessment({"id": "aa-weak", "hunt_id": "h1", "revision": 1, "source": "agent",
+                                "model": {"provider": "scripted", "model_requested": "m"}, "body": checked,
+                                "checker": counts, "created_at": utcnow()})
+    for path in ("/hunts/h1", "/hunts/h1/assessment"):
+        page = client.get(path).text
+        narrative = page[page.index('<ol class="narrative">'):]
+        narrative = narrative[:narrative.index("</ol>")]
+        assert narrative.count('<li class="weak">') == 1 and narrative.count("<li>") == 1
+        assert "<b>Context (weakly supported)</b>" in narrative and "<b>Objective</b>" in narrative
+        assert ('<p class="help small weak-reason">Weakly supported: no reported finding cited; the model labelled '
+                "it &lt;Persistence&gt;.</p>") in narrative
+        assert "<Persistence>" not in page

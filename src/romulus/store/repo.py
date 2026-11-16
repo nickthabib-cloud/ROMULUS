@@ -3000,6 +3000,17 @@ class Repo:
                     values["attack"] = json.loads(raw) if isinstance(raw, str) else raw
                     yield values
 
+    def candidate_ids_for_event(self, hunt_id: str, event_id: str, lanes: Iterable[str], limit: int) -> list[str]:
+        """At most `limit` ids of the hunt's deterministic findings in `lanes` that cite the event (by id), through
+        the event index."""
+        query = (select(t.candidate_event.c.candidate_id).join(
+            t.candidate, t.candidate.c.id == t.candidate_event.c.candidate_id,
+        ).where(t.candidate_event.c.hunt_id == hunt_id, t.candidate_event.c.event_id == event_id,
+                t.candidate.c.lane.in_(tuple(lanes)), t.candidate.c.provenance == "deterministic")
+            .order_by(t.candidate_event.c.candidate_id).limit(limit))
+        with self.engine.connect() as connection:
+            return [str(row[0]) for row in connection.execute(query)]
+
     def candidate_duplicate_batches(self, hunt_id: str, event_ids: Iterable[str], lanes: Iterable[str],
                                     batch_size: int = 500) -> Iterator[list[dict]]:
         """Stream SQL-filtered, overlapping findings with bounded candidate materialization."""

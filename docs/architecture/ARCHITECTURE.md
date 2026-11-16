@@ -38,9 +38,12 @@ expansion: anchors ─► typed links (lineage, session, flow, …) ─► conte
                             │
 evidence ranking, pass 2 ─► ranked findings and entities (report manifest)
                             │
-AI investigating agent (planned) ─► hypotheses, typed pivots, AI assessment
-                            │
-AI triage order ─► a labelled, promote-only view over the surfaced finding groups (never the report order)
+AI investigating agent (planned) ─► orient ─► hypotheses, typed pivots ─► AI triage ─► AI assessment
+                            │      (triage: a labelled, promote-only view over the surfaced finding groups, never
+                            │       the report order; its verdicts reach the assessment, whose narrative is checked
+                            │       against the Reported set, confirmed findings and those verdicts; triage keeps its
+                            │       own budget, so the phase can run up to AGENT_TRIAGE_MAX_WALL_SECONDS longer than
+                            │       AGENT_MAX_WALL_SECONDS)
                             │
 report ─► ReportManifest ─► JSON | Markdown | web (findings, incidents, narratives, timeline)
 ```

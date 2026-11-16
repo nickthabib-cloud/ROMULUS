@@ -97,6 +97,31 @@ def group_key(section: int, provenance: str, rule_id: str, kind: str, value: str
     return json.dumps([section, provenance, rule_id, kind, value], ensure_ascii=False, separators=(",", ":"))
 
 
+def placement(row: dict, rank: dict | None, ranked: bool) -> tuple[int, tuple, tuple[str, str]]:
+    """A surfaced finding's section, order keys within it, and primary target, in the deterministic report order.
+    `rank` is its final-pass rank (stored, or scored by `rank_unranked`) when the hunt is ranked."""
+    ts = str(row["ts"]) if row["ts"] is not None else None
+    if ranked:
+        section = (0 if row["lane"] == rank_model.CONFIRMED_LANE else 1 if rank["reported"] else 2)
+        order = (0, -float(rank["score"]), int(ts is None), ts or "")
+        kind, value = rank["entity_kind"], rank["entity"]
+        target = ((kind, clip(value, MAX_ENTITY_TEXT)) if value is not None
+                  and kind != rank_model.UNATTRIBUTED else derived_target(row["entities"]))
+    else:
+        section = LANE_SECTION[row["lane"]]
+        # the report's rule-estimate order compares the time as text, an unknown time as "None"
+        order = (0, -float(row["priority"]), 0, str(row["ts"]))
+        target = derived_target(row["entities"])
+    return section, order, target
+
+
+def group_fields(row: dict, section: int, target: tuple[str, str]) -> tuple[int, str, str, str, str]:
+    """The fields of a finding's group: section, provenance (agent proposals group apart), rule, target kind and
+    value."""
+    provenance = "agent" if row.get("provenance") == rank_model.AGENT_PROVENANCE else "deterministic"
+    return section, provenance, row["rule_id"], *target
+
+
 # The stage's page cache (KiB): bounded memory whatever the hunt's size.
 CACHE_KIB = 16_384
 # Filling the order and the groups: each statement reads through an index made before the data, so no sort is needed
@@ -267,22 +292,12 @@ class OrderWorkspace:
             staged, keys = [], {}
             for row in page:
                 agent = row.get("provenance") == rank_model.AGENT_PROVENANCE
-                provenance = "agent" if agent else "deterministic"
                 ts = str(row["ts"]) if row["ts"] is not None else None
-                if self.ranked:
-                    rank = ranks.get(row["id"]) or late[row["id"]]
-                    section = (0 if row["lane"] == rank_model.CONFIRMED_LANE else 1 if rank["reported"] else 2)
-                    order = (0, -float(rank["score"]), int(ts is None), ts or "")
-                    kind, value = rank["entity_kind"], rank["entity"]
-                    target = ((kind, clip(value, MAX_ENTITY_TEXT)) if value is not None
-                              and kind != rank_model.UNATTRIBUTED else derived_target(row["entities"]))
-                else:
-                    section = LANE_SECTION[row["lane"]]
-                    # the report's rule-estimate order compares the time as text, an unknown time as "None"
-                    order = (0, -float(row["priority"]), 0, str(row["ts"]))
-                    target = derived_target(row["entities"])
-                key = group_key(section, provenance, row["rule_id"], *target)
-                keys[key] = (section, provenance, row["rule_id"], *target)
+                rank = (ranks.get(row["id"]) or late[row["id"]]) if self.ranked else None
+                section, order, target = placement(row, rank, self.ranked)
+                fields = group_fields(row, section, target)
+                key = group_key(*fields)
+                keys[key] = fields
                 staged.append((row, section, order, key, ts, agent))
             gids = self._gids(keys)
             findings, entities = [], []
