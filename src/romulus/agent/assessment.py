@@ -18,11 +18,13 @@ from romulus.agent.provider import (
     AgentBudget,
     BudgetExhausted,
     ChatRequest,
+    SecretGuardTripped,
     charge_parts,
     parts_of,
     record_call,
+    record_secret_guard,
 )
-from romulus.agent.provider.base import estimate_tokens
+from romulus.agent.provider.base import estimate_tokens, redact_value
 from romulus.agent.refusals import reason, validation_reasons
 from romulus.agent.safety import injection_flags
 from romulus.agent.toolbox import argument_schema
@@ -626,6 +628,11 @@ def assess_output(settings, provider) -> AssessOutput:
     return AssessOutput(tokens, provider.output_limit(ChatRequest(messages=[], max_output_tokens=tokens)), note)
 
 
+# How an assess session the secret guard ended starts its summary (its state is `secret_guard`); the agent phase reads
+# it to name the template's reason.
+SECRET_GUARD_SUMMARY = "secret_guard"
+
+
 def run_assessment(settings, repo, hunt_id: str, provider, budget: AgentBudget, *, owner_token=None,
                    clock=None, max_calls: int = 2, heartbeat=None) -> dict | None:
     """Run one bounded assess session; return None when no valid checked body was produced."""
@@ -693,6 +700,17 @@ def run_assessment(settings, repo, hunt_id: str, provider, budget: AgentBudget, 
             heartbeat()
         try:
             result = provider.chat(request)
+        except SecretGuardTripped as exc:
+            # the retry replays the earlier answer, which held a configured secret's text: that signed turn can be
+            # neither redacted nor sent, so the session ends here and the run stores the template (names only)
+            record_secret_guard(repo, hunt_id=hunt_id, purpose="assess", session_id=session_id, error=exc,
+                                owner_token=owner_token)
+            names = ", ".join(sorted({setting for setting, _ in exc.trips}))
+            repo.update_agent_session(session_id, hunt_id, {
+                "state": "secret_guard", "ended_at": utcnow(),
+                "summary": (f"{SECRET_GUARD_SUMMARY}: the earlier answer held the text of a configured secret "
+                            f"({names}), so it was not sent back for the retry")[:2000]}, owner_token=owner_token)
+            return None
         except Exception as exc:  # noqa: BLE001 - record any provider failure and fall back to the template.
             from romulus.agent.provider import ProviderUnavailable, record_failure
             if isinstance(exc, ProviderUnavailable):
@@ -719,6 +737,8 @@ def run_assessment(settings, repo, hunt_id: str, provider, budget: AgentBudget, 
                 parsed = result.parsed if isinstance(result.parsed, dict) else None
                 if parsed is None and result.content:
                     parsed = json.loads(result.content)
+                # the model's own words are stored, rendered and reported: never with a configured secret's text
+                parsed = redact_value(parsed, settings)
                 validated = AssessmentBody.model_validate(parsed).model_dump(mode="json")
                 checked, checker = check_assessment(repo, hunt_id, validated, owner_token=owner_token)
                 validation = {"ok": result.ok, "errors": [result.error] if result.error else [], "drops": checker}

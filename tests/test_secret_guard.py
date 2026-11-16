@@ -7,6 +7,7 @@ import logging
 import pytest
 from sqlalchemy import select
 
+from romulus.agent.assessment import run_assessment
 from romulus.agent.investigate import _BudgetGate, _prompt_set, _run_session, run_agent_phase
 from romulus.agent.provider import (
     SECRET_GUARD_ACTION,
@@ -232,9 +233,9 @@ def test_after_a_trip_the_run_continues_its_other_sessions_and_the_assessment(tm
              ToolCall("of", "finish_session", {"summary": "The initial review is complete."}, "{}")]
     read = [ToolCall("r1", "list_findings", {}, "{}")]
     finish = [ToolCall("f", "finish_session", {"summary": "The evidence review is complete."}, "{}")]
-    body = {"overall": [], "key_steps": [], "confidence": {"overall": "low", "reasons": []},
+    body = {"overall": [], "key_steps": [], "narrative": [], "confidence": {"overall": "low", "reasons": []},
             "alternatives": [], "gaps": [], "next_checks": []}
-    trip = SecretGuardTripped(3, [("ARKIME_PASSWORD", "text")])
+    trip =SecretGuardTripped(3, [("ARKIME_PASSWORD", "text")])
     provider = ScriptedProvider([response(tool_calls=opens), response(tool_calls=read), trip,
                                  response(tool_calls=finish), response(parsed=body)])
 
@@ -329,3 +330,83 @@ def test_after_a_real_trip_no_page_shows_the_secret_and_run_details_count_it(set
     assert all(SENTINEL not in page for page in pages) and SENTINEL not in caplog.text
     block = pages[1].split('id="secret-guard"', 1)[1].split("</section>", 1)[0]
     assert '<span class="mono">ARKIME_PASSWORD</span> 1 session' in block and "replacement" in block
+
+
+# ---- the assessment ----------------------------------------------------------------------------------------------
+
+def _assess_with_claude(repo, tmp_path, *replies):
+    from tests.test_agent_provider_claude import Endpoint, claude_settings, provider
+    settings = claude_settings(arkime_password=SENTINEL, home=tmp_path)
+    endpoint = Endpoint(*replies)
+    p, _ = provider(settings, endpoint)
+    budget = AgentBudget.from_usage(BudgetLimits.from_settings(settings), repo.agent_usage("h1"), clock=lambda: 0.0)
+    return run_assessment(settings, repo, "h1", p, budget, clock=lambda: 0.0), endpoint
+
+
+def test_an_assessment_retry_that_would_replay_the_secret_ends_in_secret_guard(setup, tmp_path, caplog):
+    pytest.importorskip("anthropic")
+    from tests.test_agent_provider_claude import reply, text
+    caplog.set_level(logging.DEBUG)
+    client, repo, *_ = setup
+    test_web_agent_a6.run_row(repo, state="partial", reason="secret_guard")
+    # an answer that fails validation and holds the secret's text: its retry would replay it
+    broken = json.dumps({"overall": f"The reset set {SENTINEL}."})
+    result, endpoint = _assess_with_claude(repo, tmp_path, reply([text(broken)]), reply([text("{}")]))
+    assert result is None and len(endpoint.calls) == 1
+    session = repo.agent_sessions("h1", purpose="assess")[-1]
+    assert session["state"] == "secret_guard" and session["summary"].startswith("secret_guard: ")
+    assert "ARKIME_PASSWORD" in session["summary"]
+    events = [row["detail"] for row in repo.audit_trail("h1", SECRET_GUARD_ACTION)[0]]
+    assert events == [{"setting": "ARKIME_PASSWORD", "part": "text", "session_id": session["id"],
+                       "purpose": "assess", "message_index": 2}]
+    pages = [client.get(f"/hunts/h1{suffix}").text for suffix in ("", "/run", "/assessment")]
+    assert SENTINEL not in _every_stored_value(repo.engine) and SENTINEL not in caplog.text
+    assert all(SENTINEL not in page for page in pages)
+
+
+def test_a_stored_assessment_and_its_narrative_never_hold_the_secret(setup, tmp_path, caplog):
+    pytest.importorskip("anthropic")
+    from romulus.agent.aliases import AliasBook
+    from romulus.report import markdown
+    from romulus.report.manifest import build_manifest
+    from tests.test_agent_provider_claude import reply, text
+    caplog.set_level(logging.DEBUG)
+    client, repo, *_ = setup
+    test_web_agent_a6.run_row(repo)
+    alias = AliasBook(repo, "h1").alias_for("E", "ev1")
+    body = {"overall": [{"text": f"The account reset to {SENTINEL} is the lead.", "cites": [alias],
+                         "kind": "hypothesis"}],
+            "key_steps": [], "confidence": {"overall": "medium", "reasons": []},
+            "narrative": [{"time_span": {"start": "", "end": ""}, "phase": "Credential Access", "sentences": [
+                {"text": f"The recorded process set the password {SENTINEL} on web01.", "cites": [alias],
+                 "kind": "observed"}]}],
+            "alternatives": [], "gaps": [], "next_checks": []}
+    result, endpoint = _assess_with_claude(repo, tmp_path, reply([text(json.dumps(body))]))
+    assert result is not None and len(endpoint.calls) == 1
+    stored = repo.agent_assessments("h1")[-1]["body"]
+    assert stored["narrative"][0]["sentences"][0]["text"] == "The recorded process set the password <redacted> on web01."
+    assert stored["overall"][0]["text"] == "The account reset to <redacted> is the lead."
+    manifest = build_manifest(repo, "h1", "test")
+    manifest["revision"] = {"number": 1, "id": "h1-r1", "supersedes": None}
+    report = markdown.render(manifest)
+    assert "<redacted>" in report or "\\<redacted\\>" in report
+    pages = [client.get(f"/hunts/h1{suffix}").text for suffix in ("", "/assessment", "/run")]
+    assert SENTINEL not in _every_stored_value(repo.engine) and SENTINEL not in caplog.text
+    assert SENTINEL not in report and SENTINEL not in json.dumps(manifest, default=str)
+    assert all(SENTINEL not in page for page in pages)
+
+
+def test_an_assess_trip_stores_the_template_with_the_secret_guard_reason(tmp_path):
+    engine, repo = _repo(tmp_path, "assess-trip")
+    provider = ScriptedProvider([SecretGuardTripped(2, [("ES_PASSWORD", "text")])])
+    result = run_agent_phase(Settings(home=tmp_path), repo, "h1", provider=provider,
+                             toolbox_factory=lambda session: Toolbox(repo, "h1", session_id=session),
+                             clock=lambda: 0.0)
+    assert [(row["purpose"], row["state"]) for row in repo.agent_sessions("h1")] == [("assess", "secret_guard")]
+    template = repo.agent_assessments("h1")[-1]
+    assert template["source"] == "template"
+    assert result.state == "partial" and "secret_guard" in result.reason
+    assert result.as_dict()["secret_guard"] == {"ES_PASSWORD": 1}
+    from romulus.agent.assessment import template_assessment
+    assert "(secret_guard)" in template_assessment(repo, "h1", "secret_guard")["header"]
+    engine.dispose()

@@ -19,7 +19,7 @@ from romulus.agent.admission import (
     truncated_text,
     typed_alias_arguments,
 )
-from romulus.agent.assessment import assess_output, run_assessment, template_assessment
+from romulus.agent.assessment import SECRET_GUARD_SUMMARY, assess_output, run_assessment, template_assessment
 from romulus.agent.dossier import build_dossier
 from romulus.agent.provider import (
     AgentBudget,
@@ -1088,10 +1088,13 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
             reasons.append(assessment_reason)
         elif assessment_reason.startswith("context_full"):
             reasons.append("context_full")
+        # the assessment's own retry tripped the secret guard (an investigate session's trip is not the reason)
+        assess_guarded = assessment_reason.startswith(SECRET_GUARD_SUMMARY)
         reason = next((item for item in reasons if item.startswith("budget:")), None)
         if reason is None:
             reason = ("provider_unavailable" if "provider_unavailable" in reasons else
-                      "context_full" if "context_full" in reasons else "assessment_not_produced")
+                      "context_full" if "context_full" in reasons else
+                      SECRET_GUARD_REASON if assess_guarded else "assessment_not_produced")
         try:
             _store_template(repo, hunt_id, reason, owner_token=owner_token)
         except Exception as exc:
