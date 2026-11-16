@@ -62,7 +62,7 @@ def _session(repo, tmp_path, provider, gate, settings=None):
 
 
 def _sized(monkeypatch, provider, sizes):
-    """Prompt estimates by call: the session's prompt grows as a live investigation's does."""
+    """Prompt estimates by call: the session's prompt grows from call to call."""
     monkeypatch.setattr(investigate, "estimate_tokens",
                         lambda text: sizes[min(len(provider.requests), len(sizes) - 1)])
 
@@ -73,7 +73,7 @@ READ = ToolCall("r", "list_findings", {"page": 1}, "{}")
 
 # ---- the reservation -----------------------------------------------------------------------------------------------
 
-def test_how_the_measured_reservation_arises_and_that_it_stopped_the_session(tmp_path):
+def test_a_write_everything_reservation_at_half_the_budget_stops_the_session(tmp_path):
     limits = _limits()
     # a 228,158-token prompt estimate: written whole to the cache at 1.25, plus the output and thinking allowance,
     # once for the configured model and once more for the refusal fallback's attempt
@@ -134,7 +134,7 @@ def test_the_same_session_continues_and_its_charge_never_exceeds_the_reservation
     outcome = _session(repo, tmp_path, provider, gate)
 
     assert outcome["state"] == "finished" and outcome["reservation_overruns"] == 0
-    # the first call's charge brought the session where the measured stop happened: about 1.08M spent, and the
+    # after the first call's charge about 1.08M is spent, and the
     # second call's write-everything worst case would no longer fit beside the hold
     spent_at_second = 800_000 + charged_before[0]
     assert spent_at_second + _limits().worst_tokens(228_158, OUTPUT) + HOLD > 2_000_000
@@ -276,4 +276,106 @@ def test_an_over_long_hypothesis_note_is_refused_once_then_kept_cut_and_marked(t
     assert len(events) == 1
     stored = str(events[0])
     assert truncation_marker("note", 600) in stored
+    engine.dispose()
+
+
+def test_a_changed_prefix_is_reserved_as_a_write(monkeypatch, tmp_path):
+    engine, repo, provider, gate, _budget, reserved = _growing_session(
+        monkeypatch, tmp_path, clock=lambda: 0.0, spent=500_000, name="changed")
+    basis = investigate._cache_basis
+
+    def rewritten(result, request, prompt_est, started_at):
+        recorded = basis(result, request, prompt_est, started_at)
+        request.messages[1]["content"] += " "         # after the call, an earlier message is edited
+        return recorded
+    monkeypatch.setattr(investigate, "_cache_basis", rewritten)
+
+    _session(repo, tmp_path, provider, gate)
+
+    assert reserved[0].cached == 0 and reserved[1].cached == 0
+    engine.dispose()
+
+
+def test_a_turn_past_the_cache_lookback_is_reserved_as_a_write():
+    parallel = [{"role": "assistant", "content": "", "provider_state": {"content": [
+        {"type": "thinking"}, {"type": "text"}, *[{"type": "tool_use"}] * 30]}}, *[{"role": "tool"}] * 30]
+    assert investigate._cache_positions(parallel) == 4          # a run of calls, and of results, is one position
+    interleaved = [{"role": "assistant", "content": "", "provider_state": {"content": [
+        {"type": "thinking"}, {"type": "tool_use"}] * 10}}, {"role": "user", "content": "x"}]
+    assert investigate._cache_positions(interleaved) == 21 > investigate.CACHE_LOOKBACK_POSITIONS
+
+
+def test_a_declined_attempt_and_the_fallback_answer_never_exceed_the_reservation():
+    from romulus.agent.provider.budget import Part, charge_parts
+    limits = _limits()
+    reserved = limits.worst_tokens_cached(228_158, 219_000, OUTPUT)
+    # the configured model reads the prefix, writes the growth, and declines at the end of its full allowance; the
+    # fallback model then writes the whole prompt to its own cache and uses its full allowance
+    declined = Part("m", 228_158, OUTPUT, cache_read=219_000, cache_write=228_158 - 219_000)
+    answered = Part("fallback", 228_158, OUTPUT, cache_write=228_158)
+    assert limits.budget_tokens(charge_parts((declined, answered))) <= reserved
+    assert limits.budget_tokens(charge_parts((declined,))) <= _limits(fallback=False).worst_tokens_cached(
+        228_158, 219_000, OUTPUT)
+
+
+# ---- runaway sessions end in a bounded number of model calls ---------------------------------------------------------
+
+def _forever(make):
+    return [lambda _request, make=make: response(tool_calls=[make()])] * 50
+
+
+def test_a_session_that_only_writes_ends_capped(tmp_path):
+    engine, repo = _hunt(tmp_path, "only-writes")
+    settings = Settings(home=tmp_path, agent_max_tool_calls_per_session=1)
+    gate = _BudgetGate(AgentBudget(BudgetLimits.from_settings(settings), clock=lambda: 0.0), settings)
+    provider = ScriptedProvider(_forever(lambda: _update(repo)))
+
+    outcome = _session(repo, tmp_path, provider, gate, settings)
+
+    assert outcome["state"] == "capped"
+    assert len(provider.requests) == _write_allowance(settings) + 1       # the allowance, then one refused reply
+    engine.dispose()
+
+
+def test_a_session_that_only_reads_ends_capped(tmp_path):
+    engine, repo = _hunt(tmp_path, "only-reads")
+    settings = Settings(home=tmp_path, agent_max_tool_calls_per_session=2)
+    gate = _BudgetGate(AgentBudget(BudgetLimits.from_settings(settings), clock=lambda: 0.0), settings)
+    provider = ScriptedProvider(_forever(lambda: READ))
+
+    outcome = _session(repo, tmp_path, provider, gate, settings)
+
+    assert outcome["state"] == "capped" and len(provider.requests) == 3
+    engine.dispose()
+
+
+def test_a_session_whose_finish_keeps_being_refused_ends_capped(tmp_path):
+    engine, repo = _hunt(tmp_path, "finish-loop")
+    settings = Settings(home=tmp_path)
+    gate = _BudgetGate(AgentBudget(BudgetLimits.from_settings(settings), clock=lambda: 0.0), settings)
+    provider = ScriptedProvider(_forever(lambda: ToolCall("f", "finish_session", {"summary": "short"}, "{}")))
+
+    outcome = _session(repo, tmp_path, provider, gate, settings)
+
+    assert outcome["state"] == "capped" and outcome["reason"] == "finish_session refused 3 times"
+    assert len(provider.requests) == investigate.FINISH_ATTEMPTS
+    engine.dispose()
+
+
+def test_an_over_long_agent_note_is_refused_once_then_kept_cut_and_marked(tmp_path):
+    engine, repo = _hunt(tmp_path, "add-note")
+    settings = Settings(home=tmp_path)
+    gate = _BudgetGate(AgentBudget(BudgetLimits.from_settings(settings), clock=lambda: 0.0), settings)
+    text = "The record repeats the earlier pattern. " * 40
+    note = ToolCall("n", "add_note", {"target": _alias(repo), "text": text}, "{}")
+    provider = ScriptedProvider([response(tool_calls=[note]), response(tool_calls=[note]),
+                                 response(tool_calls=[FINISH])])
+
+    outcome = _session(repo, tmp_path, provider, gate, settings)
+
+    assert outcome["state"] == "finished"
+    assert repo.agent_refusal_counts("h1")["by_tool"]["add_note"] == {
+        "text: string_too_long": 1, "text: truncated_by_product": 1}
+    stored = repo.agent_notes("h1")
+    assert len(stored) == 1 and stored[0]["text"].endswith(truncation_marker("text", 1000))
     engine.dispose()

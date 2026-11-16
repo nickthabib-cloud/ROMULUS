@@ -33,7 +33,7 @@ from romulus.agent.provider import (
     record_call,
     record_failure,
 )
-from romulus.agent.provider.base import estimate_tokens
+from romulus.agent.provider.base import PROVIDER_STATE, estimate_tokens
 from romulus.agent.refusals import bounded, reason, tool_result_reasons
 from romulus.agent.toolbox import Toolbox
 from romulus.config import Settings
@@ -69,6 +69,12 @@ class AgentPhaseResult:
 # CACHE_TRUST_SECONDS ago: the minute of margin covers the time between the cache's use and the next call's start.
 CACHE_TTL_SECONDS = 300.0
 CACHE_TRUST_SECONDS = CACHE_TTL_SECONDS - 60.0
+# A request's cache breakpoint looks back at most 20 content positions for the previous entry (a run of tool_use
+# blocks, or of tool_result blocks, is one position). A request that appended more than this many since the previous
+# call is reserved as written to the cache; the margin covers the wire format's own blocks.
+CACHE_LOOKBACK_POSITIONS = 16
+# A session's finish_session calls that may be refused before it ends capped: an over-long summary needs two.
+FINISH_ATTEMPTS = 3
 
 
 @dataclass
@@ -491,6 +497,25 @@ def _cache_basis(result, request: ChatRequest, prompt_est: int, started_at: floa
             "completion": served.completion, "prompt_est": prompt_est, "cached": cached, "since": started_at}
 
 
+def _cache_positions(messages: list[dict]) -> int:
+    """The content positions `messages` add to a request, as the cache lookback counts them: every block, a run of
+    tool calls or of tool results counting once. Counted generously (each message's text is one position)."""
+    positions, last = 0, None
+    for message in messages:
+        role = message.get("role")
+        if role == "assistant":
+            state = message.get(PROVIDER_STATE) or {}
+            kinds = [block.get("type") for block in state.get("content") or [] if isinstance(block, dict)] or (
+                ["text"] + (["tool_use"] if message.get("tool_calls") else []))
+        else:
+            kinds = ["tool_result" if role == "tool" else "text"]
+        for kind in kinds:
+            if not (kind == last and kind in ("tool_use", "tool_result")):
+                positions += 1
+            last = kind
+    return positions
+
+
 def _deterministic_tool_summary(calls: list[tuple[str, str]], changes: list[dict]) -> str:
     recent = calls[-10:]
     steps = "; ".join(f"{name}: {status}" for name, status in recent) or "no tool calls"
@@ -521,6 +546,7 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
     read_count = write_count = 0
     reads_closed = writes_closed = False
     overlong: dict[str, int] = {}
+    finish_refusals = 0
     # what the previous call left in the prompt cache, and the request it was made with (see `_BudgetGate`)
     cache_basis: dict | None = None
     cache_trusted = True
@@ -626,7 +652,8 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
             # its output (the reply goes back), and the estimated growth since
             prefix, prompt_bound = None, prompt_est
             if (cache_basis is not None and cache_trusted and len(messages) >= cache_basis["messages"]
-                    and digest(messages[:cache_basis["messages"]]) == cache_basis["digest"]):
+                    and digest(messages[:cache_basis["messages"]]) == cache_basis["digest"]
+                    and _cache_positions(messages[cache_basis["messages"]:]) <= CACHE_LOOKBACK_POSITIONS):
                 prompt_bound = max(prompt_est, cache_basis["prompt"] + cache_basis["completion"]
                                    + max(0, prompt_est - cache_basis["prompt_est"]))
                 prefix = _CachedPrefix(cache_basis["cached"], cache_basis["since"])
@@ -753,6 +780,8 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                             tool_result, reasons = _overlong_retry(
                                 toolbox, call.name, field, call.arguments, 2 if context_wrap_sent else overlong[key])
                 finish_tried = finish_tried or kind == "finish"
+                if kind == "finish" and tool_result.get("status") != "complete":
+                    finish_refusals += 1
                 raw_args = call.raw_arguments.encode("utf-8")
                 if call.arguments is not None:
                     stored_args = call.arguments
@@ -780,6 +809,9 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                     return finish(end_state, summary, "context_full" if context_wrap_sent else None)
             if context_wrap_sent:
                 continue
+            if finish_refusals >= FINISH_ATTEMPTS:
+                return finish("capped", _deterministic_tool_summary(tool_history, hypothesis_changes),
+                              f"finish_session refused {finish_refusals} times")
             closing = []
             if not reads_closed and read_count >= call_limit:
                 reads_closed = True
