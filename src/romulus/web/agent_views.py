@@ -19,7 +19,13 @@ from romulus.report.manifest import (
     _ai_assessment,
     fallback_view,
 )
-from romulus.report.markdown import narrative_label, narrative_weak_reason, narrative_when
+from romulus.report.markdown import (
+    narrative_context_reason,
+    narrative_label,
+    narrative_support,
+    narrative_weak_reason,
+    narrative_when,
+)
 from romulus.store import schema as t
 
 PAGE_SIZE = 50
@@ -144,9 +150,11 @@ def narrative_view(repo, hunt_id, paragraphs):
         span = paragraph.get("time_span") or {}
         start, end = clip(span.get("start"), 40), clip(span.get("end"), 40)
         shown = {"phase": clip(paragraph.get("phase"), 120), "weakly_supported": paragraph.get("weakly_supported"),
-                 "support_reason": paragraph.get("support_reason"),
+                 "support_reason": paragraph.get("support_reason"), "context_reason": paragraph.get("context_reason"),
                  "model_phase": clip(paragraph.get("model_phase"), 120)}
         out.append({"phase": narrative_label(shown), "weak": narrative_weak_reason(shown),
+                    "context": narrative_context_reason(shown),
+                    "support": narrative_support(paragraph),
                     "when": narrative_when(start, end, "→"),
                     "sentences": [{"text": clip(sentence.get("text"), 2000),
                                    "kind": sentence["kind"] if sentence.get("kind") in NARRATIVE_KINDS else "uncertain",

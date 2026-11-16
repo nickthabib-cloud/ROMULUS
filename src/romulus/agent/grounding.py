@@ -2,8 +2,11 @@
 
 The narrative checker and the assessment input read one store-backed view of each cited finding: its lane, whether it
 is Reported (the final ranking's Reported set; without a final ranking, the lanes the headline result follows: urgent
-and high), whether it is confirmed (lane urgent), and the AI triage pass's verdict for its group. Nothing here changes
-a rank, lane, Reported flag or the triage order: it only reads them.
+and high), whether it is confirmed (lane urgent), and the AI triage pass's verdict for its group. A finding supports
+the narrative strongly when it is confirmed, triaged as likely or possible attack, or Reported without a likely-benign
+verdict: the Reported set can hold nearly every surfaced finding, so the verdict outweighs it, while a confirmed
+finding outweighs any verdict. Nothing here changes a rank, lane, Reported flag or the triage order: it only reads
+them.
 
 A cited evidence record stands for the reportable deterministic findings that cite it, found through the event index
 and bounded per record; when a record has more such findings than the bound, its support is unknown (the checker
@@ -19,6 +22,7 @@ from dataclasses import dataclass
 from romulus.agent.triage_order import group_fields, placement
 from romulus.decide import rank as rank_model
 from romulus.hunt.rank import PASS_FINAL, rank_unranked
+from romulus.report.markdown import SUPPORT_LABELS
 from romulus.store.repo import Repo
 
 REPORTABLE_LANES = ("urgent", "high", "lead")
@@ -80,16 +84,39 @@ class FindingStrength:
 
     @property
     def strong(self) -> bool:
-        """Reported, confirmed or triaged as likely or possible attack (deterministic findings only)."""
-        return self.reportable and (self.reported or self.confirmed or self.triage in ATTACK_VERDICTS)
+        """Confirmed, or triaged as likely or possible attack, or Reported and not triaged likely benign
+        (deterministic findings only). The Reported set holds nearly every surfaced finding on a busy hunt, so a
+        triage verdict of likely benign outweighs it; a confirmed finding outweighs any verdict."""
+        return self.reportable and (self.confirmed or self.triage in ATTACK_VERDICTS
+                                    or (self.reported and self.triage != BENIGN_VERDICT))
 
     @property
     def benign(self) -> bool:
-        """Triaged likely benign and neither Reported nor confirmed: deterministic evidence outranks the verdict."""
-        return self.reportable and not self.reported and not self.confirmed and self.triage == BENIGN_VERDICT
+        """Triaged likely benign and not confirmed."""
+        return self.reportable and not self.confirmed and self.triage == BENIGN_VERDICT
+
+    @property
+    def category(self) -> str:
+        """The support category this finding gives a paragraph (`SUPPORT_CATEGORIES`)."""
+        if not self.reportable:
+            return "other"
+        if self.confirmed:
+            return "confirmed"
+        if self.triage in ATTACK_VERDICTS:
+            return "attack"
+        if self.triage == BENIGN_VERDICT:
+            return "benign"
+        return "reported" if self.reported else "other"
 
     def view(self) -> dict:
         return {"lane": self.lane, "reported": self.reported, "confirmed": self.confirmed, "triage": self.triage}
+
+
+# A paragraph's support summary counts its distinct cites in these categories, strongest first; a cite falls in the
+# first category any of its findings gives: confirmed, triaged likely or possible attack, Reported without a
+# likely-benign verdict, support unknown (the evidence lookup's cap), triaged likely benign, anything else (a finding
+# neither Reported nor triaged, an AI proposal, a link or hypothesis).
+SUPPORT_CATEGORIES = tuple(SUPPORT_LABELS)
 
 
 @dataclass(frozen=True)
@@ -114,6 +141,18 @@ class CiteStrength:
     @property
     def benign(self) -> bool:
         return self.complete and bool(self.findings) and all(item.benign for item in self.findings)
+
+    @property
+    def category(self) -> str:
+        """The strongest category its findings give (`SUPPORT_CATEGORIES`); unknown when the lookup was capped and
+        none of the findings it read is strong."""
+        given = {item.category for item in self.findings}
+        for name in ("confirmed", "attack", "reported"):
+            if name in given:
+                return name
+        if not self.complete:
+            return "unknown"
+        return "benign" if self.benign else "other"
 
 
 class EvidenceStrength:
