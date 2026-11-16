@@ -9,7 +9,7 @@ import uuid
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from time import monotonic
 
 from romulus.agent.admission import (
@@ -27,16 +27,18 @@ from romulus.agent.provider import (
     BudgetLimits,
     ChatRequest,
     ProviderUnavailable,
+    SecretGuardTripped,
     charge_of,
     charge_parts,
     parts_of,
     record_call,
     record_failure,
+    record_secret_guard,
 )
-from romulus.agent.provider.base import PROVIDER_STATE, estimate_tokens
+from romulus.agent.provider.base import PROVIDER_STATE, ToolCall, estimate_tokens, redact_value
 from romulus.agent.refusals import bounded, reason, tool_result_reasons
 from romulus.agent.toolbox import Toolbox
-from romulus.config import Settings
+from romulus.config import Settings, redact_text
 from romulus.hunt.rank import place_late_findings
 from romulus.report.incidents import build_incident_graph
 from romulus.store.db import digest, utcnow
@@ -57,11 +59,16 @@ class AgentPhaseResult:
     usage: dict = field(default_factory=dict)
     # refused tool calls and assessment answers, as counts by tool and reason (field paths and error types only)
     refusals: dict = field(default_factory=dict)
+    # sessions the secret guard ended, by setting name (never a value)
+    secret_guard: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
-        return {"status": self.state, "reason": self.reason, "prompt_digests": self.prompt_digests,
-                "provider": self.provider, "sessions": self.sessions, "limits_hit": self.limits_hit,
-                "unworked": self.unworked, "usage": self.usage, "refusals": self.refusals}
+        out = {"status": self.state, "reason": self.reason, "prompt_digests": self.prompt_digests,
+               "provider": self.provider, "sessions": self.sessions, "limits_hit": self.limits_hit,
+               "unworked": self.unworked, "usage": self.usage, "refusals": self.refusals}
+        if self.secret_guard:
+            out["secret_guard"] = self.secret_guard
+        return out
 
 
 # The anthropic adapter's prompt-cache entries live five minutes from their last use. A prefix the previous call of a
@@ -75,6 +82,8 @@ CACHE_TRUST_SECONDS = CACHE_TTL_SECONDS - 60.0
 CACHE_LOOKBACK_POSITIONS = 16
 # A session's finish_session calls that may be refused before it ends capped: an over-long summary needs two.
 FINISH_ATTEMPTS = 3
+# The end reason of a session the secret guard ended (its state is `secret_guard`).
+SECRET_GUARD_REASON = "secret_guard"
 
 
 @dataclass
@@ -277,6 +286,7 @@ def _finalize(repo: Repo, hunt_id: str, result: AgentPhaseResult, *, started_at=
               owner_token=None) -> AgentPhaseResult:
     _place_late_ranks(repo, hunt_id, owner_token=owner_token)
     result.refusals = repo.agent_refusal_counts(hunt_id)
+    result.secret_guard = repo.agent_secret_guard_counts(hunt_id)
     repo.finalize_agent_run(hunt_id, {
         "state": result.state, "reason": result.reason, "prompt_digests": result.prompt_digests,
         "provider": result.provider, "started_at": started_at, "ended_at": utcnow(),
@@ -516,6 +526,15 @@ def _cache_positions(messages: list[dict]) -> int:
     return positions
 
 
+def _without_secrets(call: ToolCall, settings: Settings) -> ToolCall:
+    """The tool call with every configured secret's text removed from its arguments (unchanged when none holds any)."""
+    arguments = redact_value(call.arguments, settings) if call.arguments is not None else None
+    raw = redact_text(call.raw_arguments, settings)
+    if arguments == call.arguments and raw == call.raw_arguments:
+        return call
+    return replace(call, arguments=arguments, raw_arguments=raw)
+
+
 def _deterministic_tool_summary(calls: list[tuple[str, str]], changes: list[dict]) -> str:
     recent = calls[-10:]
     steps = "; ".join(f"{name}: {status}" for name, status in recent) or "no tool calls"
@@ -680,6 +699,19 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 return finish("failed", _deterministic_tool_summary(tool_history, hypothesis_changes),
                               f"budget:{reservation.retry_budget}" if reservation.retry_budget else
                               "provider_unavailable")
+            except SecretGuardTripped as exc:
+                # An earlier reply of this session holds a configured secret's text. It is signed provider state
+                # that can be neither redacted nor sent, and the session is append-only, so it ends here: nothing
+                # more is sent in it, and what it already wrote is kept. Names and parts only, never the text.
+                budget_gate.settle(reservation)
+                record_secret_guard(repo, hunt_id=hunt_id, purpose=purpose, session_id=session_id, error=exc,
+                                    owner_token=owner_token)
+                names = ", ".join(sorted({setting for setting, _ in exc.trips}))
+                log.warning("agent session %s ended by the secret guard (%s)", session_id, names)
+                return finish("secret_guard", (
+                    f"Secret guard: an earlier reply in this session held the text of a configured secret ({names}), "
+                    "so the session ended before anything more was sent; its recorded work is kept. "
+                    + _deterministic_tool_summary(tool_history, hypothesis_changes)), SECRET_GUARD_REASON)
             except BaseException as exc:
                 # settled on every exit: a reservation left behind would hold a sibling's call waiting
                 budget_gate.settle(reservation)
@@ -727,10 +759,13 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 return finish("failed", _deterministic_tool_summary(tool_history, hypothesis_changes),
                               "no_tool_call_twice")
             no_tool_misses = 0
+            # the calls as they are run and stored: any configured secret's text the model wrote is removed first
+            # (its turn, kept unchanged for replay, then ends the session at the secret guard)
+            calls = [_without_secrets(call, settings) for call in result.tool_calls]
             if context_wrap_sent:
-                finish_call = next((call for call in result.tool_calls if call.name == "finish_session"), None)
+                finish_call = next((call for call in calls if call.name == "finish_session"), None)
                 if finish_call is None:
-                    for call in result.tool_calls:
+                    for call in calls:
                         call_seq += 1
                         raw = call.raw_arguments[:8192]
                         arguments = call.arguments if call.arguments is not None else raw
@@ -746,7 +781,7 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                                   "context wrap-up did not finish the session")
                 allowed_calls = [finish_call]
             else:
-                allowed_calls = result.tool_calls
+                allowed_calls = calls
             executed = finish_tried = False
             for call in allowed_calls:
                 call_seq += 1

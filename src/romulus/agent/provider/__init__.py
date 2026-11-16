@@ -20,10 +20,12 @@ from romulus.agent.provider.base import (
     ChatResult,
     HistoryError,
     ProviderUnavailable,
+    SecretGuardTripped,
     Tool,
     ToolCall,
     Usage,
     endpoint_url,
+    redact_value,
 )
 from romulus.agent.provider.budget import (
     AgentBudget,
@@ -44,14 +46,16 @@ from romulus.agent.provider.egress import (
 from romulus.agent.provider.fallbacks import refusal_fallback_on
 from romulus.config import Settings
 from romulus.store.db import digest
+from romulus.store.repo import SECRET_GUARD_ACTION
 
 ANTHROPIC_EXTRA_HINT = "the anthropic provider needs its optional SDK: install romulus[anthropic]"
 ANTHROPIC_MODULES = ("anthropic", "httpx2")
 
 __all__ = [
-    "EGRESS_SWITCH_VALUE", "PROVIDER_STATE", "AgentBudget", "AgentNotReady", "AgentReadiness", "BudgetExhausted",
-    "BudgetLimits", "ChatProvider", "ChatRequest", "ChatResult", "HistoryError", "ProviderUnavailable", "Tool",
-    "ToolCall", "Usage", "agent_readiness", "build_provider", "egress_banners", "record_call", "record_failure",
+    "EGRESS_SWITCH_VALUE", "PROVIDER_STATE", "SECRET_GUARD_ACTION", "AgentBudget", "AgentNotReady", "AgentReadiness",
+    "BudgetExhausted", "BudgetLimits", "ChatProvider", "ChatRequest", "ChatResult", "HistoryError",
+    "ProviderUnavailable", "SecretGuardTripped", "Tool", "ToolCall", "Usage", "agent_readiness", "build_provider",
+    "egress_banners", "record_call", "record_failure", "record_secret_guard",
 ]
 
 
@@ -215,6 +219,15 @@ def record_call(repo, provider: ChatProvider, *, hunt_id: str, purpose: str, req
         options["usage_worst_case"] = True     # an attempt that broke off mid-reply, charged at its full allowance
     if result.details:
         options["provider_details"] = dict(result.details)
+    if result.redactions:
+        # secret replacements in the text this call added, by setting: an analyst's sign that some telemetry was
+        # hidden from the model (numbers only)
+        options["redactions"] = dict(result.redactions)
+    parsed = {"content": result.parsed, "tool_calls": [c.as_dict() for c in result.tool_calls]}
+    settings = getattr(provider, "s", None)
+    if isinstance(settings, Settings):
+        # the model's own words are stored as the raw response is: with any configured secret's text removed
+        parsed = redact_value(parsed, settings)
     repo.save_model_call({
         "id": call_id, "hunt_id": hunt_id, "case_id": case_id, "session_id": session_id,
         "purpose": purpose, "model": provider.model,
@@ -226,7 +239,7 @@ def record_call(repo, provider: ChatProvider, *, hunt_id: str, purpose: str, req
         "prompt_eval_count": None if charge.estimated else charge.prompt,
         "eval_count": None if charge.estimated else charge.completion,
         "duration_ms": result.duration_ms, "raw_response": result.raw,
-        "parsed": {"content": result.parsed, "tool_calls": [c.as_dict() for c in result.tool_calls]},
+        "parsed": parsed,
         "validation": validation if validation is not None else {"ok": result.ok, "errors": [result.error] if result.error else []},
         "status": result.status,
         "provider": described["provider"], "endpoint_host": described["endpoint_host"],
@@ -260,6 +273,16 @@ def record_failure(repo, provider: ChatProvider, *, hunt_id: str, purpose: str, 
         "cost_usd_est": limits.charge_cost(charge) if limits.priced else None,
     }, owner_token=owner_token)
     return call_id
+
+
+def record_secret_guard(repo, *, hunt_id: str, purpose: str, session_id: str | None, error: SecretGuardTripped,
+                        owner_token: str | None = None) -> None:
+    """Audit a secret-guard trip: for each setting and part of the turn it was found in, the session, its purpose
+    and the message index. Never the value and never an excerpt."""
+    for setting, part in error.trips:
+        repo.audit("system", SECRET_GUARD_ACTION, hunt_id, {
+            "setting": setting, "part": part, "session_id": session_id, "purpose": purpose,
+            "message_index": error.message_index}, owner_token=owner_token)
 
 
 def egress_banners(configured: dict | None, usage: dict) -> list[str]:

@@ -15,7 +15,7 @@ from typing import TypeVar
 import httpx
 
 from romulus.agent.provider.egress import EgressDecision
-from romulus.config import Settings, redact_text
+from romulus.config import Settings, redact_counted, redact_text
 
 CHARS_PER_TOKEN = 3.2          # conservative for English + JSON + log text
 TRUNCATION_MARGIN = 32
@@ -47,6 +47,31 @@ class AgentNotReady(RuntimeError):
 class HistoryError(ValueError):
     """The conversation cannot be sent as it is: for example, an assistant turn lacks the provider state its
     adapter must replay, or was changed after the model produced it. Nothing was sent."""
+
+
+# The parts of a replayed assistant turn the secret guard reads: its text, its readable thinking or reasoning, a
+# tool call's input as the model streamed it and as it was parsed, and a tool call's name.
+SECRET_GUARD_PARTS = ("text", "thinking", "tool_input_streamed", "tool_input_parsed", "tool_name")
+
+
+class SecretGuardTripped(HistoryError):
+    """A replayed assistant turn holds the text of a configured secret. The turn is signed provider state, so it
+    can be neither redacted nor sent: the session it belongs to cannot continue. `trips` names, for each match,
+    the secret's setting (its environment name) and the part of the turn it was found in; it never holds the
+    value or any text around it. Nothing was sent."""
+
+    def __init__(self, message_index: int, trips: list[tuple[str, str]]):
+        self.message_index = message_index
+        self.trips = tuple(sorted(set(trips)))
+        names = ", ".join(sorted({setting for setting, _ in self.trips}))
+        parts = ", ".join(part for part in SECRET_GUARD_PARTS if part in {p for _, p in self.trips})
+        super().__init__(f"assistant message {message_index} holds a configured secret ({names}; in its {parts}); "
+                         "it is never sent")
+
+
+def secret_trips(parts: list[tuple[str, str]], secrets: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """(setting, part) for every secret value found in a (part, text) list: names only."""
+    return [(name, part) for name, value in secrets for part, text in parts if text and value in text]
 
 
 class TransientFailure(Exception):
@@ -168,6 +193,9 @@ class ChatResult:
     attempts: int = 1
     provider_state: dict | None = None             # opaque; see PROVIDER_STATE and assistant_message()
     details: dict = field(default_factory=dict)    # provider-reported specifics (native stop reason, refusal, ...)
+    # secret replacements outgoing redaction made in the text this call added to its conversation, by setting
+    # (environment name): numbers only (see redact_messages)
+    redactions: dict = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -187,20 +215,43 @@ class ChatResult:
         return message
 
 
-def redact_messages(messages: list[dict], settings: Settings) -> list[dict]:
+def redact_value(value, settings: Settings):
+    """Copy of a JSON-like value with every configured secret removed from every string, at any depth: what the
+    model wrote, before it is run or stored."""
+    if isinstance(value, str):
+        return redact_text(value, settings)
+    if isinstance(value, list):
+        return [redact_value(v, settings) for v in value]
+    if isinstance(value, dict):
+        return {k: redact_value(v, settings) for k, v in value.items()}
+    return value
+
+
+def redact_messages(messages: list[dict], settings: Settings, counts: dict[str, int] | None = None) -> list[dict]:
     """Copy of the messages with every configured secret removed from every string, at any depth. The provider
     state is left as it is: it is the model's own earlier output, which must go back byte for byte (signatures
-    cover it), and every prompt it was produced from was redacted."""
-    def clean(value):
+    cover it), and every prompt it was produced from was redacted.
+
+    `counts` receives the replacements, by setting, made in the messages after the last assistant turn: what this
+    request adds to an append-only conversation. Earlier messages were counted by the call that first sent them,
+    so the counts of a session's calls add up to what it hid once, however often its history is sent again."""
+    last_assistant = max((i for i, m in enumerate(messages) if isinstance(m, dict) and m.get("role") == "assistant"),
+                         default=-1)
+
+    def clean(value, tally):
         if isinstance(value, str):
-            return redact_text(value, settings)
+            return redact_counted(value, settings, tally)
         if isinstance(value, list):
-            return [clean(v) for v in value]
+            return [clean(v, tally) for v in value]
         if isinstance(value, dict):
-            return {k: clean(v) for k, v in value.items()}
+            return {k: clean(v, tally) for k, v in value.items()}
         return value
-    return [{k: v if k == PROVIDER_STATE else clean(v) for k, v in m.items()} if isinstance(m, dict) else clean(m)
-            for m in messages]
+    out = []
+    for i, m in enumerate(messages):
+        tally = counts if i > last_assistant else None
+        out.append({k: v if k == PROVIDER_STATE else clean(v, tally) for k, v in m.items()} if isinstance(m, dict)
+                   else clean(m, tally))
+    return out
 
 
 def parse_tool_arguments(call_id: str, name: str, raw) -> ToolCall:
@@ -277,13 +328,17 @@ class ChatProvider:
         if not self.replays_provider_state:
             messages = [{k: v for k, v in m.items() if k != PROVIDER_STATE} if isinstance(m, dict) else m
                         for m in messages]
-        messages = redact_messages(messages, self.s)
+        redactions: dict[str, int] = {}
+        messages = redact_messages(messages, self.s, redactions)
         est = estimate_tokens(request.prompt_text())
         ctx = self.context_tokens()
         if ctx and est + max_out > ctx:
+            # nothing was sent: no replacement reached the model
             return ChatResult("too_large", "", "", None, [], Usage(), est, self.model, "", 0, "",
                               f"prompt estimate {est} + {max_out} output exceeds the {ctx}-token context")
-        return self._chat(request, messages, max_out, est)
+        result = self._chat(request, messages, max_out, est)
+        result.redactions = dict(sorted(redactions.items()))
+        return result
 
     def _retrying(self, attempt_once: Callable[[], T], *, attempt_guard: Callable[[dict], bool] | None = None,
                   billed=None) -> tuple[T, int, int]:

@@ -444,6 +444,29 @@ TRIAGE_PURPOSE = "triage"
 TRIAGE_FAILED = "hunt.ai_triage_failed"
 # A resume that continued the hunt's agent on another model than the one it recorded (--force-model): from, to.
 AGENT_MODEL_FORCED = "hunt.agent_model_forced"
+# Each secret-guard trip of an agent session: the setting, the part of the reply and the session (never a value).
+SECRET_GUARD_ACTION = "agent.secret_guard_tripped"
+# A secret's setting as the agent's counts name it (an environment name), and how many distinct names are kept.
+SECRET_SETTING_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+SECRET_NAMES_KEPT = 32
+
+
+def _add_redactions(total: dict[str, int], stored) -> None:
+    """Add one model call's stored redaction counts ({setting: replacements}) to `total`. Malformed entries count
+    under "?"; at most SECRET_NAMES_KEPT names are kept (the rest count under "?")."""
+    try:
+        counts = json.loads(stored) if isinstance(stored, str) else stored
+    except ValueError:
+        counts = None
+    if not isinstance(counts, dict):
+        return
+    for name, count in counts.items():
+        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+            continue
+        key = name if isinstance(name, str) and SECRET_SETTING_NAME.fullmatch(name) else "?"
+        if key not in total and len(total) >= SECRET_NAMES_KEPT:
+            key = "?"
+        total[key] = total.get(key, 0) + count
 # The reason on the agent record a triage pass creates for a hunt with no agent record: terminal, removed on release.
 TRIAGE_PLACEHOLDER = "triage_lease_placeholder"
 # A snapshot taken while the hunt has its final ranking lists findings in report order, as segments: ranked confirmed
@@ -6049,7 +6072,9 @@ class Repo:
                  *((t.model_call.c.purpose.not_in(exclude_purposes),) if exclude_purposes else ()),
                  *((t.model_call.c.purpose.in_(purposes),) if purposes is not None else ()))
         calls, tokens, budget_tokens, cost, ms, estimated = 0, 0, 0, 0.0, 0, False
+        redactions: dict[str, int] = {}
         weighted = func.json_extract(t.model_call.c.options, "$.budget_tokens")
+        redacted = func.json_extract(t.model_call.c.options, "$.redactions")
         with self.engine.connect() as c:
             after = ""
             while True:
@@ -6059,9 +6084,11 @@ class Repo:
                     t.model_call.c.prompt_tokens_est, t.model_call.c.prompt_eval_count, t.model_call.c.eval_count,
                     case((or_(t.model_call.c.prompt_eval_count.is_(None), t.model_call.c.eval_count.is_(None)),
                           t.model_call.c.raw_response), else_=None),
-                    t.model_call.c.cost_usd_est, t.model_call.c.duration_ms, weighted,
+                    t.model_call.c.cost_usd_est, t.model_call.c.duration_ms, weighted, redacted,
                 ).where(*scope, t.model_call.c.id > after).order_by(t.model_call.c.id).limit(200)).all()
-                for call_id, prompt_est, prompt, completion, raw, row_cost, duration, row_budget in rows:
+                for call_id, prompt_est, prompt, completion, raw, row_cost, duration, row_budget, row_redacted in rows:
+                    if row_redacted:
+                        _add_redactions(redactions, row_redacted)
                     if prompt is None or completion is None:
                         estimated = True
                         prompt, completion, row_budget = prompt_est or 0, int(len(raw or "") / 3.2) + 8, None
@@ -6090,9 +6117,28 @@ class Repo:
                 ("model", "model_reported"), and_(t.model_call.c.model_reported.is_not(None), t.model_call.c.model_reported != ""))
         result = {"calls": calls, "tokens": tokens, "budget_tokens": budget_tokens, "cost_usd": cost, "model_ms": ms, "estimated": estimated,
                   "remote_calls": remote, "models_reported": answered}
+        if redactions:
+            # replacements outgoing redaction made in the text the calls added, by secret setting: telemetry the model
+            # was not shown (each call counts only what it added, so a resent history is not counted again)
+            result["redactions"] = dict(sorted(redactions.items()))
         if group_limit is not None:
             result.update(remote_calls_more=remote_more, models_reported_more=answered_more)
         return result
+
+    def agent_secret_guard_counts(self, hunt_id: str) -> dict[str, int]:
+        """Sessions the agent's secret guard ended, by the setting (environment name) whose text a reply held. Names
+        and counts only: the audit records never hold a value. A name outside the setting-name shape counts as "?"."""
+        setting = func.json_extract(t.audit_event.c.detail, "$.setting")
+        session = func.json_extract(t.audit_event.c.detail, "$.session_id")
+        out: dict[str, int] = {}
+        with self.engine.connect() as c:
+            rows = c.execute(select(setting, func.count(func.distinct(session))).where(
+                t.audit_event.c.action == SECRET_GUARD_ACTION, t.audit_event.c.hunt_id == hunt_id,
+            ).group_by(setting).order_by(setting).limit(SECRET_NAMES_KEPT)).all()
+        for name, sessions in rows:
+            key = name if isinstance(name, str) and SECRET_SETTING_NAME.fullmatch(name) else "?"
+            out[key] = out.get(key, 0) + int(sessions or 0)
+        return out
 
     def agent_fallbacks(self, hunt_id: str, *, group_limit: int = 50) -> dict:
         """Model calls a fallback model answered after the configured model declined, and calls that ended declined,

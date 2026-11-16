@@ -30,7 +30,8 @@ tool inputs the model streamed and the tools a required-tool instruction named, 
 Replay accepts only text, thinking, redacted-thinking and tool-use blocks with their known fields, as an assistant
 turn. An assistant turn with tool calls but no provider state (history from another provider, or a trimmed or
 rebuilt turn), a state that is malformed or holds anything else, a turn whose text or tool calls no longer match its
-state, or one that holds a configured secret, raises HistoryError before anything is sent.
+state, raises HistoryError before anything is sent; one that holds a configured secret's text raises its subclass
+SecretGuardTripped, which names the setting and the part of the turn, never the value.
 """
 from __future__ import annotations
 
@@ -44,8 +45,6 @@ import re
 import time
 from collections.abc import Callable
 
-from pydantic import SecretStr
-
 from romulus.agent.provider.base import (
     MAX_ERROR_MESSAGE,
     PROVIDER_STATE,
@@ -55,17 +54,19 @@ from romulus.agent.provider.base import (
     ChatResult,
     HistoryError,
     ProviderUnavailable,
+    SecretGuardTripped,
     ToolCall,
     TransientFailure,
     Usage,
     endpoint_url,
     parse_tool_arguments,
+    secret_trips,
 )
 from romulus.agent.provider.egress import EgressDecision
 from romulus.agent.provider.fallbacks import refusal_fallback_on
 from romulus.agent.provider.openai_compatible import probe_calls
 from romulus.agent.refusals import EXTRA, bounded, reason
-from romulus.config import MIN_SECRET_LENGTH, Settings, redact_text
+from romulus.config import MIN_SECRET_LENGTH, Settings, redact_text, secret_settings
 
 log = logging.getLogger("romulus.agent")
 # the server-side refusal fallback, "default" form: the API picks the fallback model by refusal category
@@ -223,11 +224,10 @@ def _derived_input(raw: str):
         return None
 
 
-def _long_secrets(settings: Settings) -> list[str]:
-    """Configured secrets long enough to tell apart from ordinary text (shorter ones doctor warns about)."""
-    values = (getattr(settings, name) for name in type(settings).model_fields)
-    return [v.get_secret_value() for v in values
-            if isinstance(v, SecretStr) and len(v.get_secret_value()) >= MIN_SECRET_LENGTH]
+def _long_secrets(settings: Settings) -> list[tuple[str, str]]:
+    """Configured secrets long enough to tell apart from ordinary text (shorter ones doctor warns about), as
+    (environment name, value)."""
+    return [(name, value) for name, value in secret_settings(settings) if len(value) >= MIN_SECRET_LENGTH]
 
 
 def _same_arguments(given, stored_raw: str) -> bool:
@@ -970,10 +970,13 @@ class ClaudeMessagesProvider(ChatProvider):
         if not same_calls or _text(original) != stored_text:
             raise HistoryError(f"assistant message {n} was changed after the model produced it; its signed "
                                "thinking no longer matches the turn. Sessions must be append-only or start fresh")
-        replayed = ([b.get("text") or b.get("thinking") or "" for b in blocks] + [s[2] for s in stored]
-                    + [json.dumps(b["input"]) for b in blocks if b["type"] == "tool_use"])
-        if any(secret in text for secret in _long_secrets(self.s) for text in replayed):
-            raise HistoryError(f"assistant message {n} holds a configured secret; it is never sent")
+        replayed = ([(b["type"], b.get("text") or b.get("thinking") or "") for b in blocks
+                     if b["type"] in ("text", "thinking")]
+                    + [("tool_input_streamed", s[2]) for s in stored]
+                    + [("tool_input_parsed", json.dumps(b["input"])) for b in blocks if b["type"] == "tool_use"])
+        trips = secret_trips(replayed, _long_secrets(self.s))
+        if trips:
+            raise SecretGuardTripped(n, trips)
         if state.get("required_tools"):
             _require_tool(out, n, list(state["required_tools"]))
         return [{"role": "assistant", "content": copy.deepcopy(blocks)}]
