@@ -182,6 +182,7 @@ def panel(repo, hunt, usage, *, with_assessment=True):
             # what the secret guard did, by setting name only: replacements outgoing redaction made in telemetry
             # sent to the model, and sessions ended because a reply held a secret's text
             "redactions": dict((usage or {}).get("redactions") or {}),
+            "output_redactions": dict((usage or {}).get("output_redactions") or {}),
             "secret_guard": repo.agent_secret_guard_counts(hunt["id"])}
 
 

@@ -747,7 +747,8 @@ def run_assessment(settings, repo, hunt_id: str, provider, budget: AgentBudget, 
                 validation = {"ok": False, "errors": [_validation_summary(exc, result)],
                               "reasons": _failure_reasons(exc)}
         call_id = record_call(repo, provider, hunt_id=hunt_id, purpose="assess", request=request, result=result,
-                              limits=limits, session_id=session_id, validation=validation, owner_token=owner_token)
+                              limits=limits, session_id=session_id, validation=validation, owner_token=owner_token,
+                              settings=settings)
         try:
             if stopped:
                 repo.update_agent_session(session_id, hunt_id, {"state": "refused" if result.status == "refused" else "context_full",

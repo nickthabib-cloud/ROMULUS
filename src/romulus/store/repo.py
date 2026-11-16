@@ -6073,8 +6073,10 @@ class Repo:
                  *((t.model_call.c.purpose.in_(purposes),) if purposes is not None else ()))
         calls, tokens, budget_tokens, cost, ms, estimated = 0, 0, 0, 0.0, 0, False
         redactions: dict[str, int] = {}
+        written: dict[str, int] = {}
         weighted = func.json_extract(t.model_call.c.options, "$.budget_tokens")
         redacted = func.json_extract(t.model_call.c.options, "$.redactions")
+        redacted_output = func.json_extract(t.model_call.c.options, "$.output_redactions")
         with self.engine.connect() as c:
             after = ""
             while True:
@@ -6084,11 +6086,14 @@ class Repo:
                     t.model_call.c.prompt_tokens_est, t.model_call.c.prompt_eval_count, t.model_call.c.eval_count,
                     case((or_(t.model_call.c.prompt_eval_count.is_(None), t.model_call.c.eval_count.is_(None)),
                           t.model_call.c.raw_response), else_=None),
-                    t.model_call.c.cost_usd_est, t.model_call.c.duration_ms, weighted, redacted,
+                    t.model_call.c.cost_usd_est, t.model_call.c.duration_ms, weighted, redacted, redacted_output,
                 ).where(*scope, t.model_call.c.id > after).order_by(t.model_call.c.id).limit(200)).all()
-                for call_id, prompt_est, prompt, completion, raw, row_cost, duration, row_budget, row_redacted in rows:
+                for (call_id, prompt_est, prompt, completion, raw, row_cost, duration, row_budget, row_redacted,
+                     row_written) in rows:
                     if row_redacted:
                         _add_redactions(redactions, row_redacted)
+                    if row_written:
+                        _add_redactions(written, row_written)
                     if prompt is None or completion is None:
                         estimated = True
                         prompt, completion, row_budget = prompt_est or 0, int(len(raw or "") / 3.2) + 8, None
@@ -6121,6 +6126,9 @@ class Repo:
             # replacements outgoing redaction made in the text the calls added, by secret setting: telemetry the model
             # was not shown (each call counts only what it added, so a resent history is not counted again)
             result["redactions"] = dict(sorted(redactions.items()))
+        if written:
+            # replacements in the model's own answers before they were stored, by secret setting
+            result["output_redactions"] = dict(sorted(written.items()))
         if group_limit is not None:
             result.update(remote_calls_more=remote_more, models_reported_more=answered_more)
         return result

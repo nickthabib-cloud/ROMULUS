@@ -43,7 +43,7 @@ from romulus.agent.provider import (
     record_call,
     record_failure,
 )
-from romulus.agent.provider.base import estimate_tokens
+from romulus.agent.provider.base import estimate_tokens, redact_value
 from romulus.agent.provider.budget import Charge
 from romulus.agent.refusals import reason
 from romulus.agent.safety import injection_flags
@@ -487,8 +487,10 @@ def _call(settings, repo, hunt_id, provider, request, budget: TriageBudget, prom
         log.exception("triage call failed")
         return "provider_error"
     budget.charge(result)
+    # the verdicts' rationales and labels are stored, ordered and shown: never with a configured secret's text (the
+    # call's record counts the replacements)
     verdicts, chunk_drops = ({}, Counter({result.status: 1})) if not result.ok else validate(
-        result.parsed, {group: shown[group] for group in numbers})
+        redact_value(result.parsed, settings), {group: shown[group] for group in numbers})
     reasons: Counter = Counter()
     for drop, count in chunk_drops.items():
         reasons[DROP_REASONS.get(drop, reason("$", drop))] += count
@@ -497,7 +499,7 @@ def _call(settings, repo, hunt_id, provider, request, budget: TriageBudget, prom
                                            "errors": ([result.error] if result.error else [])
                                            + [f"{drop}: {count}" for drop, count in sorted(chunk_drops.items())],
                                            "reasons": dict(sorted(reasons.items()))},
-                owner_token=owner_token)
+                owner_token=owner_token, settings=settings)
     if not result.ok:
         return result.status
     drops.update(chunk_drops)

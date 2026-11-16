@@ -575,6 +575,8 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
     overruns = 0
 
     def finish(state: str, final_summary: str, reason: str | None = None) -> dict:
+        # a summary can quote the model (its finish_session text, a refusal, an error): stored without any secret
+        final_summary = redact_text(final_summary, settings)
         outcome = {"id": session_id, "hypothesis_id": hypothesis_id, "purpose": purpose, "state": state,
                    "summary": final_summary[:2000], "reason": reason,
                    "provider_unavailable": provider_unavailable, "tool_call_limit": call_limit,
@@ -726,7 +728,7 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
             heartbeat()
             model_call_id = record_call(repo, provider, hunt_id=hunt_id, purpose=purpose, request=request,
                                         result=result, limits=budget_gate.budget.limits, session_id=session_id,
-                                        owner_token=owner_token)
+                                        owner_token=owner_token, settings=settings)
             if reservation.overrun is not None:
                 # the charge came out above the reservation (the cache did not hold what it was counted for): this
                 # session reserves every later prompt as written to the cache, and stops if the limit was crossed

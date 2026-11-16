@@ -44,7 +44,7 @@ from romulus.agent.provider.egress import (
     system_resolver,
 )
 from romulus.agent.provider.fallbacks import refusal_fallback_on
-from romulus.config import Settings
+from romulus.config import Settings, redact_text
 from romulus.store.db import digest
 from romulus.store.repo import SECRET_GUARD_ACTION
 
@@ -198,9 +198,10 @@ def build_provider(s: Settings, *, transport=None, resolver: Resolver = system_r
 def record_call(repo, provider: ChatProvider, *, hunt_id: str, purpose: str, request: ChatRequest,
                 result: ChatResult, limits: BudgetLimits, call_id: str | None = None, case_id: str | None = None,
                 session_id: str | None = None, validation: dict | None = None,
-                owner_token: str | None = None) -> str:
+                owner_token: str | None = None, settings: Settings | None = None) -> str:
     """Store one model call: prompt digest, provider and model (requested and reported), parameters, the raw
-    response, finish reason, validation, usage and an estimated cost."""
+    response, finish reason, validation, usage and an estimated cost. Every configured secret's text is removed
+    from what is stored, using `settings` (else the provider's own)."""
     call_id = call_id or "mc-" + uuid.uuid4().hex[:20]
     charge = charge_of(result)
     described = provider.describe()
@@ -217,17 +218,27 @@ def record_call(repo, provider: ChatProvider, *, hunt_id: str, purpose: str, req
         options["budget_tokens"] = limits.budget_tokens(charge)
     if charge.worst_case:
         options["usage_worst_case"] = True     # an attempt that broke off mid-reply, charged at its full allowance
-    if result.details:
-        options["provider_details"] = dict(result.details)
+    parsed = {"content": result.parsed, "tool_calls": [c.as_dict() for c in result.tool_calls]}
+    if validation is None:
+        validation = {"ok": result.ok, "errors": [result.error] if result.error else []}
+    details, raw = dict(result.details), result.raw
+    settings = settings if settings is not None else getattr(provider, "s", None)
+    if isinstance(settings, Settings):
+        # the model's own words, and anything quoting them (an error, a refusal, a provider's details), are stored
+        # as the raw response is: with any configured secret's text removed and the replacements counted
+        written: dict[str, int] = {}
+        parsed = redact_value(parsed, settings, written)
+        validation, details = redact_value(validation, settings), redact_value(details, settings)
+        raw = redact_text(raw, settings)
+        if written:
+            # replacements in the model's own answer, by setting (numbers only)
+            options["output_redactions"] = dict(sorted(written.items()))
+    if details:
+        options["provider_details"] = details
     if result.redactions:
         # secret replacements in the text this call added, by setting: an analyst's sign that some telemetry was
         # hidden from the model (numbers only)
         options["redactions"] = dict(result.redactions)
-    parsed = {"content": result.parsed, "tool_calls": [c.as_dict() for c in result.tool_calls]}
-    settings = getattr(provider, "s", None)
-    if isinstance(settings, Settings):
-        # the model's own words are stored as the raw response is: with any configured secret's text removed
-        parsed = redact_value(parsed, settings)
     repo.save_model_call({
         "id": call_id, "hunt_id": hunt_id, "case_id": case_id, "session_id": session_id,
         "purpose": purpose, "model": provider.model,
@@ -238,9 +249,9 @@ def record_call(repo, provider: ChatProvider, *, hunt_id: str, purpose: str, req
         # what the call was charged: every attempt the provider billed for it, when it reports them
         "prompt_eval_count": None if charge.estimated else charge.prompt,
         "eval_count": None if charge.estimated else charge.completion,
-        "duration_ms": result.duration_ms, "raw_response": result.raw,
+        "duration_ms": result.duration_ms, "raw_response": raw,
         "parsed": parsed,
-        "validation": validation if validation is not None else {"ok": result.ok, "errors": [result.error] if result.error else []},
+        "validation": validation,
         "status": result.status,
         "provider": described["provider"], "endpoint_host": described["endpoint_host"],
         "egress": described["egress"], "model_reported": result.model_reported or None,

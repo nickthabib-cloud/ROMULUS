@@ -410,3 +410,155 @@ def test_an_assess_trip_stores_the_template_with_the_secret_guard_reason(tmp_pat
     from romulus.agent.assessment import template_assessment
     assert "(secret_guard)" in template_assessment(repo, "h1", "secret_guard")["header"]
     engine.dispose()
+
+
+# ---- the triage pass ---------------------------------------------------------------------------------------------
+
+def _web_client(monkeypatch, tmp_path, repo):
+    import secrets as random
+
+    from fastapi.testclient import TestClient
+
+    from romulus.web import app as web
+    from romulus.web.auth import create_user
+    monkeypatch.setattr(web, "open_repo", lambda _: repo)
+    app = web.create_app(Settings(home=tmp_path, secret_key=random.token_urlsafe(32)), tmp_path / "settings.env")
+    password = random.token_urlsafe(20)
+    create_user(repo.engine, "lead", password, "lead")
+    client = TestClient(app)
+    client.post("/login", data={"username": "lead", "password": password})
+    return client
+
+
+def test_triage_verdicts_are_stored_exported_reported_and_shown_without_the_secret(tmp_path, monkeypatch, caplog):
+    anthropic = pytest.importorskip("anthropic")
+    httpx2 = pytest.importorskip("httpx2")
+    assert anthropic
+    from romulus.agent.triage import DATA_BEGIN, DATA_END, run_triage_pass
+    from romulus.hunt.triage import write_export
+    from romulus.report.manifest import build_manifest
+    from romulus.report.markdown import render
+    from tests import test_ai_triage
+    from tests.test_agent_provider_claude import MODEL_INFO, claude_settings, provider, reply, text
+    caplog.set_level(logging.DEBUG)
+    engine = make_engine(tmp_path / "triage.sqlite")
+    migrate(engine)
+    repo = test_ai_triage._hunt(filler=12, repo=Repo(engine))
+    requests = []
+
+    def endpoint(request):
+        if request.url.path.startswith("/v1/models"):
+            return httpx2.Response(200, json=MODEL_INFO)
+        requests.append(request.content.decode())
+        body = json.loads(request.content)
+        user = body["messages"][0]["content"]
+        user = user if isinstance(user, str) else "".join(block.get("text", "") for block in user)
+        cards = json.loads(user[user.index(DATA_BEGIN + "\n") + len(DATA_BEGIN) + 1:user.index("\n" + DATA_END)])
+        # a label is a short slug: one holding the secret's text no longer fits it once redacted, so that verdict
+        # is dropped as malformed; the others keep a plain label and a rationale holding the text
+        answer = {"groups": [test_ai_triage.verdict(card, "likely_attack",
+                                                    label=f"reset-{SENTINEL.lower()}" if i == 0 else "web-chain",
+                                                    rationale=f"The account was set to {SENTINEL} here.")
+                             for i, card in enumerate(cards["cards"])]}
+        return httpx2.Response(200, headers={"content-type": "text/event-stream"},
+                               content=reply([text(json.dumps(answer))]))
+
+    settings = claude_settings(arkime_password=SENTINEL.lower(), es_password=SENTINEL, home=tmp_path,
+                               stage_dir=tmp_path / "stage",
+                               agent_triage_promote_per_lane=2, agent_triage_call_input_tokens=4000,
+                               agent_triage_call_output_tokens=2048)
+    p, _ = provider(settings, endpoint)
+    summary = run_triage_pass(settings, repo, "h1", p)
+    assert summary["groups"]["triaged"] > 0 and summary["dropped"] == {"bad_incident_label": len(requests)}
+    with engine.connect() as connection:
+        rows = [dict(row) for row in connection.execute(select(t.ai_triage_group)).mappings()]
+    with_verdict = [row for row in rows if row["rationale"]]
+    assert with_verdict and all(row["rationale"] == "The account was set to <redacted> here." for row in with_verdict)
+    assert {row["incident_label"] for row in with_verdict} == {"web-chain"}
+    written = repo.agent_usage("h1")["output_redactions"]
+    assert written["ES_PASSWORD"] >= len(with_verdict) and written["ARKIME_PASSWORD"] == len(requests)
+    write_export(repo, "h1", tmp_path / "order.json")
+    manifest = build_manifest(repo, "h1", "test")
+    report = render({**manifest, "revision": {"number": 1, "id": "r1", "supersedes": None}})
+    assert "The account was set to" in report
+    client = _web_client(monkeypatch, tmp_path, repo)
+    page = client.get("/hunts/h1/triage").text
+    assert "The account was set to &lt;redacted&gt; here." in page
+    run = client.get("/hunts/h1/run").text
+    assert '<span class="mono">ES_PASSWORD</span>' in run.split('id="secret-guard"', 1)[1]
+    shown = [_every_stored_value(engine), (tmp_path / "order.json").read_text(encoding="utf-8"), report,
+             json.dumps(manifest, default=str), page, run, caplog.text, *requests]
+    assert all(SENTINEL not in item and SENTINEL.lower() not in item for item in shown)
+    engine.dispose()
+
+
+def test_no_write_tool_ever_receives_the_secret_and_no_stored_call_holds_it(tmp_path, caplog):
+    caplog.set_level(logging.DEBUG)
+    engine, repo = _repo(tmp_path, "writes")
+    settings = Settings(home=tmp_path, arkime_password=SENTINEL)
+    now = utcnow()
+    repo.save_agent_hypothesis({"id": "hyp-1", "hunt_id": "h1", "statement": "Review the account change here",
+                                "techniques": [], "entity_ids": [], "status": "open", "confidence": "low",
+                                "questions": ["q"], "created_session_id": None, "sessions_run": 0,
+                                "created_at": now, "updated_at": now})
+    received: list = []
+
+    class Spy(Toolbox):
+        def execute(self, name, arguments):
+            received.append((name, arguments))
+            return super().execute(name, arguments)
+
+    def writes(request):
+        hypothesis = json.loads(request.messages[1]["content"])["hypothesis"]["alias"]
+        said = f"The account was set to {SENTINEL} on web01."
+        return response(tool_calls=[
+            ToolCall("w1", "add_note", {"target": hypothesis, "text": said, "cites": []}, "{}"),
+            ToolCall("w2", "update_hypothesis", {"hypothesis": hypothesis, "questions": [said], "note": said}, "{}"),
+            ToolCall("w3", "propose_finding", {"claim": said, "claim_kind": "account_change", "cites": ["E1"],
+                                               "lane": "lead", "rationale": said}, "{}"),
+            ToolCall("w4", "propose_link", {"from": "F1", "to": "F2", "relation": "related", "cites": ["F1"],
+                                            "rationale": said}, "{}"),
+            ToolCall("w5", "request_rule", {"pattern_description": said, "cites": ["E1"]}, "{}"),
+            ToolCall("w6", "finish_session", {"summary": said}, json.dumps({"summary": said}))])
+    budget = AgentBudget.from_usage(BudgetLimits.from_settings(settings), repo.agent_usage("h1"), clock=lambda: 0.0)
+    outcome = _run_session(settings, repo, "h1", ScriptedProvider([writes]), _BudgetGate(budget, settings),
+                           lambda session: Spy(repo, "h1", session_id=session), _prompt_set(),
+                           purpose="investigate", hypothesis=repo.agent_hypotheses("h1")[0])
+    assert [name for name, _ in received] == ["add_note", "update_hypothesis", "propose_finding", "propose_link",
+                                              "request_rule", "finish_session"]
+    assert all(SENTINEL not in json.dumps(arguments) and "<redacted>" in json.dumps(arguments)
+               for _, arguments in received)
+    assert outcome["state"] == "finished" and outcome["summary"] == "The account was set to <redacted> on web01."
+    assert repo.agent_notes("h1") and all("<redacted>" in row["text"] for row in repo.agent_notes("h1"))
+    assert SENTINEL not in _every_stored_value(engine) and SENTINEL not in caplog.text
+    engine.dispose()
+
+
+def test_an_error_quoting_the_model_is_stored_redacted(tmp_path, caplog):
+    pytest.importorskip("anthropic")
+    from tests.test_agent_provider_claude import (
+        TOOL,
+        Endpoint,
+        claude_settings,
+        provider,
+        reply,
+        text,
+        tool_use,
+    )
+    caplog.set_level(logging.DEBUG)
+    engine, repo = _repo(tmp_path, "error")
+    # the model calls a tool it was never offered, named after the secret: the error names the tool
+    made_up = "x" + SENTINEL.replace("-", "_")
+    secret = made_up[1:]
+    settings = claude_settings(arkime_password=secret)
+    p, _ = provider(settings, Endpoint(reply([text("Calling."), tool_use(name=made_up)], stop="tool_use")))
+    request = ChatRequest([{"role": "user", "content": "go"}], tools=[TOOL])
+    result = p.chat(request)
+    assert result.status == "invalid_tool_call" and secret not in result.error and "<redacted>" in result.error
+    record_call(repo, p, hunt_id="h1", purpose="investigate", request=request, result=result,
+                limits=BudgetLimits.from_settings(settings))
+    stored = repo.model_calls("h1")[0]
+    assert any("<redacted>" in error for error in stored["validation"]["errors"])
+    assert stored["options"]["output_redactions"] == {"ARKIME_PASSWORD": 1}       # the stored call's name
+    assert secret not in _every_stored_value(engine) and secret not in caplog.text
+    engine.dispose()

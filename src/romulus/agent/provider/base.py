@@ -215,15 +215,15 @@ class ChatResult:
         return message
 
 
-def redact_value(value, settings: Settings):
+def redact_value(value, settings: Settings, counts: dict[str, int] | None = None):
     """Copy of a JSON-like value with every configured secret removed from every string, at any depth: what the
-    model wrote, before it is run or stored."""
+    model wrote, before it is run or stored. `counts` receives the replacements by setting (names only)."""
     if isinstance(value, str):
-        return redact_text(value, settings)
+        return redact_counted(value, settings, counts)
     if isinstance(value, list):
-        return [redact_value(v, settings) for v in value]
+        return [redact_value(v, settings, counts) for v in value]
     if isinstance(value, dict):
-        return {k: redact_value(v, settings) for k, v in value.items()}
+        return {k: redact_value(v, settings, counts) for k, v in value.items()}
     return value
 
 
@@ -345,6 +345,9 @@ class ChatProvider:
                               f"prompt estimate {est} + {max_out} output exceeds the {ctx}-token context")
         result = self._chat(request, messages, max_out, est)
         result.redactions = dict(sorted(redactions.items()))
+        if result.error:
+            # an error can quote the model (a refusal's words, a tool name it made up): it is stored and shown
+            result.error = redact_text(result.error, self.s)
         return result
 
     def _retrying(self, attempt_once: Callable[[], T], *, attempt_guard: Callable[[dict], bool] | None = None,
