@@ -258,6 +258,10 @@ class ChatProvider:
         budget check must allow for."""
         return request.max_output_tokens or self.s.agent_max_output_tokens
 
+    def model_output_limit(self) -> int:
+        """The most output tokens the model's server reports one call may ask for; 0 when it reports none."""
+        return 0
+
     def _chat(self, request: ChatRequest, messages: list[dict], max_out: int, est: int) -> ChatResult:
         raise NotImplementedError
 

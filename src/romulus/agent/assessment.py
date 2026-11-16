@@ -524,6 +524,43 @@ def _assessment_input(repo, hunt_id: str, token_budget: int, *, owner_token=None
     return {"digest": digest(output), "data": output}
 
 
+# The assessment answer, with its narrative, is typically 3,000-5,000 output tokens. An adapter that adds thinking
+# room to every call already allows far more; one that adds none gets at least this much for the assess call.
+ASSESS_OUTPUT_FLOOR = 8192
+
+
+@dataclass(frozen=True)
+class AssessOutput:
+    """The assess call's output allowance: `max_output_tokens` to request (None: the configured default stands), the
+    adapter's resulting output limit, which the budget and the cost worst case reserve, and why it differs from the
+    configured value, if it does."""
+    max_output_tokens: int | None
+    limit: int
+    note: str = ""
+
+
+def assess_output(settings, provider) -> AssessOutput:
+    """AGENT_MAX_OUTPUT_TOKENS, raised to ASSESS_OUTPUT_FLOOR when the adapter adds no thinking room to a call's
+    output limit, but never past the output limit the model's server reports (the floor is clamped to it, and the
+    note says so). An adapter that adds thinking room keeps its usual limit."""
+    configured = settings.agent_max_output_tokens
+    if provider.output_limit(ChatRequest(messages=[], max_output_tokens=configured)) != configured:
+        return AssessOutput(None, provider.output_limit(ChatRequest(messages=[])))
+    floor, note = ASSESS_OUTPUT_FLOOR, ""
+    reported = provider.model_output_limit()
+    if reported and floor > reported:
+        floor = reported
+        note = (f"the assessment's {ASSESS_OUTPUT_FLOOR}-token output floor is clamped to the model's reported "
+                f"{reported}-token output limit")
+    tokens = max(configured, floor)
+    if tokens == configured:
+        return AssessOutput(None, provider.output_limit(ChatRequest(messages=[])), note)
+    if not note:
+        note = (f"assessment output allowance {tokens} tokens (the floor for an adapter without thinking room; "
+                f"AGENT_MAX_OUTPUT_TOKENS is {configured})")
+    return AssessOutput(tokens, provider.output_limit(ChatRequest(messages=[], max_output_tokens=tokens)), note)
+
+
 def run_assessment(settings, repo, hunt_id: str, provider, budget: AgentBudget, *, owner_token=None,
                    clock=None, max_calls: int = 2, heartbeat=None) -> dict | None:
     """Run one bounded assess session; return None when no valid checked body was produced."""
@@ -537,10 +574,11 @@ def run_assessment(settings, repo, hunt_id: str, provider, budget: AgentBudget, 
     system_text = _prompt("system.md")
     assess_text = _prompt("assess.md")
     prompt_digests = {"system.md": digest(system_text), "assess.md": digest(assess_text)}
+    allowance = assess_output(settings, provider)
     request_shell = ChatRequest(messages=[{"role": "system", "content": system_text + "\n\n" + assess_text},
                                           {"role": "user", "content": ""}],
                                 response_schema=ASSESSMENT_SCHEMA, schema_name="ai-assessment@1",
-                                strict_schema=True)
+                                strict_schema=True, max_output_tokens=allowance.max_output_tokens)
     context_limit = provider.context_tokens() or settings.agent_context_tokens
     estimate_room = (max(1, int(context_limit * 0.85) - estimate_tokens(request_shell.prompt_text())
                          - provider.output_limit(request_shell) - 512) if context_limit else 24_000)
@@ -551,7 +589,8 @@ def run_assessment(settings, repo, hunt_id: str, provider, budget: AgentBudget, 
     limits = budget.limits
     for attempt in range(max_calls):
         request = ChatRequest(messages=messages, response_schema=ASSESSMENT_SCHEMA,
-                              schema_name="ai-assessment@1", strict_schema=True)
+                              schema_name="ai-assessment@1", strict_schema=True,
+                              max_output_tokens=allowance.max_output_tokens)
         prompt_est = estimate_tokens(request.prompt_text())
         max_output = provider.output_limit(request)
         if context_limit and prompt_est > context_limit * 0.85:
@@ -647,11 +686,14 @@ def run_assessment(settings, repo, hunt_id: str, provider, budget: AgentBudget, 
                     conflict = "UNIQUE constraint failed: agent_assessment.hunt_id, agent_assessment.revision"
                     if conflict not in str(exc.orig) or revision_attempt == 2:
                         raise
-            repo.update_agent_session(session_id, hunt_id, {"state": "finished", "summary": "Assessment stored.",
+            summary = "Assessment stored." + (f" Note: {allowance.note}." if allowance.note else "")
+            repo.update_agent_session(session_id, hunt_id, {"state": "finished", "summary": summary,
                                                              "tool_calls": 0, "ended_at": utcnow()},
                                       owner_token=owner_token)
             return {"session_id": session_id, "model_call_id": call_id, "revision": revision,
-                    "body": checked, "checker": checker, "prompt_digests": prompt_digests}
+                    "body": checked, "checker": checker, "prompt_digests": prompt_digests,
+                    "output_allowance": {"max_output_tokens": allowance.max_output_tokens,
+                                         "limit": allowance.limit, "note": allowance.note}}
         except (ValidationError, ValueError, TypeError) as exc:
             if attempt + 1 >= max_calls:
                 break
