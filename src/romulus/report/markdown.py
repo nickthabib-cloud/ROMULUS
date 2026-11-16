@@ -42,20 +42,21 @@ NARRATIVE_TITLE = "What likely happened (AI hypothesis, unconfirmed)"
 NARRATIVE_NOTE = ("The model's theory of what most plausibly happened, pieced together from the cited findings. It may "
                   "be wrong: each sentence is labelled observed (shown by the cited records), inferred (reasoned "
                   "between them) or uncertain (the evidence is thin or missing). A paragraph marked weakly "
-                  "supported cites no reported finding, or only activity triaged as likely benign: read it as "
-                  "context, not as a step of the attack.")
+                  "supported cites no reported, confirmed or likely-attack finding (or its support could not be "
+                  "determined): read it as context, not as a step of the attack.")
 NARRATIVE_EMPTY = ("The assessment has no narrative: the model wrote none, or the checker removed every sentence "
                    "(see the checker changes below).")
 
 
-# A paragraph the checker found weakly supported keeps every sentence, is shown muted under its label, and says why
-# (one of these fixed reasons). An ATT&CK phase label it could not support becomes CONTEXT_PHASE; the model's own
-# label is kept beside it.
+# A paragraph the checker found weakly supported keeps every sentence, is shown muted under the label CONTEXT_PHASE,
+# and says why (one of these fixed reasons); the model's own label is kept beside it.
 CONTEXT_PHASE = "Context"
 WEAK_NO_REPORTED = "no_reported_finding"
 WEAK_BENIGN = "triaged_likely_benign"
+WEAK_UNKNOWN = "support_unknown"
 WEAK_REASONS = {WEAK_NO_REPORTED: "no reported finding cited",
-                WEAK_BENIGN: "cited activity was triaged as likely benign"}
+                WEAK_BENIGN: "cited activity was triaged as likely benign",
+                WEAK_UNKNOWN: "support could not be determined (citation cap)"}
 WEAK_LABEL = "weakly supported"
 
 

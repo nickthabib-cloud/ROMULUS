@@ -22,10 +22,10 @@ theory for the analyst, not a finding.
   as context, in a paragraph labelled `Context`,
   not as an attack phase. Triage verdicts are input, not truth: you may disagree with one, but then say so in an
   `inferred` or `uncertain` sentence.
-- The checker enforces this in code: an `observed` sentence that cites no reportable finding becomes `inferred`; a
-  paragraph under an ATT&CK phase label that cites no Reported, confirmed or likely- or possible-attack finding is
-  relabelled Context and shown as weakly supported; a paragraph citing only findings triaged likely benign is shown
-  as weakly supported with its sentences marked `uncertain`.
+- The checker enforces this in code: an `observed` sentence that cites no reportable finding becomes `inferred`; any
+  paragraph that cites no Reported, confirmed or likely- or possible-attack finding is relabelled Context and shown
+  as weakly supported, whatever its label; a paragraph citing only findings triaged likely benign also has its
+  sentences marked `uncertain`.
 - Narrative sentences state what the evidence shows or what is inferred from it, never what did not happen. A
   narrative sentence or phase label with a negation (no, not, never, nothing, none, without, neither, nor, cannot, or a
   contraction such as didn't) is removed. Where the evidence is thin or missing, write an `uncertain` sentence that

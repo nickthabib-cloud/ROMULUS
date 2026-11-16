@@ -32,7 +32,7 @@ from romulus.agent.toolbox import argument_schema
 from romulus.detect.metadata import ATTACK_TACTICS
 from romulus.report.incidents import build_incident_graph
 from romulus.report.manifest import NARRATIVE_PARAGRAPHS, NARRATIVE_SENTENCES, coverage_for_hunt
-from romulus.report.markdown import CONTEXT_PHASE, WEAK_BENIGN, WEAK_NO_REPORTED
+from romulus.report.markdown import CONTEXT_PHASE, WEAK_BENIGN, WEAK_NO_REPORTED, WEAK_UNKNOWN
 from romulus.store.db import digest, utcnow
 
 
@@ -318,7 +318,8 @@ def check_assessment(repo, hunt_id: str, body: dict, *, owner_token=None,
               "removed_empty_paragraph": 0, "cleared_narrative_time": 0, "cleared_narrative_phase": 0,
               "removed_narrative_negation": 0, "labelled_uncertain": 0,
               "downgraded_observed_weak_evidence": 0, "phase_weakly_supported": 0,
-              "weakly_supported_benign_triage": 0, "labelled_uncertain_benign_triage": 0}
+              "weakly_supported_benign_triage": 0, "labelled_uncertain_benign_triage": 0,
+              "weakly_supported_unknown_support": 0}
     suspicious_cache: dict[str, bool] = {}
 
     def check(sentence: dict, section: str) -> dict | None:
@@ -451,13 +452,14 @@ def _ground_paragraph(paragraph: dict, strengths: dict, counts: dict) -> dict:
     """The narrative's evidence rules, which weigh what the cited activity is, not only that it is cited:
     - an `observed` sentence must cite a reportable deterministic finding (urgent, high or lead), directly or through
       an evidence record one cites; otherwise it becomes `inferred`;
-    - a paragraph keeps an ATT&CK phase label only if a sentence cites a Reported or confirmed finding, or one whose
-      group the triage pass assessed as likely or possible attack; otherwise its phase becomes Context and it is
-      marked weakly supported;
-    - a paragraph whose every cite rests only on findings triaged likely benign (none Reported or confirmed) is
-      marked weakly supported, and its sentences become `uncertain`.
-    A cite whose findings could not all be looked up counts as support of unknown strength, never as weak. Nothing is
-    removed; every change is counted and the paragraph says why it is weakly supported."""
+    - a paragraph, whatever its label, that cites no Reported or confirmed finding and none whose group the triage
+      pass assessed as likely or possible attack is weakly supported: its phase becomes Context (the model's label is
+      kept as `model_phase`, any ATT&CK tactic is dropped) and it says why, in this order:
+      - every cite rests only on findings triaged likely benign: its sentences also become `uncertain`;
+      - a cited evidence record has more findings than the lookup reads: its support could not be determined, and
+        unknown support never counts as strong;
+      - otherwise: no reported finding is cited.
+    Nothing is removed; each weakly supported paragraph is counted once, under its reason."""
     sentences = []
     for sentence in paragraph["sentences"]:
         refs = sentence.pop(REFS)
@@ -466,24 +468,25 @@ def _ground_paragraph(paragraph: dict, strengths: dict, counts: dict) -> dict:
             counts["downgraded_observed_weak_evidence"] += 1
         sentences.append((sentence, refs))
     cites = [strengths[ref] for _sentence, refs in sentences for ref in refs]
-    supported = any(item.strong or item.unknown for item in cites)
-    benign = bool(cites) and all(item.benign for item in cites)
     out = {**paragraph, "sentences": [sentence for sentence, _refs in sentences]}
-    reason = None
-    if paragraph.get("tactic") and not supported:
-        out = {**{key: value for key, value in out.items() if key != "tactic"}, "phase": CONTEXT_PHASE,
-               "model_phase": paragraph["phase"]}
-        counts["phase_weakly_supported"] += 1
-        reason = WEAK_NO_REPORTED
-    if benign:
-        counts["weakly_supported_benign_triage"] += 1
+    if any(item.strong for item in cites):
+        return out
+    if cites and all(item.benign for item in cites):
         reason = WEAK_BENIGN
+        counts["weakly_supported_benign_triage"] += 1
         for sentence in out["sentences"]:
             if sentence["kind"] != "uncertain":
                 sentence["kind"] = "uncertain"
                 counts["labelled_uncertain_benign_triage"] += 1
-    if reason is not None:
-        out.update(weakly_supported=True, support_reason=reason)
+    elif any(item.unknown for item in cites):
+        reason = WEAK_UNKNOWN
+        counts["weakly_supported_unknown_support"] += 1
+    else:
+        reason = WEAK_NO_REPORTED
+        counts["phase_weakly_supported"] += 1
+    out = {key: value for key, value in out.items() if key != "tactic"}
+    out.update(phase=CONTEXT_PHASE, weakly_supported=True, support_reason=reason,
+               **({"model_phase": paragraph["phase"]} if paragraph["phase"] else {}))
     return out
 
 
@@ -608,6 +611,9 @@ def _assessment_input(repo, hunt_id: str, token_budget: int, *, owner_token=None
     for entry, finding_id in listed:
         if (strength := strengths.get(finding_id)) is not None:
             entry.update(strength.view())
+            if not strength.deterministic:
+                # an agent proposal never supports the narrative: it is not presented as Reported evidence
+                entry.pop("reported")
     output = {"triage": triage.view(), "hypotheses": cards,
               "agent_findings": agent_findings,
               "agent_links": agent_link_cards, "incidents": incident_cards,

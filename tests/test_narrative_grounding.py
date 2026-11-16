@@ -178,8 +178,7 @@ def test_an_attack_phase_citing_only_unreported_benign_triaged_findings_becomes_
     # nothing is removed: both sentences stay, marked uncertain
     assert [(s["text"], s["kind"]) for s in paragraph["sentences"]] == [
         ("The recorded activity ran on the host.", "uncertain"), ("This likely set up persistence.", "uncertain")]
-    assert counts == {"phase_weakly_supported": 1, "weakly_supported_benign_triage": 1,
-                      "labelled_uncertain_benign_triage": 2}
+    assert counts == {"weakly_supported_benign_triage": 1, "labelled_uncertain_benign_triage": 2}
     # without verdicts the same paragraph cites no Reported finding: context, its sentences as written
     checked, counts = check_assessment(repo, "h1", deepcopy(body), triage=OFF)
     paragraph = checked["narrative"][0]
@@ -203,16 +202,26 @@ def test_a_paragraph_citing_a_reported_confirmed_or_likely_attack_finding_keeps_
     assert checked["narrative"][0]["phase"] == "Impact" and counts == {}
 
 
-def test_a_label_that_is_not_an_attack_phase_is_kept_and_only_all_benign_cites_mark_it():
+def test_any_label_without_strong_support_is_weakly_supported_whatever_it_says():
     repo = _hunt()
     body = _reply([_p([_s(_f(repo, "f-0001"), kind="inferred")], "Routine provisioning"),
-                   _p([_s([_f(repo, "f-0001"), _f(repo, "z-attack-1")], kind="inferred")], "Staging")])
+                   _p([_s([_f(repo, "f-0001"), _f(repo, "z-attack-1")], kind="inferred")], "Staging"),
+                   _p([_s(_f(repo, "f-0003"), kind="inferred")], "Exploitation of the web server"),
+                   _p([_s(_f(repo, "f-0005"), kind="inferred")], "")])
+    checked, counts = check_assessment(repo, "h1", body, triage=OFF)
+    labels = [(p["phase"], p.get("model_phase"), p.get("support_reason")) for p in checked["narrative"]]
+    # a free-text label is no way around the rule: it becomes Context, the model's words kept beside it
+    assert labels == [("Context", "Routine provisioning", "no_reported_finding"),
+                      ("Context", "Staging", "no_reported_finding"),       # no verdicts: r.attack is not strong
+                      ("Context", "Exploitation of the web server", "no_reported_finding"),
+                      ("Context", None, "no_reported_finding")]
+    assert counts == {"phase_weakly_supported": 4}
     checked, counts = check_assessment(repo, "h1", body, triage=USED)
-    first, second = checked["narrative"]
-    assert first["phase"] == "Routine provisioning" and first["support_reason"] == "triaged_likely_benign"
-    assert first["sentences"][0]["kind"] == "uncertain" and "model_phase" not in first
-    assert second["phase"] == "Staging" and "weakly_supported" not in second
-    assert counts == {"weakly_supported_benign_triage": 1, "labelled_uncertain_benign_triage": 1}
+    first = checked["narrative"][0]
+    assert first["phase"] == "Context" and first["support_reason"] == "triaged_likely_benign"
+    assert first["sentences"][0]["kind"] == "uncertain"
+    assert checked["narrative"][1]["phase"] == "Staging" and "weakly_supported" not in checked["narrative"][1]
+    assert counts == {"weakly_supported_benign_triage": 3, "labelled_uncertain_benign_triage": 3}
 
 
 def test_an_observed_sentence_needs_a_reportable_finding():
@@ -232,7 +241,7 @@ def test_an_observed_sentence_needs_a_reportable_finding():
     assert paragraph["phase"] == "Execution" and counts == {"downgraded_observed_weak_evidence": 2}
 
 
-def test_an_evidence_record_stands_for_its_findings_and_an_incomplete_lookup_is_never_weak(monkeypatch):
+def test_an_evidence_record_stands_for_its_findings_and_an_incomplete_lookup_is_never_strong(monkeypatch):
     repo, _cid = _repo_with_finding()
     with repo.engine.begin() as connection:
         connection.exec_driver_sql("UPDATE candidate SET lane = 'lead'")     # reportable, not Reported
@@ -242,10 +251,18 @@ def test_an_evidence_record_stands_for_its_findings_and_an_incomplete_lookup_is_
     assert checked["narrative"][0]["phase"] == "Context" and checked["narrative"][0]["sentences"][0]["kind"] == (
         "observed")                                                            # the record's finding is reportable
     assert counts == {"phase_weakly_supported": 1}
-    # more findings cite the record than the lookup reads: support of unknown strength keeps the label
+    # more findings cite the record than the lookup reads: support of unknown strength is weak, and says so
+    with repo.engine.begin() as connection:
+        connection.exec_driver_sql("UPDATE candidate SET lane = 'high'")     # Reported, but past the lookup's cap
     monkeypatch.setattr(grounding, "EVENT_FINDINGS", 0)
     checked, counts = check_assessment(repo, "h1", deepcopy(body), triage=OFF)
-    assert checked["narrative"][0]["phase"] == "Credential Access" and counts == {}
+    paragraph = checked["narrative"][0]
+    assert paragraph["phase"] == "Context" and paragraph["support_reason"] == "support_unknown"
+    assert paragraph["model_phase"] == "Credential Access" and paragraph["sentences"][0]["kind"] == "observed"
+    assert counts == {"weakly_supported_unknown_support": 1}
+    assert markdown.narrative_weak_reason(paragraph) == (
+        "Weakly supported: support could not be determined (citation cap); the model labelled it Credential "
+        "Access.")
 
 
 def test_the_evidence_fields_never_enter_the_response_schema():
@@ -267,7 +284,8 @@ def test_the_assess_input_gives_each_listed_finding_its_evidence_strength_and_no
     assert attack is None or attack["triage"] == "likely_attack"
     assert all(set(card) == {"alias", "lane", "time", "claim", "reported", "confirmed", "triage"}
                for card in cards.values())
-    assert data["agent_findings"][0]["triage"] == "not_triaged"
+    # an agent proposal is never presented as Reported evidence
+    assert data["agent_findings"][0]["triage"] == "not_triaged" and "reported" not in data["agent_findings"][0]
     text = json.dumps(data)
     for internal in ("score", "rank_position", "rank_reasons", "rationale", "incident_label", "best_position"):
         assert internal not in text
@@ -323,14 +341,19 @@ def test_the_phase_runs_orient_investigate_triage_then_assess_under_one_lease(tm
     # the stored narrative was checked against those verdicts
     stored = repo.agent_assessments("h1")[-1]
     assert [p["phase"] for p in stored["body"]["narrative"]] == ["Lateral Movement", "Context"]
-    assert stored["checker"] == {"phase_weakly_supported": 1, "weakly_supported_benign_triage": 1,
-                                 "labelled_uncertain_benign_triage": 1}
+    assert stored["checker"] == {"weakly_supported_benign_triage": 1, "labelled_uncertain_benign_triage": 1}
     # the phase result carries the pass; the stored phase summary keeps a short record of it (the pass's full
     # summary is stored on its own); its own usage leaves the triage calls out
     assert result.state == "completed" and result.as_dict()["ai_triage"]["status"] == "complete"
     record = repo.latest_audit("h1", "hunt.ai_agent_summary")["detail"]["ai_triage"]
     assert record == {"status": "complete", "reason": None, "pass": 1, "model": "fake-triage-model"}
     assert result.usage["calls"] == 3 == len(provider.requests)
+    # the agent's late finding was placed into the final ranking before the pass: the view stays current after the
+    # phase finalizes, in the manifest and in the web's own check
+    from romulus.report.triage import triage_view
+    assert repo.agent_run("h1")["state"] == "completed" and not repo.unranked_findings("h1")
+    assert build_manifest(repo, "h1", "test")["ai_triage"]["stale"] is False
+    assert triage_view(repo, "h1")["stale"] is False
     assert repo.agent_usage("h1", purposes=(TRIAGE_PURPOSE,))["calls"] == len(triage_provider.requests) > 0
 
 
@@ -531,11 +554,9 @@ web_setup = test_web_agent_a6.setup
 def test_the_web_shows_weak_paragraphs_muted_with_their_reason_escaped(web_setup):
     client, repo, cid, *_ = web_setup
     test_web_agent_a6.run_row(repo)
-    with repo.engine.begin() as connection:
-        connection.exec_driver_sql("UPDATE candidate SET lane = 'lead'")          # reportable, not Reported
-    alias = _f(repo, cid)
-    body = _reply([_p([_s(alias, "The process read the credential store.")], HOSTILE_PHASE),
-                   _p([_s(alias, "The read was done by the attacker.", "inferred")], "Objective")])
+    ta._insert(repo, [ta._row("lead-1", "r.lead", lane="lead", host="web01")])     # reportable, not Reported
+    body = _reply([_p([_s(_f(repo, "lead-1"), "The process read the credential store.")], HOSTILE_PHASE),
+                   _p([_s(_f(repo, cid), "The read was done by the attacker.", "inferred")], "Objective")])
     checked, counts = check_assessment(repo, "h1", body, triage=OFF)
     assert counts == {"phase_weakly_supported": 1}
     repo.save_agent_assessment({"id": "aa-weak", "hunt_id": "h1", "revision": 1, "source": "agent",

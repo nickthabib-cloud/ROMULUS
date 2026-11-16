@@ -4,7 +4,7 @@
 {% from 'agent_macros.html' import cites %}
 {% if nv and nv.narrative is defined %}
 {% if nv.narrative %}
-<p class="help small">The model's theory of what most plausibly happened, pieced together from the cited findings. It may be wrong. Each sentence is marked <span class="ns k-observed">observed</span> (shown by the cited records), <span class="ns k-inferred">inferred</span> (reasoned between them) or <span class="ns k-uncertain">uncertain</span> (the evidence is thin or missing). A paragraph marked weakly supported cites no reported finding, or only activity triaged as likely benign: read it as context, not as a step of the attack.</p>
+<p class="help small">The model's theory of what most plausibly happened, pieced together from the cited findings. It may be wrong. Each sentence is marked <span class="ns k-observed">observed</span> (shown by the cited records), <span class="ns k-inferred">inferred</span> (reasoned between them) or <span class="ns k-uncertain">uncertain</span> (the evidence is thin or missing). A paragraph marked weakly supported cites no reported, confirmed or likely-attack finding (or its support could not be determined): read it as context, not as a step of the attack.</p>
 <ol class="narrative">
 {% for p in nv.narrative %}<li{% if p.weak %} class="weak"{% endif %}><div class="narrative-head"><b>{{ p.phase }}</b><span class="mono small help">{{ p.when }}</span></div>
 {% if p.weak %}<p class="help small weak-reason">{{ p.weak }}</p>{% endif %}

@@ -6,7 +6,8 @@ and high), whether it is confirmed (lane urgent), and the AI triage pass's verdi
 a rank, lane, Reported flag or the triage order: it only reads them.
 
 A cited evidence record stands for the reportable deterministic findings that cite it, found through the event index
-and bounded per record; when a record has more such findings than the bound, its support is unknown, never weak.
+and bounded per record; when a record has more such findings than the bound, its support is unknown (the checker
+never counts unknown support as strong, and says the support could not be determined).
 Findings the AI agent proposed never support the narrative here: the model must not ground its story on its own
 claims. Triage verdicts are read by group (a finding's section, rule and primary target, as the triage pass grouped
 it), streamed over the pass's stored groups and kept only for the groups asked about.

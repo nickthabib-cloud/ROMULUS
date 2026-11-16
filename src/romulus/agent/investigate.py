@@ -1131,6 +1131,9 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
     else:
         # the triage pass runs only when an assessment is about to: its verdicts are part of the assess input
         if triage is not None:
+            # the investigation stored all it will: place its late findings into the final ranking first, so the
+            # pass reads the order the report will show and stays current (the assessment adds no findings)
+            _place_late_ranks(repo, hunt_id, owner_token=owner_token)
             triage_summary = _triage_before_assess(repo, hunt_id, triage, budget, heartbeat)
         context = triage_context(triage_summary, enabled=triage is not None or settings.agent_triage == "on")
         try:
