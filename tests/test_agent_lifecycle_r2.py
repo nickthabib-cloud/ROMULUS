@@ -191,7 +191,7 @@ def test_hunt_resume_recovers_pending_handoff_only_after_lease_expiry(tmp_path, 
     monkeypatch.setattr(hunt_run, "ElasticClient", lambda *_a, **_kw: object())
     monkeypatch.setattr(hunt_run, "_contracts", lambda *_a, **_kw: {})
     monkeypatch.setattr(hunt_run, "agent_readiness", lambda *_a: SimpleNamespace(ready=True))
-    body = {"overall": [], "key_steps": [], "confidence": {"overall": "low", "reasons": []},
+    body = {"overall": [], "key_steps": [], "narrative": [], "confidence": {"overall": "low", "reasons": []},
             "alternatives": [], "gaps": [], "next_checks": []}
     provider = ScriptedProvider([
         response(tool_calls=[ToolCall("finish", "finish_session", {"summary": "Review finished."}, "{}")]),

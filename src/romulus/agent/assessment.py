@@ -6,7 +6,7 @@ import re
 import unicodedata
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -26,8 +26,9 @@ from romulus.agent.provider.base import estimate_tokens
 from romulus.agent.refusals import reason, validation_reasons
 from romulus.agent.safety import injection_flags
 from romulus.agent.toolbox import argument_schema
+from romulus.detect.metadata import ATTACK_TACTICS
 from romulus.report.incidents import build_incident_graph
-from romulus.report.manifest import coverage_for_hunt
+from romulus.report.manifest import NARRATIVE_PARAGRAPHS, NARRATIVE_SENTENCES, coverage_for_hunt
 from romulus.store.db import digest, utcnow
 
 
@@ -40,20 +41,27 @@ class _Strict(BaseModel):
 TEXT_LIMIT = 500
 CITE_LIMIT = 20
 SECTION_LIMITS = {"overall": 8, "key_steps": 30, "reasons": 10, "alternatives": 10, "gaps": 10, "next_checks": 10}
+# A narrative paragraph's phase label; the paragraph and sentence bounds are the report manifest's (NARRATIVE_*).
+PHASE_LIMIT = 80
+# An RFC 3339 date and time with a UTC offset, the only form a narrative time span takes (ASCII digits only).
+DATE_TIME = re.compile(r"(?P<date>\d{4}-\d{2}-\d{2})[Tt ](?P<time>\d{2}:\d{2}:\d{2}(?:\.\d+)?)"
+                       r"(?P<offset>[Zz]|[+-]\d{2}:\d{2})", re.ASCII)
 
 
 def _section(what: str, limit: int) -> str:
     return f"{what} At most {limit}; any past {limit} are dropped and counted."
 
 
+_TEXT = f"One concise sentence, at most {TEXT_LIMIT} characters; an empty or longer one is dropped and counted."
+_CITES = (f"Aliases supplied for this hunt that support the sentence (such as F12 or E3), one per item, at most "
+          f"{CITE_LIMIT} (the rest are dropped). A sentence without a citation, or with anything but an alias issued "
+          "in this hunt, is dropped.")
+
+
 class Sentence(_Strict):
-    text: str = Field(description=(
-        f"One concise sentence, at most {TEXT_LIMIT} characters; an empty or longer one is dropped and counted."))
+    text: str = Field(description=_TEXT)
     # plain strings: the checker drops a sentence citing anything that is not an alias issued in this hunt, and counts it
-    cites: list[str] = Field(description=(
-        f"Aliases supplied for this hunt that support the sentence (such as F12 or E3), one per item, at most "
-        f"{CITE_LIMIT} (the rest are dropped). A sentence without a citation, or with anything but an alias issued "
-        "in this hunt, is dropped."))
+    cites: list[str] = Field(description=_CITES)
     kind: Literal["observed", "inferred", "hypothesis"] = Field(description=(
         "observed: recorded in the cited records; inferred: reasoned from them; hypothesis: proposed, unconfirmed."))
 
@@ -69,10 +77,39 @@ class Confidence(_Strict):
     reasons: list[Sentence] = Field(description=_section("Why.", SECTION_LIMITS["reasons"]))
 
 
+class NarrativeSentence(_Strict):
+    text: str = Field(description=_TEXT)
+    cites: list[str] = Field(description=_CITES)
+    kind: Literal["observed", "inferred", "uncertain"] = Field(description=(
+        "observed: recorded in the cited records; inferred: a link or step reasoned from them, not recorded; "
+        "uncertain: where the evidence is thin or missing and the step is unknown."))
+
+
+class TimeSpan(_Strict):
+    start: str = Field(description=(
+        "When this part of the story began, as an RFC 3339 time with a UTC offset read from a cited finding, inside "
+        "the hunt window; or empty when unknown. Any other value is cleared and counted."))
+    end: str = Field(description="When it ended, in the same form as start; or empty.")
+
+
+class NarrativeParagraph(_Strict):
+    time_span: TimeSpan
+    phase: str = Field(description=(
+        f"A short label for this part of the story, at most {PHASE_LIMIT} characters, such as an ATT&CK tactic "
+        "name (Initial Access, Lateral Movement); a longer one is cleared and counted."))
+    sentences: list[NarrativeSentence] = Field(description=(
+        f"{NARRATIVE_SENTENCES[0]} to {NARRATIVE_SENTENCES[1]} sentences, each cited; any past "
+        f"{NARRATIVE_SENTENCES[1]} are dropped and counted, and a paragraph left with none is dropped."))
+
+
 class AssessmentBody(_Strict):
     overall: list[Sentence] = Field(description=_section("The overall assessment.", SECTION_LIMITS["overall"]))
     key_steps: list[KeyStep] = Field(description=_section("The attack path's key steps, in time order.",
                                                           SECTION_LIMITS["key_steps"]))
+    narrative: list[NarrativeParagraph] = Field(description=(
+        "One coherent hypothesis of what most plausibly happened, from initial access to objective, in "
+        f"chronological order: {NARRATIVE_PARAGRAPHS[0]} to {NARRATIVE_PARAGRAPHS[1]} paragraphs (fewer only when "
+        f"the findings cannot support more); any past {NARRATIVE_PARAGRAPHS[1]} are dropped and counted."))
     confidence: Confidence
     alternatives: list[Sentence] = Field(description=_section("Benign or other explanations.",
                                                               SECTION_LIMITS["alternatives"]))
@@ -83,18 +120,35 @@ class AssessmentBody(_Strict):
 ASSESSMENT_SCHEMA = argument_schema(AssessmentBody)
 @dataclass(frozen=True)
 class AbsencePhrase:
-    """A bounded token phrase; gap counts intervening words between its two endpoints."""
+    """A bounded token phrase; gap counts intervening words between its two endpoints. A phrase whose intervening
+    words include one of `unless_between` does not match ("no PTR record" names a DNS answer, not an absence)."""
     words: tuple[str, ...]
     max_gap: int = 0
+    unless_between: frozenset[str] = frozenset()
 
 
+# DNS resource record types: "no <type> record" describes a DNS answer
+DNS_RECORD_TYPES = frozenset({"a", "aaaa", "cname", "mx", "ns", "ptr", "soa", "srv", "txt"})
+RECORD_WORDS = frozenset({"record", "records"})
 ABSENCE_PHRASES: tuple[AbsencePhrase, ...] = (
     AbsencePhrase(("clean",)), AbsencePhrase(("uncompromised",)), AbsencePhrase(("did", "not")),
     *(AbsencePhrase(("not", word), 3) for word in ("compromised", "malicious", "affected", "breached")),
     *(AbsencePhrase(("no", word), 3) for word in
       ("compromise", "evidence", "sign", "signs", "indication", "trace")),
+    *(AbsencePhrase(("no", word), 3, DNS_RECORD_TYPES) for word in sorted(RECORD_WORDS)),
     *(AbsencePhrase(("nothing", word), 3) for word in ("malicious", "suspicious", "found")),
 )
+# Confidence reasons state coverage ("no records from host B after 14:00"); only the record phrases are lifted there.
+CONFIDENCE_ABSENCE_PHRASES = tuple(phrase for phrase in ABSENCE_PHRASES if phrase.words[-1] not in RECORD_WORDS)
+# The narrative states what the evidence shows or what is inferred from it, never what did not happen: a narrative
+# sentence or phase label with any of these words is dropped (a sentence) or cleared (a label). Bare contractions
+# are listed because the apostrophe can be left out; "n't" itself becomes "not".
+NEGATIONS = frozenset({"no", "not", "never", "nothing", "none", "without", "neither", "nor", "cannot"})
+BARE_CONTRACTIONS = frozenset({"aint", "arent", "cant", "couldnt", "didnt", "doesnt", "dont", "hadnt", "hasnt",
+                               "havent", "isnt", "mustnt", "neednt", "shant", "shouldnt", "wasnt", "werent", "wont",
+                               "wouldnt"})
+# The one form a narrative may use for a gap: an explicit unknown, kept and labelled uncertain.
+UNKNOWN_OPENINGS = (("it", "is", "unknown", "whether"), ("unknown", "whether"))
 # Deliberately finite: common Cyrillic/Greek Latin lookalikes, after NFKC and case folding.
 _CONFUSABLES = str.maketrans({
     "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "у": "y", "х": "x",
@@ -108,7 +162,7 @@ _QUOTED = re.compile(r"`[^`]*`|\"[^\"]*\"|'[^'\n]*'")
 def _prose_tokens(text: str) -> list[str]:
     normalized = unicodedata.normalize("NFKC", text).casefold().translate(_CONFUSABLES)
     normalized = "".join(c for c in normalized if unicodedata.category(c) != "Cf")
-    normalized = normalized.replace("’", "'")
+    normalized = normalized.replace("’", "'").replace("ʼ", "'").replace("‘", "'")
     def quote(match):
         prefix = normalized[max(0, match.start() - 45):match.start()]
         if re.search(r"\b(?:commands?|ran|run|execute[ds]?)(?:\s+(?:was|is|were|are))?\s*[:=]?\s*$", prefix):
@@ -125,10 +179,27 @@ def _contains_phrase(text: str, phrase: AbsencePhrase | tuple[str, ...]) -> bool
     rule = phrase if isinstance(phrase, AbsencePhrase) else AbsencePhrase(phrase)
     if len(rule.words) == 2 and rule.max_gap:
         first, last = rule.words
-        return any(token == first and last in tokens[index + 1:index + rule.max_gap + 2]
-                   for index, token in enumerate(tokens))
+        for index, token in enumerate(tokens):
+            if token != first:
+                continue
+            window = tokens[index + 1:index + rule.max_gap + 2]
+            if any(word == last and not rule.unless_between.intersection(window[:offset])
+                   for offset, word in enumerate(window)):
+                return True
+        return False
     width = len(rule.words)
     return any(tuple(tokens[index:index + width]) == rule.words for index in range(len(tokens) - width + 1))
+
+
+def _negated(text: str) -> bool:
+    """Whether the text has a negation word, compared as whole words on its normalized form (NFKC, case folded,
+    common lookalike letters mapped, format characters removed, "n't" read as "not")."""
+    return any(token in NEGATIONS or token in BARE_CONTRACTIONS for token in _prose_tokens(text))
+
+
+def _unknown_statement(text: str) -> bool:
+    tokens = _prose_tokens(text)
+    return any(tuple(tokens[:len(opening)]) == opening for opening in UNKNOWN_OPENINGS)
 
 
 def _sentence(value: dict) -> dict:
@@ -150,10 +221,19 @@ def _map_sentence(sentence: dict, aliases: AliasBook, counts: dict, section: str
             return None
         targets.append(row["target_id"])
         rows.append(row)
+    phrases = CONFIDENCE_ABSENCE_PHRASES if section == "confidence" else ABSENCE_PHRASES
     if section not in {"gaps", "next_checks"} and any(_contains_phrase(sentence["text"], phrase)
-                                                          for phrase in ABSENCE_PHRASES):
+                                                          for phrase in phrases):
         counts["removed_absence_claim"] += 1
         return None
+    if section == "narrative":
+        if _unknown_statement(sentence["text"]):
+            if sentence.get("kind") != "uncertain":
+                sentence = {**sentence, "kind": "uncertain"}
+                counts["labelled_uncertain"] += 1
+        elif _negated(sentence["text"]):
+            counts["removed_narrative_negation"] += 1
+            return None
     suspicious_only = all(_suspicious_alias(aliases, row, suspicious_cache) for row in rows)
     if suspicious_only:
         counts["labelled_suspicious_only"] += 1
@@ -222,7 +302,9 @@ def check_assessment(repo, hunt_id: str, body: dict, *, owner_token=None) -> tup
     aliases = AliasBook(repo, hunt_id, owner_token=owner_token)
     counts = {"removed_uncited": 0, "removed_unknown_alias": 0, "downgraded_observed": 0,
               "removed_absence_claim": 0, "labelled_suspicious_only": 0, "removed_empty": 0,
-              "removed_over_length": 0, "trimmed_citations": 0, "dropped_over_cap": 0}
+              "removed_over_length": 0, "trimmed_citations": 0, "dropped_over_cap": 0,
+              "removed_empty_paragraph": 0, "cleared_narrative_time": 0, "cleared_narrative_phase": 0,
+              "removed_narrative_negation": 0, "labelled_uncertain": 0}
     suspicious_cache: dict[str, bool] = {}
 
     def check(sentence: dict, section: str) -> dict | None:
@@ -254,7 +336,94 @@ def check_assessment(repo, hunt_id: str, body: dict, *, owner_token=None) -> tup
     for section in ("alternatives", "gaps", "next_checks"):
         checked[section] = capped([value for item in checked[section]
                                    if (value := check(item, section)) is not None], section)
+    checked["narrative"] = _check_narrative(checked["narrative"], check, counts, _hunt_window(repo, hunt_id))
     return checked, {key: value for key, value in counts.items() if value}
+
+
+def _hunt_window(repo, hunt_id: str) -> tuple[datetime | None, datetime | None]:
+    """The hunt window's bounds in UTC. A stored bound written without an offset is taken as UTC (hunt windows are
+    UTC), not dropped; one that is not a date and time at all leaves that side open."""
+    window = ((repo.get_hunt(hunt_id) or {}).get("manifest") or {}).get("window") or {}
+    return _window_bound(window.get("start")), _window_bound(window.get("end"))
+
+
+def _window_bound(value) -> datetime | None:
+    if (moment := _utc_time(value)) is not None or not isinstance(value, str):
+        return moment
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
+def _utc_time(value) -> datetime | None:
+    """An RFC 3339 time with a UTC offset (date and time), in UTC; None for anything else. A stored datetime without
+    an offset is UTC, as the store keeps it."""
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    match = DATE_TIME.fullmatch(value.strip()) if isinstance(value, str) else None
+    if match is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(f"{match['date']}T{match['time']}"
+                                        f"{'+00:00' if match['offset'] in 'Zz' else match['offset']}")
+    except ValueError:            # a well-formed but impossible time, such as hour 25
+        return None
+    return parsed.astimezone(UTC)
+
+
+def _span_time(value: str, window: tuple[datetime | None, datetime | None]) -> datetime | None:
+    moment = _utc_time(value)
+    start, end = window
+    if moment is None or (start is not None and moment < start) or (end is not None and moment > end):
+        return None
+    return moment
+
+
+def _span_text(moment: datetime | None) -> str:
+    return "" if moment is None else moment.isoformat().replace("+00:00", "Z")
+
+
+def _phase_tactic(phase: str) -> str | None:
+    """The ATT&CK tactic a phase label names (Lateral Movement, command and control), or None."""
+    name = re.sub(r"[^a-z]+", "-", phase.casefold().replace("&", " and ")).strip("-")
+    return name if name in ATTACK_TACTICS else None
+
+
+def _check_narrative(paragraphs: list[dict], check, counts: dict, window) -> list[dict]:
+    """Every narrative sentence goes through the same checks as the other sections (citations, absence claims,
+    length, the observed label), and one with a negation word is dropped unless it is an explicit unknown ("it is
+    unknown whether ..."), which is labelled uncertain; then a time that is not an RFC 3339 time inside the hunt
+    window, and a phase label past its cap, negated or stating an absence, are cleared; paragraphs left empty are dropped; the caps are applied. Each
+    change is counted."""
+    out = []
+    for paragraph in paragraphs:
+        sentences = [value for item in paragraph["sentences"] if (value := check(item, "narrative")) is not None]
+        counts["dropped_over_cap"] += max(0, len(sentences) - NARRATIVE_SENTENCES[1])
+        if not sentences:
+            counts["removed_empty_paragraph"] += 1
+            continue
+        span = {}
+        for side in ("start", "end"):
+            raw = paragraph["time_span"][side].strip()
+            span[side] = _span_time(raw, window) if raw else None
+            if raw and span[side] is None:
+                counts["cleared_narrative_time"] += 1
+        if span["start"] is not None and span["end"] is not None and span["start"] > span["end"]:
+            span = {"start": None, "end": None}
+            counts["cleared_narrative_time"] += 2
+        phase = " ".join(paragraph["phase"].split())
+        if len(phase) > PHASE_LIMIT or (phase and (_negated(phase) or any(_contains_phrase(phase, rule)
+                                                                           for rule in ABSENCE_PHRASES))):
+            phase = ""
+            counts["cleared_narrative_phase"] += 1
+        tactic = _phase_tactic(phase) if phase else None
+        out.append({"time_span": {side: _span_text(span[side]) for side in ("start", "end")}, "phase": phase,
+                    **({"tactic": tactic} if tactic else {}),
+                    "sentences": sentences[:NARRATIVE_SENTENCES[1]]})
+    counts["dropped_over_cap"] += max(0, len(out) - NARRATIVE_PARAGRAPHS[1])
+    return out[:NARRATIVE_PARAGRAPHS[1]]
 
 
 def _report_findings(repo, hunt_id: str) -> list[dict]:
@@ -334,7 +503,8 @@ def _assessment_input(repo, hunt_id: str, token_budget: int, *, owner_token=None
                        "hosts": incident["hosts"], "accounts": incident["accounts"],
                        "attack_tactics": incident["attack_tactics"], "findings": len(members)},
             "top_findings": [{"alias": aliases.alias_for("F", row["id"]), "lane": row["lane"],
-                              "claim": row["claim"][:240]} for row in top],
+                              "time": _span_text(_utc_time(row.get("ts"))), "claim": row["claim"][:240]}
+                             for row in top],
             "links": [{"alias": aliases.alias_for("L", link["id"]), "type": link["link_type"],
                        "strength": link["style"], "anchor": aliases.alias_for("F", link["anchor_finding_id"]),
                        "targets": [aliases.alias_for("F", item) for item in link["target_finding_ids"]],
@@ -357,7 +527,8 @@ def _assessment_input(repo, hunt_id: str, token_budget: int, *, owner_token=None
         })
     output = {"hypotheses": cards,
               "agent_findings": [{"alias": aliases.alias_for("F", row["id"]), "claim": row["claim"],
-                                  "lane": row["lane"], "hypothesis": (
+                                  "lane": row["lane"], "time": _span_text(_utc_time(row.get("ts"))),
+                                  "hypothesis": (
                                       aliases.alias_for("H", row["agent_hypothesis_id"])
                                       if row.get("agent_hypothesis_id") else None)}
                                  for row in repo.candidates(hunt_id, ["urgent", "high", "lead"])
@@ -411,6 +582,50 @@ def _assessment_input(repo, hunt_id: str, token_budget: int, *, owner_token=None
     return {"digest": digest(output), "data": output}
 
 
+# The assessment answer, with its narrative, is typically 3,000-5,000 output tokens. An adapter that adds thinking
+# room to every call already allows far more; one that adds none gets at least this much for the assess call.
+ASSESS_OUTPUT_FLOOR = 8192
+
+
+@dataclass(frozen=True)
+class AssessOutput:
+    """The assess call's output allowance: `max_output_tokens` to request (None: the configured default stands), the
+    adapter's resulting output limit, which the budget and the cost worst case reserve, and why it differs from the
+    configured value, if it does."""
+    max_output_tokens: int | None
+    limit: int
+    note: str = ""
+
+
+def assess_output(settings, provider) -> AssessOutput:
+    """AGENT_MAX_OUTPUT_TOKENS, raised to ASSESS_OUTPUT_FLOOR when the adapter adds no thinking room to a call's
+    output limit, but never past the output limit the model's server reports nor past a third of a known context
+    window (the floor is clamped to them, and the note says so). An adapter that adds thinking room keeps its usual
+    limit."""
+    configured = settings.agent_max_output_tokens
+    if provider.output_limit(ChatRequest(messages=[], max_output_tokens=configured)) != configured:
+        return AssessOutput(None, provider.output_limit(ChatRequest(messages=[])))
+    floor, notes = ASSESS_OUTPUT_FLOOR, []
+    reported = provider.model_output_limit()
+    if reported and floor > reported:
+        floor = reported
+        notes.append(f"clamped to the model's reported {reported}-token output limit")
+    # on a small context window the answer must leave room for the hunt data it assesses
+    context = provider.context_tokens()
+    if context and floor > context // 3:
+        floor = context // 3
+        notes.append(f"capped at a third of the {context}-token context window ({floor} tokens)")
+    note = (f"the assessment's {ASSESS_OUTPUT_FLOOR}-token output floor is " + " and ".join(notes)
+            + f"; AGENT_MAX_OUTPUT_TOKENS is {configured}") if notes else ""
+    tokens = max(configured, floor)
+    if tokens == configured:
+        return AssessOutput(None, provider.output_limit(ChatRequest(messages=[])), note)
+    if not note:
+        note = (f"assessment output allowance {tokens} tokens (the floor for an adapter without thinking room; "
+                f"AGENT_MAX_OUTPUT_TOKENS is {configured})")
+    return AssessOutput(tokens, provider.output_limit(ChatRequest(messages=[], max_output_tokens=tokens)), note)
+
+
 def run_assessment(settings, repo, hunt_id: str, provider, budget: AgentBudget, *, owner_token=None,
                    clock=None, max_calls: int = 2, heartbeat=None) -> dict | None:
     """Run one bounded assess session; return None when no valid checked body was produced."""
@@ -424,10 +639,11 @@ def run_assessment(settings, repo, hunt_id: str, provider, budget: AgentBudget, 
     system_text = _prompt("system.md")
     assess_text = _prompt("assess.md")
     prompt_digests = {"system.md": digest(system_text), "assess.md": digest(assess_text)}
+    allowance = assess_output(settings, provider)
     request_shell = ChatRequest(messages=[{"role": "system", "content": system_text + "\n\n" + assess_text},
                                           {"role": "user", "content": ""}],
                                 response_schema=ASSESSMENT_SCHEMA, schema_name="ai-assessment@1",
-                                strict_schema=True)
+                                strict_schema=True, max_output_tokens=allowance.max_output_tokens)
     context_limit = provider.context_tokens() or settings.agent_context_tokens
     estimate_room = (max(1, int(context_limit * 0.85) - estimate_tokens(request_shell.prompt_text())
                          - provider.output_limit(request_shell) - 512) if context_limit else 24_000)
@@ -438,7 +654,8 @@ def run_assessment(settings, repo, hunt_id: str, provider, budget: AgentBudget, 
     limits = budget.limits
     for attempt in range(max_calls):
         request = ChatRequest(messages=messages, response_schema=ASSESSMENT_SCHEMA,
-                              schema_name="ai-assessment@1", strict_schema=True)
+                              schema_name="ai-assessment@1", strict_schema=True,
+                              max_output_tokens=allowance.max_output_tokens)
         prompt_est = estimate_tokens(request.prompt_text())
         max_output = provider.output_limit(request)
         if context_limit and prompt_est > context_limit * 0.85:
@@ -534,11 +751,14 @@ def run_assessment(settings, repo, hunt_id: str, provider, budget: AgentBudget, 
                     conflict = "UNIQUE constraint failed: agent_assessment.hunt_id, agent_assessment.revision"
                     if conflict not in str(exc.orig) or revision_attempt == 2:
                         raise
-            repo.update_agent_session(session_id, hunt_id, {"state": "finished", "summary": "Assessment stored.",
+            summary = "Assessment stored." + (f" Note: {allowance.note}." if allowance.note else "")
+            repo.update_agent_session(session_id, hunt_id, {"state": "finished", "summary": summary,
                                                              "tool_calls": 0, "ended_at": utcnow()},
                                       owner_token=owner_token)
             return {"session_id": session_id, "model_call_id": call_id, "revision": revision,
-                    "body": checked, "checker": checker, "prompt_digests": prompt_digests}
+                    "body": checked, "checker": checker, "prompt_digests": prompt_digests,
+                    "output_allowance": {"max_output_tokens": allowance.max_output_tokens,
+                                         "limit": allowance.limit, "note": allowance.note}}
         except (ValidationError, ValueError, TypeError) as exc:
             if attempt + 1 >= max_calls:
                 break

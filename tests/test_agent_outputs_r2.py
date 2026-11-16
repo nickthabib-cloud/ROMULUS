@@ -203,7 +203,7 @@ def test_prior_assessment_is_marked_stale_after_a_new_investigation(tmp_path):
     from romulus.report.manifest import _ai_assessment
     repo, _toolbox, _admission, _finding, _evidence, _entity = _fixture(tmp_path)
     created = utcnow()
-    body = {"overall": [], "key_steps": [], "confidence": {"overall": "low", "reasons": []},
+    body = {"overall": [], "key_steps": [], "narrative": [], "confidence": {"overall": "low", "reasons": []},
             "alternatives": [], "gaps": [], "next_checks": []}
     repo.save_agent_assessment({"id": "prior", "hunt_id": "h1", "revision": 1, "source": "agent",
                                 "model": {}, "body": body, "checker": {}, "created_at": created})
@@ -211,7 +211,9 @@ def test_prior_assessment_is_marked_stale_after_a_new_investigation(tmp_path):
     assessment = _ai_assessment(repo, "h1")
     assert assessment["stale"] is True
     assert assessment["header"].startswith("Prior AI assessment: investigation changed after this assessment;")
-    assert assessment["body"] == body
+    # the narrative is carried beside the body, under the same stale header
+    assert assessment["body"] == {key: value for key, value in body.items() if key != "narrative"}
+    assert assessment["narrative"] == []
     repo.engine.dispose()
 
 
@@ -231,7 +233,7 @@ def test_assessment_revision_collision_retries_storage_without_another_model_cal
     from tests.agent_scripted import ScriptedProvider, response
 
     repo, _toolbox, _admission, _finding, _evidence, _entity = _fixture(tmp_path)
-    body = {"overall": [], "key_steps": [], "confidence": {"overall": "low", "reasons": []},
+    body = {"overall": [], "key_steps": [], "narrative": [], "confidence": {"overall": "low", "reasons": []},
             "alternatives": [], "gaps": [], "next_checks": []}
     provider = ScriptedProvider([response(parsed=body)])
     settings = Settings(home=tmp_path)
@@ -260,7 +262,7 @@ def test_assessment_checker_cannot_seed_new_aliases_after_lease_loss(tmp_path, m
 
     repo, _toolbox, _admission, _finding, _evidence, _entity = _fixture(tmp_path)
     owner = repo.claim_agent_lease("h1", 600)["lease_owner"]
-    body = {"overall": [], "key_steps": [], "confidence": {"overall": "low", "reasons": []},
+    body = {"overall": [], "key_steps": [], "narrative": [], "confidence": {"overall": "low", "reasons": []},
             "alternatives": [], "gaps": [], "next_checks": []}
     provider = ScriptedProvider([response(parsed=body)])
     settings = Settings(home=tmp_path)

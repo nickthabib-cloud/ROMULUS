@@ -12,7 +12,14 @@ import anyio
 from sqlalchemy import func, select, tuple_
 from starlette.concurrency import run_in_threadpool
 
-from romulus.report.manifest import _ai_assessment, fallback_view
+from romulus.report.manifest import (
+    NARRATIVE_KINDS,
+    NARRATIVE_PARAGRAPHS,
+    NARRATIVE_SENTENCES,
+    _ai_assessment,
+    fallback_view,
+)
+from romulus.report.markdown import narrative_when
 from romulus.store import schema as t
 
 PAGE_SIZE = 50
@@ -121,10 +128,30 @@ def assessment_view(repo, hunt_id):
         if sentences:
             result["sections"].append({"name": name.replace("_", " "), "sentences": sentences,
                                        "more": max(0, len(items) - 30)})
+    if "narrative" in assessment:
+        result["narrative"] = narrative_view(repo, hunt_id, assessment["narrative"])
     confidence = body.get("confidence") or {}
     result["confidence"] = clip(confidence.get("overall"), 100)
     result["checker_text"] = json_text(assessment.get("checker") or {})
     return result
+
+
+def narrative_view(repo, hunt_id, paragraphs):
+    """The narrative's paragraphs for the page: phase, time span, and each sentence with its kind (one of the three
+    labels, used as a style class) and resolved citations. Bounded by the checker's caps."""
+    out = []
+    for paragraph in (paragraphs or [])[:NARRATIVE_PARAGRAPHS[1]]:
+        span = paragraph.get("time_span") or {}
+        start, end = clip(span.get("start"), 40), clip(span.get("end"), 40)
+        out.append({"phase": clip(paragraph.get("phase"), 120) or "Phase not given",
+                    "when": narrative_when(start, end, "→"),
+                    "sentences": [{"text": clip(sentence.get("text"), 2000),
+                                   "kind": sentence["kind"] if sentence.get("kind") in NARRATIVE_KINDS else "uncertain",
+                                   "cites": cites_view(repo, hunt_id, sentence.get("cites")),
+                                   "cites_more": max(0, len(sentence.get("cites") or []) - 20),
+                                   "suspicious_content": bool(sentence.get("suspicious_content"))}
+                                  for sentence in (paragraph.get("sentences") or [])[:NARRATIVE_SENTENCES[1]]]})
+    return out
 
 
 def panel(repo, hunt, usage, *, with_assessment=True):

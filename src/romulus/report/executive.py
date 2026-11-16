@@ -4,7 +4,16 @@ import re
 from xml.etree.ElementTree import Element, SubElement, tostring
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from romulus.report.markdown import BANNER, is_ranked, outcome_sentence, ranked_sections
+from romulus.report.markdown import (
+    BANNER,
+    NARRATIVE_EMPTY,
+    NARRATIVE_NOTE,
+    NARRATIVE_TITLE,
+    is_ranked,
+    narrative_heading,
+    outcome_sentence,
+    ranked_sections,
+)
 
 _WORD = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _XML_INVALID = re.compile(r"[^\x09\x0a\x0d\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
@@ -72,6 +81,24 @@ def write(m, path, technical_name):
     if assessment := m.get("ai_assessment"):
         paragraph("AI assessment", bold=True)
         paragraph(assessment.get("header") or "Template narrative.")
+
+        def statement(sentence):
+            cites = ", ".join(str(cite) for cite in sentence.get("cites") or [])
+            suffix = f" [{cites}]" if cites else ""
+            marker = (" Cites only content flagged as possible prompt injection."
+                      if sentence.get("suspicious_content") else "")
+            paragraph(f"{sentence.get('kind', 'inferred')}: {sentence.get('text', '')}{suffix}{marker}")
+
+        if "narrative" in assessment:
+            paragraph(NARRATIVE_TITLE, bold=True)
+            paragraph(NARRATIVE_NOTE)
+            for number, story in enumerate(assessment["narrative"], 1):
+                paragraph(f"{number}. {narrative_heading(story)}", bold=True)
+                for sentence in story["sentences"]:
+                    statement(sentence)
+            if not assessment["narrative"]:
+                paragraph(NARRATIVE_EMPTY)
+            paragraph("Assessment details", bold=True)
         assessment_body = assessment.get("body") or {}
         confidence = assessment_body.get("confidence") or {}
         if confidence.get("overall"):
@@ -93,11 +120,7 @@ def write(m, path, technical_name):
             if sentences:
                 paragraph(title, bold=True)
             for sentence in sentences:
-                cites = ", ".join(str(cite) for cite in sentence.get("cites") or [])
-                suffix = f" [{cites}]" if cites else ""
-                marker = (" Cites only content flagged as possible prompt injection."
-                          if sentence.get("suspicious_content") else "")
-                paragraph(f"{sentence.get('kind', 'inferred')}: {sentence.get('text', '')}{suffix}{marker}")
+                statement(sentence)
         checker = assessment.get("checker") or {}
         paragraph(f"Checker changes: {json.dumps(checker, sort_keys=True) if checker else 'none'}.")
     if visibility := m["coverage"].get("zeek_visibility"):

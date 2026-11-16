@@ -19,7 +19,7 @@ from romulus.agent.admission import (
     truncated_text,
     typed_alias_arguments,
 )
-from romulus.agent.assessment import run_assessment, template_assessment
+from romulus.agent.assessment import assess_output, run_assessment, template_assessment
 from romulus.agent.dossier import build_dossier
 from romulus.agent.provider import (
     AgentBudget,
@@ -121,9 +121,11 @@ class _BudgetGate:
     # how often a waiting call re-checks the wall-clock budget while calls in flight hold their reservations
     WAIT_SECONDS = 5.0
 
-    def __init__(self, budget: AgentBudget, settings: Settings):
+    def __init__(self, budget: AgentBudget, settings: Settings, assess_output: int | None = None):
         self.budget = budget
         self.settings = settings
+        # the assess call's own output limit (romulus.agent.assessment.assess_output), which its hold reserves
+        self.assess_output = assess_output
         self.lock = threading.Lock()
         self.changed = threading.Condition(self.lock)
         self.queue: deque[object] = deque()
@@ -133,6 +135,7 @@ class _BudgetGate:
 
     def _reserve_for_assess(self, prompt: int, output: int) -> tuple[int, int, float, float]:
         limits = self.budget.limits
+        output = self.assess_output or output
         fraction = self.settings.agent_assess_reserve_fraction
         calls = max(1, math.ceil(limits.max_calls * fraction))
         tokens = max(math.ceil(limits.max_tokens * fraction),
@@ -986,7 +989,7 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
                                 existing.get("provider") or provider_data, usage=repo.agent_usage(hunt_id))
     _recover_running_sessions(repo, hunt_id, owner_token=owner_token)
     budget = _budget(settings, hunt["manifest"], repo, hunt_id, clock)
-    gate = _BudgetGate(budget, settings)
+    gate = _BudgetGate(budget, settings, assess_output=assess_output(settings, provider).limit)
     start = existing.get("started_at") if existing and existing.get("started_at") else utcnow()
     repo.save_agent_run({"hunt_id": hunt_id, "state": "running", "reason": None,
                          "prompt_digests": prompt_digests,

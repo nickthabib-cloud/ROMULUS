@@ -30,7 +30,7 @@ def test_reassess_closes_crashed_sessions_and_preserves_partial_investigation(tm
     monkeypatch.setattr(hunt_run, "open_repo", lambda _s: repo)
     monkeypatch.setattr(cli, "load_settings", lambda _path: Settings(home=tmp_path))
     monkeypatch.setattr(provider_port, "agent_readiness", lambda _s: SimpleNamespace(ready=True))
-    body = {"overall": [], "key_steps": [], "confidence": {"overall": "low", "reasons": []},
+    body = {"overall": [], "key_steps": [], "narrative": [], "confidence": {"overall": "low", "reasons": []},
             "alternatives": [], "gaps": [], "next_checks": []}
     monkeypatch.setattr(provider_port, "build_provider", lambda *_a, **_kw: ScriptedProvider([response(parsed=body)]))
     monkeypatch.setattr(report_manifest, "publish_revision", lambda *_a, **_kw: {"revision": {"number": 1}})

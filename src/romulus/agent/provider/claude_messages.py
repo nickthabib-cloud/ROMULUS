@@ -660,6 +660,7 @@ class ClaudeMessagesProvider(ChatProvider):
         # only for a model the server-side fallback serves (romulus.agent.provider.fallbacks)
         self.betas = (FALLBACK_BETA,) if refusal_fallback_on(settings) else ()
         self._window: int | None = None
+        self._max_output: int | None = None
         self._grammar_refused: set[str] = set()     # tool sets the API refused to compile strict
         key = settings.agent_api_key.get_secret_value()
         timeout = float(settings.agent_timeout_seconds)
@@ -700,6 +701,16 @@ class ClaudeMessagesProvider(ChatProvider):
             except (self.sdk.APIError, self.httpx2.HTTPError, EgressViolation):
                 pass        # the API still enforces the window; it rejects a prompt that does not fit
         return self._window
+
+    def model_output_limit(self) -> int:
+        """The output limit the models endpoint reports (asked once; 0 if unknown), as doctor reads it."""
+        if self._max_output is None:
+            self._max_output = 0
+            try:
+                self._max_output = int(self.client.models.retrieve(self.model).max_tokens or 0)
+            except (self.sdk.APIError, self.httpx2.HTTPError, EgressViolation):
+                pass        # the API still enforces the limit; it rejects a call that asks for more
+        return self._max_output
 
     # ---- one call -------------------------------------------------------------------------------------------
     def _chat(self, request: ChatRequest, messages: list[dict], max_out: int, est: int) -> ChatResult:
@@ -1123,6 +1134,7 @@ class ClaudeMessagesProvider(ChatProvider):
         else:
             out.append(("agent.model", "ok", f"{info.id} is available ({info.display_name})"))
         window, configured = info.max_input_tokens, self.s.agent_context_tokens
+        self._max_output = int(info.max_tokens or 0)
         if not configured and window:
             self._window = int(window)
             out.append(("agent.context", "ok", f"context window {window} tokens, from the models endpoint"))
