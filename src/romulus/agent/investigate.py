@@ -13,9 +13,10 @@ from dataclasses import dataclass, field
 from time import monotonic
 
 from romulus.agent.admission import (
-    SUMMARY_MAX_CHARS,
+    CUTTABLE_TEXT,
     AgentAdmission,
-    truncated_summary,
+    text_limit,
+    truncated_text,
     typed_alias_arguments,
 )
 from romulus.agent.assessment import run_assessment, template_assessment
@@ -26,12 +27,13 @@ from romulus.agent.provider import (
     BudgetLimits,
     ChatRequest,
     ProviderUnavailable,
+    charge_of,
     charge_parts,
     parts_of,
     record_call,
     record_failure,
 )
-from romulus.agent.provider.base import estimate_tokens
+from romulus.agent.provider.base import PROVIDER_STATE, estimate_tokens
 from romulus.agent.refusals import bounded, reason, tool_result_reasons
 from romulus.agent.toolbox import Toolbox
 from romulus.config import Settings
@@ -62,6 +64,26 @@ class AgentPhaseResult:
                 "unworked": self.unworked, "usage": self.usage, "refusals": self.refusals}
 
 
+# The anthropic adapter's prompt-cache entries live five minutes from their last use. A prefix the previous call of a
+# session read from or wrote to the cache is counted at the read weight only while that call started less than
+# CACHE_TRUST_SECONDS ago: the minute of margin covers the time between the cache's use and the next call's start.
+CACHE_TTL_SECONDS = 300.0
+CACHE_TRUST_SECONDS = CACHE_TTL_SECONDS - 60.0
+# A request's cache breakpoint looks back at most 20 content positions for the previous entry (a run of tool_use
+# blocks, or of tool_result blocks, is one position). A request that appended more than this many since the previous
+# call is reserved as written to the cache; the margin covers the wire format's own blocks.
+CACHE_LOOKBACK_POSITIONS = 16
+# A session's finish_session calls that may be refused before it ends capped: an over-long summary needs two.
+FINISH_ATTEMPTS = 3
+
+
+@dataclass
+class _CachedPrefix:
+    """What the previous call of an append-only session left in the configured model's prompt cache."""
+    tokens: int             # prompt tokens that call read from or wrote to the cache
+    since: float            # when that call started, on the budget's clock
+
+
 @dataclass
 class _Reservation:
     prompt_est: int
@@ -70,14 +92,19 @@ class _Reservation:
     cost: float
     purpose: str
     retry_budget: str | None = None
+    cached: int = 0                         # prompt tokens reserved at the cache-read weight
+    overrun: tuple[int, int] | None = None  # (charged, reserved) budget tokens when the charge exceeded the reservation
 
 
 class _BudgetGate:
     """Reserve worst-case concurrent calls so parallel sessions cannot race past hunt caps.
 
-    A call reserves its own worst case (`BudgetLimits.worst_tokens`: the whole prompt at the dearest token weight and
-    the full output allowance, once more for the refusal fallback's attempt only when that fallback is on) while it
-    runs, and the assessment keeps its hold. A call that fits beside what is already spent but not beside the live
+    A call reserves its own worst case while it runs, and the assessment keeps its hold. The worst case is
+    `BudgetLimits.worst_tokens_cached`: the prefix the session's previous call left in the configured model's prompt
+    cache at the read weight while that entry is still alive (`CACHE_TRUST_SECONDS`), the rest of the prompt at the
+    dearest weight, the full output and thinking allowance, and, only when the refusal fallback is on, one whole
+    attempt by the fallback model (no shared cache: its prompt at the dearest weight). Without a live cached prefix it
+    is `worst_tokens`. A charge that comes out above its reservation is recorded on the reservation (`overrun`). A call that fits beside what is already spent but not beside the live
     reservations of calls still in flight waits for them to settle (they almost always settle far below their worst
     case) instead of stopping its session; it stops only when it cannot fit even with nothing else in flight. Waiters
     are served in arrival order. The stop's detail states what was spent, reserved and held, and the limit."""
@@ -107,14 +134,16 @@ class _BudgetGate:
         return calls, tokens, cost, wall
 
     def _over(self, prompt: int, output: int, purpose: str, tokens: int, cost: float, *,
-              live: bool) -> BudgetExhausted | None:
+              live: bool, cached: int = 0) -> BudgetExhausted | None:
         """Why this call cannot start now (None when it can): against what is spent, the assessment's hold and, with
         `live`, the reservations of calls in flight. Called with the lock held."""
         limits, spent = self.budget.limits, self.budget
         try:
-            spent.check(prompt, output)
+            spent.check(prompt, output, worst_tokens=tokens)
         except BudgetExhausted as exc:
             return exc
+        basis = (f" ({cached} prompt tokens still in the prompt cache counted at the read weight)" if cached
+                 else "")
         held_calls, held_tokens, held_cost, held_wall = (
             self._reserve_for_assess(prompt, output) if purpose != "assess" else (0, 0, 0.0, 0.0))
         in_flight = (self.calls, self.tokens, self.cost) if live else (0, 0, 0.0)
@@ -125,8 +154,8 @@ class _BudgetGate:
         if spent.budget_tokens + in_flight[1] + tokens + held_tokens > limits.max_tokens:
             return BudgetExhausted("tokens", (
                 f"{spent.budget_tokens} of {limits.max_tokens} budget tokens (weighted by price) spent, {tokens} "
-                f"reserved for this call's worst case, {in_flight[1]} reserved by calls in flight, {held_tokens} "
-                "held for the assessment"))
+                f"reserved for this call's worst case{basis}, {in_flight[1]} reserved by calls in flight, "
+                f"{held_tokens} held for the assessment"))
         if limits.max_cost_usd and spent.cost_usd + in_flight[2] + cost + held_cost > limits.max_cost_usd:
             return BudgetExhausted("cost", (
                 f"about ${spent.cost_usd:.4f} of ${limits.max_cost_usd:.2f} spent, ${cost:.4f} reserved for this "
@@ -138,9 +167,15 @@ class _BudgetGate:
                 "assessment"))
         return None
 
-    def reserve(self, prompt: int, output: int, purpose: str) -> _Reservation:
+    def cached_tokens(self, prefix: _CachedPrefix | None) -> int:
+        """The prompt tokens of `prefix` still in the cache now: none once the entry may have expired."""
+        if prefix is None or self.budget.clock() - prefix.since >= CACHE_TRUST_SECONDS:
+            return 0
+        return prefix.tokens
+
+    def reserve(self, prompt: int, output: int, purpose: str, *,
+                prefix: _CachedPrefix | None = None) -> _Reservation:
         limits = self.budget.limits
-        tokens = limits.worst_tokens(prompt, output)
         cost = limits.worst_cost(prompt, output)
         ticket = object()
         with self.changed:
@@ -148,15 +183,18 @@ class _BudgetGate:
             try:
                 while True:
                     if self.queue[0] is ticket:
+                        # decided when the call may start: a wait can outlast the cache entry
+                        cached = self.cached_tokens(prefix)
+                        tokens = limits.worst_tokens_cached(prompt, cached, output)
                         # never past a limit with nothing else in flight: a stop, since spending only grows
-                        alone = self._over(prompt, output, purpose, tokens, cost, live=False)
+                        alone = self._over(prompt, output, purpose, tokens, cost, live=False, cached=cached)
                         if alone is not None:
                             raise alone
-                        if self._over(prompt, output, purpose, tokens, cost, live=True) is None:
+                        if self._over(prompt, output, purpose, tokens, cost, live=True, cached=cached) is None:
                             self.calls += 1
                             self.tokens += tokens
                             self.cost += cost
-                            return _Reservation(prompt, output, tokens, cost, purpose)
+                            return _Reservation(prompt, output, tokens, cost, purpose, cached=cached)
                     # it fits once the calls in flight settle, or it is not this call's turn yet
                     self.changed.wait(self.WAIT_SECONDS)
             finally:
@@ -169,10 +207,13 @@ class _BudgetGate:
             self.tokens -= reservation.tokens
             self.cost -= reservation.cost
             try:
+                charged = None
                 if error is not None:
-                    self.budget.charge_failure(error)
+                    charged = self.budget.charge_failure(error)
                 elif result is not None:
-                    self.budget.charge(result)
+                    charged = self.budget.charge(result)
+                if charged is not None and charged["budget_tokens"] > reservation.tokens:
+                    reservation.overrun = (int(charged["budget_tokens"]), reservation.tokens)
             finally:
                 self.changed.notify_all()
 
@@ -381,12 +422,19 @@ def _session_tools(toolbox: Toolbox) -> list:
     return toolbox.provider_tools()
 
 
-# A session's tool calls: AGENT_MAX_TOOL_CALLS_PER_SESSION covers its pivots, proposals and finish, plus one read for
-# each unit of input it is handed that it can only see by reading it: each dossier index page after the first an
-# orient session is shown (one list_findings call each), each finding an investigate session's hypothesis cites (one
-# get_finding call each). The extra never exceeds TOOL_CALL_EXTRA_FACTOR times the base, so one session stays bounded
-# however large the hunt; the hunt's model-call, token and wall-clock budgets bound the sessions together.
+# A session's reads (every tool that only looks at hunt state or telemetry): AGENT_MAX_TOOL_CALLS_PER_SESSION covers
+# its pivots, plus one read for each unit of input it is handed that it can only see by reading it: each dossier index
+# page after the first an orient session is shown (one list_findings call each), each finding an investigate session's
+# hypothesis cites (one get_finding call each). The extra never exceeds TOOL_CALL_EXTRA_FACTOR times the base, so one
+# session stays bounded however large the hunt; the hunt's model-call, token and wall-clock budgets bound the sessions
+# together.
 TOOL_CALL_EXTRA_FACTOR = 3
+# The tools that record the session's work. They never count against the reads, so a session that has read all it may
+# can still record what it found and finish. What they store is bounded per hunt by the agent's own caps (hypotheses,
+# findings, links, notes, rule requests: AGENT_MAX_*), enforced at admission; this allowance bounds only how many a
+# session may attempt, refused ones included, at the largest number of reads a session can ever have.
+WRITE_TOOLS = frozenset({"open_hypothesis", "update_hypothesis", "propose_finding", "propose_link", "add_note",
+                         "request_rule"})
 
 
 def _tool_call_allowance(settings: Settings, *, reads: int) -> int:
@@ -394,36 +442,78 @@ def _tool_call_allowance(settings: Settings, *, reads: int) -> int:
     return base + min(max(0, reads), TOOL_CALL_EXTRA_FACTOR * base)
 
 
+def _write_allowance(settings: Settings) -> int:
+    return settings.agent_max_tool_calls_per_session * (1 + TOOL_CALL_EXTRA_FACTOR)
+
+
 def _cited_findings(repo: Repo, hypothesis_id: str) -> int:
     return len({row["target_id"] for row in repo.agent_hypothesis_cites(hypothesis_id=hypothesis_id)
                 if row["target_kind"] == "finding"})
 
 
-_SUMMARY_TOO_LONG = reason("summary", "string_too_long")
-SUMMARY_TRUNCATED_REASON = reason("summary", "truncated_by_product")
+def _overlong_field(name: str, arguments, reasons) -> str | None:
+    """The free-text field a write or finish_session call was refused for alone, by its length (None otherwise)."""
+    field = CUTTABLE_TEXT.get(name, (None, None))[0]
+    if field is None or reasons != [reason(field, "string_too_long")]:
+        return None
+    return field if isinstance(arguments, dict) and isinstance(arguments.get(field), str) else None
 
 
-def _overlong_summary(arguments, reasons) -> bool:
-    """A finish_session refused only because its summary is longer than the limit."""
-    return reasons == [_SUMMARY_TOO_LONG] and isinstance(arguments, dict) and isinstance(arguments.get("summary"), str)
-
-
-def _overlong_finish(toolbox: Toolbox, summary: str, attempt: int) -> tuple[dict, list[str]]:
-    """The first over-length summary is refused with the limit and its length (numbers only, never its text). The
-    next one is accepted cut to the limit at a sentence end, with a marker saying so, and recorded under the reason
-    `summary: truncated_by_product`: the session's work is never lost to a summary that will not fit."""
+def _overlong_retry(toolbox: Toolbox, name: str, field: str, arguments: dict, attempt: int) -> tuple[dict, list[str]]:
+    """The first over-length text in a field is refused with the limit and its length (numbers only, never its text).
+    The next is accepted cut to the limit at a sentence end, with a marker saying so, and recorded under the reason
+    `<field>: truncated_by_product`: the session's work is never lost to text that will not fit."""
+    limit = text_limit(CUTTABLE_TEXT[name][1], field)
+    length = len(arguments[field])
+    too_long = reason(field, "string_too_long")
     if attempt == 1:
-        message = (f"summary has {len(summary)} characters; finish_session accepts at most {SUMMARY_MAX_CHARS}. "
-                   f"Call finish_session again with a summary of at most {SUMMARY_MAX_CHARS} characters; another "
-                   "over-length summary is cut to fit and marked as truncated.")
+        message = (f"{field} has {length} characters; {name} accepts at most {limit}. Call {name} again with a "
+                   f"{field} of at most {limit} characters; another over-length {field} is cut to fit and marked as "
+                   "truncated.")
         refused = {"status": "refused", "coverage": {"status": "complete", "gaps": []},
                    "counts": {"returned": 0, "total": 0}, "more": False, "errors": [message],
-                   "data": {"error": {"code": "summary_too_long", "message": message,
-                                      "length": len(summary), "limit": SUMMARY_MAX_CHARS,
-                                      "reasons": [_SUMMARY_TOO_LONG]}}}
-        return refused, [_SUMMARY_TOO_LONG]
-    accepted = toolbox.execute("finish_session", {"summary": truncated_summary(summary)})
-    return accepted, [SUMMARY_TRUNCATED_REASON]
+                   "data": {"error": {"code": f"{field}_too_long", "message": message, "length": length,
+                                      "limit": limit, "reasons": [too_long]}}}
+        return refused, [too_long]
+    accepted = toolbox.execute(name, {**arguments, field: truncated_text(arguments[field], limit, field)})
+    return accepted, [reason(field, "truncated_by_product")]
+
+
+def _cache_basis(result, request: ChatRequest, prompt_est: int, started_at: float) -> dict | None:
+    """What a completed call left in the configured model's prompt cache, for the session's next reservation: the
+    prompt tokens its served attempt read from or wrote to the cache, its reported prompt and output, and the request
+    they belong to. None when the call is no basis for that: usage estimated, no cache use reported, a reply a
+    fallback model served (the configured model's cache holds none of it) or one that did not complete."""
+    if result.status not in ("ok", "invalid_json", "invalid_tool_call", "truncated_output"):
+        return None
+    if (result.details or {}).get("fallback"):
+        return None
+    charge = charge_of(result)
+    served = charge.parts[-1] if charge.parts else charge
+    cached = served.cache_read + served.cache_write
+    if charge.estimated or cached <= 0:
+        return None
+    return {"messages": len(request.messages), "digest": digest(request.messages), "prompt": served.prompt,
+            "completion": served.completion, "prompt_est": prompt_est, "cached": cached, "since": started_at}
+
+
+def _cache_positions(messages: list[dict]) -> int:
+    """The content positions `messages` add to a request, as the cache lookback counts them: every block, a run of
+    tool calls or of tool results counting once. Counted generously (each message's text is one position)."""
+    positions, last = 0, None
+    for message in messages:
+        role = message.get("role")
+        if role == "assistant":
+            state = message.get(PROVIDER_STATE) or {}
+            kinds = [block.get("type") for block in state.get("content") or [] if isinstance(block, dict)] or (
+                ["text"] + (["tool_use"] if message.get("tool_calls") else []))
+        else:
+            kinds = ["tool_result" if role == "tool" else "text"]
+        for kind in kinds:
+            if not (kind == last and kind in ("tool_use", "tool_result")):
+                positions += 1
+            last = kind
+    return positions
 
 
 def _deterministic_tool_summary(calls: list[tuple[str, str]], changes: list[dict]) -> str:
@@ -447,18 +537,26 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
     hypothesis_changes: list[dict] = []
     tool_count = 0
     no_tool_misses = 0
-    wrap_up_sent = False
     finish_retried = False
     context_wrap_sent = False
     call_seq = 0
     provider_unavailable = False
     call_limit = settings.agent_max_tool_calls_per_session
-    overlong_summaries = 0
+    write_limit = _write_allowance(settings)
+    read_count = write_count = 0
+    reads_closed = writes_closed = False
+    overlong: dict[str, int] = {}
+    finish_refusals = 0
+    # what the previous call left in the prompt cache, and the request it was made with (see `_BudgetGate`)
+    cache_basis: dict | None = None
+    cache_trusted = True
+    overruns = 0
 
     def finish(state: str, final_summary: str, reason: str | None = None) -> dict:
         outcome = {"id": session_id, "hypothesis_id": hypothesis_id, "purpose": purpose, "state": state,
                    "summary": final_summary[:2000], "reason": reason,
                    "provider_unavailable": provider_unavailable, "tool_call_limit": call_limit,
+                   "write_call_limit": write_limit, "reservation_overruns": overruns,
                    "limits_hit": sorted(admission.limits_hit) if admission is not None else []}
         if session_saved:
             try:
@@ -549,16 +647,27 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 request = ChatRequest(messages=messages, tools=tools, tool_choice="auto")
                 prompt_est = estimate_tokens(request.prompt_text())
                 max_out = provider.output_limit(request)
+            # an append-only session: the previous request is this one's prefix, and that call's cached prompt tokens
+            # are still in the cache (while its entry lives); the prompt is bounded by that call's reported prompt,
+            # its output (the reply goes back), and the estimated growth since
+            prefix, prompt_bound = None, prompt_est
+            if (cache_basis is not None and cache_trusted and len(messages) >= cache_basis["messages"]
+                    and digest(messages[:cache_basis["messages"]]) == cache_basis["digest"]
+                    and _cache_positions(messages[cache_basis["messages"]:]) <= CACHE_LOOKBACK_POSITIONS):
+                prompt_bound = max(prompt_est, cache_basis["prompt"] + cache_basis["completion"]
+                                   + max(0, prompt_est - cache_basis["prompt_est"]))
+                prefix = _CachedPrefix(cache_basis["cached"], cache_basis["since"])
             # before the reservation: nothing between reserving and the call may raise without settling it
             heartbeat()
             try:
-                reservation = budget_gate.reserve(prompt_est, max_out, purpose)
+                reservation = budget_gate.reserve(prompt_bound, max_out, purpose, prefix=prefix)
             except BudgetExhausted as exc:
                 log.info("agent session %s stopped: %s", session_id, exc)
                 stopped = f"Budget stop: {exc}. " + _deterministic_tool_summary(tool_history, hypothesis_changes)
                 return finish("budget", stopped, f"budget:{exc.budget}")
             request.attempt_guard = lambda info, reservation=reservation: budget_gate.attempt_guard(reservation, info)
             started = monotonic()
+            started_at = budget_gate.budget.clock()
             try:
                 result = provider.chat(request)
             except ProviderUnavailable as exc:
@@ -583,6 +692,21 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
             model_call_id = record_call(repo, provider, hunt_id=hunt_id, purpose=purpose, request=request,
                                         result=result, limits=budget_gate.budget.limits, session_id=session_id,
                                         owner_token=owner_token)
+            if reservation.overrun is not None:
+                # the charge came out above the reservation (the cache did not hold what it was counted for): this
+                # session reserves every later prompt as written to the cache, and stops if the limit was crossed
+                overruns += 1
+                cache_trusted = False
+                charged, reserved = reservation.overrun
+                spent, limits = budget_gate.budget.budget_tokens, budget_gate.budget.limits
+                log.warning("agent session %s: a call was charged %d budget tokens against %d reserved",
+                            session_id, charged, reserved)
+                if spent > limits.max_tokens:
+                    return finish("budget", (
+                        f"Budget stop: tokens budget exceeded: a call was charged {charged} budget tokens against "
+                        f"{reserved} reserved, and {spent} of {limits.max_tokens} budget tokens are spent. "
+                        + _deterministic_tool_summary(tool_history, hypothesis_changes)), "budget:tokens")
+            cache_basis = _cache_basis(result, request, prompt_est, started_at) if cache_trusted else None
             if result.status in {"too_large", "truncated_input"}:
                 return finish("context_full", result.error or "Provider reported an oversized or truncated input.",
                               "context_full")
@@ -593,7 +717,7 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 if context_wrap_sent:
                     return finish("context_full", _deterministic_tool_summary(tool_history, hypothesis_changes),
                                   "context wrap-up did not finish the session")
-                if wrap_up_sent:
+                if reads_closed or writes_closed:
                     return finish("capped", _deterministic_tool_summary(tool_history, hypothesis_changes),
                                   "tool-call wrap-up did not finish the session")
                 no_tool_misses += 1
@@ -603,14 +727,14 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 return finish("failed", _deterministic_tool_summary(tool_history, hypothesis_changes),
                               "no_tool_call_twice")
             no_tool_misses = 0
-            if wrap_up_sent or context_wrap_sent:
+            if context_wrap_sent:
                 finish_call = next((call for call in result.tool_calls if call.name == "finish_session"), None)
                 if finish_call is None:
                     for call in result.tool_calls:
                         call_seq += 1
                         raw = call.raw_arguments[:8192]
                         arguments = call.arguments if call.arguments is not None else raw
-                        refused = {"status": "refused", "errors": ["tool-call limit reached; only finish_session is allowed"]}
+                        refused = {"status": "refused", "errors": ["context is nearly full; only finish_session is allowed"]}
                         repo.save_agent_tool_call({"id": _id("atc"), "hunt_id": hunt_id, "session_id": session_id,
                                                    "seq": call_seq, "name": call.name, "arguments": arguments,
                                                    "arguments_truncated": len(call.raw_arguments.encode()) > 8192,
@@ -618,27 +742,28 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                                                    "refusal_reasons": [reason("$", "tool_call_limit")],
                                                    "model_call_id": model_call_id, "created_at": utcnow()},
                                                   owner_token=owner_token)
-                    if context_wrap_sent:
-                        return finish("context_full", _deterministic_tool_summary(tool_history, hypothesis_changes),
-                                      "context wrap-up did not finish the session")
-                    return finish("capped", _deterministic_tool_summary(tool_history, hypothesis_changes),
-                                  "tool-call limit reached")
+                    return finish("context_full", _deterministic_tool_summary(tool_history, hypothesis_changes),
+                                  "context wrap-up did not finish the session")
                 allowed_calls = [finish_call]
             else:
                 allowed_calls = result.tool_calls
-            if not wrap_up_sent and tool_count >= call_limit:
-                messages.append({"role": "user", "content": "Tool-call limit reached. Call finish_session now with a summary."})
-                wrap_up_sent = True
-                # This reply already used the final ordinary tool call. The single wrap-up call is next.
-                continue
+            executed = finish_tried = False
             for call in allowed_calls:
                 call_seq += 1
-                at_limit = tool_count >= call_limit and not wrap_up_sent
-                if at_limit:
-                    tool_result = {"status": "refused", "errors": ["tool-call limit reached"]}
+                kind = ("finish" if call.name == "finish_session" else "write" if call.name in WRITE_TOOLS
+                        else "read")
+                if kind == "read" and read_count >= call_limit:
+                    tool_result = {"status": "refused", "errors": [
+                        "read limit reached; only the write tools and finish_session are allowed"]}
                     reasons = [reason("$", "tool_call_limit")]
+                elif kind == "write" and write_count >= write_limit:
+                    tool_result = {"status": "refused", "errors": ["write limit reached; call finish_session"]}
+                    reasons = [reason("$", "write_call_limit")]
                 else:
                     tool_count += 1
+                    read_count += kind == "read"
+                    write_count += kind == "write"
+                    executed = executed or kind != "finish"
                     if call.error:
                         # the provider refused the arguments before any tool ran
                         tool_result = {"status": "refused", "errors": [call.error]}
@@ -647,11 +772,16 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                         heartbeat()
                         tool_result = toolbox.execute(call.name, call.arguments)
                         reasons = tool_result_reasons(tool_result)
-                        if call.name == "finish_session" and _overlong_summary(call.arguments, reasons):
-                            overlong_summaries += 1
+                        field = _overlong_field(call.name, call.arguments, reasons)
+                        if field is not None:
+                            key = f"{call.name}.{field}"
+                            overlong[key] = overlong.get(key, 0) + 1
                             # after the context wrap-up there is no further turn to correct it in
-                            tool_result, reasons = _overlong_finish(
-                                toolbox, call.arguments["summary"], 2 if context_wrap_sent else overlong_summaries)
+                            tool_result, reasons = _overlong_retry(
+                                toolbox, call.name, field, call.arguments, 2 if context_wrap_sent else overlong[key])
+                finish_tried = finish_tried or kind == "finish"
+                if kind == "finish" and tool_result.get("status") != "complete":
+                    finish_refusals += 1
                 raw_args = call.raw_arguments.encode("utf-8")
                 if call.arguments is not None:
                     stored_args = call.arguments
@@ -677,20 +807,40 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                     summary = str((tool_result.get("data") or {}).get("summary") or "Session finished.")
                     end_state = "context_full" if context_wrap_sent else "finished"
                     return finish(end_state, summary, "context_full" if context_wrap_sent else None)
-            if not wrap_up_sent and tool_count >= call_limit:
-                messages.append({"role": "user", "content": "Tool-call limit reached. Call finish_session now with a summary."})
-                wrap_up_sent = True
+            if context_wrap_sent:
                 continue
-            if wrap_up_sent and not finish_retried and any(
-                    call.name == "finish_session" for call in allowed_calls):
-                # the wrap-up's finish_session was refused (its result says why): one corrected call is allowed
-                messages.append({"role": "user", "content": "finish_session was refused; its result says why. "
-                                 "Call finish_session once more with a corrected summary."})
-                finish_retried = True
+            if finish_refusals >= FINISH_ATTEMPTS:
+                return finish("capped", _deterministic_tool_summary(tool_history, hypothesis_changes),
+                              f"finish_session refused {finish_refusals} times")
+            closing = []
+            if not reads_closed and read_count >= call_limit:
+                reads_closed = True
+                closing.append("read")
+            if not writes_closed and write_count >= write_limit:
+                writes_closed = True
+                closing.append("write")
+            if closing:
+                # a spent kind closes; the session may still use the other and must then finish
+                writes = ", ".join(sorted(name for name in WRITE_TOOLS if name in toolbox.registry))
+                left = ("finish_session" if writes_closed or not writes
+                        else f"{writes} and finish_session")
+                messages.append({"role": "user", "content": (
+                    f"Tool-call limit reached for {' and '.join(closing)} tools in this session. "
+                    + ("Only " + left + " remain. Record what you found, then call finish_session with a summary."
+                       if reads_closed else "Call finish_session with a summary when the remaining reads are done."))})
                 continue
-            if wrap_up_sent:
+            if (reads_closed or writes_closed) and finish_tried:
+                if not finish_retried:
+                    # finish_session was refused (its result says why): one corrected call is allowed
+                    messages.append({"role": "user", "content": "finish_session was refused; its result says why. "
+                                     "Call finish_session once more with a corrected summary."})
+                    finish_retried = True
+                    continue
                 return finish("capped", _deterministic_tool_summary(tool_history, hypothesis_changes),
                               "wrap_up_not_finished")
+            if (reads_closed or writes_closed) and not executed:
+                return finish("capped", _deterministic_tool_summary(tool_history, hypothesis_changes),
+                              "tool-call limit reached and the reply used no remaining tool")
     except Exception as exc:
         if is_lease_lost(exc):
             raise

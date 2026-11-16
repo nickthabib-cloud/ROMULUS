@@ -13,7 +13,8 @@ from romulus.web import agent_views as view
 from romulus.web.finding_order import finding_page
 
 
-def register_agent_routes(app, repo, need, page):
+def register_agent_routes(app, repo, need, page, hunt_page):
+    """AI investigation pages. They sit under the hunt's AI assessment tab and share its header."""
     def hunt(hunt_id):
         row = repo.get_hunt(hunt_id)
         if row is None:
@@ -37,17 +38,8 @@ def register_agent_routes(app, repo, need, page):
         catalog = CatalogBrowser(repo)
         techniques = {row.technique.id for domain in ("enterprise", "ics")
                       for row in catalog.catalog(domain).coverage_by_technique}
-        return page(request, "hypotheses.html", user, h=h, rows=rows, more=more, techniques=techniques,
+        return hunt_page(request, "hypotheses.html", user, h, "assessment", rows=rows, more=more, techniques=techniques,
                     next_url=next_url(request, "after", cursor) if cursor else None)
-
-    @app.get("/hunts/{hunt_id}/triage", response_class=HTMLResponse)
-    def triage(request: Request, hunt_id: str):
-        """The AI triage order, from the same builder the report manifest uses; templates escape every field. The page
-        checks staleness by finding count and final ranking; the report and the export verify the whole order."""
-        from romulus.report.triage import triage_view
-        user = need(request)
-        h = hunt(hunt_id)
-        return page(request, "triage.html", user, h=h, view=triage_view(repo, hunt_id))
 
     @app.get("/hunts/{hunt_id}/hypotheses/{hid}", response_class=HTMLResponse)
     def hypothesis(request: Request, hunt_id: str, hid: str):
@@ -84,7 +76,7 @@ def register_agent_routes(app, repo, need, page):
             cites, cites_more, cites_after = view.hypothesis_cites(repo, hunt_id, hid, params.get("cites_after", ""))
         except ValueError as error:
             raise HTTPException(400, str(error)) from error
-        return page(request, "hypothesis.html", user, h=h, hypothesis=row,
+        return hunt_page(request, "hypothesis.html", user, h, "assessment", hypothesis=row,
             questions=[view.clip(question, 1000) for question in row["questions"][:50]],
             questions_more=max(0, len(row["questions"]) - 50),
             history=events, history_more=events_more,
@@ -126,6 +118,6 @@ def register_agent_routes(app, repo, need, page):
             if kind == "links":
                 row["endpoints"] = [view.resolved_cite(repo, hunt_id, {"kind": row[key + "_kind"],
                     "id": row[key + "_id"]}) for key in ("from", "to")]
-        return page(request, "agent_outputs.html", user, h=h, kind=kind, rows=rows, more=more,
+        return hunt_page(request, "agent_outputs.html", user, h, "assessment", kind=kind, rows=rows, more=more,
                     next_url=next_url(request, "after", cursor) if cursor else None,
                     finding_url=lambda cid: "/findings/" + quote(cid, safe=""))

@@ -128,7 +128,7 @@ def test_labels_and_checker_counts_reach_every_rendered_sentence_group(repo, tmp
     assert sum(item.get("suspicious_content", False)
                for section in view["sections"] for item in section["sentences"]) == 6
     environment = Environment(loader=FileSystemLoader(app.HERE / "templates"), autoescape=select_autoescape())
-    html = environment.get_template("agent_panel.html").render(
+    html = environment.get_template("assessment_body.html").render(
         ai_panel={"state": "completed", "run": {}, "usage": {}, "budgets": {}, "counts": {},
                   "assessment": view}, h={"id": "h1"}, user={"r": "analyst"})
     assert html.count(LABEL) == 6

@@ -24,7 +24,7 @@ def test_visibility_appendix_link_requires_file_and_is_unique(client, tmp_path, 
     if bundled:
         write_reports(repo, manifest, settings.reports_dir / 'h1')
     _login(web, password)
-    page = web.get('/hunts/h1')
+    page = web.get('/hunts/h1/coverage')
     assert page.status_code == 200
     assert page.text.count('href="/reports/h1/' + ref['filename'] + '"') == int(bundled)
     if bundled:

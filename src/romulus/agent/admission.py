@@ -112,13 +112,30 @@ class FinishSessionArgs(_Args):
         f"What was examined, what changed and what is left, 20 to {SUMMARY_MAX_CHARS} characters."))
 
 
-def truncated_summary(text: str) -> str:
-    """An over-length session summary cut to fit SUMMARY_MAX_CHARS with SUMMARY_TRUNCATED at its end: at the last
-    sentence end that keeps at least half the room, else the last word break, else mid-word. Used only after the
-    model has been told the limit and its summary's length and wrote one over it again."""
-    room = SUMMARY_MAX_CHARS - len(SUMMARY_TRUNCATED) - 1
+# The free-text fields a model's over-length text is kept in, cut to fit and marked, after it was told the limit and
+# its length once and wrote one over it again: narrative a session would otherwise lose. Claims, rationales and rule
+# descriptions are never cut: a shortened claim could say something the model did not.
+CUTTABLE_TEXT = {"finish_session": ("summary", FinishSessionArgs), "update_hypothesis": ("note", UpdateHypothesisArgs),
+                 "add_note": ("text", AddNoteArgs)}
+
+
+def text_limit(model: type[BaseModel], field: str) -> int:
+    """The maximum length a text field of an argument model accepts."""
+    return next(item.max_length for item in model.model_fields[field].metadata
+                if getattr(item, "max_length", None) is not None)
+
+
+def truncation_marker(field: str, limit: int) -> str:
+    return f"[{field} truncated by the product at {limit} characters]"
+
+
+def truncated_text(text: str, limit: int, field: str) -> str:
+    """Over-length text cut to fit `limit` with its truncation marker at the end: at the last sentence end that
+    keeps at least half the room, else the last word break, else mid-word."""
+    marker = truncation_marker(field, limit)
+    room = limit - len(marker) - 1
     text = text.strip()
-    if len(text) <= SUMMARY_MAX_CHARS:
+    if len(text) <= limit:
         return text
     head = text[:room]
     ends = [match.end() for match in _SENTENCE_END.finditer(head)]
@@ -126,7 +143,12 @@ def truncated_summary(text: str) -> str:
         head = head[:ends[-1]]
     elif head.rfind(" ") >= room // 2:
         head = head[:head.rfind(" ")]
-    return f"{head.rstrip()} {SUMMARY_TRUNCATED}"
+    return f"{head.rstrip()} {marker}"
+
+
+def truncated_summary(text: str) -> str:
+    """An over-length session summary cut to fit SUMMARY_MAX_CHARS with SUMMARY_TRUNCATED at its end."""
+    return truncated_text(text, SUMMARY_MAX_CHARS, "summary")
 
 
 def _id(prefix: str) -> str:

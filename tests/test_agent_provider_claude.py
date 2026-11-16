@@ -293,6 +293,18 @@ def test_without_a_system_prompt_the_breakpoint_closes_the_tool_list_and_fallbac
     assert "fallbacks" not in body and "anthropic-beta" not in ep.calls[0].headers
 
 
+@pytest.mark.parametrize(("model", "sent"), [("claude-haiku-5-5", False), ("claude-haiku-5-5-20261101", False),
+                                             ("claude-opus-5-5", True), ("claude-fable-5-2", True),
+                                             ("claude-unknown-9", True)])
+def test_fallbacks_are_requested_only_for_a_model_the_server_side_fallback_serves(model, sent):
+    ep = Endpoint(reply([tool_use()], stop="tool_use", model=model))
+    p, _ = provider(claude_settings(agent_model=model), ep)
+    p.chat(ChatRequest([{"role": "user", "content": "go"}], tools=[TOOL]))
+    body = ep.body()
+    assert ("fallbacks" in body) is sent
+    assert (ep.calls[0].headers.get("anthropic-beta") == FALLBACK_BETA) is sent
+
+
 def test_translation_of_system_tool_calls_and_tool_results():
     first = Endpoint(reply([THINKING, text("Two leads."), tool_use(call_id="toolu_a"),
                             tool_use('{"entity": "web1"}', name="pivot", call_id="toolu_b")], stop="tool_use"))

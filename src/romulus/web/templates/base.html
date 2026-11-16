@@ -3,23 +3,42 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
 <title>{% block title %}ROMULUS{% endblock %}</title>
+<script src="/static/theme.js"></script>
 <link rel="stylesheet" href="/static/style.css">
 <script src="/static/app.js" defer></script>
 </head>
 <body>
 <div class="banner">{{ banner }}</div>
 <header class="top">
-  <a class="brand" href="/">ROMULUS</a>
+  <a class="brand" href="/" aria-label="ROMULUS home">
+    <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 3 6v6c0 5 3.8 9.4 9 10 5.2-.6 9-5 9-10V6l-9-4Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 12.5 11 15l5-6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <span>ROMULUS</span>
+  </a>
   {% if user %}
-  <nav><a href="/">Hunts</a><a href="/hunts/new">New hunt</a><a href="/indicators">Indicators</a><a href="/catalog">Catalog</a>{% if user.r == 'lead' %}<a href="/site">Site setup</a>{% endif %}</nav>
-  <form method="post" action="/logout" class="logout">
-    <span class="who">{{ user.u }} ({{ user.r }})</span>
-    <input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit">Sign out</button>
-  </form>
+  {% set path = request.url.path %}
+  <nav class="primary">
+    <a href="/"{% if path == '/' or (path.startswith('/hunts/') and path != '/hunts/new') %} aria-current="page"{% endif %}>Hunts</a>
+    <a href="/hunts/new"{% if path == '/hunts/new' %} aria-current="page"{% endif %}>New hunt</a>
+    <a href="/indicators"{% if path.startswith('/indicators') %} aria-current="page"{% endif %}>Indicators</a>
+    <a href="/catalog"{% if path.startswith('/catalog') %} aria-current="page"{% endif %}>Catalog</a>
+    {% if user.r == 'lead' %}<a href="/site"{% if path.startswith('/site') %} aria-current="page"{% endif %}>Site setup</a>{% endif %}
+  </nav>
   {% endif %}
+  <div class="top-end">
+    <button type="button" class="icon-btn" id="theme-toggle" title="Switch between dark and light theme" aria-label="Switch between dark and light theme" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+    </button>
+    {% if user %}
+    <form method="post" action="/logout" class="logout">
+      <span class="who"><span class="avatar" aria-hidden="true">{{ user.u[:1] | upper }}</span>{{ user.u }} <span class="role">{{ user.r }}</span></span>
+      <input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="btn ghost sm">Sign out</button>
+    </form>
+    {% endif %}
+  </div>
 </header>
-<main>{% block content %}{% endblock %}</main>
+<main class="{% block main_class %}{% endblock %}">{% block content %}{% endblock %}</main>
 <div class="banner">{{ banner }}</div>
 </body>
 </html>

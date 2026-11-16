@@ -23,24 +23,16 @@ from starlette.concurrency import run_in_threadpool
 
 from romulus.agent.provider import agent_readiness, egress_banners
 from romulus.config import Settings
-from romulus.decide.policy import LANE_ORDER
 from romulus.hunt.run import open_repo
 from romulus.report.bundle import write_reports
-from romulus.report.manifest import internal_networks_view, investigations_for_hunt, publish_revision
+from romulus.report.manifest import publish_revision
 from romulus.site import SiteChangedError, SiteValidationError, load_site_facts, save_site_facts
 from romulus.store.db import compact, maintenance_lease
-from romulus.store.repo import FINAL_RANK_PASS
 from romulus.web import agent_views, site_form
 from romulus.web.agent_routes import register_agent_routes
 from romulus.web.auth import RateLimiter, Sessions, csrf_ok, verify
 from romulus.web.catalog_routes import register_catalog_routes
-from romulus.web.finding_order import (
-    RANKED_LANES,
-    SEGMENT_TITLES,
-    finding_order,
-    finding_page,
-    ranked_finding_page,
-)
+from romulus.web.hunt_routes import make_hunt_page, register_hunt_routes
 from romulus.web.indicator_routes import IndicatorBodyLimit, register_indicator_routes
 from romulus.web.request_routes import DetectionRequestBodyLimit, register_request_routes
 
@@ -91,7 +83,8 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
     register_indicator_routes(app, repo, need, page)
     register_catalog_routes(app, repo, need, page)
     register_request_routes(app, repo, need, page)
-    register_agent_routes(app, repo, need, page)
+    hunt_page = make_hunt_page(repo, page)
+    register_agent_routes(app, repo, need, page, hunt_page)
 
     @app.get("/login", response_class=HTMLResponse)
     def login_form(request: Request, error: str = ""):
@@ -188,130 +181,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
                                                                 "agent_requested": requested})
         return RedirectResponse("/?started=1", status_code=303)
 
-    @app.get("/hunts/{hunt_id}", response_class=HTMLResponse)
-    def hunt_detail(request: Request, hunt_id: str, lane: str = "", after: str = ""):
-        u = need(request)
-        if len(after) > 512:
-            raise HTTPException(400, "Invalid page cursor")
-        h = repo.get_hunt(hunt_id)
-        if h is None:
-            raise HTTPException(404)
-        stream_cursor = repo.agent_change_max_seq(hunt_id)
-        agent_run = repo.agent_run(hunt_id)
-        live = agent_views.stream_live(repo, h, agent_run)
-        from urllib.parse import urlencode
-
-        from romulus.store import schema as tables
-        columns = tuple(getattr(tables.candidate.c, key) for key in (
-            "id", "lane", "severity", "confidence", "priority", "ts", "rule_id", "claim", "provenance",
-            "agent_hypothesis_id"))
-        lane = lane if lane in LANE_ORDER else ""
-        # Without a lane the page lists the reportable findings in report order when the hunt has its final ranking,
-        # else in the rule estimate's order; a lane lists that lane in the rule estimate's order.
-        ranked = not lane and repo.has_rank_pass(hunt_id, FINAL_RANK_PASS)
-        try:
-            if ranked:
-                cands, cands_more, cursor = ranked_finding_page(repo, hunt_id, pass_no=FINAL_RANK_PASS, after=after,
-                                                                columns=columns)
-            elif lane in RANKED_LANES or not lane:
-                # a ranked lane is selected by its rank in the order index (the same rows as lane == it)
-                cands, cands_more, cursor = finding_page(
-                    repo, hunt_id, after=after, columns=columns, lane=lane or None,
-                    predicates=() if lane else (finding_order()[0][0] < len(RANKED_LANES),))
-            else:
-                cands, cands_more, cursor = finding_page(repo, hunt_id, after=after, columns=columns,
-                                                         predicates=(tables.candidate.c.lane == lane,))
-        except ValueError as error:
-            raise HTTPException(400, "Invalid page cursor") from error
-        if agent_run:
-            agent_views.validate_hypothesis_links(repo, hunt_id, cands)
-        cands_next = "?" + urlencode({"lane": lane, "after": cursor}) if cursor else None
-        from romulus.report.manifest import coverage_for_hunt
-        cov = coverage_for_hunt(repo, hunt_id)
-        zeek_visibility = cov.get("zeek_visibility")
-        zeek_visibility_bundled = False
-        if zeek_visibility:
-            snapshot = zeek_visibility["snapshot"]
-            digest = snapshot.get("sha256", "")
-            if (isinstance(digest, str) and len(digest) == 64
-                    and all(char in "0123456789abcdef" for char in digest)):
-                filename = f"zeek-visibility-{digest}.jsonl"
-                appendix = (s.reports_dir / hunt_id / filename).resolve()
-                zeek_visibility_bundled = (snapshot.get("filename") == filename
-                    and s.reports_dir.resolve() in appendix.parents and appendix.is_file())
-        with repo.engine.connect() as c:
-            from sqlalchemy import select
-
-            from romulus.store import schema as t
-            reports = c.execute(select(t.report_manifest.c.id, t.report_manifest.c.revision,
-                                       t.report_manifest.c.created_at).where(t.report_manifest.c.hunt_id == hunt_id)
-                                .order_by(t.report_manifest.c.revision.desc())).mappings().all()
-        agent_audit = repo.latest_audit(hunt_id, "hunt.agent_summary")
-        agent_summary = agent_audit["detail"] if agent_audit else None
-        investigations = investigations_for_hunt(repo, hunt_id)
-        ai_audit = repo.latest_audit(hunt_id, "hunt.ai_agent_summary")
-        agent_usage = repo.agent_usage(hunt_id, group_limit=50)
-        banners = [agent_views.clip(banner, 1000) for banner in egress_banners(h["manifest"].get("ai_agent"), agent_usage)]
-        # calls a model other than the configured one answered (a provider's refusal fallback)
-        answered_by = [{**r, "model": agent_views.clip(r["model"], 300),
-                        "model_reported": agent_views.clip(r["model_reported"], 300)}
-                       for r in agent_usage["models_reported"] if r["model_reported"] != r["model"]]
-        return page(request, "hunt.html", u, h=h, cands=cands, lanes=repo.lane_counts(hunt_id), lane=lane,
-                    ranked=ranked, segment_titles=SEGMENT_TITLES,
-                    coverage=cov["rules"], zeek_visibility=zeek_visibility, zeek_visibility_bundled=zeek_visibility_bundled,
-                    tasks=repo.tasks(hunt_id), reports=reports, agent=agent_summary,
-                    investigations=investigations, ai_agent=ai_audit["detail"] if ai_audit else None,
-                    egress_banners=banners, answered_by=answered_by,
-                    ai_panel=agent_views.panel(repo, h, agent_usage), cands_more=cands_more, cands_next=cands_next,
-                    live=live, stream_cursor=stream_cursor,
-                    agent_message=agent_views.REASSESS_MESSAGES.get(request.query_params.get("agent_message"), ""),
-                    internal_networks=internal_networks_view(repo, hunt_id, h["manifest"]))
-
-    def _timeline_findings(hunt_id: str) -> list[dict]:
-        return [{"id": c["id"], "lane": c["lane"], "rule_id": c["rule_id"], "claim": c["claim"],
-                 "observed_at": str(c["ts"]) if c["ts"] is not None else None,
-                 "entities": c["entities"], "event_ids": c["event_ids"],
-                 "source_link_id": c.get("source_link_id"), "provenance": c.get("provenance", "deterministic")}
-                for c in repo.candidates(hunt_id, ["urgent", "high", "lead"])]
-
-    @app.get("/hunts/{hunt_id}/timeline", response_class=HTMLResponse)
-    def timeline(request: Request, hunt_id: str):
-        from romulus.detect.metadata import hunt_rule_metadata
-        from romulus.report.incidents import build_incident_graph
-        from romulus.report.timeline import LANES, LINK_STYLES, ROW_KINDS, build_timeline
-        u = need(request)
-        h = repo.get_hunt(hunt_id)
-        if h is None:
-            raise HTTPException(404)
-        params = request.query_params
-        explicit = "lane" in params or "kind" in params or "style" in params
-        lanes = [v for v in params.getlist("lane") if v in LANES] if explicit else list(LANES)
-        kinds = [v for v in params.getlist("kind") if v in ROW_KINDS] if explicit else list(ROW_KINDS)
-        styles = [v for v in params.getlist("style") if v in LINK_STYLES] if explicit else list(LINK_STYLES)
-        findings = _timeline_findings(hunt_id)
-        graph = build_incident_graph(repo, hunt_id, findings)
-        titles = {rule_id: rule.title for rule_id, rule in
-                  hunt_rule_metadata(repo, manifest=h['manifest']).items()}
-        analyst = repo.analyst_links(hunt_id)
-        window = h["manifest"].get("window") or {}
-        tl = build_timeline(findings, graph["edges"], analyst, window.get("start"), window.get("end"),
-                            titles=titles, lanes=lanes, kinds=kinds, styles=styles)
-        pick = sorted(({**f, "title": titles.get(f["rule_id"], f["rule_id"])} for f in findings),
-                      key=lambda f: (f["observed_at"] is None, f["observed_at"] or "", f["id"]))
-        return page(request, "timeline.html", u, h=h, tl=tl, analyst_links=analyst, pick=pick,
-                    all_lanes=LANES, all_kinds=ROW_KINDS, all_styles=LINK_STYLES)
-
-    @app.post("/hunts/{hunt_id}/links")
-    def add_link(request: Request, hunt_id: str, from_finding: str = Form(...), to_finding: str = Form(...),
-                 relation: str = Form(...), note: str = Form(""), csrf: str = Form("")):
-        u = need(request)
-        if not csrf_ok(u, csrf):
-            raise HTTPException(403, "bad CSRF token")
-        try:
-            repo.add_analyst_link(hunt_id, from_finding, to_finding, relation, note, f"web:{u['u']}")
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        return RedirectResponse(f"/hunts/{hunt_id}/timeline", status_code=303)
+    register_hunt_routes(app, repo, s, need, hunt_page)
 
     @app.get("/hunts/{hunt_id}/stream")
     async def stream(request: Request, hunt_id: str, after_seq: str = "0"):
@@ -404,7 +274,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
             raise HTTPException(404)
         refusal = repo.agent_reassessment_refusal(hunt_id)
         if refusal:
-            return RedirectResponse(agent_views.href(hunt_id) + "?" + urlencode({"agent_message": agent_views.reassess_code(refusal)}),
+            return RedirectResponse(agent_views.href(hunt_id, "/assessment") + "?" + urlencode({"agent_message": agent_views.reassess_code(refusal)}),
                                     status_code=303)
         cmd = [sys.executable, "-m", "romulus.cli"] + (["--env-file", str(env_file)] if env_file else []) + [
             "agent", "reassess", hunt_id]
@@ -413,7 +283,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         with open(s.logs_dir / f"agent-reassess-{datetime.now():%Y%m%d-%H%M%S}.log", "ab") as log:
             subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env, start_new_session=True)
         repo.audit(f"web:{u['u']}", "web.agent_reassess", hunt_id=hunt_id)
-        return RedirectResponse(agent_views.href(hunt_id), status_code=303)
+        return RedirectResponse(agent_views.href(hunt_id, "/assessment"), status_code=303)
 
     @app.get("/hunts/{hunt_id}/delete", response_class=HTMLResponse)
     def delete_confirm(request: Request, hunt_id: str):
@@ -523,7 +393,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         out = s.reports_dir / hunt_id
         out.mkdir(parents=True, exist_ok=True)
         write_reports(repo, m, out)
-        return RedirectResponse(f"/hunts/{hunt_id}#reports", status_code=303)
+        return RedirectResponse(agent_views.href(hunt_id) + "#reports", status_code=303)
 
     @app.get("/reports/{hunt_id}/{rev_id}.{ext}")
     def get_report(request: Request, hunt_id: str, rev_id: str, ext: str):
