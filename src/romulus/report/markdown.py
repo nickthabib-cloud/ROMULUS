@@ -41,16 +41,48 @@ def _agent_note_line(note: dict) -> str:
 NARRATIVE_TITLE = "What likely happened (AI hypothesis, unconfirmed)"
 NARRATIVE_NOTE = ("The model's theory of what most plausibly happened, pieced together from the cited findings. It may "
                   "be wrong: each sentence is labelled observed (shown by the cited records), inferred (reasoned "
-                  "between them) or uncertain (the evidence is thin or missing).")
+                  "between them) or uncertain (the evidence is thin or missing). A paragraph marked weakly "
+                  "supported cites no reported finding, or only activity triaged as likely benign: read it as "
+                  "context, not as a step of the attack.")
 NARRATIVE_EMPTY = ("The assessment has no narrative: the model wrote none, or the checker removed every sentence "
                    "(see the checker changes below).")
+
+
+# A paragraph the checker found weakly supported keeps every sentence, is shown muted under its label, and says why
+# (one of these fixed reasons). An ATT&CK phase label it could not support becomes CONTEXT_PHASE; the model's own
+# label is kept beside it.
+CONTEXT_PHASE = "Context"
+WEAK_NO_REPORTED = "no_reported_finding"
+WEAK_BENIGN = "triaged_likely_benign"
+WEAK_REASONS = {WEAK_NO_REPORTED: "no reported finding cited",
+                WEAK_BENIGN: "cited activity was triaged as likely benign"}
+WEAK_LABEL = "weakly supported"
+
+
+def narrative_label(paragraph: dict) -> str:
+    """A narrative paragraph's phase label as shown: "Context (weakly supported)" for a weakly supported one
+    (unescaped)."""
+    phase = paragraph.get("phase") or ""
+    if paragraph.get("weakly_supported"):
+        return f"{phase or CONTEXT_PHASE} ({WEAK_LABEL})"
+    return phase or "Phase not given"
+
+
+def narrative_weak_reason(paragraph: dict) -> str:
+    """Why a weakly supported paragraph is muted, in words (empty for a supported one; unescaped)."""
+    if not paragraph.get("weakly_supported"):
+        return ""
+    reason = WEAK_REASONS.get(paragraph.get("support_reason"), WEAK_REASONS[WEAK_NO_REPORTED])
+    model_phase = paragraph.get("model_phase")
+    return (f"Weakly supported: {reason}" + (f"; the model labelled it {model_phase}" if model_phase else "")
+            + ".")
 
 
 def narrative_heading(paragraph: dict) -> str:
     """A narrative paragraph's phase and time span, as one line (unescaped)."""
     span = paragraph.get("time_span") or {}
     start, end = span.get("start") or "", span.get("end") or ""
-    return f"{paragraph.get('phase') or 'Phase not given'} · {narrative_when(start, end)}"
+    return f"{narrative_label(paragraph)} · {narrative_when(start, end)}"
 
 
 def narrative_when(start: str, end: str, to: str = "to") -> str:
@@ -79,7 +111,9 @@ def _assessment_section(m: dict) -> list[str]:
     if "narrative" in assessment:
         out += [f"### {NARRATIVE_TITLE}", "", NARRATIVE_NOTE, ""]
         for number, paragraph in enumerate(assessment["narrative"], 1):
+            weak = narrative_weak_reason(paragraph)
             out += [f"**{number}. {esc(narrative_heading(paragraph))}**", "",
+                    *([f"*{esc(weak)}*", ""] if weak else []),
                     *[sentence(item) for item in paragraph["sentences"]], ""]
         if not assessment["narrative"]:
             out += [NARRATIVE_EMPTY, ""]

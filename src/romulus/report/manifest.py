@@ -17,6 +17,7 @@ from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.hunt.publish import subject_event_ids
 from romulus.hunt.rank import PASS_FINAL, rank_summary, rank_unranked
 from romulus.report.incidents import build_incident_graph, incident_narrative
+from romulus.report.markdown import WEAK_NO_REPORTED, WEAK_REASONS
 from romulus.report.triage import LABEL as TRIAGE_LABEL
 from romulus.report.triage import triage_view
 from romulus.store import schema as t
@@ -1034,10 +1035,17 @@ def narrative_paragraphs(value) -> list[dict]:
         if not sentences:
             continue
         tactic = paragraph.get("tactic")
+        weak = paragraph.get("weakly_supported") is True
+        reason = paragraph.get("support_reason")
+        model_phase = paragraph.get("model_phase")
         out.append({"time_span": {side: span.get(side) if isinstance(span.get(side), str) else ""
                                   for side in ("start", "end")},
                     "phase": paragraph.get("phase") if isinstance(paragraph.get("phase"), str) else "",
-                    **({"tactic": tactic} if isinstance(tactic, str) and tactic else {}),
+                    **({"tactic": tactic} if isinstance(tactic, str) and tactic and not weak else {}),
+                    **({"weakly_supported": True,
+                        "support_reason": reason if reason in WEAK_REASONS else WEAK_NO_REPORTED,
+                        **({"model_phase": model_phase[:200]} if isinstance(model_phase, str) and model_phase
+                           else {})} if weak else {}),
                     "sentences": sentences})
     return out
 
