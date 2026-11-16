@@ -41,7 +41,7 @@ class HuntToolExecutor:
 
     def __init__(self, repo: Repo, hunt_id: str, pivot: PivotExecutor, fetcher: LinkFetcher,
                  hunt_start: datetime, hunt_end: datetime, *, owner_token: str | None = None,
-                 packet_sources: tuple[str, ...] = ()):
+                 packet_sources: tuple[str, ...] = (), uncontracted_targets: tuple[str, ...] = ()):
         self.repo = repo
         self.hunt_id = hunt_id
         self.pivot = pivot
@@ -50,6 +50,8 @@ class HuntToolExecutor:
         self.owner_token = owner_token
         # packet sources the hunt can read (packet captures, the Arkime viewer): a typed search never reaches them
         self.packet_sources = tuple(packet_sources)
+        # hunt targets with no field contract in this run: no search can read them, whatever its scope
+        self.uncontracted_targets = tuple(uncontracted_targets)
         self._followable: dict[str, tuple[str, ...]] = {}
 
     def _events(self, ids: list[str]) -> list[TypedEvent]:
@@ -99,9 +101,13 @@ class HuntToolExecutor:
         if isinstance(request, SearchEventsRequest):
             link_key["search"] = request.arguments.model_dump(mode="json", include={"scope", "conditions"})
         result = self.pivot.run(session_id, request, anchor_ts=anchor_ts)
-        if isinstance(request, SearchEventsRequest) and request.arguments.scope != "host" and self.packet_sources:
-            result = result.model_copy(update={"not_searched": [
-                f"{name}: not searched (scope unsupported for agent search)" for name in self.packet_sources]})
+        if isinstance(request, SearchEventsRequest):
+            packets = self.packet_sources if request.arguments.scope != "host" else ()
+            unsearched = [*(f"{name}: not searched (scope unsupported for agent search)" for name in packets),
+                          *(f"{target}: not searched (no field contract for this target)"
+                            for target in self.uncontracted_targets)]
+            if unsearched:
+                result = result.model_copy(update={"not_searched": unsearched})
         reach_ids = list(getattr(result, "reach_event_ids", []) or result.event_ids)
         link_id = "agent-link-" + digest({
             "hunt_id": self.hunt_id, "anchor_id": anchor_id,
@@ -262,6 +268,8 @@ def build_agent_toolbox(settings: Settings, repo: Repo, hunt_id: str, *, client,
     packet_sources = tuple(f"packet captures behind {target} (Arkime viewer and TShark)"
                            for target, contract in sorted(contracts.items())
                            if contract is not None and getattr(contract, "time_field", "") == "firstPacket")
+    uncontracted = tuple(sorted({str(target) for target in manifest.get("targets") or []
+                                 if contracts.get(target) is None}))
     executor = HuntToolExecutor(repo, hunt_id, pivot, fetcher, start, end, owner_token=owner_token,
-                                packet_sources=packet_sources)
+                                packet_sources=packet_sources, uncontracted_targets=uncontracted)
     return Toolbox(repo, hunt_id, executor=executor, session_id=session_id, owner_token=owner_token)

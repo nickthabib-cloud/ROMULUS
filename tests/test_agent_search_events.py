@@ -288,6 +288,7 @@ def test_zero_hits_under_complete_coverage_is_a_real_no_match():
     assert response["status"] == "complete"
     search = response["data"]["result"]["search"]
     assert search["negative"] == "no_match" and search["unresolved_because"] == []
+    assert search["exhaustive"] is True
     assert {cell["target"] for cell in response["data"]["result"]["coverage"]} == {"net-a", "net-b"}
     assert all(cell["status"] == "complete" for cell in response["data"]["result"]["coverage"])
 
@@ -344,7 +345,7 @@ def test_records_past_the_cap_at_one_instant_are_an_honest_partial(monkeypatch):
     assert response["status"] == "partial"
     reasons = response["data"]["result"]["reasons"]
     assert "cap:10<total:31" in reasons and "pivot_head_tail_sample" in reasons
-    assert any(reason.startswith("pivot_min_split:") for reason in reasons)
+    assert any(reason.startswith(("pivot_min_split:", "pivot_partition_limit:")) for reason in reasons)
     assert response["counts"]["total"] == 20                    # head and tail, every one shown, none invented
     partial = [cell for cell in response["data"]["result"]["coverage"] if cell["status"] == "partial"]
     assert partial and all(cell["unresolved_ranges"] for cell in partial)
@@ -356,8 +357,10 @@ def test_the_partition_limit_is_named_and_zero_unresolved_is_never_claimed(monke
     repo, client = _hunt(), FakeES(generated={"net-a": 1_000_000})
     response = _search(_toolbox(repo, {"net-a": _keyword_contract("net-a")}, client), DNS)
     assert response["status"] == "partial"
-    assert f"pivot_partition_limit:{MAX_PIVOT_PARTITIONS}" in response["data"]["result"]["reasons"]
-    assert response["data"]["result"]["search"]["negative"] == "matches_found"
+    assert f"pivot_partition_limit:{pivot_module.SEARCH_PARTITIONS}" in response["data"]["result"]["reasons"]
+    search = response["data"]["result"]["search"]
+    assert search["negative"] == "matches_found" and search["exhaustive"] is False
+    assert any("pivot_partition_limit" in why for why in search["unresolved_because"])
     cells = response["data"]["result"]["coverage"]
     assert any(cell["unresolved_ranges"] for cell in cells)
 
@@ -425,23 +428,28 @@ def test_adversarial_values_on_case_insensitive_windows_paths_are_escaped_wildca
     })
     executor = PivotExecutor(_hunt(), FakeES(), "h1", {"win-a": contract})
     for value in ADVERSARIAL:
-        plan = executor.plan_search(_request([{"field": "host.name", "op": "eq", "values": [value]},
-                                              {"field": "event.channel", "op": "eq", "values": [value]},
-                                              {"field": "process.command_line", "op": "eq", "values": [value]}],
-                                             scope="host"))
+        conditions = [{"field": "host.name", "op": "eq", "values": [value]},
+                      {"field": "event.channel", "op": "eq", "values": [value]}]
+        plan = executor.plan_search(_request(conditions, scope="host"))
         assert plan.refusal is None, value
         body = pivot_module.compile_es(plan.intents[0], contract).body
-        assert {"query_string", "regexp", "script", "match", "simple_query_string"}.isdisjoint(_clause_kinds(body))
+        assert {"query_string", "regexp", "script", "match", "match_phrase",
+                "simple_query_string"}.isdisjoint(_clause_kinds(body))
         wildcards = [leaf for path, leaf in _leaves(body) if "wildcard" in path and path[-1] == "value"]
         short = _escape_wildcard(value.strip().rstrip(".").split(".", 1)[0])
-        assert set(wildcards) <= {_escape_wildcard(value), short, f"{short}.*"}
+        assert wildcards and set(wildcards) <= {_escape_wildcard(value), short, f"{short}.*"}
         for pattern in wildcards:
             # every * and ? the value held is escaped: only the compiler's own trailing ".*" is a wildcard
             unescaped = pattern.replace("\\\\", "").replace("\\*", "").replace("\\?", "")
             assert "?" not in unescaped and unescaped.count("*") <= (1 if pattern.endswith(".*") else 0)
-        phrases = [leaf for path, leaf in _leaves(body) if "match_phrase" in path]
-        terms = [leaf for path, leaf in _leaves(body) if "term" in path]
-        assert (phrases == [value]) if len(value) > 64 else (terms == [value])
+        # text equality reads the keyword subfield as a term; a value past what it keeps is never sent as a phrase
+        plan = executor.plan_search(_request(
+            [{"field": "process.command_line", "op": "eq", "values": [value]}], scope="host"))
+        if len(value) > 64:
+            assert plan.intents == [] and "cannot be matched exactly" in json.dumps(plan.refusal), value
+        else:
+            body = pivot_module.compile_es(plan.intents[0], contract).body
+            assert body["query"]["bool"]["filter"][1] == {"term": {"process.command_line.keyword": value}}
 
 
 def test_an_account_value_without_its_kind_prefix_is_not_evaluated_and_never_reaches_the_source():
@@ -604,13 +612,14 @@ def test_a_search_over_many_dense_targets_stays_bounded_and_names_what_it_did_no
     toolbox = _toolbox(repo, {target: _keyword_contract(target) for target in targets}, client)
     response = _search(toolbox, DNS)
 
-    per_target = MAX_PIVOT_PARTITIONS * pivot_module.MAX_SAMPLE_QUERIES * 20
+    partitions = pivot_module.SEARCH_PARTITIONS
+    per_target = partitions * pivot_module.MAX_SAMPLE_QUERIES * 20
     assert response["status"] == "partial"
     # each query held at most the leaf cap, and one target took at most its splits, leaves and samples
     queries = {}
     for target, _body in client.bodies:
         queries[target] = queries.get(target, 0) + 1
-    assert max(queries.values()) <= 2 * MAX_PIVOT_PARTITIONS - 1 + MAX_PIVOT_PARTITIONS * pivot_module.MAX_SAMPLE_QUERIES
+    assert max(queries.values()) <= 2 * partitions - 1 + partitions * pivot_module.MAX_SAMPLE_QUERIES
     assert client.returned <= 20 * len(client.bodies)
     reasons = response["data"]["result"]["reasons"]
     searched = {target for target, _body in client.bodies}
@@ -626,11 +635,17 @@ def test_a_search_over_many_dense_targets_stays_bounded_and_names_what_it_did_no
 
 
 def test_the_search_bounds_hold_for_the_real_constants():
-    assert pivot_module.MAX_SEARCH_TARGET_RECORDS == (
-        MAX_PIVOT_PARTITIONS * pivot_module.MAX_SAMPLE_QUERIES * pivot_module.SEARCH_LEAF_RECORDS)
-    # one search's rows stay well under the hunt's page-item ceiling
+    from romulus.agent.dossier import MATERIALIZE_LINK_BYTES_LIMIT
     from romulus.store.repo import AGENT_PAGE_ITEM_LIMIT
-    assert pivot_module.MAX_SEARCH_RECORDS + pivot_module.MAX_SEARCH_TARGET_RECORDS < AGENT_PAGE_ITEM_LIMIT // 3
+
+    assert pivot_module.SEARCH_PARTITIONS < MAX_PIVOT_PARTITIONS
+    assert pivot_module.MAX_SEARCH_TARGET_RECORDS == (
+        pivot_module.SEARCH_PARTITIONS * pivot_module.MAX_SAMPLE_QUERIES * pivot_module.SEARCH_LEAF_RECORDS)
+    kept = pivot_module.MAX_SEARCH_RECORDS + pivot_module.MAX_SEARCH_TARGET_RECORDS
+    # ten worst-case searches fit the hunt's agent page items, and one search's reach link (event ids of about
+    # 26 bytes, twice: its records and its evidence) stays a small share of the incident graph's payload ceiling
+    assert 10 * kept < AGENT_PAGE_ITEM_LIMIT
+    assert 2 * 26 * kept < MATERIALIZE_LINK_BYTES_LIMIT // 10
 
 
 def _request(conditions, *, scope="network") -> SearchEventsRequest:
@@ -650,3 +665,40 @@ def test_a_tool_without_a_reach_link_type_is_refused_before_any_source_query():
     result = executor.run(SESSION, "anchor", Unlisted(), anchor_ts=T)
     assert result.status == "unsupported"
     assert result.reasons == ["tool unlisted_tool has no agent reach link type"]
+
+
+def test_a_target_without_a_contract_is_named_and_keeps_a_zero_unresolved():
+    repo, client = _hunt(), FakeES({"net-a": []})
+    pivot = PivotExecutor(repo, client, "h1", {"net-a": _keyword_contract("net-a"), "net-b": None})
+    executor = HuntToolExecutor(repo, "h1", pivot, LinkFetcher(pivot, T, END), T, END,
+                                uncontracted_targets=("net-c",))
+    response = _search(Toolbox(repo, "h1", executor=executor, session_id=SESSION), DNS)
+    assert response["status"] == "partial"
+    search = response["data"]["result"]["search"]
+    assert search["negative"] == "unresolved" and search["exhaustive"] is False
+    assert "net-c: not searched (no field contract for this target)" in search["not_searched"]
+    assert any(reason == "not evaluated: net-b: no field contract for this target"
+               for reason in response["data"]["result"]["reasons"])
+
+
+def test_a_failed_search_is_retried_and_its_successful_retry_is_then_deduplicated():
+    from romulus.sources.es import SourceError
+
+    class FlakyES(FakeES):
+        failures = 1
+
+        def iterate(self, q, max_records, **kwargs):
+            if self.failures:
+                self.failures -= 1
+                self.bodies.append((q.target, q.body))
+                raise SourceError("connection reset")
+            yield from super().iterate(q, max_records, **kwargs)
+
+    repo, client = _hunt(), FlakyES({"net-a": []})
+    toolbox = _toolbox(repo, {"net-a": _keyword_contract("net-a")}, client)
+    first, second, third = (_search(toolbox, DNS) for _ in range(3))
+    assert first["status"] == "failed"
+    assert second["status"] == "complete" and second["data"]["result"]["search"]["repeated"] is False
+    assert third["data"]["result"]["search"]["repeated"] is True
+    assert third["data"]["result"]["cursor"] == second["data"]["result"]["cursor"]
+    assert len(client.bodies) == 2

@@ -57,6 +57,8 @@ TOOL_TEXT_LIMIT = 180
 TELEMETRY_CHUNK_BYTES = 384
 TELEMETRY_RESPONSE_BYTES = 24_000
 RAW_RECORDS_PER_EVIDENCE_PAGE = 2
+# how many derived cursors a search that keeps failing is retried under before it is no longer deduplicated
+SEARCH_RETRY_KEYS = 4
 _RULE_IDS = frozenset(playbook.id for playbook in ALL_PLAYBOOKS)
 _ALIAS_PATTERN = r"^[FIENL][1-9][0-9]*$"
 AliasArg = Annotated[str, Field(pattern=_ALIAS_PATTERN)]
@@ -1185,14 +1187,18 @@ class Toolbox:
         stable = None
         if search:
             # One identity per canonical search in this session: a repeated search reads its stored result again
-            # and spends no source query.
-            stable = "P" + digest({"identity": identity})[:20]
-            plan = self.repo.agent_page_plan(self.hunt_id, stable)
-            if plan is not None and plan["identity"] == identity:
+            # and spends no source query. A failed search may be tried again, each try under the next derived
+            # cursor, so a later repeat still finds the try that succeeded.
+            for attempt in range(SEARCH_RETRY_KEYS):
+                stable = "P" + digest({"identity": identity, "attempt": attempt})[:20]
+                plan = self.repo.agent_page_plan(self.hunt_id, stable)
+                if plan is None or plan["identity"] != identity:
+                    break
                 if plan["summary"].get("status") != "failed":
                     return self._pivot_plan_result(plan, page=1, cursor=stable, chunk_index=chunk_index,
                                                    repeated=True)
-                stable = "P" + uuid4().hex[:20]      # a failed search may be tried again, under a new cursor
+            else:
+                stable = None                       # past the derived tries: a fresh cursor, never deduplicated
         if anchor["ts"] is None:
             return self._semantic_refusal("observation_time_unavailable", "the finding has no recorded observation time")
         if search:
@@ -1219,12 +1225,15 @@ class Toolbox:
         else:
             negative = "unresolved"
         why = [_bounded_text(reason) for reason in [*result.not_searched, *result.reasons][:10]]
+        exhaustive = result.status == "complete" and not result.not_searched
         return {
             "scope": args.scope,
             "conditions": [item.model_dump(mode="json") for item in args.conditions],
             "window": {"start": args.start.isoformat(), "end": args.end.isoformat()},
             "negative": negative,
-            "unresolved_because": why if negative == "unresolved" else [],
+            # every matching record of every source in scope was read: only then do the hits name every host
+            "exhaustive": exhaustive,
+            "unresolved_because": why if not exhaustive else [],
             "not_searched": [_bounded_text(item) for item in result.not_searched],
             "match_semantics": ("the source matched the conditions on its native fields; a few fields match "
                                 "without case or by a host's short name, so read each record's typed values"),

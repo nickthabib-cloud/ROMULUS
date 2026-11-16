@@ -61,7 +61,7 @@ from romulus.evidence.zeek_catalog import ELASTIC, MALCOLM, SECURITY_ONION, ZEEK
 from romulus.hunt.publish import publish_match
 from romulus.hunt.windows_filters import nxlog_windows_group
 from romulus.site import SiteFacts, absent_site_facts
-from romulus.sources.compile import CompileError, _intent_os_family, compile_es, time_unit
+from romulus.sources.compile import CompileError, _intent_os_family, compile_es, time_unit, utf16_length
 from romulus.sources.es import ElasticClient, SourceError
 from romulus.sources.execute import execute
 from romulus.sources.models import Completeness, Predicate, SearchIntent, SearchOutcome, Window
@@ -638,23 +638,28 @@ def _link_task_kind(executor) -> str:
     return "agent_follow_link" if getattr(executor, "source_query_scope", None) == "agent" else "expansion_link"
 
 
-# The agent's typed search (search_events). One search may name every target of its scope, and has no entity to
-# narrow it, so it holds fewer records than an entity pivot: each leaf query keeps at most SEARCH_LEAF_RECORDS, so
-# one target holds at most MAX_PIVOT_PARTITIONS leaves x (head, tail and the two anchor samples) x that many, and
-# once MAX_SEARCH_RECORDS rows were fetched the targets not yet searched are named as not evaluated. Whatever a
-# hunt's size, one search therefore holds at most MAX_SEARCH_RECORDS + MAX_SEARCH_TARGET_RECORDS rows.
+# The agent's typed search (search_events). One search may name every target of its scope and has no entity to
+# narrow it, and everything it keeps is persisted (evidence, its result's page items, its reach link), so it keeps
+# far fewer rows than an entity pivot: a dense window is split into at most SEARCH_PARTITIONS leaves, each leaf
+# query keeps at most SEARCH_LEAF_RECORDS, so one target keeps at most SEARCH_PARTITIONS leaves x (head, tail and the
+# two anchor samples) x that many rows, from at most 2 x SEARCH_PARTITIONS - 1 + SEARCH_PARTITIONS x
+# MAX_SAMPLE_QUERIES queries; once MAX_SEARCH_RECORDS rows were kept the targets not yet searched are named as not
+# evaluated. Whatever a hunt's size, one search keeps at most MAX_SEARCH_RECORDS + MAX_SEARCH_TARGET_RECORDS rows: about
+# ten such searches fit the hunt's agent page items, and one search's reach link stays far below the incident
+# graph's payload ceiling. A capped search is partial and names what it did not read, never a no-match.
 SEARCH_LEAF_RECORDS = 1_000
-MAX_SEARCH_TARGET_RECORDS = MAX_PIVOT_PARTITIONS * MAX_SAMPLE_QUERIES * SEARCH_LEAF_RECORDS
-MAX_SEARCH_RECORDS = 10_000
+SEARCH_PARTITIONS = 4
+MAX_SEARCH_TARGET_RECORDS = SEARCH_PARTITIONS * MAX_SAMPLE_QUERIES * SEARCH_LEAF_RECORDS
+MAX_SEARCH_RECORDS = 5_000
 SEARCH_PURPOSE = "agent:search_events"
 # How many similar searchable fields a refusal or a not-evaluated reason names, and how many targets a refusal lists.
 SEARCH_SIMILAR_FIELDS = 20
 SEARCH_REASON_SIMILAR = 5
 SEARCH_REFUSAL_TARGETS = 10
 # The query clauses a compiled agent search may contain. Every value the model wrote reaches the source as the value
-# of one of them (term, terms, prefix, range; a wildcard only in the compiler's escaped exact-value form; a phrase only
-# for a value longer than a text field's keyword subfield keeps). Never query_string, regexp, script or match.
-SEARCH_CLAUSES = frozenset({"bool", "term", "terms", "prefix", "range", "wildcard", "match_phrase", "exists"})
+# of one of them (term, terms, prefix, range; a wildcard only in the compiler's escaped exact-value form). Never a
+# phrase (it matches inside longer text: a mention, not the value), query_string, regexp, script or match.
+SEARCH_CLAUSES = frozenset({"bool", "term", "terms", "prefix", "range", "wildcard", "exists"})
 _STRING_KINDS = frozenset({"keyword", "constant_keyword", "wildcard", "flattened"})
 _INTEGER_KINDS = frozenset({"long", "integer", "short"})
 _INTEGER_TEXT = re.compile(r"[+-]?[0-9]{1,19}")
@@ -722,6 +727,12 @@ def _search_predicate(contract: FieldContract, condition: SearchCondition,
         # equality on analyzed text is compiled against its keyword subfields: its values are strings
         return "keyword" if variant.exact and op in {"eq", "in"} else variant.type
 
+    for variant in variants:
+        limit = variant.exact_limit if variant.exact and op in {"eq", "in"} else None
+        if limit is not None and any(utf16_length(value) > limit for value in condition.values):
+            # the subfield keeps no longer value, and a phrase on the text would match it inside longer text
+            return None, (f"field {field_name} / op {op}: a value longer than {limit} characters is not kept "
+                          "exactly by this source and cannot be matched exactly")
     try:
         parsed = search_values(kind(spec), op, condition.values)
         for variant in spec.alternatives:
@@ -1117,7 +1128,10 @@ class PivotExecutor:
         targets = [contract for _target, contract in sorted(self.contracts.items())
                    if contract is not None and _scoped(contract, args.scope)]
         intents: list[SearchIntent] = []
-        skipped: list[tuple[str, str, str | None]] = []   # (target, problem, the condition's field when one)
+        # (target, problem, the condition's field when one); a target without a contract cannot be searched
+        skipped: list[tuple[str, str, str | None]] = [
+            (target, "no field contract for this target", None)
+            for target, contract in sorted(self.contracts.items()) if contract is None]
         for contract in targets:
             # a condition naming logical Linux datasets selects the Linux layout's fields, as the compiler does
             provisional = SearchIntent(kind="raw", target=contract.target, window=window, filters=[
@@ -1149,7 +1163,7 @@ class PivotExecutor:
         coverage = []
         for target, problem, field_name in skipped:
             reason = f"not evaluated: {target}: {problem}"
-            if field_name is not None:
+            if field_name is not None and self.contracts.get(target) is not None:
                 similar, _count = _similar_fields([self.contracts[target]], field_name)
                 if similar:
                     reason += "; similar searchable fields: " + ", ".join(
@@ -1388,6 +1402,7 @@ class PivotExecutor:
         query_cap: int | None = None,
         spend_task_id: str | None = None,
         record_cap: int | None = None,
+        max_partitions: int | None = None,
     ):
         """Breadth-first capped-window splitting keeps late activity represented within a fixed leaf budget."""
         if record_cap is not None:
@@ -1412,6 +1427,7 @@ class PivotExecutor:
                              "bounded host activity existence probe" if intent.purpose == "expansion:host-witness"
                              else "source retrieval complete")] if complete else [],
                      [] if complete else [_range(intent.window.start, intent.window.end, reason)])]
+        partitions = max_partitions or MAX_PIVOT_PARTITIONS
         pending = deque([intent])
         leaves = []
         while pending:
@@ -1432,7 +1448,7 @@ class PivotExecutor:
             outcome = self._execute(current, contract, spend_task_id=spend_task_id)
             if _is_capped(outcome.reasons) and (current.window.end - current.window.start) > MIN_PIVOT_SPLIT * 2:
                 projected_leaves = len(leaves) + len(pending) + 2
-                if projected_leaves <= MAX_PIVOT_PARTITIONS:
+                if projected_leaves <= partitions:
                     midpoint = current.window.start + (current.window.end - current.window.start) / 2
                     pending.append(current.model_copy(update={
                         "window": Window(start=current.window.start, end=midpoint),
@@ -1442,7 +1458,7 @@ class PivotExecutor:
                     }))
                     continue
                 outcome = outcome.model_copy(update={
-                    "reasons": sorted(set(outcome.reasons + [f"pivot_partition_limit:{MAX_PIVOT_PARTITIONS}"])),
+                    "reasons": sorted(set(outcome.reasons + [f"pivot_partition_limit:{partitions}"])),
                 })
             elif _is_capped(outcome.reasons):
                 outcome = outcome.model_copy(update={
@@ -2045,7 +2061,7 @@ class PivotExecutor:
             target_successes = 0
             for leaf_intent, outcome, covered_ranges, unresolved_ranges in self._execute_partitions(
                     intent, self.contracts[intent.target], anchor_ts,
-                    spend_task_id=task_id):
+                    spend_task_id=task_id, max_partitions=SEARCH_PARTITIONS if search else None):
                 leaf_reasons = list(outcome.reasons)
                 if outcome.completeness == Completeness.failed:
                     incomplete = True
