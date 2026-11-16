@@ -118,11 +118,11 @@ def test_refused_calls_record_reasons_on_their_rows_audit_and_logs_without_value
         ["statement: type_mismatch", "*: unexpected_property"], None]
     assess = [row for row in repo.model_calls(hunt_id="h1") if row["purpose"] == "assess"]
     assert len(assess) == 2 and all(not row["validation"]["ok"] for row in assess)
-    assert assess[0]["validation"]["reasons"] == ["overall: list_type", "key_steps: missing", "confidence: missing",
+    assert assess[0]["validation"]["reasons"] == ["overall: list_type", "key_steps: missing", "narrative: missing", "confidence: missing",
                                                   "alternatives: missing", "gaps: missing",
                                                   "next_checks: missing", "*: extra_forbidden"]
     expected = {"assessment": {"*: extra_forbidden": 2, "alternatives: missing": 2, "confidence: missing": 2,
-                               "gaps: missing": 2, "key_steps: missing": 2, "next_checks: missing": 2,
+                               "gaps: missing": 2, "key_steps: missing": 2, "narrative: missing": 2, "next_checks: missing": 2,
                                "overall: list_type": 2},
                 "finish_session": {"summary: string_too_short": 1},
                 "open_hypothesis": {"*: extra_forbidden": 1, "*: unexpected_property": 1,
@@ -144,7 +144,7 @@ def test_an_assessment_check_that_fails_still_records_the_billed_call(tmp_path, 
     from romulus.agent import assessment
     from romulus.agent.provider import AgentBudget, BudgetLimits
     repo = _hunt(tmp_path)
-    body = {"overall": [], "key_steps": [], "confidence": {"overall": "low", "reasons": []}, "alternatives": [],
+    body = {"overall": [], "key_steps": [], "narrative": [], "confidence": {"overall": "low", "reasons": []}, "alternatives": [],
             "gaps": [], "next_checks": []}
 
     def broken(*_a, **_kw):

@@ -38,15 +38,36 @@ def _agent_note_line(note: dict) -> str:
     return f"- {esc(note['text'])}{suffix}{marker}"
 
 
+NARRATIVE_TITLE = "What likely happened (AI hypothesis, unconfirmed)"
+NARRATIVE_NOTE = ("The model's theory of what most plausibly happened, pieced together from the cited findings. It may "
+                  "be wrong: each sentence is labelled observed (shown by the cited records), inferred (reasoned "
+                  "between them) or uncertain (the evidence is thin or missing).")
+NARRATIVE_EMPTY = ("The assessment has no narrative: the model wrote none, or the checker removed every sentence "
+                   "(see the checker changes below).")
+
+
+def narrative_heading(paragraph: dict) -> str:
+    """A narrative paragraph's phase and time span, as one line (unescaped)."""
+    span = paragraph.get("time_span") or {}
+    start, end = span.get("start") or "", span.get("end") or ""
+    return f"{paragraph.get('phase') or 'Phase not given'} · {narrative_when(start, end)}"
+
+
+def narrative_when(start: str, end: str, to: str = "to") -> str:
+    """A time span as words: one time, a range, an open start or end, or that none was given."""
+    if start and end:
+        return start if start == end else f"{start} {to} {end}"
+    if start:
+        return f"from {start}"
+    return f"until {end}" if end else "time not given"
+
+
 def _assessment_section(m: dict) -> list[str]:
     assessment = m.get("ai_assessment")
     if not assessment:
         return []
     body = assessment.get("body") or {}
     out = ["## AI assessment", "", esc(assessment.get("header") or "Template narrative."), ""]
-    confidence = (body.get("confidence") or {}).get("overall")
-    if confidence:
-        out += [f"**Overall confidence: {esc(confidence)}**", ""]
 
     def sentence(item: dict) -> str:
         cites = ", ".join(f"`{esc(value)}`" for value in item.get("cites") or [])
@@ -55,6 +76,17 @@ def _assessment_section(m: dict) -> list[str]:
                   if item.get("suspicious_content") else "")
         return f"- *{esc(item.get('kind', 'inferred'))}:* {esc(item.get('text', ''))}{suffix}{marker}"
 
+    if "narrative" in assessment:
+        out += [f"### {NARRATIVE_TITLE}", "", NARRATIVE_NOTE, ""]
+        for number, paragraph in enumerate(assessment["narrative"], 1):
+            out += [f"**{number}. {esc(narrative_heading(paragraph))}**", "",
+                    *[sentence(item) for item in paragraph["sentences"]], ""]
+        if not assessment["narrative"]:
+            out += [NARRATIVE_EMPTY, ""]
+        out += ["### Assessment details", ""]
+    confidence = (body.get("confidence") or {}).get("overall")
+    if confidence:
+        out += [f"**Overall confidence: {esc(confidence)}**", ""]
     key_steps = []
     for step in body.get("key_steps") or []:
         item = dict(step.get("sentence") or {})

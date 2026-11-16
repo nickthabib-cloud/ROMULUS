@@ -57,7 +57,7 @@ def _logon(repo):
 
 
 def _body(text, aliases):
-    return {"overall": [{"text": text, "cites": aliases, "kind": "observed"}], "key_steps": [],
+    return {"overall": [{"text": text, "cites": aliases, "kind": "observed"}], "key_steps": [], "narrative": [],
             "confidence": {"overall": "low", "reasons": []}, "alternatives": [], "gaps": [],
             "next_checks": []}
 
@@ -105,7 +105,7 @@ def test_labels_and_checker_counts_reach_every_rendered_sentence_group(repo, tmp
     event_id = _logon(repo)
     sentence = _body("The recorded authentication warrants review.",
                      [AliasBook(repo, "h1").alias_for("E", event_id)])["overall"][0]
-    body = {"overall": [sentence], "key_steps": [{"time": None, "tactic": None, "sentence": sentence}],
+    body = {"overall": [sentence], "key_steps": [{"time": None, "tactic": None, "sentence": sentence}], "narrative": [],
             "confidence": {"overall": "low", "reasons": [sentence]}, "alternatives": [sentence],
             "gaps": [sentence], "next_checks": [sentence]}
     checked, counts = check_assessment(repo, "h1", deepcopy(body))

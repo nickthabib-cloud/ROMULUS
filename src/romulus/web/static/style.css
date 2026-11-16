@@ -172,6 +172,15 @@ td.lead { color: var(--lead); font-weight: 600; }
 .ai-surface > .panel-head { background: var(--ai-soft); }
 .kind { color: var(--muted); font-size: 11.5px; }
 .flag { color: var(--warn); font-weight: 600; }
+/* the AI narrative: observed sentences in plain text, inferred links in italics, uncertain steps dotted and muted */
+.narrative { list-style: none; padding: 0; margin: 0; }
+.narrative > li { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.narrative > li:last-child { border-bottom: 0; }
+.narrative p { margin: 4px 0 0; line-height: 1.55; }
+.narrative-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
+.ns.k-inferred { font-style: italic; }
+.ns.k-uncertain { color: var(--muted); text-decoration: underline dotted; text-underline-offset: 3px; }
+.notice p { margin: 2px 0 0; }
 
 /* ---------- notices ---------- */
 .notice { display: flex; gap: 10px; align-items: flex-start; padding: 9px 12px; border-radius: var(--radius-sm);

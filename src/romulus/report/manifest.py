@@ -1004,6 +1004,44 @@ def fallback_view(repo: Repo, hunt_id: str) -> dict | None:
     return out
 
 
+# The AI narrative: an ordered story of paragraphs (at least, at most), each a few cited sentences (at least, at
+# most) under a phase label and a time span. The assessment checker enforces the bounds when the model's answer is
+# stored; renderers read the shape below.
+NARRATIVE_KINDS = ("observed", "inferred", "uncertain")
+NARRATIVE_PARAGRAPHS = (3, 12)
+NARRATIVE_SENTENCES = (1, 6)
+
+
+def narrative_paragraphs(value) -> list[dict]:
+    """A stored narrative in the shape every renderer reads: paragraphs with a time span, a phase label, an optional
+    ATT&CK tactic and their sentences (text, kind, cites and the flagged-content label). The checker built it when
+    the assessment was stored; anything not of that shape is left out rather than rendered."""
+    out = []
+    for paragraph in (value if isinstance(value, list) else [])[:NARRATIVE_PARAGRAPHS[1]]:
+        if not isinstance(paragraph, dict):
+            continue
+        span = paragraph.get("time_span") if isinstance(paragraph.get("time_span"), dict) else {}
+        sentences = []
+        for sentence in (paragraph.get("sentences") if isinstance(paragraph.get("sentences"), list)
+                         else [])[:NARRATIVE_SENTENCES[1]]:
+            if not isinstance(sentence, dict) or not isinstance(sentence.get("text"), str):
+                continue
+            cites = sentence.get("cites") if isinstance(sentence.get("cites"), list) else []
+            sentences.append({"text": sentence["text"],
+                              "kind": sentence.get("kind") if sentence.get("kind") in NARRATIVE_KINDS else "uncertain",
+                              "cites": [cite for cite in cites if isinstance(cite, str)],
+                              **({"suspicious_content": True} if sentence.get("suspicious_content") else {})})
+        if not sentences:
+            continue
+        tactic = paragraph.get("tactic")
+        out.append({"time_span": {side: span.get(side) if isinstance(span.get(side), str) else ""
+                                  for side in ("start", "end")},
+                    "phase": paragraph.get("phase") if isinstance(paragraph.get("phase"), str) else "",
+                    **({"tactic": tactic} if isinstance(tactic, str) and tactic else {}),
+                    "sentences": sentences})
+    return out
+
+
 def _ai_assessment(repo: Repo, hunt_id: str, *, stored_only: bool = False) -> dict | None:
     # A live view needs only the latest revision, not the accumulated assessment or session history.
     with repo.engine.connect() as connection:
@@ -1038,7 +1076,15 @@ def _ai_assessment(repo: Repo, hunt_id: str, *, stored_only: bool = False) -> di
         fallbacks = fallback_view(repo, hunt_id)
         if fallbacks and any(purpose != "assess" for purpose in fallbacks["by_purpose"]):
             header += " Agent calls behind it: " + fallbacks["note"]
-        return {"source": source, "header": header, "model": model, "body": row["body"],
+        body = row["body"]
+        # the narrative is a model's hypothesis; only an agent-written body carries one, and an assessment stored
+        # before the narrative existed has none (the key is then absent, not empty)
+        narrative = None
+        if isinstance(body, dict) and "narrative" in body:
+            narrative = narrative_paragraphs(body["narrative"]) if source == "agent" else None
+            body = {key: value for key, value in body.items() if key != "narrative"}
+        return {"source": source, "header": header, "model": model, "body": body,
+                **({"narrative": narrative} if narrative is not None else {}),
                 "checker": row["checker"], "revision": row["revision"], **({"stale": True} if stale else {})}
     # Preserve the byte-for-byte renderer output for hunts that predate the persisted agent phase.
     # New hunts always have an agent_run row and receive their deterministic template in this path.

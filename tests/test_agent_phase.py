@@ -136,7 +136,7 @@ def test_scripted_orient_investigate_and_assess_keeps_deterministic_rows(tmp_pat
     finish = [ToolCall("f", "finish_session", {"summary": "The evidence review is complete."}, "{}")]
     assessment = {"overall": [{"text": "The persisted finding is available for review.", "cites": [],
                                 "kind": "hypothesis"}],
-                  "key_steps": [], "confidence": {"overall": "low", "reasons": []},
+                  "key_steps": [], "narrative": [], "confidence": {"overall": "low", "reasons": []},
                   "alternatives": [], "gaps": [], "next_checks": []}
     provider = ScriptedProvider([response(tool_calls=opens), response(tool_calls=finish),
                                  response(tool_calls=finish), response(parsed=assessment)])
@@ -184,7 +184,7 @@ def test_assessment_checker_removes_uncited_unknown_and_absence_text_and_downgra
         {"text": "The host is clean.", "cites": [deterministic_alias], "kind": "observed"},
         {"text": "The agent proposal suggests a possible execution path.", "cites": [agent_alias],
          "kind": "observed"}],
-        "key_steps": [], "confidence": {"overall": "low", "reasons": []}, "alternatives": [],
+        "key_steps": [], "narrative": [], "confidence": {"overall": "low", "reasons": []}, "alternatives": [],
         "gaps": [{"text": "No auditd records from host B were in the index after 14:00.",
                   "cites": [deterministic_alias], "kind": "inferred"}], "next_checks": []}
 
@@ -204,7 +204,7 @@ def test_reassessment_appends_revision_and_preserves_the_first(tmp_path):
     migrate(engine)
     repo = Repo(engine)
     repo.create_hunt("h1", {"window": {}, "targets": []}, "d", "test")
-    first_body = {"overall": [], "key_steps": [], "confidence": {"overall": "low", "reasons": []},
+    first_body = {"overall": [], "key_steps": [], "narrative": [], "confidence": {"overall": "low", "reasons": []},
                   "alternatives": [], "gaps": [], "next_checks": []}
     first = {"id": "aa-first", "hunt_id": "h1", "revision": 1, "source": "template", "model": {},
              "body": first_body, "checker": {}, "created_at": datetime.now(UTC)}
@@ -241,7 +241,7 @@ def test_interrupted_investigation_is_retried_without_repeating_deterministic_wo
                              "summary": "", "started_at": started, "ended_at": None})
     repo.save_agent_run({"hunt_id": "h1", "state": "running", "reason": None, "prompt_digests": {},
                          "provider": {}, "started_at": started, "ended_at": None})
-    body = {"overall": [], "key_steps": [], "confidence": {"overall": "low", "reasons": []},
+    body = {"overall": [], "key_steps": [], "narrative": [], "confidence": {"overall": "low", "reasons": []},
             "alternatives": [], "gaps": [], "next_checks": []}
     provider = ScriptedProvider([response(tool_calls=[ToolCall(
         "finish", "finish_session", {"summary": "The resumed investigation is complete."}, "{}")]),
@@ -284,7 +284,7 @@ def test_resume_after_new_investigation_replaces_a_stale_agent_assessment(tmp_pa
     repo.save_agent_run({"hunt_id": "h1", "state": "partial", "reason": "provider_unavailable",
                          "prompt_digests": {}, "provider": {}, "started_at": now, "ended_at": now})
     hypothesis_alias = AliasBook(repo, "h1").alias_for("H", "hyp-pending")
-    body = {"overall": [], "key_steps": [], "confidence": {"overall": "medium", "reasons": []},
+    body = {"overall": [], "key_steps": [], "narrative": [], "confidence": {"overall": "medium", "reasons": []},
             "alternatives": [], "gaps": [], "next_checks": []}
     provider = ScriptedProvider([
         response(tool_calls=[ToolCall("updated", "update_hypothesis",
@@ -327,7 +327,7 @@ def test_two_consecutive_provider_outages_are_billed_then_assess_runs(tmp_path):
         error = ProviderUnavailable("endpoint unavailable")
         error.billed = [{"model": "scripted-model", "prompt": 100, "completion": 20}]
         return error
-    body = {"overall": [], "key_steps": [], "confidence": {"overall": "low", "reasons": []},
+    body = {"overall": [], "key_steps": [], "narrative": [], "confidence": {"overall": "low", "reasons": []},
             "alternatives": [], "gaps": [], "next_checks": []}
     provider = ScriptedProvider([outage(), outage(), response(parsed=body)])
 
@@ -383,7 +383,7 @@ def test_session_stop_conditions_are_persisted_and_do_not_skip_assessment(tmp_pa
         "group_key": "c1", "source_case_id": None, "source_anchor_id": None, "source_link_id": None,
     })
     finish = ToolCall("finish", "finish_session", {"summary": "The bounded review session is complete."}, "{}")
-    body = {"overall": [], "key_steps": [], "confidence": {"overall": "low", "reasons": []},
+    body = {"overall": [], "key_steps": [], "narrative": [], "confidence": {"overall": "low", "reasons": []},
             "alternatives": [], "gaps": [], "next_checks": []}
     settings = Settings(home=tmp_path, agent_max_tool_calls_per_session=1 if mode == "capped" else 25)
     if mode == "capped":
@@ -494,7 +494,7 @@ def test_investigation_reserve_exhaustion_goes_to_assess_with_budget_reason(tmp_
     })
     opened = ToolCall("open", "open_hypothesis", {"statement": "Review the call-budget hypothesis"}, "{}")
     finish = ToolCall("finish", "finish_session", {"summary": "The initial review is complete."}, "{}")
-    body = {"overall": [], "key_steps": [], "confidence": {"overall": "low", "reasons": []},
+    body = {"overall": [], "key_steps": [], "narrative": [], "confidence": {"overall": "low", "reasons": []},
             "alternatives": [], "gaps": [], "next_checks": []}
     provider = ScriptedProvider([response(tool_calls=[opened, finish]), response(parsed=body)])
 
@@ -553,7 +553,7 @@ def test_assessment_input_trims_all_sections_and_refuses_an_oversized_prompt(tmp
     assert context["data"]["omitted"]["other_hypotheses"] > 0
     assert "remain in the report" in context["data"]["omitted"]["message"]
 
-    body = {"overall": [], "key_steps": [], "confidence": {"overall": "low", "reasons": []},
+    body = {"overall": [], "key_steps": [], "narrative": [], "confidence": {"overall": "low", "reasons": []},
             "alternatives": [], "gaps": [], "next_checks": []}
     provider = ScriptedProvider([response(parsed=body)], context=64, output=32)
     budget = AgentBudget.from_usage(BudgetLimits.from_settings(Settings(home=tmp_path)), repo.agent_usage("h1"),
@@ -582,7 +582,7 @@ def test_mission_scale_40_hypotheses_four_sessions_and_25_tools_stays_within_cap
             "created_at": now + timedelta(microseconds=index), "updated_at": now,
         })
 
-    body = {"overall": [], "key_steps": [], "confidence": {"overall": "low", "reasons": []},
+    body = {"overall": [], "key_steps": [], "narrative": [], "confidence": {"overall": "low", "reasons": []},
             "alternatives": [], "gaps": [], "next_checks": []}
 
     def scripted(request):
@@ -652,7 +652,7 @@ def test_agent_reassess_cli_publishes_a_new_report_revision(tmp_path, monkeypatc
     repo = hunt_run.open_repo(settings)
     repo.create_hunt("h1", {"window": {}, "targets": [], "ai_agent": {"requested": False}}, "d", "test")
     _detection_finished(repo, "h1")
-    body = {"overall": [], "key_steps": [], "confidence": {"overall": "low", "reasons": []},
+    body = {"overall": [], "key_steps": [], "narrative": [], "confidence": {"overall": "low", "reasons": []},
             "alternatives": [], "gaps": [], "next_checks": []}
     repo.save_agent_assessment({"id": "aa-first", "hunt_id": "h1", "revision": 1, "source": "template",
                                 "model": {}, "body": body, "checker": {}, "created_at": datetime.now(UTC)})

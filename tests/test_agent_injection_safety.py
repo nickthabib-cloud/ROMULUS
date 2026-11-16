@@ -133,7 +133,7 @@ def test_scripted_agent_receives_injected_typed_text_only_in_tool_result_data_an
     aliases = AliasBook(repo, "h1")
     evidence_alias = aliases.alias_for("E", event.id)
     finding_alias = aliases.alias_for("F", "injected-finding")
-    empty_assessment = {"overall": [], "key_steps": [], "confidence": {"overall": "low", "reasons": []},
+    empty_assessment = {"overall": [], "key_steps": [], "narrative": [], "confidence": {"overall": "low", "reasons": []},
                         "alternatives": [], "gaps": [], "next_checks": []}
     provider = ScriptedProvider([
         response(tool_calls=[ToolCall("read", "get_evidence", {"evidence": [evidence_alias]}, "{}")]),

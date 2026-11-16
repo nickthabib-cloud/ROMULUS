@@ -274,7 +274,7 @@ def _sentence(alias, text="The recorded process ran on the host.", kind="observe
 
 
 def _reply(alias, **sections):
-    body = {"overall": [_sentence(alias)], "key_steps": [], "confidence": {"overall": "medium", "reasons": []},
+    body = {"overall": [_sentence(alias)], "key_steps": [], "narrative": [], "confidence": {"overall": "medium", "reasons": []},
             "alternatives": [], "gaps": [], "next_checks": []}
     body.update(sections)
     return body

@@ -363,7 +363,7 @@ def test_persisted_assessment_target_ids_resolve_to_scoped_citation_links(setup,
         body, checker = check_assessment(repo, "h1", {
             "overall": [{"text": "A cited process warrants review", "kind": "observed", "cites": [
                 aliases.alias_for("F", cid), aliases.alias_for("E", "ev1")]}],
-            "key_steps": [], "confidence": {"overall": "low", "reasons": []},
+            "key_steps": [], "narrative": [], "confidence": {"overall": "low", "reasons": []},
             "alternatives": [], "gaps": [], "next_checks": [],
         })
         assert body["overall"][0]["cites"] == [cid, "ev1"]
