@@ -232,9 +232,10 @@ def redact_messages(messages: list[dict], settings: Settings, counts: dict[str, 
     state is left as it is: it is the model's own earlier output, which must go back byte for byte (signatures
     cover it), and every prompt it was produced from was redacted.
 
-    `counts` receives the replacements, by setting, made in the messages after the last assistant turn: what this
-    request adds to an append-only conversation. Earlier messages were counted by the call that first sent them,
-    so the counts of a session's calls add up to what it hid once, however often its history is sent again."""
+    `counts` receives the replacements, by setting, made in the non-system messages after the last assistant turn:
+    what this request adds to an append-only conversation. Earlier messages were counted by the call that first
+    sent them, so the counts of a session's calls add up to what it hid once, however often its history is sent
+    again. System messages are the product's own instructions, not telemetry, and are never counted."""
     last_assistant = max((i for i, m in enumerate(messages) if isinstance(m, dict) and m.get("role") == "assistant"),
                          default=-1)
 
@@ -248,7 +249,9 @@ def redact_messages(messages: list[dict], settings: Settings, counts: dict[str, 
         return value
     out = []
     for i, m in enumerate(messages):
-        tally = counts if i > last_assistant else None
+        # system messages are the product's own instructions, not telemetry: redacted, never counted
+        system = isinstance(m, dict) and m.get("role") == "system"
+        tally = counts if i > last_assistant and not system else None
         out.append({k: v if k == PROVIDER_STATE else clean(v, tally) for k, v in m.items()} if isinstance(m, dict)
                    else clean(m, tally))
     return out

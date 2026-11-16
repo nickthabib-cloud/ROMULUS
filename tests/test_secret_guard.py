@@ -102,6 +102,10 @@ def test_redaction_counts_name_the_setting_and_count_only_what_a_request_adds():
     sent = redact_messages(history, s, later)
     assert first == {"ARKIME_PASSWORD": 2} and later == {"ARKIME_PASSWORD": 1}
     assert SENTINEL not in json.dumps(sent)
+    # the product's own instructions are redacted too but are not telemetry: never counted
+    instructions: dict = {}
+    sent = redact_messages([{"role": "system", "content": f"never {SENTINEL}"}, history[1]], s, instructions)
+    assert instructions == {"ARKIME_PASSWORD": 2} and SENTINEL not in json.dumps(sent)
 
 
 def test_redaction_counts_are_recorded_per_call_and_summed_in_usage(tmp_path, caplog):
@@ -290,3 +294,38 @@ def test_run_details_show_redaction_and_guard_counts_by_setting_name(setup):
     assert '<span class="mono">?</span> 2 replacements' in block and "<b>bad</b>" not in html
     assert '<span class="mono">ARKIME_PASSWORD</span> 2 sessions' in block
     assert "romulus doctor" in block
+
+
+def test_after_a_real_trip_no_page_shows_the_secret_and_run_details_count_it(setup, caplog):
+    pytest.importorskip("anthropic")
+    from tests.test_agent_provider_claude import Endpoint, claude_settings, provider, reply, text, tool_use
+    caplog.set_level(logging.DEBUG)
+    client, repo, *_ = setup
+    test_web_agent_a6.run_row(repo, state="partial", reason="secret_guard")
+    settings = claude_settings(arkime_password=SENTINEL)
+    thinking = {"type": "thinking", "thinking": f"The reset set {SENTINEL}.",
+                "signature": "EqQBCkgIBhABGAIiQL+signature/A=="}
+    opened = tool_use(json.dumps({"statement": f"Review the password reset to {SENTINEL} on the web host",
+                                  "techniques": [], "entities": [], "supporting": [], "questions": ["Who?"]}),
+                      name="open_hypothesis")
+    endpoint = Endpoint(reply([thinking, text(f"Opening {SENTINEL}."), opened], stop="tool_use"), reply([text("x")]))
+    p, _ = provider(settings, endpoint)
+    budget = AgentBudget.from_usage(BudgetLimits.from_settings(settings), repo.agent_usage("h1"), clock=lambda: 0.0)
+    # the dossier the model is shown holds the secret's text once (a finding's claim), so redaction counts it
+    with repo.engine.begin() as connection:
+        connection.execute(t.candidate.update().values(claim=f"Password reset to {SENTINEL} observed"))
+    outcome = _run_session(settings, repo, "h1", p, _BudgetGate(budget, settings),
+                           lambda session: Toolbox(repo, "h1", session_id=session), _prompt_set(), purpose="orient")
+    assert outcome["state"] == "secret_guard" and len(endpoint.calls) == 1
+    assert SENTINEL not in endpoint.calls[0].content.decode()
+    assert repo.agent_usage("h1").get("redactions", {}).get("ARKIME_PASSWORD", 0) >= 1
+    # the deterministic finding keeps its text: only what the model wrote is stored without it
+    with repo.engine.begin() as connection:
+        connection.execute(t.candidate.update().values(claim="Password reset observed"))
+    pages = [client.get(f"/hunts/h1{suffix}").text for suffix in (
+        "", "/run", "/findings", "/assessment", "/hypotheses", "/agent/notes", "/agent/findings")]
+    hid = repo.agent_hypotheses("h1")[0]["id"]
+    pages.append(client.get(f"/hunts/h1/hypotheses/{hid}").text)
+    assert all(SENTINEL not in page for page in pages) and SENTINEL not in caplog.text
+    block = pages[1].split('id="secret-guard"', 1)[1].split("</section>", 1)[0]
+    assert '<span class="mono">ARKIME_PASSWORD</span> 1 session' in block and "replacement" in block
