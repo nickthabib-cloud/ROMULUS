@@ -10,6 +10,7 @@ from romulus.report.markdown import (
     NARRATIVE_NOTE,
     NARRATIVE_TITLE,
     is_ranked,
+    narrative_context_reason,
     narrative_heading,
     narrative_support,
     narrative_weak_reason,
@@ -106,6 +107,8 @@ def write(m, path, technical_name):
                 paragraph(f"{number}. {narrative_heading(story)}", bold=True, muted=bool(weak))
                 if weak:
                     paragraph(weak, muted=True)
+                if context := narrative_context_reason(story):
+                    paragraph(context)
                 for sentence in story["sentences"]:
                     statement(sentence, muted=bool(weak))
                 if support := narrative_support(story):

@@ -35,6 +35,7 @@ from romulus.report.incidents import build_incident_graph
 from romulus.report.manifest import NARRATIVE_PARAGRAPHS, NARRATIVE_SENTENCES, coverage_for_hunt
 from romulus.report.markdown import (
     CONTEXT_PHASE,
+    MODEL_CONTEXT_ATTACK,
     WEAK_BENIGN,
     WEAK_MODEL_CONTEXT,
     WEAK_NO_REPORTED,
@@ -56,6 +57,9 @@ SECTION_LIMITS = {"overall": 8, "key_steps": 30, "reasons": 10, "alternatives": 
 PHASE_LIMIT = 80
 # The key a checked narrative sentence carries its cites' alias kinds under until the evidence rules have read them.
 REFS = "_refs"
+# A phase label by which the model itself marks a paragraph as context (matched after NFKC and case folding):
+# "Context" alone, or followed by a colon, a dash or a space ("Contextual discovery" is not one).
+MODEL_CONTEXT = re.compile(r"context(?:$|[:\-–—\s])")
 # An RFC 3339 date and time with a UTC offset, the only form a narrative time span takes (ASCII digits only).
 DATE_TIME = re.compile(r"(?P<date>\d{4}-\d{2}-\d{2})[Tt ](?P<time>\d{2}:\d{2}:\d{2}(?:\.\d+)?)"
                        r"(?P<offset>[Zz]|[+-]\d{2}:\d{2})", re.ASCII)
@@ -326,7 +330,7 @@ def check_assessment(repo, hunt_id: str, body: dict, *, owner_token=None,
               "removed_narrative_negation": 0, "labelled_uncertain": 0,
               "downgraded_observed_weak_evidence": 0, "phase_weakly_supported": 0,
               "weakly_supported_benign_triage": 0, "labelled_uncertain_benign_triage": 0,
-              "weakly_supported_unknown_support": 0, "model_labelled_context": 0}
+              "weakly_supported_unknown_support": 0, "model_labelled_context": 0, "model_context_cites_attack": 0}
     suspicious_cache: dict[str, bool] = {}
 
     def check(sentence: dict, section: str) -> dict | None:
@@ -459,19 +463,21 @@ def _ground_paragraph(paragraph: dict, strengths: dict, counts: dict) -> dict:
     """The narrative's evidence rules, which weigh what the cited activity is, not only that it is cited:
     - an `observed` sentence must cite a reportable deterministic finding (urgent, high or lead), directly or through
       an evidence record one cites; otherwise it becomes `inferred`;
-    - a paragraph, whatever its label, that cites no Reported or confirmed finding and none whose group the triage
-      pass assessed as likely or possible attack is weakly supported: its phase becomes Context (the model's label is
-      kept as `model_phase`, any ATT&CK tactic is dropped) and it says why, in this order:
+    - a cite is strong when its finding is confirmed, triaged as likely or possible attack, or Reported without a
+      likely-benign verdict (`grounding.FindingStrength.strong`); one strong cite keeps a paragraph's label;
+    - a paragraph, whatever its label, with no strong cite is weakly supported: its phase becomes Context (the model's
+      label is kept as `model_phase`, any ATT&CK tactic is dropped), it is shown muted, and it says why, in this order:
       - every cite rests only on findings triaged likely benign: its sentences also become `uncertain`;
       - a cited evidence record has more findings than the lookup reads: its support could not be determined, and
         unknown support never counts as strong;
-      - otherwise: no reported finding is cited.
-    - a paragraph the model itself labelled context (its label starts with "Context") is shown as context the same
-      way, whatever it cites.
-    A cite is strong when its finding is confirmed, triaged as likely or possible attack, or Reported without a
-    likely-benign verdict (`grounding.FindingStrength.strong`): one strong cite keeps a paragraph's label. Every
-    paragraph records its support mix, the count of its distinct cites in each `SUPPORT_CATEGORIES` category, so the
-    analyst sees how much of it rests on what. Nothing is removed; each weakly supported paragraph is counted once,
+      - otherwise: no reported finding is cited;
+    - a paragraph the model itself labelled context (`MODEL_CONTEXT`: "Context" alone or followed by a colon, dash or
+      space) is context: weakly supported and muted like the above, unless it cites a confirmed or attack-triaged
+      finding. Attack activity is never demoted: such a paragraph is labelled Context as the model asked, but stays
+      unmuted with its sentences as written, and says that it cites confirmed or attack-triaged findings
+      (`context_reason`). A Reported finding without a verdict does not make that exception.
+    Every paragraph records its support mix, the count of its distinct cites in each `SUPPORT_CATEGORIES` category,
+    so the analyst sees how much of it rests on what. Nothing is removed; each paragraph changed is counted once,
     under its reason."""
     sentences = []
     for sentence in paragraph["sentences"]:
@@ -485,7 +491,12 @@ def _ground_paragraph(paragraph: dict, strengths: dict, counts: dict) -> dict:
     mix = Counter(item.category for item in cites)
     support = {name: mix[name] for name in SUPPORT_CATEGORIES if mix[name]}
     out = {**paragraph, "sentences": [sentence for sentence, _refs in sentences], "support": support}
-    if unicodedata.normalize("NFKC", paragraph["phase"]).casefold().startswith(CONTEXT_PHASE.casefold()):
+    if MODEL_CONTEXT.match(unicodedata.normalize("NFKC", paragraph["phase"]).casefold()):
+        if any(item.category in ("confirmed", "attack") for item in cites):
+            counts["model_context_cites_attack"] += 1
+            out = {key: value for key, value in out.items() if key != "tactic"}
+            out.update(phase=CONTEXT_PHASE, context_reason=MODEL_CONTEXT_ATTACK, model_phase=paragraph["phase"])
+            return out
         reason = WEAK_MODEL_CONTEXT
         counts["model_labelled_context"] += 1
     elif any(item.strong for item in cites):

@@ -8,6 +8,7 @@
 <ol class="narrative">
 {% for p in nv.narrative %}<li{% if p.weak %} class="weak"{% endif %}><div class="narrative-head"><b>{{ p.phase }}</b><span class="mono small help">{{ p.when }}</span></div>
 {% if p.weak %}<p class="help small weak-reason">{{ p.weak }}</p>{% endif %}
+{% if p.context %}<p class="small context-reason">{{ p.context }}</p>{% endif %}
 <p>{% for s in p.sentences %}<span class="ns k-{{ s.kind }}">{{ s.text }}</span> <span class="kind">({{ s.kind }})</span> <span class="cites">{{ cites(s.cites) }}</span>{% if s.cites_more %} <span class="help small">{{ s.cites_more }} more citations</span>{% endif %}{% if s.suspicious_content %} <b class="flag">Cites only content flagged as possible prompt injection.</b>{% endif %}{% if not loop.last %} {% endif %}{% endfor %}</p>
 {% if p.support %}<p class="help small support-mix">{{ p.support }}</p>{% endif %}</li>
 {% endfor %}</ol>

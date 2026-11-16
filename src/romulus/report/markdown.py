@@ -61,6 +61,11 @@ WEAK_REASONS = {WEAK_NO_REPORTED: "no reported finding cited",
                 WEAK_BENIGN: "cited activity was triaged as likely benign",
                 WEAK_UNKNOWN: "support could not be determined (citation cap)",
                 WEAK_MODEL_CONTEXT: "labelled context by the model"}
+# A paragraph the model labelled context that cites confirmed or attack-triaged findings: shown as Context, as the
+# model asked, but never muted or weakened, with this reason in plain view.
+MODEL_CONTEXT_ATTACK = "model_context_cites_attack"
+CONTEXT_REASONS = {MODEL_CONTEXT_ATTACK: "labelled context by the model, but it cites confirmed or attack-triaged "
+                                         "findings"}
 # A paragraph's support mix: how many of its distinct cites fall in each category, strongest first (the checker
 # derives it from stored ranks and triage verdicts only).
 SUPPORT_LABELS = {"confirmed": "confirmed", "attack": "triaged possible or likely attack",
@@ -76,7 +81,19 @@ def narrative_support(paragraph: dict) -> str:
     parts = [f"{support[name]} {label}" for name, label in SUPPORT_LABELS.items()
              if isinstance(support.get(name), int) and support[name] > 0]
     return "Support: " + ", ".join(parts) + "." if parts else ""
+
+
 WEAK_LABEL = "weakly supported"
+
+
+def narrative_context_reason(paragraph: dict) -> str:
+    """Why a paragraph the model labelled context is shown unmuted, in words (empty otherwise; unescaped)."""
+    reason = CONTEXT_REASONS.get(paragraph.get("context_reason"))
+    if not reason or paragraph.get("weakly_supported"):
+        return ""
+    model_phase = paragraph.get("model_phase")
+    return (f"{reason[0].upper()}{reason[1:]}" + (f"; the model labelled it {model_phase}" if model_phase else "")
+            + ".")
 
 
 def narrative_label(paragraph: dict) -> str:
@@ -133,8 +150,10 @@ def _assessment_section(m: dict) -> list[str]:
         for number, paragraph in enumerate(assessment["narrative"], 1):
             weak = narrative_weak_reason(paragraph)
             support = narrative_support(paragraph)
+            context = narrative_context_reason(paragraph)
             out += [f"**{number}. {esc(narrative_heading(paragraph))}**", "",
                     *([f"*{esc(weak)}*", ""] if weak else []),
+                    *([esc(context), ""] if context else []),
                     *[sentence(item) for item in paragraph["sentences"]], "",
                     *([f"*{esc(support)}*", ""] if support else [])]
         if not assessment["narrative"]:

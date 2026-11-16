@@ -560,11 +560,13 @@ web_setup = test_web_agent_a6.setup
 def test_the_web_shows_weak_paragraphs_muted_with_their_reason_escaped(web_setup):
     client, repo, cid, *_ = web_setup
     test_web_agent_a6.run_row(repo)
-    ta._insert(repo, [ta._row("lead-1", "r.lead", lane="lead", host="web01")])     # reportable, not Reported
+    ta._insert(repo, [ta._row("lead-1", "r.lead", lane="lead", host="web01"),      # reportable, not Reported
+                      ta._row("urg-1", "r.urgent", lane="urgent", host="web01")])  # confirmed
     body = _reply([_p([_s(_f(repo, "lead-1"), "The process read the credential store.")], HOSTILE_PHASE),
-                   _p([_s(_f(repo, cid), "The read was done by the attacker.", "inferred")], "Objective")])
+                   _p([_s(_f(repo, cid), "The read was done by the attacker.", "inferred")], "Objective"),
+                   _p([_s(_f(repo, "urg-1"), "An administrator ran the tool.", "inferred")], "Context: admin work")])
     checked, counts = check_assessment(repo, "h1", body, triage=OFF)
-    assert counts == {"phase_weakly_supported": 1}
+    assert counts == {"phase_weakly_supported": 1, "model_context_cites_attack": 1}
     repo.save_agent_assessment({"id": "aa-weak", "hunt_id": "h1", "revision": 1, "source": "agent",
                                 "model": {"provider": "scripted", "model_requested": "m"}, "body": checked,
                                 "checker": counts, "created_at": utcnow()})
@@ -572,7 +574,11 @@ def test_the_web_shows_weak_paragraphs_muted_with_their_reason_escaped(web_setup
         page = client.get(path).text
         narrative = page[page.index('<ol class="narrative">'):]
         narrative = narrative[:narrative.index("</ol>")]
-        assert narrative.count('<li class="weak">') == 1 and narrative.count("<li>") == 1
+        assert narrative.count('<li class="weak">') == 1 and narrative.count("<li>") == 2
+        # model context citing a confirmed finding: Context, unmuted, its reason in plain view
+        assert "<li><div class=\"narrative-head\"><b>Context</b>" in narrative
+        assert ('<p class="small context-reason">Labelled context by the model, but it cites confirmed or '
+                "attack-triaged findings; the model labelled it Context: admin work.</p>") in narrative
         assert "<b>Context (weakly supported)</b>" in narrative and "<b>Objective</b>" in narrative
         assert ('<p class="help small weak-reason">Weakly supported: no reported finding cited; the model labelled '
                 "it &lt;Persistence&gt;.</p>") in narrative
@@ -653,19 +659,56 @@ def test_reported_findings_without_a_verdict_stay_strong_and_a_failed_pass_keeps
 @pytest.mark.parametrize("label", ["Context", "context: routine deployment", "CONTEXT",
                                    "Ｃｏｎｔｅｘｔ - provisioning"])
 def test_a_model_context_label_is_rendered_as_product_context(label):
-    repo = _reported_hunt({"r.q2": "likely_attack"})
-    body = _reply([_p([_s(_f(repo, "q-2"), kind="inferred")], label)])
+    repo = _reported_hunt({"r.q1": "insufficient_evidence"})
+    # Reported findings without a benign verdict (q-1) are strong support, but they never lift model context
+    body = _reply([_p([_s([_f(repo, "q-0"), _f(repo, "q-1")], kind="inferred")], label)])
     checked, counts = check_assessment(repo, "h1", body, triage=USED)
     paragraph = checked["narrative"][0]
     assert paragraph["phase"] == "Context" and paragraph["model_phase"] == label and "tactic" not in paragraph
     assert paragraph["weakly_supported"] and paragraph["support_reason"] == "model_labelled_context"
-    assert paragraph["sentences"][0]["kind"] == "inferred" and paragraph["support"] == {"attack": 1}
+    assert paragraph["sentences"][0]["kind"] == "inferred" and paragraph["support"] == {"reported": 1, "benign": 1}
     assert counts == {"model_labelled_context": 1}
     # one look for every kind of context: the same label and muted style as a product-weakened paragraph
     shown = narrative_paragraphs(checked["narrative"])[0]
     assert markdown.narrative_label(shown) == "Context (weakly supported)"
     assert markdown.narrative_weak_reason(shown) == (
         f"Weakly supported: labelled context by the model; the model labelled it {label}.")
+
+
+@pytest.mark.parametrize("cited", ["c-urgent", "q-2"])
+def test_a_model_context_paragraph_citing_confirmed_or_attack_triaged_findings_is_never_demoted(cited):
+    repo = _reported_hunt({"r.q2": "likely_attack"})
+    label = "Context: routine administration"
+    body = _reply([_p([_s([_f(repo, cited), _f(repo, "q-0")]),
+                       _s(_f(repo, "q-0"), "A routine job ran.", "inferred")], label)])
+    checked, counts = check_assessment(repo, "h1", body, triage=USED)
+    paragraph = checked["narrative"][0]
+    # labelled Context as the model asked, but neither weak nor muted, and its sentences as written
+    assert paragraph["phase"] == "Context" and paragraph["model_phase"] == label and "tactic" not in paragraph
+    assert "weakly_supported" not in paragraph and paragraph["context_reason"] == "model_context_cites_attack"
+    assert [s["kind"] for s in paragraph["sentences"]] == ["observed", "inferred"]
+    assert paragraph["support"] == ({"confirmed": 1, "benign": 1} if cited == "c-urgent"
+                                    else {"attack": 1, "benign": 1})
+    assert counts == {"model_context_cites_attack": 1}
+    shown = narrative_paragraphs(checked["narrative"])[0]
+    assert shown["context_reason"] == "model_context_cites_attack" and shown["model_phase"] == label
+    assert markdown.narrative_label(shown) == "Context" and markdown.narrative_weak_reason(shown) == ""
+    reason = ("Labelled context by the model, but it cites confirmed or attack-triaged findings; the model labelled "
+              f"it {label}.")
+    assert markdown.narrative_context_reason(shown) == reason
+    # every renderer shows the reason in plain view, unmuted
+    manifest = {"ai_assessment": {"source": "agent", "header": "h", "body": {}, "checker": {},
+                                  "narrative": [shown]}}
+    text = "\n".join(markdown._assessment_section(manifest))
+    assert f"\n{reason}\n" in text and f"*{reason}*" not in text
+
+
+@pytest.mark.parametrize("label", ["Contextual discovery", "Contexts", "In context", "Contextualizing the access"])
+def test_only_context_itself_is_a_model_context_label(label):
+    repo = _reported_hunt({})
+    checked, counts = check_assessment(repo, "h1", _reply([_p([_s(_f(repo, "c-urgent"))], label)]), triage=USED)
+    paragraph = checked["narrative"][0]
+    assert paragraph["phase"] == label and "weakly_supported" not in paragraph and counts == {}
 
 
 def test_the_support_summary_counts_distinct_cites_and_stays_bounded_at_the_lookup_cap(monkeypatch):
