@@ -121,7 +121,8 @@ def test_budget_round_with_none_reason_still_assesses(agent_repo, tmp_path):
     result = _run(repo, tmp_path, ScriptedProvider([_finish(), response(parsed=ASSESSMENT)]),
                   agent_max_calls=2, agent_concurrency=2)
     assert result.state == "partial" and "budget:calls" in result.reason
-    assert sorted(row["state"] for row in repo.agent_sessions("h1", purpose="investigate")) == ["budget", "finished"]
+    # only one first call fits beside the assessment's hold: the second session is not started (it would make no call)
+    assert sorted(row["state"] for row in repo.agent_sessions("h1", purpose="investigate")) == ["finished"]
     assert repo.agent_sessions("h1", purpose="assess")[-1]["state"] == "finished"
 
 
