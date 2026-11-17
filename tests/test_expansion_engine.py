@@ -328,6 +328,28 @@ def test_dropped_aggregate_keys_make_anchor_partial_and_list_the_keys():
     assert any('"process.pid":108' in reason for reason in anchor_row["reasons"])
 
 
+def test_an_analysts_stop_leaves_unfinished_anchors_pending_and_a_resume_finishes_them():
+    repo = repo_with_anchor()
+    first_fetcher = ScriptedFetcher(repo)
+    stop = {"detail": None}
+
+    def stop_after_first(_link):
+        stop["detail"] = "requested by web:alice"
+
+    first = ExpansionEngine(repo, "h1", WINDOW, first_fetcher, after_link=stop_after_first,
+                            stop_check=lambda: stop["detail"]).run()
+    assert len(first_fetcher.calls) == 1                     # no link is fetched after the stop
+    assert first["status"] == "partial" and first["stopped"] == "requested by web:alice"
+    assert first["pending"] == ["F-anchor"] and first["stop_reason"].startswith("stopped by analyst")
+    assert repo.expansion_anchors("h1")[0]["status"] == "pending"   # never complete, never given up
+
+    resumed_fetcher = ScriptedFetcher(repo)
+    result = ExpansionEngine(repo, "h1", WINDOW, resumed_fetcher).run()
+    assert result["stop_reason"] == "fixpoint" and "stopped" not in result
+    assert first_fetcher.calls[0] not in resumed_fetcher.calls       # the stored link is reused
+    assert repo.expansion_anchors("h1")[0]["status"] == "expanded_complete"
+
+
 def test_resume_continues_after_crash_without_repeating_evaluated_links():
     repo = repo_with_anchor()
     first_fetcher = ScriptedFetcher(repo)

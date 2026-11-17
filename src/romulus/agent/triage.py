@@ -38,6 +38,7 @@ from time import monotonic
 
 from romulus.agent.provider import (
     AgentBudget,
+    AgentStopped,
     BudgetExhausted,
     BudgetLimits,
     ChatRequest,
@@ -137,6 +138,8 @@ class TriageBudget(AgentBudget):
         self.input_tokens = 0
         self.budget_input_tokens = 0
         self.output_tokens = 0
+        # `stop()`: an analyst's open stop request for the agent (None while there is none); no call starts after it
+        self.stop: Callable[[], str | None] | None = None
 
     @classmethod
     def from_settings(cls, s: Settings, clock: Callable[[], float] = monotonic) -> TriageBudget:
@@ -171,6 +174,9 @@ class TriageBudget(AgentBudget):
         return budget
 
     def check(self, prompt_tokens_est: int, max_output_tokens: int) -> None:
+        stopped = self.stop() if self.stop is not None else None
+        if stopped:
+            raise AgentStopped(stopped)
         super().check(prompt_tokens_est, max_output_tokens)
         factor = self.limits.attempts_reserved
         worst_prompt = self.limits.worst_prompt_tokens(prompt_tokens_est)
@@ -391,13 +397,15 @@ def pass_digest(cards_digest: str, s: Settings, provider, system: str) -> str:
 def run_triage_pass(settings: Settings, repo: Repo, hunt_id: str, provider, *, owner_token: str | None = None,
                     heartbeat: Callable[[], None] | None = None, clock: Callable[[], float] = monotonic,
                     force: bool = False, workdir: str | None = None, max_bytes: int | None = None,
-                    reserve_bytes: int = 0, model_source: str | None = None) -> dict:
+                    reserve_bytes: int = 0, model_source: str | None = None,
+                    stop: Callable[[], str | None] | None = None) -> dict:
     """Run one triage pass and publish it (rows and summary in one transaction); return its summary. The wall budget
     starts here, so staging and card building count. A stage over its byte budget is an honest failure: recorded,
     nothing published, the deterministic order kept. The pass runs on `provider.model`, its own model, which the
     summary and the prompt digest record; `model_source` says which setting chose it."""
     heartbeat = heartbeat or (lambda: None)
     budget = TriageBudget.from_settings(settings, clock)
+    budget.stop = stop                  # an analyst's stop ends the pass before its next call (budget:stopped)
     system = _prompt()
     titles = _titles(repo, hunt_id)
     previous = latest_summary(repo, hunt_id)
@@ -583,7 +591,8 @@ def _call(settings, repo, hunt_id, provider, request, budget: TriageBudget, prom
 def run_cited_triage(settings: Settings, repo: Repo, hunt_id: str, provider, group_keys: list[tuple], *,
                      owner_token: str | None = None, heartbeat: Callable[[], None] | None = None,
                      clock: Callable[[], float] = monotonic, workdir: str | None = None,
-                     max_bytes: int | None = None, reserve_bytes: int = 0) -> dict:
+                     max_bytes: int | None = None, reserve_bytes: int = 0,
+                     stop: Callable[[], str | None] | None = None) -> dict:
     """Extend the latest triage pass to the groups `group_keys` names (`triage_order.group_fields` tuples, in the
     order to triage them) that it left without a verdict: the same model, prompt, cards, validation and redaction,
     spending from what is left of that pass's own budget (calls, tokens, cost and wall time). The pass keeps its number,
@@ -605,6 +614,7 @@ def run_cited_triage(settings: Settings, repo: Repo, hunt_id: str, provider, gro
         return {**out, "status": "skipped", "reason": "no usable triage pass to extend"}
     budget = TriageBudget.resume(settings, previous.get("usage") or {}, clock,
                                  billed=pass_billed(repo, hunt_id, previous))
+    budget.stop = stop
     system = _prompt()
     try:
         with OrderWorkspace(repo, hunt_id, directory=workdir, heartbeat=heartbeat, max_bytes=max_bytes,

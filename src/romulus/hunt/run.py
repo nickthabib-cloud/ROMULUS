@@ -288,9 +288,9 @@ def _ai_agent_phase(s: Settings, repo: Repo, hunt_id: str, manifest: dict, owner
                     if cited is not None:
                         return run_cited_triage_in_phase(s, repo, hunt_id, cited, owner_token=owner_token,
                                                          heartbeat=phase_heartbeat, readiness=readiness,
-                                                         build=build_provider)
+                                                         build=build_provider, stop=watch)
                     return run_triage_in_phase(s, repo, hunt_id, owner_token=owner_token, heartbeat=phase_heartbeat,
-                                               readiness=readiness, build=build_provider)
+                                               readiness=readiness, build=build_provider, stop=watch)
             result = run_agent_phase(s, repo, hunt_id, provider=provider, toolbox_factory=toolbox_factory,
                                      owner_token=owner_token, heartbeat=heartbeat, triage=triage, stop=watch,
                                      refresh=refresh).as_dict()
@@ -835,9 +835,10 @@ def _agent_extended(repo: Repo, hunt_id: str, agent_run: dict) -> bool:
 
 
 def resume_hunt(s: Settings, hunt_id: str, *, force_model: bool = False, continue_agent: bool = False,
-                actor: str = "system") -> dict:
+                actor: str = "system", on_claimed=None) -> dict:
     """Resume persisted agent work without repeating a completed deterministic hunt. The agent keeps the model the
-    hunt recorded unless `force_model`.
+    hunt recorded unless `force_model`. `on_claimed()` runs once this resume holds the hunt's (or its agent's) lease
+    (the command line records its worker process then, so a refused resume never replaces a live worker's record).
 
     A hunt an analyst stopped resumes too, and the resume clears the stop request (`actor` is recorded): one stopped
     during its sweep runs the sweep again (its writes are idempotent, and its aggregates must read every partition),
@@ -913,6 +914,8 @@ def resume_hunt(s: Settings, hunt_id: str, *, force_model: bool = False, continu
         if hunt["execution_state"] != "partial":
             raise RuntimeError(f"hunt {hunt_id} is {hunt['execution_state']}; only a partial hunt resumes its sweep")
         owner = repo.claim_hunt(hunt_id, _lease_seconds(s), resume=True)["lease_owner"]
+        if on_claimed is not None:
+            on_claimed()
         repo.clear_stops(hunt_id, actor)
         if forced is not None:
             repo.audit("system", AGENT_MODEL_FORCED, hunt_id, forced, owner_token=owner)
@@ -939,6 +942,8 @@ def resume_hunt(s: Settings, hunt_id: str, *, force_model: bool = False, continu
     claimed = (repo.claim_agent_lease(hunt_id, _lease_seconds(s)) if agent_only else
                repo.claim_hunt(hunt_id, _lease_seconds(s), resume=True))
     owner_token = claimed["lease_owner"]
+    if on_claimed is not None:
+        on_claimed()
     # the analyst asked the hunt to run again: an earlier stop request no longer applies
     repo.clear_stops(hunt_id, actor)
     if forced is not None:

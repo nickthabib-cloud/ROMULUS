@@ -45,7 +45,7 @@ def _ready(s: Settings, readiness):
 
 
 def _pass(s: Settings, repo: Repo, hunt_id: str, owner: str, heartbeat, *, provider, readiness, build, force: bool,
-          source: str) -> dict:
+          source: str, stop=None) -> dict:
     """One pass under a lease `owner` already holds: never raises for anything but a lost lease; a failure is
     recorded and returned as the summary."""
     try:
@@ -53,7 +53,8 @@ def _pass(s: Settings, repo: Repo, hunt_id: str, owner: str, heartbeat, *, provi
             from romulus.agent.provider import build_provider
             provider = (build or build_provider)(s, readiness=readiness)
         return run_triage_pass(s, repo, hunt_id, provider, owner_token=owner, heartbeat=heartbeat, force=force,
-                               model_source=source, **stage_limits(s))
+                               model_source=source, **({"stop": stop} if stop is not None else {}),
+                               **stage_limits(s))
     except Exception as exc:
         if is_lease_lost(exc):
             raise
@@ -70,7 +71,7 @@ def _pass(s: Settings, repo: Repo, hunt_id: str, owner: str, heartbeat, *, provi
 
 
 def run_triage_in_phase(s: Settings, repo: Repo, hunt_id: str, *, owner_token: str, heartbeat, readiness=None,
-                        build: Callable | None = None, provider=None) -> dict:
+                        build: Callable | None = None, provider=None, stop=None) -> dict:
     """Run one triage pass inside the agent phase, under the agent lease that phase holds (no claim or release):
     after the investigation and before the assessment, which reads its verdicts. The same model and provider choice
     as `run_triage`; a completed pass with the same digest is reused. Raises only for a lost lease."""
@@ -81,11 +82,12 @@ def run_triage_in_phase(s: Settings, repo: Repo, hunt_id: str, *, owner_token: s
         if not readiness.ready:
             return {"status": "skipped", "reason": f"provider_not_ready: {readiness.message()}"}
     return _pass(s, repo, hunt_id, owner_token, heartbeat, provider=provider, readiness=readiness, build=build,
-                 force=False, source=source)
+                 force=False, source=source, stop=stop)
 
 
 def run_cited_triage_in_phase(s: Settings, repo: Repo, hunt_id: str, group_keys: list[tuple], *, owner_token: str,
-                              heartbeat, readiness=None, build: Callable | None = None, provider=None) -> dict:
+                              heartbeat, readiness=None, build: Callable | None = None, provider=None,
+                              stop=None) -> dict:
     """Extend the phase's triage pass to the groups the assessment's narrative cites without a verdict
     (`agent.triage.run_cited_triage`), under the same lease, model and budget. Never raises for anything but a lost
     lease: a failure is the summary, and is recorded."""
@@ -100,7 +102,8 @@ def run_cited_triage_in_phase(s: Settings, repo: Repo, hunt_id: str, group_keys:
             from romulus.agent.provider import build_provider
             provider = (build or build_provider)(s, readiness=readiness)
         return run_cited_triage(s, repo, hunt_id, provider, group_keys, owner_token=owner_token,
-                                heartbeat=heartbeat, **stage_limits(s))
+                                heartbeat=heartbeat, **({"stop": stop} if stop is not None else {}),
+                                **stage_limits(s))
     except Exception as exc:
         if is_lease_lost(exc):
             raise

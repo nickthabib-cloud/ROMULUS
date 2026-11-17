@@ -243,6 +243,13 @@ class BudgetExhausted(RuntimeError):
         self.detail = detail
 
 
+class AgentStopped(BudgetExhausted):
+    """An analyst asked the agent to stop: no further model call starts (`budget` is "stopped")."""
+
+    def __init__(self, detail: str):
+        super().__init__("stopped", detail)
+
+
 @dataclass(frozen=True)
 class Part:
     """One billed attempt of a call and the model that served it (empty when unknown)."""

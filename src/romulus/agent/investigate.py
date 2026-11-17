@@ -38,6 +38,7 @@ from romulus.agent.provider import (
     record_secret_guard,
 )
 from romulus.agent.provider.base import PROVIDER_STATE, ToolCall, estimate_tokens, redact_value
+from romulus.agent.provider.budget import AgentStopped
 from romulus.agent.refusals import bounded, reason, tool_result_reasons
 from romulus.agent.toolbox import Toolbox
 from romulus.agent.triage import latest_summary
@@ -94,13 +95,6 @@ SECRET_GUARD_REASON = "secret_guard"
 # The reason an analyst's stop request ended a session or the phase (a stopped session's state is `interrupted`).
 # A run stopped this way is resumable: `hunt resume` continues it from its persisted work.
 STOPPED_REASON = "stopped_by_analyst"
-
-
-class AgentStopped(BudgetExhausted):
-    """An analyst asked the agent to stop: no further model call starts."""
-
-    def __init__(self, detail: str):
-        super().__init__("stopped", detail)
 
 
 @dataclass
@@ -1290,16 +1284,30 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
             _place_late_ranks(repo, hunt_id, owner_token=owner_token)
             triage_summary = _triage_before_assess(repo, hunt_id, triage, budget, heartbeat)
         context = triage_context(triage_summary, enabled=triage is not None or settings.agent_triage == "on")
-        try:
-            assessment = run_assessment(settings, repo, hunt_id, provider, budget, owner_token=owner_token,
-                                        clock=clock, heartbeat=heartbeat, triage=context)
-        except Exception as exc:
-            if is_lease_lost(exc):
-                raise
-            assessment_fault = True
-            assessment = None
-            reasons.append(f"assessment_error:{type(exc).__name__}")
-        if assessment is not None and triage is not None and context.usable:
+        stopped = gate.stopped()
+        if stopped:
+            # stopped during the triage pass: no assessment call; the latest stored assessment stands
+            reasons.append(STOPPED_REASON)
+            try:
+                _store_template(repo, hunt_id, STOPPED_REASON, owner_token=owner_token)
+            except Exception as exc:
+                if is_lease_lost(exc):
+                    raise
+                assessment_fault = True
+                reasons.append(f"template_error:{type(exc).__name__}")
+            assessment = {"stopped": True}
+        else:
+            try:
+                assessment = run_assessment(settings, repo, hunt_id, provider, budget, owner_token=owner_token,
+                                            clock=clock, heartbeat=heartbeat, triage=context)
+            except Exception as exc:
+                if is_lease_lost(exc):
+                    raise
+                assessment_fault = True
+                assessment = None
+                reasons.append(f"assessment_error:{type(exc).__name__}")
+        if (assessment is not None and not assessment.get("stopped") and triage is not None and context.usable
+                and not gate.stopped()):
             triage_summary = {**triage_summary, "cited": _triage_cited(
                 settings, repo, hunt_id, triage, assessment, context, budget, heartbeat, owner_token=owner_token)}
     if assessment is None:

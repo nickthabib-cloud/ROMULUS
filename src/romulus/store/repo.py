@@ -670,6 +670,15 @@ class Repo:
         if fenced.rowcount != 1:
             raise RuntimeError(f"hunt {hunt_id} agent lease ownership lost")
 
+    @staticmethod
+    def _sweep_stopped(c, hunt_id: str) -> bool:
+        """Whether the hunt's latest sweep was stopped before it finished (an analyst's stop, or a force stop): its
+        detection is unfinished, though the hunt ended partial."""
+        summary = c.execute(select(t.audit_event.c.detail).where(
+            t.audit_event.c.hunt_id == hunt_id, t.audit_event.c.action == "hunt.sweep_summary",
+        ).order_by(t.audit_event.c.id.desc()).limit(1)).scalar()
+        return isinstance(summary, dict) and bool(summary.get("stopped")) and not summary.get("finished")
+
     def claim_agent_lease(self, hunt_id: str, lease_seconds: int, now: datetime | None = None,
                           owner_token: str | None = None) -> dict:
         """Claim agent-only work without changing the detection run's state."""
@@ -689,9 +698,9 @@ class Repo:
             hunt = c.execute(select(t.hunt).where(t.hunt.c.id == hunt_id)).mappings().one()
             if _stored_utc(hunt["lease_until"]) is not None and _stored_utc(hunt["lease_until"]) > now:
                 raise RuntimeError(f"hunt {hunt_id} has an active detection lease")
-            if hunt["execution_state"] not in AGENT_ELIGIBLE_STATES:
+            if hunt["execution_state"] not in AGENT_ELIGIBLE_STATES or self._sweep_stopped(c, hunt_id):
                 # The agent works from a finished detection result; finalizing over a planned, running or
-                # failed hunt would publish a negative for scope that was never assessed.
+                # failed hunt, or one stopped during its sweep, would publish a negative for scope never assessed.
                 raise RuntimeError(f"hunt {hunt_id} is {hunt['execution_state']}: the agent runs only after "
                                    "detection finishes; resume the hunt first")
             before = c.execute(select(t.agent_run).where(t.agent_run.c.hunt_id == hunt_id)).mappings().first()
@@ -5758,7 +5767,7 @@ class Repo:
                 t.hunt.c.id == hunt_id)).mappings().first()
             if hunt is None:
                 return "Hunt not found."
-            if hunt["execution_state"] not in AGENT_ELIGIBLE_STATES:
+            if hunt["execution_state"] not in AGENT_ELIGIBLE_STATES or self._sweep_stopped(c, hunt_id):
                 return "The agent runs only after detection finishes; resume the hunt first."
             until = c.execute(select(t.agent_run.c.lease_until).where(t.agent_run.c.hunt_id == hunt_id)).scalar()
             if any(_stored_utc(value) is not None and _stored_utc(value) > now

@@ -188,12 +188,19 @@ def cmd_hunt(args) -> int:
         if args.agent or args.no_agent:
             print("resume uses the agent request recorded on the hunt", file=sys.stderr)
             return EXIT_FAIL
+        from contextlib import ExitStack
         try:
-            with worker(open_repo(s), args.hunt_id, "hunt resume"):
+            with ExitStack() as stack:
+                repo = open_repo(s)
+                # the worker is recorded only once the resume holds the lease
                 result = resume_hunt(s, args.hunt_id, force_model=force_model, continue_agent=args.agent_only,
-                                     actor=f"cli:{_cli_user()}")
+                                     actor=f"cli:{_cli_user()}", on_claimed=lambda: stack.enter_context(
+                                         worker(repo, args.hunt_id, "hunt resume")))
         except (AgentModelMismatch, ControlRefused, BudgetRefused) as exc:
             print(str(exc), file=sys.stderr)
+            return EXIT_FAIL
+        except (ValueError, RuntimeError, KeyError) as exc:
+            print(f"hunt {args.hunt_id} not resumed: {exc}", file=sys.stderr)
             return EXIT_FAIL
         if args.json:
             print(json.dumps(result, indent=2, default=str))
@@ -259,8 +266,10 @@ def _hunt_control(args, s) -> int:
         if args.no_continue:
             print(f"continue the agent with `romulus hunt resume {args.hunt_id} --agent-only`")
             return EXIT_OK
-        with worker(repo, args.hunt_id, "hunt extend"):
-            result = resume_hunt(s, args.hunt_id, continue_agent=True, actor=actor)
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            result = resume_hunt(s, args.hunt_id, continue_agent=True, actor=actor, on_claimed=lambda: stack.enter_context(
+                worker(repo, args.hunt_id, "hunt extend")))
         print(json.dumps(result, indent=2, default=str) if args.json else
               f"continued: {result['execution_state']}\n" + _ai_agent_line(result))
         return EXIT_OK
