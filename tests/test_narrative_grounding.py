@@ -592,19 +592,19 @@ def test_the_web_shows_weak_paragraphs_muted_with_their_reason_escaped(web_setup
 
 
 # ------------------------------------------------------------------------- the verdict outweighs Reported; support mix
-def _reported_rows(repo=None):
-    """A ranked hunt where four lead findings on a confirmed host are Reported (not confirmed), untriaged."""
+def _reported_rows(repo=None, count=4):
+    """A ranked hunt where `count` lead findings on a confirmed host are Reported (not confirmed), untriaged."""
     from datetime import timedelta
 
     from romulus.hunt.rank import PASS_FINAL, compute_rank_pass
     repo = ta._repo(repo)
     ta._insert(repo, [ta._row("c-urgent", "r.confirmed", lane="urgent", host="quiet"),
                       *[ta._row(f"q-{index}", f"r.q{index}", lane="lead", host="quiet",
-                                ts=ta.START + timedelta(minutes=5 * index)) for index in range(4)]])
+                                ts=ta.START + timedelta(minutes=5 * index)) for index in range(count)]])
     compute_rank_pass(repo, "h1", PASS_FINAL)
     ta._finished(repo)
-    found = grounding.EvidenceStrength(repo, "h1", OFF).findings([f"q-{index}" for index in range(4)])
-    assert all(item.reported and not item.confirmed for item in found.values())
+    found = grounding.EvidenceStrength(repo, "h1", OFF).findings([f"q-{index}" for index in range(count)])
+    assert len(found) == count and all(item.reported and not item.confirmed for item in found.values())
     return repo
 
 
@@ -616,10 +616,10 @@ def by_rules(verdicts: dict[str, str | None], default: str | None = "likely_beni
     return policy
 
 
-def _reported_hunt(verdicts: dict[str, str]):
+def _reported_hunt(verdicts: dict[str, str], count=4):
     """`_reported_rows`, triaged by rule: `verdicts` maps a rule to its assessment, every other group is likely
     benign."""
-    repo = _reported_rows()
+    repo = _reported_rows(count=count)
     summary = run_triage_in_phase(ta.settings(), repo, "h1", owner_token=None, heartbeat=lambda: None,
                                   provider=ta.FakeTriage(by_rules(verdicts)))
     assert summary["status"] == "complete"
@@ -643,10 +643,18 @@ def test_reported_findings_all_triaged_likely_benign_are_weak():
 def test_one_attack_triaged_cite_keeps_the_paragraph_and_the_support_line_shows_the_mix():
     for verdict in ("possible_attack", "likely_attack"):
         repo = _reported_hunt({"r.q2": verdict})
+        # balanced: one attack-triaged cite beside one benign holds the label
+        body = _reply([_p([_s([_f(repo, "q-2"), _f(repo, "q-0")])], "Persistence")])
+        checked, counts = check_assessment(repo, "h1", body, triage=USED)
+        paragraph = checked["narrative"][0]
+        assert paragraph["phase"] == "Persistence" and "weakly_supported" not in paragraph and counts == {}
+        assert paragraph["support"] == {"attack": 1, "benign": 1} and "context_reason" not in paragraph
+        # 1 of 4: the paragraph is mostly benign, shown as context, and its attack-triaged cite is lifted out
         checked, counts = check_assessment(repo, "h1", _quiet(repo), triage=USED)
         paragraph = checked["narrative"][0]
-        # never demoted: one attack-triaged cite holds the label, and the mix shows it rests on 1 of 4
-        assert paragraph["phase"] == "Persistence" and "weakly_supported" not in paragraph and counts == {}
+        assert paragraph["phase"] == "Context" and paragraph["context_reason"] == "mostly_benign_support"
+        assert "weakly_supported" not in paragraph and counts == {"context_mostly_benign_support": 1}
+        assert [step["finding"] for step in paragraph["attack_steps"]] == ["q-2"]
         assert paragraph["support"] == {"attack": 1, "benign": 3}
         assert markdown.narrative_support(paragraph) == (
             "Support: 1 triaged possible or likely attack, 3 triaged likely benign.")
@@ -659,10 +667,16 @@ def test_reported_findings_without_a_verdict_stay_strong_and_a_failed_pass_keeps
         checked, counts = check_assessment(repo, "h1", _quiet(repo), triage=context)
         paragraph = checked["narrative"][0]
         assert paragraph["phase"] == "Persistence" and counts == {} and paragraph["support"] == {"reported": 4}
-    # an insufficient-evidence verdict is no benign verdict: that Reported finding still holds the paragraph
+    # an insufficient-evidence verdict is no benign verdict: that Reported finding is strong support, so beside three
+    # benign cites it is lifted out of a context paragraph with its verdict as it stands, never called attack-triaged
     checked, counts = check_assessment(repo, "h1", _quiet(repo), triage=USED)
-    assert checked["narrative"][0]["phase"] == "Persistence" and counts == {}
-    assert checked["narrative"][0]["support"] == {"reported": 1, "benign": 3}
+    paragraph = checked["narrative"][0]
+    assert paragraph["phase"] == "Context" and counts == {"context_mostly_benign_support": 1}
+    assert paragraph["support"] == {"reported": 1, "benign": 3}
+    assert [(step["finding"], step["support"], step["triage"]) for step in paragraph["attack_steps"]] == [
+        ("q-1", "reported", "insufficient_evidence")]
+    assert markdown.narrative_step_text(paragraph["attack_steps"][0]) == (
+        "r.q1 · lane lead · triage: insufficient evidence")
     # a confirmed finding outweighs any verdict
     body = _reply([_p([_s([_f(repo, "c-urgent"), _f(repo, "q-0")])], "Impact")])
     checked, counts = check_assessment(repo, "h1", body, triage=USED)
@@ -743,6 +757,248 @@ def test_the_support_summary_counts_distinct_cites_and_stays_bounded_at_the_look
                                                                   "reported": "7", "other": True},
                "sentences": [{"text": "t", "kind": "inferred", "cites": []}]}]
     assert narrative_paragraphs(stored)[0]["support"] == {"attack": 2}
+
+
+# ------------------------------------------------- a mostly-benign paragraph: context, its attack steps lifted out
+def _nine(repo, label="Persistence"):
+    """One paragraph citing q-0..q-8 (two sentences), under `label`."""
+    return _reply([_p([_s([_f(repo, f"q-{index}") for index in range(5)]),
+                       _s([_f(repo, f"q-{index}") for index in range(5, 9)], "The job ran again.", "inferred")],
+                      label)])
+
+
+def _state(repo):
+    """Everything about the findings the narrative must never change: lanes, ranks and Reported flags, verdicts."""
+    from romulus.hunt.rank import PASS_FINAL
+    ids = [row["id"] for row in repo.candidates("h1")]
+    groups = []
+    after = 0
+    while page := repo.triage_groups("h1", after_position=after, limit=500):
+        groups += [(group["rule_id"], group["status"], group["assessment"]) for group in page]
+        after = page[-1]["position"]
+    return ({row["id"]: row["lane"] for row in repo.candidates("h1")}, repo.rank_state("h1"),
+            repo.finding_ranks_for("h1", PASS_FINAL, ids), groups)
+
+
+def test_eight_benign_and_one_attack_triaged_cite_is_context_with_the_attack_step_lifted_everywhere(
+        tmp_path, monkeypatch):
+    repo = _reported_hunt({"r.q4": "likely_attack"}, count=9)
+    before = _state(repo)
+    checked, counts = check_assessment(repo, "h1", _nine(repo), triage=USED)
+    paragraph = checked["narrative"][0]
+    # shown as context, never weakly supported: the sentences keep their kinds, the model's label is kept
+    assert paragraph["phase"] == "Context" and paragraph["model_phase"] == "Persistence" and "tactic" not in paragraph
+    assert paragraph["context_reason"] == "mostly_benign_support" and "weakly_supported" not in paragraph
+    assert [s["kind"] for s in paragraph["sentences"]] == ["observed", "inferred"]
+    assert paragraph["support"] == {"attack": 1, "benign": 8}
+    assert paragraph["attack_steps"] == [{"finding": "q-4", "rule_id": "r.q4", "lane": "lead",
+                                          "triage": "likely_attack", "support": "attack", "title": "r.q4"}]
+    assert counts == {"context_mostly_benign_support": 1}
+    # presentation only: no lane, rank, Reported flag or verdict changed
+    assert _state(repo) == before
+    repo.save_agent_assessment({"id": "aa-split", "hunt_id": "h1", "revision": 1, "source": "agent",
+                                "model": {"provider": "scripted", "model_requested": "m"}, "body": checked,
+                                "checker": counts, "created_at": utcnow()})
+    manifest = _manifest(repo)
+    shown = manifest["ai_assessment"]["narrative"][0]
+    assert shown["context_reason"] == "mostly_benign_support" and shown["attack_steps"] == paragraph["attack_steps"]
+    assert "attack_steps_more" not in shown and markdown.narrative_muted(shown)
+    reason = ("Shown as context: most of what it cites was triaged as likely benign; each attack-associated step it "
+              "cites is listed with it; the model labelled it Persistence.")
+    assert markdown.narrative_context_reason(shown) == reason
+    # Markdown: the label, the reason and the lifted step, linked to the finding's section
+    text = markdown.render(manifest)
+    section = text[text.index("## AI assessment"):]
+    assert f"**1. Context · {IN_WINDOW}**" in section and f"\n{reason}\n" in section
+    step = "- **Attack-associated step cited here:** r.q4 · lane lead · triage: likely attack (finding [q-4](#f-q-4))"
+    assert step in section and '<a id="f-q-4"></a>' in text
+    # DOCX: the paragraph muted, the step bold and never muted
+    path = _docx(tmp_path, monkeypatch, manifest)
+    with ZipFile(path) as archive:
+        document = ElementTree.fromstring(archive.read("word/document.xml"))
+    word = executive._WORD
+    paragraphs = [("".join(t.text or "" for t in p.iter(f"{{{word}}}t")),
+                   [node.tag.rsplit("}", 1)[-1] for node in p.iter()]) for p in document.iter(f"{{{word}}}p")]
+    heading = next(tags for text, tags in paragraphs if text.startswith("1. Context · "))
+    assert "i" in heading and "color" in heading
+    lifted = next(tags for text, tags in paragraphs if text == ("Attack-associated step cited here: r.q4 · lane lead · "
+                                                               "triage: likely attack (finding q-4)"))
+    assert "b" in lifted and "i" not in lifted and "color" not in lifted
+    sentence = next(tags for text, tags in paragraphs if text.startswith("inferred: The job ran again."))
+    assert "color" in sentence
+
+
+@pytest.mark.parametrize("cited", ["c-urgent", "q-4"])
+def test_confirmed_support_is_never_split_and_model_context_keeps_its_own_rule(cited):
+    repo = _reported_hunt({"r.q4": "likely_attack"}, count=9)
+    # a confirmed cite (triaged likely benign, but confirmed outweighs any verdict) among eight benign keeps the label
+    body = _reply([_p([_s([_f(repo, "c-urgent"), *[_f(repo, f"q-{index}") for index in range(9) if index != 4]])],
+                      "Impact")])
+    checked, counts = check_assessment(repo, "h1", body, triage=USED)
+    paragraph = checked["narrative"][0]
+    assert paragraph["phase"] == "Impact" and counts == {} and paragraph["support"] == {"confirmed": 1, "benign": 8}
+    assert "context_reason" not in paragraph and "attack_steps" not in paragraph
+    # a model Context label citing confirmed or attack-triaged findings: unmuted model context, never split
+    body = _reply([_p([_s([_f(repo, cited), *[_f(repo, f"q-{index}") for index in range(9) if index != 4]])],
+                      "Context: build-day provisioning")])
+    checked, counts = check_assessment(repo, "h1", body, triage=USED)
+    paragraph = checked["narrative"][0]
+    assert paragraph["context_reason"] == "model_context_cites_attack" and "attack_steps" not in paragraph
+    assert "weakly_supported" not in paragraph and counts == {"model_context_cites_attack": 1}
+    assert not markdown.narrative_muted(narrative_paragraphs([paragraph])[0])
+
+
+def _cite(category, *, complete=True, finding_id="f"):
+    """A cite resting on one finding of `category` (or on none, for raw or other)."""
+    if category == "raw":
+        return grounding.CiteStrength(raw=True)
+    if category == "other":
+        return grounding.CiteStrength(complete=complete)
+    found = grounding.FindingStrength(
+        lane="urgent" if category == "confirmed" else "lead", deterministic=True, reported=True,
+        confirmed=category == "confirmed", triage={"attack": "likely_attack", "benign": "likely_benign",
+                                                    "confirmed": "likely_benign"}.get(category, "not_triaged"),
+        finding_id=finding_id, rule_id="r." + finding_id)
+    return grounding.CiteStrength((found,), complete)
+
+
+@pytest.mark.parametrize("mix,split", [
+    ({"attack": 1, "benign": 2}, False),                  # under the benign floor: one verdict must not flip it
+    ({"attack": 1, "benign": 3}, True),
+    ({"reported": 1, "benign": 3}, True),
+    ({"attack": 1, "benign": 1}, False),                  # balanced
+    ({"attack": 2, "benign": 4}, True),                   # exactly two-thirds
+    ({"attack": 2, "benign": 3}, False),                  # under two-thirds
+    ({"attack": 3, "benign": 9}, False),                  # more than two strong cites: several steps, kept
+    ({"attack": 1, "benign": 3, "other": 2}, False),      # unreported cites count toward the whole
+    ({"attack": 1, "benign": 3, "raw": 2}, False),
+    ({"confirmed": 1, "benign": 8}, False),               # confirmed activity is never split
+    ({"attack": 1, "benign": 0}, False),
+])
+def test_the_split_rule_at_its_boundaries(mix, split):
+    from collections import Counter
+
+    from romulus.agent.assessment import _mostly_benign
+    cites = [_cite(category, finding_id=f"{category}{index}") for category, count in mix.items()
+             for index in range(count)]
+    assert _mostly_benign(cites, Counter(item.category for item in cites)) is split
+
+
+def test_an_incomplete_lookup_never_splits_and_lifted_steps_are_bounded_and_counted(monkeypatch):
+    from collections import Counter
+
+    from romulus.agent import assessment
+    cites = [_cite("attack", finding_id="a"), *[_cite("benign", finding_id=f"b{index}") for index in range(4)]]
+    assert assessment._mostly_benign(cites, Counter(item.category for item in cites))
+    # a capped evidence lookup may hide a confirmed finding past what it read
+    capped = [*cites[:-1], _cite("benign", complete=False, finding_id="b9")]
+    assert not assessment._mostly_benign(capped, Counter(item.category for item in capped))
+    # one evidence record standing for many strong findings: each is lifted once, attack-triaged before Reported,
+    # at most ATTACK_STEPS kept and the rest counted
+    many = tuple(_cite("reported" if index % 2 else "attack", finding_id=f"s{index:02}").findings[0]
+                 for index in range(14))
+    record = grounding.CiteStrength(many)
+    steps = assessment._attack_steps([record, record, _cite("benign", finding_id="b")])
+    assert len(steps) == 14 and [step["support"] for step in steps] == ["attack"] * 7 + ["reported"] * 7
+    paragraph = {"time_span": {"start": IN_WINDOW, "end": IN_WINDOW}, "phase": "Discovery",
+                 "sentences": [{"text": "t", "kind": "observed", assessment.REFS: [("E", "ev")]}]}
+    strengths = {("E", "ev"): record}
+    monkeypatch.setattr(assessment, "_mostly_benign", lambda *_args: True)
+    counts = Counter()
+    out = assessment._ground_paragraph(paragraph, strengths, counts)
+    assert len(out["attack_steps"]) == 10 and out["attack_steps_more"] == 4
+    shown = narrative_paragraphs([{**out, "sentences": [{"text": "t", "kind": "observed", "cites": []}]}])[0]
+    assert len(shown["attack_steps"]) == 10 and shown["attack_steps_more"] == 4
+    assert markdown.narrative_steps_more(shown) == (
+        "4 more attack-associated finding(s) cited here; its citations and support line count them.")
+
+
+def test_the_manifest_whitelists_the_split_reason_and_bounds_its_steps():
+    step = {"finding": "F1", "rule_id": "r.a", "title": "<b>T</b>", "lane": "lead", "triage": "likely_attack",
+            "support": "attack", "extra": "x"}
+    base = {"time_span": {}, "phase": "Context", "sentences": [{"text": "t", "kind": "inferred", "cites": []}]}
+    shown = narrative_paragraphs([{**base, "context_reason": "mostly_benign_support", "model_phase": "Persistence",
+                                   "attack_steps": [step, {"finding": "", "support": "attack"},
+                                                    {"finding": "F2", "support": "benign"}, "junk",
+                                                    *[{**step, "finding": f"G{index}"} for index in range(12)]],
+                                   "attack_steps_more": 3}])[0]
+    assert shown["context_reason"] == "mostly_benign_support" and shown["model_phase"] == "Persistence"
+    assert shown["attack_steps"][0] == {key: value for key, value in step.items() if key != "extra"}
+    # ten kept; the stored count plus every entry not kept (malformed or past the bound) is counted
+    assert len(shown["attack_steps"]) == 10 and shown["attack_steps_more"] == 3 + 16 - 10
+    # steps ride only on a mostly-benign context paragraph; an unknown reason is dropped with them
+    for extra in ({"context_reason": "model_context_cites_attack"}, {"context_reason": "made-up"},
+                  {"context_reason": "mostly_benign_support", "weakly_supported": True}, {}):
+        other = narrative_paragraphs([{**base, **extra, "attack_steps": [step]}])[0]
+        assert "attack_steps" not in other and "attack_steps_more" not in other
+    assert "context_reason" not in narrative_paragraphs([{**base, "context_reason": "made-up"}])[0]
+
+
+def test_a_narrative_without_a_mostly_benign_paragraph_renders_as_before(tmp_path):
+    repo = _hunt()
+    _weak_assessment(repo, tmp_path)
+    manifest = _manifest(repo)
+    for paragraph in manifest["ai_assessment"]["narrative"]:
+        assert not {"attack_steps", "attack_steps_more"} & set(paragraph)
+        assert paragraph.get("context_reason") != "mostly_benign_support"
+    assert "context_mostly_benign_support" not in manifest["ai_assessment"]["checker"]
+    assert "Attack-associated step cited here" not in markdown.render(manifest)
+
+
+def test_the_web_lifts_the_attack_step_out_of_a_muted_context_paragraph(web_setup):
+    client, repo, cid, *_ = web_setup
+    test_web_agent_a6.run_row(repo)
+    paragraph = {"time_span": {"start": IN_WINDOW, "end": IN_WINDOW}, "phase": "Context",
+                 "context_reason": "mostly_benign_support", "model_phase": HOSTILE_PHASE,
+                 "attack_steps": [{"finding": cid, "rule_id": "r.x", "title": "<i>Tool</i>", "lane": "high",
+                                   "triage": "possible_attack", "support": "attack"}],
+                 "support": {"attack": 1, "benign": 8},
+                 "sentences": [{"text": "Provisioning ran.", "kind": "observed", "cites": [cid]}]}
+    supported = {"time_span": {"start": IN_WINDOW, "end": IN_WINDOW}, "phase": "Objective",
+                 "sentences": [{"text": "The read was done.", "kind": "inferred", "cites": [cid]}]}
+    repo.save_agent_assessment({"id": "aa-split", "hunt_id": "h1", "revision": 1, "source": "agent",
+                                "model": {"provider": "scripted", "model_requested": "m"},
+                                "body": {**_reply([paragraph, supported])},
+                                "checker": {"context_mostly_benign_support": 1}, "created_at": utcnow()})
+    for path in ("/hunts/h1", "/hunts/h1/assessment"):
+        page = client.get(path).text
+        narrative = page[page.index('<ol class="narrative">'):]
+        narrative = narrative[:narrative.index("</ol>")]
+        assert narrative.count('<li class="context-split">') == 1 and narrative.count("<li>") == 1
+        assert ('<p class="small context-reason">Shown as context: most of what it cites was triaged as likely '
+                "benign; each attack-associated step it cites is listed with it; the model labelled it "
+                "&lt;Persistence&gt;.</p>") in narrative
+        assert ('<p class="attack-step"><b>Attack-associated step cited here:</b> &lt;i&gt;Tool&lt;/i&gt; · lane high'
+                f' · triage: possible attack (finding <a href="/findings/{cid}">{cid}</a>)</p>') in narrative
+        assert "<i>Tool</i>" not in page and "<Persistence>" not in page
+
+
+def test_a_cited_verdict_that_makes_a_paragraph_mostly_benign_is_counted_when_grounded_again():
+    from romulus.agent.assessment import cited_triage_groups, reground_narrative
+    repo = _reported_rows(count=6)
+    run_triage_in_phase(ta.settings(), repo, "h1", owner_token=None, heartbeat=lambda: None,
+                        provider=ta.FakeTriage(by_rules(IN_PHASE, default=None)))
+    context = triage_context(latest_summary(repo, "h1"))
+    body = _reply([_p([_s([_f(repo, f"q-{index}") for index in range(6)])], "Persistence")])
+    ungrounded: list = []
+    checked, counts = check_assessment(repo, "h1", body, triage=context, ungrounded=ungrounded)
+    # q-1..q-5 Reported without a verdict hold the paragraph
+    assert checked["narrative"][0]["phase"] == "Persistence" and checked["narrative"][0]["support"] == {
+        "reported": 5, "benign": 1}
+    groups, _skipped = cited_triage_groups(repo, "h1", ungrounded, context, 10)
+    summary = run_cited_triage_in_phase(ta.settings(), repo, "h1", groups, owner_token=None,
+                                        heartbeat=lambda: None,
+                                        provider=ta.FakeTriage(by_rules({"r.q5": "likely_attack"})))
+    assert summary["status"] == "complete", summary
+    before = _state(repo)
+    narrative, checker, changed = reground_narrative(repo, "h1", ungrounded, checked["narrative"], counts,
+                                                     triage_context(latest_summary(repo, "h1")))
+    paragraph = narrative[0]
+    assert changed == 1 and checker == {"context_mostly_benign_support": 1}
+    assert paragraph["context_reason"] == "mostly_benign_support" and paragraph["support"] == {"attack": 1,
+                                                                                             "benign": 5}
+    assert [step["finding"] for step in paragraph["attack_steps"]] == ["q-5"]
+    assert _state(repo) == before
 
 
 # ---------------------------------------------------------------- targeted triage of the narrative's cited groups

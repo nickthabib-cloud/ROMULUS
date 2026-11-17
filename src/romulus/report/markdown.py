@@ -138,7 +138,9 @@ NARRATIVE_NOTE = ("The model's theory of what most plausibly happened, pieced to
                   "between them) or uncertain (the evidence is thin or missing). A paragraph marked weakly "
                   "supported cites no confirmed, attack-triaged or reported finding (one triaged likely benign does "
                   "not count), the model labelled it context, or its support could not be determined: read it as "
-                  "context, not as a step of the attack. The support line under each paragraph counts what its "
+                  "context, not as a step of the attack. A paragraph shown as context because most of what it cites "
+                  "was triaged likely benign lists each attack-associated step it cites on its own line: read those "
+                  "steps as findings in their own right. The support line under each paragraph counts what its "
                   "citations rest on.")
 NARRATIVE_EMPTY = ("The assessment has no narrative: the model wrote none, or the checker removed every sentence "
                    "(see the checker changes below).")
@@ -160,8 +162,19 @@ WEAK_REASONS = {WEAK_NO_REPORTED: "no reported finding cited",
 # A paragraph the model labelled context that cites confirmed or attack-triaged findings: shown as Context, as the
 # model asked, but never muted or weakened, with this reason in plain view.
 MODEL_CONTEXT_ATTACK = "model_context_cites_attack"
+# A paragraph whose strong support is a small minority of what it cites, the rest triaged likely benign: the
+# paragraph is shown as Context (muted, sentences as written) and each strong finding it cites is lifted out beside it
+# as an attack-associated step (`attack_steps`), unmuted. The findings themselves are unchanged.
+MOSTLY_BENIGN = "mostly_benign_support"
 CONTEXT_REASONS = {MODEL_CONTEXT_ATTACK: "labelled context by the model, but it cites confirmed or attack-triaged "
-                                         "findings"}
+                                         "findings",
+                   MOSTLY_BENIGN: "shown as context: most of what it cites was triaged as likely benign; each "
+                                  "attack-associated step it cites is listed with it"}
+# The context reasons shown muted (the paragraph is context; what it lifts out is not).
+MUTED_CONTEXT = (MOSTLY_BENIGN,)
+# Lifted attack-associated steps kept per paragraph; more are counted, never dropped silently.
+ATTACK_STEPS = 10
+ATTACK_STEP_LABEL = "Attack-associated step cited here"
 # A paragraph's support mix: how many of its distinct cites fall in each category, strongest first (the checker
 # derives it from stored ranks and triage verdicts only).
 SUPPORT_LABELS = {"confirmed": "confirmed", "attack": "triaged possible or likely attack",
@@ -191,6 +204,26 @@ def narrative_context_reason(paragraph: dict) -> str:
     model_phase = paragraph.get("model_phase")
     return (f"{reason[0].upper()}{reason[1:]}" + (f"; the model labelled it {model_phase}" if model_phase else "")
             + ".")
+
+
+def narrative_muted(paragraph: dict) -> bool:
+    """Whether a paragraph's own text is shown muted: weakly supported, or context by a muted context reason."""
+    return bool(paragraph.get("weakly_supported")) or paragraph.get("context_reason") in MUTED_CONTEXT
+
+
+def narrative_step_text(step: dict) -> str:
+    """One lifted attack-associated step as words: its title, finding, lane and triage verdict (unescaped; the
+    finding id is given apart for a link)."""
+    triage = str(step.get("triage") or "not_triaged").replace("_", " ")
+    return (f"{step.get('title') or step.get('rule_id') or 'finding'} · lane {step.get('lane') or 'unknown'} · "
+            f"triage: {triage}")
+
+
+def narrative_steps_more(paragraph: dict) -> str:
+    """How many more attack-associated steps the paragraph cites than it lists (empty when none; unescaped)."""
+    more = paragraph.get("attack_steps_more")
+    return (f"{more} more attack-associated finding(s) cited here; its citations and support line count them."
+            if isinstance(more, int) and more > 0 else "")
 
 
 def narrative_label(paragraph: dict) -> str:
@@ -243,15 +276,26 @@ def _assessment_section(m: dict) -> list[str]:
                   if item.get("suspicious_content") else "")
         return f"- *{esc(item.get('kind', 'inferred'))}:* {esc(item.get('text', ''))}{suffix}{marker}"
 
+    visible = {finding["id"] for finding in m.get("findings") or []}
+
+    def step_line(step: dict) -> str:
+        finding = str(step.get("finding") or "")
+        named = f"[{esc(finding)}](#f-{finding})" if finding in visible else f"`{esc(finding)}`"
+        return f"- **{ATTACK_STEP_LABEL}:** {esc(narrative_step_text(step))} (finding {named})"
+
     if "narrative" in assessment:
         out += [f"### {NARRATIVE_TITLE}", "", NARRATIVE_NOTE, ""]
         for number, paragraph in enumerate(assessment["narrative"], 1):
             weak = narrative_weak_reason(paragraph)
             support = narrative_support(paragraph)
             context = narrative_context_reason(paragraph)
+            steps = paragraph.get("attack_steps") or []
+            more = narrative_steps_more(paragraph)
             out += [f"**{number}. {esc(narrative_heading(paragraph))}**", "",
                     *([f"*{esc(weak)}*", ""] if weak else []),
                     *([esc(context), ""] if context else []),
+                    *([*(step_line(step) for step in steps), *([f"- {esc(more)}"] if more else []), ""]
+                      if steps or more else []),
                     *[sentence(item) for item in paragraph["sentences"]], "",
                     *([f"*{esc(support)}*", ""] if support else [])]
         if not assessment["narrative"]:

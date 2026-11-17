@@ -184,6 +184,13 @@ td.lead { color: var(--lead); font-weight: 600; }
 .narrative > li.weak { color: var(--muted); }
 .narrative > li.weak .narrative-head b { font-weight: 600; font-style: italic; }
 .narrative > li.weak .ns { color: var(--muted); }
+/* a context paragraph whose cited activity is mostly benign: muted like the above, except each attack-associated
+   step it cites, which stands out in full ink with a danger rule */
+.narrative > li.context-split { color: var(--muted); }
+.narrative > li.context-split .narrative-head b { font-weight: 600; font-style: italic; }
+.narrative > li.context-split .ns { color: var(--muted); }
+.narrative p.attack-step { color: var(--ink); padding: 4px 8px; border-left: 3px solid var(--danger);
+                           background: var(--surface-2); border-radius: var(--radius-sm); }
 .notice p { margin: 2px 0 0; }
 
 /* ---------- notices ---------- */

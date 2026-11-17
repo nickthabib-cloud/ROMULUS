@@ -79,6 +79,9 @@ class FindingStrength:
     triage: str             # an assessment, or NOT_TRIAGED
     # its triage group (`triage_order.group_fields`), for a deterministic surfaced finding
     group: tuple | None = None
+    # which finding this is, and its rule: what a narrative paragraph names when it lifts the finding out
+    finding_id: str = ""
+    rule_id: str = ""
 
     @property
     def untriaged_reported(self) -> bool:
@@ -195,9 +198,19 @@ class EvidenceStrength:
                 self._findings[row["id"]] = FindingStrength(
                     lane=row["lane"], deterministic=row.get("provenance") != rank_model.AGENT_PROVENANCE,
                     reported=reported, confirmed=row["lane"] == rank_model.CONFIRMED_LANE,
-                    triage=verdicts.get(row["id"], NOT_TRIAGED), group=groups.get(row["id"]))
+                    triage=verdicts.get(row["id"], NOT_TRIAGED), group=groups.get(row["id"]),
+                    finding_id=row["id"], rule_id=row["rule_id"])
             self._findings.update((item, None) for item in wanted if item not in found)
         return {item: value for item in ids if (value := self._findings.get(item)) is not None}
+
+    def rule_titles(self, rule_ids) -> dict[str, str]:
+        """Each rule's title as the reports name it (the rule id when it has none), read once for the rules asked."""
+        wanted = sorted({str(item) for item in rule_ids if item})
+        if not wanted:
+            return {}
+        from romulus.detect.metadata import hunt_rule_metadata
+        rules = hunt_rule_metadata(self.repo, self.hunt_id, rule_ids=wanted)
+        return {item: getattr(rules.get(item), "title", None) or item for item in wanted}
 
     def cites(self, refs) -> dict[tuple[str, str], CiteStrength]:
         """Strength of each (alias kind, target id): a finding stands for itself, an evidence record for the

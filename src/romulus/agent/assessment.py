@@ -16,7 +16,13 @@ from sqlalchemy.exc import IntegrityError
 
 from romulus.agent.aliases import AliasBook
 from romulus.agent.dossier import build_dossier
-from romulus.agent.grounding import SUPPORT_CATEGORIES, EvidenceStrength, TriageContext, stored_triage_context
+from romulus.agent.grounding import (
+    SUPPORT_CATEGORIES,
+    EvidenceStrength,
+    FindingStrength,
+    TriageContext,
+    stored_triage_context,
+)
 from romulus.agent.provider import (
     AgentBudget,
     BudgetExhausted,
@@ -36,8 +42,10 @@ from romulus.evidence.raw_citation import RAW_GATE, RAW_LABEL_PLURAL
 from romulus.report.incidents import build_incident_graph
 from romulus.report.manifest import NARRATIVE_PARAGRAPHS, NARRATIVE_SENTENCES, coverage_for_hunt
 from romulus.report.markdown import (
+    ATTACK_STEPS,
     CONTEXT_PHASE,
     MODEL_CONTEXT_ATTACK,
+    MOSTLY_BENIGN,
     WEAK_BENIGN,
     WEAK_MODEL_CONTEXT,
     WEAK_NO_REPORTED,
@@ -353,7 +361,7 @@ def check_assessment(repo, hunt_id: str, body: dict, *, owner_token=None,
               "downgraded_observed_weak_evidence": 0, "phase_weakly_supported": 0,
               "weakly_supported_benign_triage": 0, "labelled_uncertain_benign_triage": 0,
               "weakly_supported_unknown_support": 0, "model_labelled_context": 0, "model_context_cites_attack": 0,
-              "weakly_supported_raw_records_only": 0}
+              "weakly_supported_raw_records_only": 0, "context_mostly_benign_support": 0}
     suspicious_cache: dict[str, bool] = {}
 
     def check(sentence: dict, section: str) -> dict | None:
@@ -483,10 +491,15 @@ def _check_narrative(paragraphs: list[dict], check, counts: dict, window,
 
 def _ground_narrative(paragraphs: list[dict], evidence: EvidenceStrength, counts: dict) -> list[dict]:
     """The evidence rules over checked paragraphs (their sentences carrying their cites by kind), with one batched
-    lookup for every cite they make."""
+    lookup for every cite they make, and one rule-title lookup for every attack-associated step they lift out."""
     strengths = evidence.cites(tuple(ref) for paragraph in paragraphs for sentence in paragraph["sentences"]
                                for ref in sentence[REFS])
-    return [_ground_paragraph(paragraph, strengths, counts) for paragraph in paragraphs]
+    grounded = [_ground_paragraph(paragraph, strengths, counts) for paragraph in paragraphs]
+    steps = [step for paragraph in grounded for step in paragraph.get("attack_steps") or []]
+    titles = evidence.rule_titles(step["rule_id"] for step in steps)
+    for step in steps:
+        step["title"] = titles.get(step["rule_id"]) or step["rule_id"] or step["finding"]
+    return grounded
 
 
 def _ground_paragraph(paragraph: dict, strengths: dict, counts: dict) -> dict:
@@ -494,7 +507,13 @@ def _ground_paragraph(paragraph: dict, strengths: dict, counts: dict) -> dict:
     - an `observed` sentence must cite a reportable deterministic finding (urgent, high or lead), directly or through
       an evidence record one cites; otherwise it becomes `inferred`;
     - a cite is strong when its finding is confirmed, triaged as likely or possible attack, or Reported without a
-      likely-benign verdict (`grounding.FindingStrength.strong`); one strong cite keeps a paragraph's label;
+      likely-benign verdict (`grounding.FindingStrength.strong`); one strong cite keeps a paragraph's label, unless
+      that support is a small minority of what it cites and the rest was triaged likely benign (`_mostly_benign`):
+      then the paragraph is shown as Context (`context_reason` MOSTLY_BENIGN, muted, its sentences as written, the
+      model's label kept as `model_phase`, any tactic dropped) and every strong finding it cites is lifted out beside
+      it as an attack-associated step (`attack_steps`: finding, rule, title, lane, verdict), shown unmuted. A
+      confirmed cite never allows this. It is presentation only: no finding's lane, verdict, Reported flag or rank
+      changes;
     - a paragraph, whatever its label, with no strong cite is weakly supported: its phase becomes Context (the model's
       label is kept as `model_phase`, any ATT&CK tactic is dropped), it is shown muted, and it says why, in this order:
       - every cite rests only on findings triaged likely benign: its sentences also become `uncertain`;
@@ -507,6 +526,10 @@ def _ground_paragraph(paragraph: dict, strengths: dict, counts: dict) -> dict:
       finding. Attack activity is never demoted: such a paragraph is labelled Context as the model asked, but stays
       unmuted with its sentences as written, and says that it cites confirmed or attack-triaged findings
       (`context_reason`). A Reported finding without a verdict does not make that exception.
+    Precedence, first match wins: a model Context label (unmuted MODEL_CONTEXT_ATTACK when it cites confirmed or
+    attack-triaged findings, else weak `model_labelled_context`); then strong support (kept, or split as mostly
+    benign); then the weak reasons in the order above. So a split paragraph is never also weakly supported, and a
+    model Context paragraph is never split.
     Every paragraph records its support mix, the count of its distinct cites in each `SUPPORT_CATEGORIES` category,
     so the analyst sees how much of it rests on what. Nothing is removed; each paragraph changed is counted once,
     under its reason."""
@@ -531,6 +554,14 @@ def _ground_paragraph(paragraph: dict, strengths: dict, counts: dict) -> dict:
         reason = WEAK_MODEL_CONTEXT
         counts["model_labelled_context"] += 1
     elif any(item.strong for item in cites):
+        if not _mostly_benign(cites, mix):
+            return out
+        counts["context_mostly_benign_support"] += 1
+        steps = _attack_steps(cites)
+        out = {key: value for key, value in out.items() if key != "tactic"}
+        out.update(phase=CONTEXT_PHASE, context_reason=MOSTLY_BENIGN, attack_steps=steps[:ATTACK_STEPS],
+                   **({"attack_steps_more": len(steps) - ATTACK_STEPS} if len(steps) > ATTACK_STEPS else {}),
+                   **({"model_phase": paragraph["phase"]} if paragraph["phase"] else {}))
         return out
     elif cites and all(item.benign for item in cites):
         reason = WEAK_BENIGN
@@ -554,10 +585,53 @@ def _ground_paragraph(paragraph: dict, strengths: dict, counts: dict) -> dict:
     return out
 
 
+# A paragraph with strong support is shown as context, its strong cites lifted out (`MOSTLY_BENIGN`), when that
+# support is a small minority of what it cites and the rest was judged benign:
+# - no cite is confirmed: deterministically confirmed activity always keeps the paragraph's label;
+# - every cite's lookup is complete: a capped evidence lookup could hide a confirmed finding past what it read;
+# - at most SPLIT_MAX_STRONG cites are strong (attack-triaged, or Reported without a benign verdict);
+# - at least SPLIT_MIN_BENIGN cites are triaged likely benign, and they are at least two-thirds of all its distinct
+#   cites (any category counts toward the whole, so unreported or raw cites make a split less likely).
+# The bounds are counts within one paragraph, which the narrative's own caps bound (sentences per paragraph,
+# citations per sentence), not volumes of telemetry, so they hold on any hunt size. Two strong cites is "one step,
+# perhaps with its companion record"; past that the paragraph describes several attack-associated steps and keeps its
+# label. The benign floor keeps a short paragraph from flipping on one verdict; the two-thirds share means the
+# benign activity outnumbers the strong at least two to one. A split never hides the strong cites: each strong
+# finding is lifted out beside the paragraph, unmuted, with its own lane and verdict.
+SPLIT_MAX_STRONG = 2
+SPLIT_MIN_BENIGN = 3
+
+
+def _mostly_benign(cites: list, mix: Counter) -> bool:
+    """Whether a paragraph with strong support is mostly benign by the split rule above."""
+    strong = sum(item.strong for item in cites)
+    return (not mix["confirmed"] and all(item.complete for item in cites)
+            and 0 < strong <= SPLIT_MAX_STRONG and mix["benign"] >= SPLIT_MIN_BENIGN
+            and 3 * mix["benign"] >= 2 * len(cites))
+
+
+STEP_ORDER = {"confirmed": 0, "attack": 1, "reported": 2}
+
+
+def _attack_steps(cites: list) -> list[dict]:
+    """Every strong finding behind the strong cites, once each: attack-triaged before Reported without a verdict,
+    then in citation order. A cited evidence record contributes each strong finding it stands for (bounded by the
+    lookup's own cap)."""
+    found: dict[str, FindingStrength] = {}
+    for cite in cites:
+        if cite.strong:
+            for finding in cite.findings:
+                if finding.strong and finding.finding_id:
+                    found.setdefault(finding.finding_id, finding)
+    ordered = sorted(found.values(), key=lambda item: STEP_ORDER.get(item.category, 3))
+    return [{"finding": item.finding_id, "rule_id": item.rule_id, "lane": item.lane, "triage": item.triage,
+             "support": item.category} for item in ordered]
+
+
 # The checker counts the evidence rules make; grounding again replaces exactly these.
 GROUNDING_COUNTS = ("downgraded_observed_weak_evidence", "phase_weakly_supported", "weakly_supported_benign_triage",
                     "labelled_uncertain_benign_triage", "weakly_supported_unknown_support", "model_labelled_context",
-                    "model_context_cites_attack", "weakly_supported_raw_records_only")
+                    "model_context_cites_attack", "weakly_supported_raw_records_only", "context_mostly_benign_support")
 
 
 def cited_triage_groups(repo, hunt_id: str, ungrounded: list[dict], triage: TriageContext,

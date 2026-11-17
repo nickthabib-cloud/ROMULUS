@@ -22,8 +22,12 @@ from romulus.report.manifest import (
     fallback_view,
 )
 from romulus.report.markdown import (
+    ATTACK_STEPS,
     narrative_context_reason,
     narrative_label,
+    narrative_muted,
+    narrative_step_text,
+    narrative_steps_more,
     narrative_support,
     narrative_weak_reason,
     narrative_when,
@@ -161,7 +165,13 @@ def narrative_view(repo, hunt_id, paragraphs):
                  "support_reason": paragraph.get("support_reason"), "context_reason": paragraph.get("context_reason"),
                  "model_phase": clip(paragraph.get("model_phase"), 120)}
         out.append({"phase": narrative_label(shown), "weak": narrative_weak_reason(shown),
-                    "context": narrative_context_reason(shown),
+                    "context": narrative_context_reason(shown), "muted": narrative_muted(shown),
+                    # the attack-associated steps a context paragraph lifts out, each linked to its finding
+                    "steps": [{"text": clip(narrative_step_text(step), 600), "finding": clip(step["finding"], 160),
+                               "url": "/findings/" + quote(step["finding"], safe="")}
+                              for step in (paragraph.get("attack_steps") or [])[:ATTACK_STEPS]
+                              if isinstance(step, dict) and isinstance(step.get("finding"), str)],
+                    "steps_more": narrative_steps_more(paragraph),
                     "support": narrative_support(paragraph),
                     "when": narrative_when(start, end, "→"),
                     "sentences": [{"text": clip(sentence.get("text"), 2000),
