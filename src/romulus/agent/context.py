@@ -30,16 +30,18 @@ from romulus.agent.admission import collect_issued_aliases
 from romulus.agent.provider.base import CHARS_PER_TOKEN, PROVIDER_STATE, estimate_tokens, redact_value
 from romulus.config import Settings, redact_counted, redact_text
 
-# The latest tool results kept in full at a compaction. A reply often makes two to four calls at once, and the next
-# step usually compares the newest results with each other; older ones are re-read on demand through their handle.
+# The latest tool results kept in full at a compaction (of those a stub would replace: write results and short ones
+# are never stubbed and not counted here). A reply often makes two to four calls at once, and the next step usually
+# compares the newest results with each other; older ones are re-read on demand through their handle.
 KEEP_FULL_RESULTS = 4
 # A compaction runs once the full results older than the kept ones reach this many estimated tokens. Each compaction
 # changes the conversation from its first newly stubbed result on, so the provider writes that tail to its cache again
 # once (about 1.25 times the input price) instead of reading it (about 0.1 times); in between, every call re-reads the
-# stale results (0.1 times each). With a tail of about 30,000 tokens and results of about 4,000, the cost per call
-# is lowest at a compaction every 12 to 15 calls, about this many tokens of stale results. With a provider that bills
-# cached input at the full price, compaction is pure saving, and this threshold only keeps it batched.
-COMPACT_AFTER_TOKENS = 48_000
+# stale results (0.1 times each). Over a session of forty large query results (about 5,700 tokens each) the weighted
+# prompt cost is lowest between 32,000 and 48,000 (a compaction every 6 to 9 calls), and rises on either side (more
+# rewrites below, more stale re-reads above); the lower end also keeps the largest prompt lower. With a provider that
+# bills cached input at the full price, compaction is pure saving, and this threshold only keeps it batched.
+COMPACT_AFTER_TOKENS = 32_000
 # The most estimated tokens one tool result may add to the conversation: the smaller of this and RESULT_CONTEXT_SHARE
 # of the model's context, never under MIN_RESULT_TOKENS. It fits a query_source chunk (12 KB of rows and aggregations)
 # and a search page's telemetry allowance (24 KB) with their envelopes in one page; larger content is paged.
@@ -48,8 +50,8 @@ RESULT_CONTEXT_SHARE = 0.05
 MIN_RESULT_TOKENS = 2_000
 # Results shorter than this many characters are never stubbed: a stub would not be much shorter.
 STUB_MIN_CHARS = 1_600
-# The share of a result's character allowance one page of its text takes: the rest is the page envelope (status,
-# counts, up to STUB_ALIASES aliases, the next call) and the escaping the text needs inside the envelope's JSON.
+# The share of a result's character allowance one page of its text takes, measured as it is shown (escaped inside the
+# tool message's JSON): the rest is the page envelope (status, counts, up to STUB_ALIASES aliases, the next call).
 PAGE_SHARE = 0.75
 # How many aliases a stub or a paged envelope lists by name; the rest are counted, and the handle shows them.
 STUB_ALIASES = 200
@@ -89,9 +91,38 @@ class _Entry:
     offset: int                 # where the redacted result text starts in the store, in bytes
     length: int                 # its length in bytes
     chars: int                  # its length in characters
-    pages: int
-    stub: str                   # the stub that replaces it at a compaction (computed once: it never changes)
+    bounds: list[int]           # where each page of its text starts, in characters, and where the last one ends
+    stub: str                  # the stub that replaces it at a compaction (computed once: it never changes)
     envelope: dict = field(default_factory=dict)
+
+    @property
+    def pages(self) -> int:
+        return len(self.bounds) - 1
+
+
+def _shown_length(text: str) -> int:
+    """How many characters `text` takes as a JSON string inside a tool message (its escapes counted)."""
+    return len(json.dumps(text, ensure_ascii=False))
+
+
+def _page_bounds(text: str, budget: int) -> list[int]:
+    """Where each page of `text` starts, and where the last ends: each page as long as fits in `budget` characters
+    once escaped as a JSON string, so text heavy in quotes and backslashes never makes a page larger."""
+    bounds, start = [0], 0
+    while start < len(text):
+        low, high = start + 1, min(len(text), start + budget)
+        if _shown_length(text[start:high]) <= budget:
+            low = high
+        else:
+            while low < high:      # the longest prefix that fits (one character always does)
+                middle = (low + high + 1) // 2
+                if _shown_length(text[start:middle]) <= budget:
+                    low = middle
+                else:
+                    high = middle - 1
+        bounds.append(low)
+        start = low
+    return bounds if len(bounds) > 1 else [0, 0]
 
 
 @dataclass
@@ -140,19 +171,21 @@ class SessionResults:
         offset = self.store.tell()
         self.store.write(encoded)
         shown = redact_value(json.loads(json.dumps(result, default=str)), self.settings)
-        pages = max(1, -(-len(redacted) // self.page_chars))
+        fits = len(text) <= self.cap_chars
+        bounds = [0, len(redacted)] if fits else _page_bounds(redacted, self.page_chars)
         argument_text = _bounded(redact_text(json.dumps(arguments, sort_keys=True, ensure_ascii=False, default=str),
                                              self.settings), STUB_ARGUMENT_CHARS)
         envelope = self._envelope(tool, shown, sorted(aliases, key=_alias_key))
-        entry = _Entry(handle, tool, argument_text, offset, len(encoded), len(redacted), pages, "", envelope)
+        entry = _Entry(handle, tool, argument_text, offset, len(encoded), len(redacted), bounds, "", envelope)
+        pages = entry.pages
         entry.stub = json.dumps(self._stub(entry), sort_keys=True, ensure_ascii=False)
         self.entries[handle] = entry
-        if len(text) <= self.cap_chars:
+        if fits:
             return handle, text
         for name, count in counts.items():
             self.pending_redactions[name] = self.pending_redactions.get(name, 0) + count
         paged = {**envelope, "paged": {
-            "handle": handle, "page": 1, "pages": pages, "encoding": "json", "text": redacted[:self.page_chars],
+            "handle": handle, "page": 1, "pages": pages, "encoding": "json", "text": redacted[:bounds[1]],
             "message": (f"This result is larger than one page: this is page 1 of {pages} of its JSON text. Read the "
                         f"rest with get_result handle={handle} page=2 (and so on). The aliases it issued are listed "
                         "above and are citable now."),
@@ -191,7 +224,7 @@ class SessionResults:
                               "message": f"result {handle} has {entry.pages} page(s)"}}
         self.store.seek(entry.offset)
         text = self.store.read(entry.length).decode("utf-8")
-        part = text[(page - 1) * self.page_chars:page * self.page_chars]
+        part = text[entry.bounds[page - 1]:entry.bounds[page]]
         return {"handle": handle, "tool": entry.tool, "arguments": entry.arguments, "page": page,
                 "pages": entry.pages, "encoding": "json", "text": part,
                 "next": f"get_result handle={handle} page={page + 1}" if page < entry.pages else None}
@@ -202,14 +235,16 @@ class SessionResults:
         KEEP_FULL_RESULTS, once those add up to COMPACT_AFTER_TOKENS; returns how many were stubbed (0: unchanged).
         Only tool messages' content changes: the model's turns, their provider state and every tool_call_id stay."""
         last_assistant = max((i for i, m in enumerate(messages) if m.get("role") == "assistant"), default=-1)
-        full = [slot for slot in self.slots if not slot.stubbed]
+        # the full results a stub would replace: the results of the tools that record the session's work, and
+        # results too short to gain from a stub, stay as they are and are not counted among the kept ones
+        full = [slot for slot in self.slots if not slot.stubbed and slot.tool not in NEVER_COMPACTED
+                and len(str(messages[slot.index].get("content") or "")) >= STUB_MIN_CHARS]
         for slot in full:
             if not slot.tokens:
                 slot.tokens = estimate_tokens(str(messages[slot.index].get("content") or ""))
         kept = {id(slot) for slot in full[-KEEP_FULL_RESULTS:]} if KEEP_FULL_RESULTS else set()
-        candidates = [slot for slot in full
-                      if id(slot) not in kept and slot.index < last_assistant and slot.tool not in NEVER_COMPACTED
-                      and len(str(messages[slot.index].get("content") or "")) >= STUB_MIN_CHARS]
+        # a result the model has not been sent yet (after its last turn) is never stubbed
+        candidates = [slot for slot in full if id(slot) not in kept and slot.index < last_assistant]
         if sum(slot.tokens for slot in candidates) < COMPACT_AFTER_TOKENS:
             return 0
         for slot in candidates:

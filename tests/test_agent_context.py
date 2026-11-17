@@ -29,7 +29,7 @@ ROW_BYTES = 12_000          # one query_source chunk of rows and aggregations
 
 
 def _settings(tmp_path, **kw) -> Settings:
-    return Settings(home=tmp_path, es_password=SECRET, agent_max_tool_calls_per_session=CALLS + 10, **kw)
+    return Settings(**{"home": tmp_path, "es_password": SECRET, "agent_max_tool_calls_per_session": CALLS + 10, **kw})
 
 
 def _hunt():
@@ -68,12 +68,16 @@ def _query_result(n: int, evidence: str) -> dict:
         more=False)
 
 
-def _toolbox_factory(repo, evidence, produced: list):
+def _toolbox_factory(repo, evidence, produced: list, rows_per_result: int = 1):
     def make(session):
         toolbox = Toolbox(repo, "h1", session_id=session)
 
         def query(_args):
-            produced.append(_query_result(len(produced) + 1, evidence))
+            result = _query_result(len(produced) + 1, evidence)
+            if rows_per_result > 1:
+                result["data"]["result"]["search"]["rows_and_aggregations"]["text"] = "".join(
+                    _rows(i) for i in range(rows_per_result))
+            produced.append(result)
             return produced[-1]
         # the same name, arguments and description: the tool definitions sent are the real ones
         toolbox.registry["query_source"] = RegisteredTool("query_source", QUERY_SOURCE_DESCRIPTION,
@@ -102,22 +106,28 @@ def _script(anchor, evidence, hypothesis):
     return [_cached_reply(calls) for calls in steps]
 
 
-def _run(tmp_path):
+def _run(tmp_path, script=None, *, settings=None, stop=None, before_reserve=None, rows_per_result=1):
+    """Run one investigate session over the scripted replies (`script(anchor, evidence, hypothesis)`, by default
+    CALLS queries, a re-read, a citation and the finish). `stop()` is the analyst's stop request; `before_reserve(n)`
+    runs before the n-th reservation (from 0)."""
     repo, anchor, evidence, hypothesis = _hunt()
-    settings = _settings(tmp_path)
-    provider = ScriptedProvider(_script(anchor, evidence, hypothesis), context=1_000_000, output=4096)
+    settings = settings or _settings(tmp_path)
+    provider = ScriptedProvider((script or _script)(anchor, evidence, hypothesis), context=1_000_000, output=4096)
     limits = BudgetLimits(400, 100_000_000, 36_000, 0.0, 0.0, 0.0, model="m",
                           cache_read_token_weight=0.1, cache_write_token_weight=1.25)
-    gate = _BudgetGate(AgentBudget(limits, clock=lambda: 0.0), settings)
+    gate = _BudgetGate(AgentBudget(limits, clock=lambda: 0.0), settings, stop=stop)
     reserved = []
     reserve = gate.reserve
 
     def spy(prompt, output, purpose, *, prefix=None):
+        if before_reserve is not None:
+            before_reserve(len(reserved))
         reserved.append(prefix)
         return reserve(prompt, output, purpose, prefix=prefix)
     gate.reserve = spy
     produced: list = []
-    outcome = _run_session(settings, repo, "h1", provider, gate, _toolbox_factory(repo, evidence, produced),
+    outcome = _run_session(settings, repo, "h1", provider, gate,
+                           _toolbox_factory(repo, evidence, produced, rows_per_result),
                            _prompt_set(), purpose="investigate", hypothesis=repo.agent_hypotheses("h1")[0])
     sizes = [estimate_tokens(request.prompt_text()) for request in provider.requests]
     return repo, provider, outcome, sizes, produced, reserved, evidence, settings
@@ -365,3 +375,114 @@ def test_every_session_offers_get_result_with_the_same_definition():
         t for t in b.provider_tools() if t.name == "get_result"]
     assert a.execute("get_result", {"handle": "R1"})["status"] == "unsupported"
     assert a.execute("get_result", {"handle": "E1"})["status"] == "refused"
+
+
+# ---- a compacting session ends as it did before: budget, secret guard, analyst stop ---------------------------------
+
+def _queries_then_finish(count: int, *, fail_at: int | None = None, error: BaseException | None = None):
+    def script(anchor, _evidence, _hypothesis):
+        query = {"anchor": anchor, "source": "net-a", "query": {"match_all": {}}}
+        steps = [_cached_reply([ToolCall(f"q{i}", "query_source", query, json.dumps(query))])
+                 for i in range(1, count + 1)]
+        steps.append(_cached_reply([ToolCall("f1", "finish_session", {"summary": "Followed the lead to its end."},
+                                             "{}")]))
+        if fail_at is not None:
+            steps[fail_at] = error
+        return steps
+    return script
+
+
+STOP_AT = 9     # a call after the first compaction (results of about 5,700 tokens, threshold 10,000)
+
+
+def test_a_budget_stop_after_a_compaction_ends_the_session_as_before(tmp_path, monkeypatch):
+    from romulus.agent.provider import BudgetExhausted
+    monkeypatch.setattr(context, "COMPACT_AFTER_TOKENS", 10_000)
+
+    def exhaust(n):
+        if n == STOP_AT:
+            raise BudgetExhausted("tokens", "1 of 1 budget tokens spent")
+    _repo, provider, outcome, *_ = _run(tmp_path, _queries_then_finish(12), before_reserve=exhaust)
+    assert outcome["context"]["compactions"] >= 1 and len(provider.requests) == STOP_AT
+    assert outcome["state"] == "budget" and outcome["reason"] == "budget:tokens"
+    assert outcome["summary"].startswith("Budget stop: ")
+
+
+def test_a_secret_guard_trip_after_a_compaction_ends_the_session_as_before(tmp_path, monkeypatch):
+    from romulus.agent.investigate import SECRET_GUARD_REASON
+    from romulus.agent.provider import SecretGuardTripped
+    monkeypatch.setattr(context, "COMPACT_AFTER_TOKENS", 10_000)
+    tripped = SecretGuardTripped(3, [("ES_PASSWORD", "text")])
+    repo, provider, outcome, *_ = _run(tmp_path, _queries_then_finish(12, fail_at=STOP_AT, error=tripped))
+    assert outcome["context"]["compactions"] >= 1 and len(provider.requests) == STOP_AT + 1
+    assert outcome["state"] == "secret_guard" and outcome["reason"] == SECRET_GUARD_REASON
+    assert repo.agent_secret_guard_counts("h1")
+
+
+def test_an_analyst_stop_after_a_compaction_ends_the_session_as_before(tmp_path, monkeypatch):
+    from romulus.agent.investigate import STOPPED_REASON
+    monkeypatch.setattr(context, "COMPACT_AFTER_TOKENS", 10_000)
+    asked = []
+
+    def ask(n):
+        if n == STOP_AT:
+            asked.append("lead-1 at 12:00")
+    _repo, provider, outcome, *_ = _run(tmp_path, _queries_then_finish(12), before_reserve=ask,
+                                        stop=lambda: asked[0] if asked else None)
+    assert outcome["context"]["compactions"] >= 1 and len(provider.requests) == STOP_AT
+    assert outcome["state"] == "interrupted" and outcome["reason"] == STOPPED_REASON
+    assert outcome["summary"].startswith("Stopped by analyst (lead-1 at 12:00).")
+
+
+# ---- a session paging an oversized result ------------------------------------------------------------------------
+
+def test_a_session_pages_an_oversized_result_counts_its_secrets_and_bounds_rereads(tmp_path, monkeypatch):
+    monkeypatch.setattr(context, "COMPACT_AFTER_TOKENS", 1)
+    monkeypatch.setattr(context, "KEEP_FULL_RESULTS", 1)
+
+    def script(anchor, _evidence, _hypothesis):
+        query = {"anchor": anchor, "source": "net-a", "query": {"match_all": {}}}
+        steps = [[ToolCall("q1", "query_source", query, json.dumps(query))]]
+        steps += [[ToolCall(f"g{page}", "get_result", {"handle": "R1", "page": page}, "{}")] for page in (1, 2, 3, 4)]
+        steps.append([ToolCall("f1", "finish_session", {"summary": "Paged through the large result."}, "{}")])
+        return [_cached_reply(calls) for calls in steps]
+    settings = _settings(tmp_path, agent_max_tool_calls_per_session=3)
+    repo, provider, outcome, sizes, *_ = _run(tmp_path, script, settings=settings, rows_per_result=9)
+    assert outcome["state"] == "finished"
+    entered = provider.requests[1].messages[-1]["content"]
+    first = json.loads(entered)
+    assert first["paged"]["page"] == 1 and first["paged"]["pages"] >= 4 and first["aliases"]
+    assert len(entered) <= SessionResults(settings, context_tokens=1_000_000).cap_chars
+    # the secrets removed before the paged result entered are counted once, for the call that sent it
+    calls = repo.model_calls("h1")
+    assert calls[1]["options"]["redactions"] == {"ES_PASSWORD": 9}
+    assert all("redactions" not in call["options"] for n, call in enumerate(calls) if n != 1)
+    # re-reads have their own allowance (the session's reads): the fourth is refused, and no source read is spent
+    rows = sorted(repo.agent_tool_calls("h1"), key=lambda row: row["seq"])
+    assert [(row["name"], row["status"]) for row in rows] == [
+        ("query_source", "complete"), ("get_result", "complete"), ("get_result", "complete"),
+        ("get_result", "complete"), ("get_result", "refused"), ("finish_session", "complete")]
+    assert rows[4]["refusal_reasons"] == ["$: reread_call_limit"]
+    # a re-read page is compacted like a result, to a stub that names the same page
+    final = provider.requests[-1].messages
+    stub = json.loads(next(m["content"] for m in final if m.get("tool_call_id") == "g1"))
+    assert stub == {"compacted": "a re-read of R1 page 1; get_result handle=R1 page=1 shows it again",
+                    "handle": "R1", "page": 1, "pages": first["paged"]["pages"], "tool": "get_result",
+                    "of_tool": "query_source"}
+    assert SECRET not in json.dumps([m.get("content") for m in final])
+    assert sizes[-1] < sizes[2] + 2_000
+
+
+def test_text_heavy_in_escapes_never_makes_a_page_larger_than_the_cap(tmp_path):
+    settings = _settings(tmp_path)
+    results = SessionResults(settings, context_tokens=1_000_000)
+    heavy = _query_result(1, "E1")
+    heavy["data"]["result"]["search"]["rows_and_aggregations"]["text"] = json.dumps(
+        [{"path": "C:\\Windows\\System32\\" + "\\\"q\\\"" * 40 + f"{i}"} for i in range(900)])
+    handle, content = results.enter(1, "query_source", {}, heavy, {"E1"})
+    pages = json.loads(content)["paged"]["pages"]
+    assert pages > 1 and len(content) <= results.cap_chars
+    texts = [results.page(handle, n)["text"] for n in range(1, pages + 1)]
+    assert all(len(json.dumps(text, ensure_ascii=False)) <= results.page_chars for text in texts)
+    assert "".join(texts) == redact_text(json.dumps(heavy, sort_keys=True, ensure_ascii=False), settings)
+    results.close()
