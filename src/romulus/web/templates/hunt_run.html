@@ -145,6 +145,7 @@
     <tr><th>Requested provider/model</th><td class="mono">{{ ai_panel.provider }}/{{ ai_panel.model }}</td></tr>
     {% if answered_by %}<tr><th>Answered by</th><td>{% for r in answered_by %}{{ r.model_reported }} ({{ r.calls }} calls; configured {{ r.model }}){% if not loop.last %}, {% endif %}{% endfor %}</td></tr>{% endif %}
     <tr><th>Started / ended</th><td class="mono">{{ ai_panel.run.started_at or 'not started' }} / {{ ai_panel.run.ended_at or 'not recorded' }}</td></tr>
+    {% if ai_panel.assessment_reused %}<tr><th>Assessment</th><td>The earlier assessment (revision {{ ai_panel.assessment_reused.revision }}, <span class="mono">{{ ai_panel.assessment_reused.created_at }}</span>): the latest run asked the model nothing new, so it was not re-assessed.</td></tr>{% endif %}
   </tbody></table></div>
   <h3 class="panel-body">Budgets and usage</h3>
   <div class="table-wrap"><table class="grid small">

@@ -1187,18 +1187,14 @@ def _ai_assessment(repo: Repo, hunt_id: str, *, stored_only: bool = False) -> di
         row = connection.execute(select(t.agent_assessment).where(
             t.agent_assessment.c.hunt_id == hunt_id,
         ).order_by(t.agent_assessment.c.revision.desc()).limit(1)).mappings().first()
-        stale = False
-        if row and row["source"] == "agent":
-            changed_session = select(t.agent_session.c.id).where(
-                t.agent_session.c.hunt_id == hunt_id,
-                t.agent_session.c.purpose.in_(("orient", "investigate")),
-                t.agent_session.c.ended_at > row["created_at"],
-            ).exists()
-            changed_hypothesis = select(t.agent_hypothesis.c.id).where(
-                t.agent_hypothesis.c.hunt_id == hunt_id,
-                t.agent_hypothesis.c.updated_at > row["created_at"],
-            ).exists()
-            stale = bool(connection.execute(select(changed_session | changed_hypothesis)).scalar_one())
+    stale = bool(row and row["source"] == "agent" and repo.agent_work_since(hunt_id, row["created_at"]))
+    reused = None
+    if row and row["source"] == "agent":
+        # the latest agent run kept this stored assessment instead of writing one: said so wherever it is shown
+        phase = repo.latest_audit(hunt_id, "hunt.ai_agent_summary")
+        kept = ((phase or {}).get("detail") or {}).get("assessment_reused")
+        if isinstance(kept, dict) and kept.get("revision") == row["revision"]:
+            reused = kept
     if row:
         source = row["source"]
         model = row["model"] or {}
@@ -1209,6 +1205,9 @@ def _ai_assessment(repo: Repo, hunt_id: str, *, stored_only: bool = False) -> di
         if stale:
             header = ("Prior AI assessment: investigation changed after this assessment; not current. "
                       "The prior body is retained for review.")
+        elif reused:
+            header = (f"The earlier assessment (revision {row['revision']}, {reused.get('created_at')}): the latest "
+                      "agent run asked the model nothing new, so it was not re-assessed. " + header)
         if source == "agent" and isinstance(model.get("fallback"), dict):
             header += " " + fallback_sentence(model["fallback"], model.get("model_requested"))
         # the work the assessment rests on: other agent calls a fallback model wrote

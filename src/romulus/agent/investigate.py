@@ -67,6 +67,8 @@ class AgentPhaseResult:
     secret_guard: dict = field(default_factory=dict)
     # the AI triage pass run before the assessment (its summary), when the phase ran one
     triage: dict | None = None
+    # the stored assessment this run kept instead of writing one ({"revision", "created_at"}), when it did
+    assessment_reused: dict | None = None
 
     def as_dict(self) -> dict:
         out = {"status": self.state, "reason": self.reason, "prompt_digests": self.prompt_digests,
@@ -76,6 +78,8 @@ class AgentPhaseResult:
             out["secret_guard"] = self.secret_guard
         if self.triage is not None:
             out["ai_triage"] = self.triage
+        if self.assessment_reused is not None:
+            out["assessment_reused"] = self.assessment_reused
         return out
 
 
@@ -98,6 +102,8 @@ FINISH_ATTEMPTS = 3
 ORIENT_TOKEN_SHARE = 0.40
 # The end reason of an orient session that reached its token share.
 ORIENT_SHARE_LIMIT = "cap:orient_token_share"
+# The smallest dossier page an orient call is worth making with: a header and a few findings.
+MIN_ORIENT_PAGE_TOKENS = 2_000
 # The end reason of a session the secret guard ended (its state is `secret_guard`).
 SECRET_GUARD_REASON = "secret_guard"
 # The reason an analyst's stop request ended a session or the phase (a stopped session's state is `interrupted`).
@@ -242,13 +248,33 @@ class _BudgetGate:
                 "assessment"))
         return None
 
-    def room_for(self, prompt: int, output: int, purpose: str) -> BudgetExhausted | None:
-        """Why one call of this size could not start now even with nothing else in flight (None when it could): a
-        session is not started that could make no call."""
+    def room_for(self, prompt: int, output: int, purpose: str, *, also: list[tuple[int, int]] = ()) -> (
+            BudgetExhausted | None):
+        """Why a first call of this size could not start now with nothing else in flight (None when it could), counting
+        the first calls of the sessions `also` lists ((prompt, output) each) as made too: a session is not started
+        that could make no call."""
         self._refresh_limits()
+        limits = self.budget.limits
         with self.lock:
-            return self._over(prompt, output, purpose, self.budget.limits.worst_tokens(prompt, output),
-                              self.budget.limits.worst_cost(prompt, output), live=False)
+            before = (self.calls, self.tokens, self.cost)
+            try:
+                # the other sessions' first calls are counted as in flight, so this one must fit beside them
+                self.calls += len(also)
+                self.tokens += sum(limits.worst_tokens(p, o) for p, o in also)
+                self.cost += sum(limits.worst_cost(p, o) for p, o in also)
+                return self._over(prompt, output, purpose, limits.worst_tokens(prompt, output),
+                                  limits.worst_cost(prompt, output), live=True)
+            finally:
+                self.calls, self.tokens, self.cost = before
+
+    def orient_prompt_room(self, output: int) -> int:
+        """The most prompt tokens an orient call may carry inside orient's token share (what is left of it, less the
+        call's output allowance), however the prompt is cached; 0 when not even an empty prompt fits."""
+        limits = self.budget.limits
+        left = limits.max_tokens * ORIENT_TOKEN_SHARE - self.orient_tokens
+        per_attempt = left / limits.attempts_reserved - output
+        dearest = max(1.0, limits.cache_read_token_weight, limits.cache_write_token_weight)
+        return max(0, math.floor(per_attempt / dearest))
 
     def cached_tokens(self, prefix: _CachedPrefix | None) -> int:
         """The prompt tokens of `prefix` still in the cache now: none once the entry may have expired."""
@@ -667,6 +693,27 @@ def _deterministic_tool_summary(calls: list[tuple[str, str]], changes: list[dict
     return f"Session stopped after {steps}{changed}."[:2000]
 
 
+def _investigate_messages(repo: Repo, hunt_id: str, hypothesis: dict, prompts: dict[str, str], *,
+                          owner_token=None) -> tuple[dict, list[dict]]:
+    """An investigate session's first messages: the system and investigate prompts, the dossier header, and the
+    hypothesis card with its cites and the summaries of its earlier sessions."""
+    context = _hypothesis_context(repo, hunt_id, hypothesis, _summaries(repo, hunt_id, hypothesis["id"]),
+                                  owner_token=owner_token)
+    dossier = build_dossier(repo, hunt_id, token_budget=1000, owner_token=owner_token)
+    return context, [{"role": "system", "content": prompts["system.md"] + "\n\n" + prompts["investigate.md"]},
+                     {"role": "user", "content": json.dumps({"dossier_header": {
+                         "header": dossier.payload.get("header"), "scope": dossier.payload.get("scope")},
+                         "hypothesis": context}, sort_keys=True, ensure_ascii=False, default=str)}]
+
+
+def first_investigate_prompt(repo: Repo, hunt_id: str, hypothesis: dict, prompts: dict[str, str], tools: list, *,
+                             owner_token=None) -> tuple[int, ChatRequest]:
+    """The estimated tokens of a hypothesis's next session's first prompt, built as the session builds it."""
+    _context, messages = _investigate_messages(repo, hunt_id, hypothesis, prompts, owner_token=owner_token)
+    request = ChatRequest(messages=messages, tools=tools, tool_choice="auto")
+    return estimate_tokens(request.prompt_text()), request
+
+
 def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_gate: _BudgetGate,
                  toolbox_factory: Callable[[str], Toolbox], prompts: dict[str, str],
                  *, purpose: str, hypothesis: dict | None = None, owner_token=None,
@@ -695,8 +742,21 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
     cache_basis: dict | None = None
     cache_trusted = True
     overruns = 0
+    counted = True
 
     def finish(state: str, final_summary: str, reason: str | None = None) -> dict:
+        nonlocal counted
+        if not counted and state not in ("budget", "interrupted"):
+            # it failed before its first call (a controller error, a refusal, an oversized context): counted, so the
+            # same hypothesis is not picked first on every run while the others wait; a budget stop or an analyst's
+            # stop is not the hypothesis's doing and is not counted
+            counted = True
+            try:
+                repo.increment_agent_hypothesis_sessions(hypothesis_id, hunt_id, owner_token=owner_token)
+            except Exception as exc:
+                if is_lease_lost(exc):
+                    raise
+                log.exception("could not count the failed session of hypothesis %s", hypothesis_id)
         # a summary can quote the model (its finish_session text, a refusal, an error): stored without any secret
         final_summary = redact_text(final_summary, settings)
         outcome = {"id": session_id, "hypothesis_id": hypothesis_id, "purpose": purpose, "state": state,
@@ -748,6 +808,24 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
             context_limit = provider.context_tokens() or settings.agent_context_tokens
             room = (max(1, int(context_limit * 0.85) - estimate_tokens(shell.prompt_text()) -
                         provider.output_limit(shell) - 512) if context_limit else 24_000)
+            # the dossier's first page is sized inside orient's token share too, so orient always makes a real call
+            # (the dossier pages: a smaller page holds fewer findings, and list_findings reads the rest)
+            share_room = (budget_gate.orient_prompt_room(provider.output_limit(shell))
+                          - estimate_tokens(shell.prompt_text()) - 512)
+            if share_room < MIN_ORIENT_PAGE_TOKENS:
+                minimal = estimate_tokens(shell.prompt_text()) + MIN_ORIENT_PAGE_TOKENS
+                spent = budget_gate.room_for(minimal, provider.output_limit(shell), "assess")
+                if spent is not None:
+                    # the hunt's own budget, not orient's share, is what leaves no room: said as the budget stop
+                    return finish("budget", f"Budget stop: {spent}. "
+                                  + _deterministic_tool_summary(tool_history, hypothesis_changes),
+                                  f"budget:{spent.budget}")
+                return finish("budget", (
+                    f"Orient made no call: its token share ({ORIENT_TOKEN_SHARE:.0%} of the budget, "
+                    f"{budget_gate.orient_tokens} budget tokens already spent) leaves no room for even a minimal "
+                    "dossier page beside its output allowance. Added budget raises the share and lets it run."),
+                    ORIENT_SHARE_LIMIT)
+            room = min(room, share_room)
             # Pagination estimates canonical data; measure the actual request envelope too.
             for _ in range(4):
                 dossier = build_dossier(repo, hunt_id, token_budget=room, owner_token=owner_token,
@@ -759,25 +837,27 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                             {"role": "user", "content": json.dumps(user, sort_keys=True, ensure_ascii=False,
                                                                   default=str, separators=(",", ":"))}]
                 request = ChatRequest(messages=messages, tools=tools, tool_choice="auto")
-                excess = (estimate_tokens(request.prompt_text()) + provider.output_limit(request)
+                prompt_tokens = estimate_tokens(request.prompt_text())
+                excess = (prompt_tokens + provider.output_limit(request)
                           - int(context_limit * 0.85)) if context_limit else 0
-                if excess <= 0:
+                # the whole request, not only the page, must fit inside orient's share
+                share_excess = prompt_tokens - budget_gate.orient_prompt_room(provider.output_limit(request))
+                if excess <= 0 and share_excess <= 0:
                     break
-                room = max(1, room - excess - 128)
+                room = max(1, room - max(excess, share_excess) - 128)
             if excess > 0:
                 return finish("context_full", "Orient input exceeds the available context budget.", "context_full")
+            if share_excess > 0:
+                return finish("budget", (
+                    f"Orient made no call: no dossier page fits inside its token share ({ORIENT_TOKEN_SHARE:.0%} of "
+                    f"the budget, {budget_gate.orient_tokens} budget tokens already spent). Added budget raises the "
+                    "share and lets it run."), ORIENT_SHARE_LIMIT)
             admission.issue_aliases(page, source="dossier")
             call_limit = _tool_call_allowance(settings, reads=len(dossier.pages) - 1)
         else:
             call_limit = _tool_call_allowance(settings, reads=_cited_findings(repo, hypothesis_id))
-            context = _hypothesis_context(repo, hunt_id, hypothesis, _summaries(repo, hunt_id, hypothesis_id),
-                                          owner_token=owner_token)
-            dossier = build_dossier(repo, hunt_id, token_budget=1000, owner_token=owner_token)
+            context, messages = _investigate_messages(repo, hunt_id, hypothesis, prompts, owner_token=owner_token)
             admission.issue_aliases(context, source="hypothesis")
-            messages = [{"role": "system", "content": system_text + "\n\n" + prompts["investigate.md"]},
-                        {"role": "user", "content": json.dumps({"dossier_header": {
-                            "header": dossier.payload.get("header"), "scope": dossier.payload.get("scope")},
-                            "hypothesis": context}, sort_keys=True, ensure_ascii=False, default=str)}]
         while True:
             request = ChatRequest(messages=messages, tools=tools, tool_choice="auto")
             prompt_est = estimate_tokens(request.prompt_text())
@@ -1191,14 +1271,29 @@ def _triage_cited(settings: Settings, repo: Repo, hunt_id: str, triage, assessme
 NO_NEW_INVESTIGATION = "no_new_investigation"
 
 
+# Orient sessions that ran to an end of their own: a limit or the model ended them, not a crash or an analyst's stop.
+_ORIENT_ENDED = frozenset({"finished", "budget", "capped", "context_full", "refused", "secret_guard"})
+
+
 def orient_completed(repo: Repo, hunt_id: str) -> bool:
-    """Whether the hunt's orient is done: a session of it finished, or it stored hypotheses (an orient the budget or a
-    stop ended after storing them, and the controller's hypotheses opened from the findings, are not repeated). Orient
-    runs again only when none finished and nothing was stored: it never ran, or it was interrupted before it stored
-    its hypotheses."""
-    if any(row["purpose"] == "orient" and row["state"] == "finished" for row in repo.agent_sessions(hunt_id)):
-        return True
-    return bool(repo.agent_hypotheses(hunt_id))
+    """Whether the hunt's orient is done, so a continuation does not orient again.
+
+    Done when an orient session finished; or when one ran to an end of its own (a budget, its token share, its tool
+    calls, the context) after making at least one model call, and the hypotheses it and the controller then opened are
+    stored. Not done when orient never ran; when every orient session was interrupted (a crash or an analyst's stop
+    can cut it before its plan is complete, so it runs again once); or when one ended on its share without a call
+    (a later extension raises the share and lets it run). The stricter rule than "any hypothesis is stored" re-orients
+    after an interruption, and still never re-orients a budget-limited orient on every extension."""
+    hypotheses = None
+    for row in repo.agent_sessions(hunt_id, purpose="orient"):
+        if row["state"] == "finished":
+            return True
+        if row["state"] in _ORIENT_ENDED and repo.model_calls(session_id=row["id"]):
+            if hypotheses is None:
+                hypotheses = bool(repo.agent_hypotheses(hunt_id))
+            if hypotheses:
+                return True
+    return False
 
 
 def continuation_plan(settings: Settings, repo: Repo, hunt_id: str) -> dict:
@@ -1283,9 +1378,7 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
 
     consecutive_outages = 1 if reportable_count and not orient_finished and orient.get("provider_unavailable") else 0
     stop_scheduling = str(orient.get("reason") or "").startswith("controller_error") or bool(stopped)
-    probe = ChatRequest(messages=[{"role": "system", "content": prompts["system.md"] + "\n\n" + prompts["investigate.md"]},
-                                  {"role": "user", "content": ""}])
-    probe_prompt = estimate_tokens(probe.prompt_text()) + 2000      # the hypothesis card and dossier header
+    probe_tools = _session_tools(Toolbox(repo, hunt_id))
     while not stop_scheduling:
         stopped = gate.stopped()
         if stopped:
@@ -1293,13 +1386,23 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
         batch = _next_hypotheses(settings, repo, hunt_id)
         if not batch:
             break
-        no_room = gate.room_for(probe_prompt, provider.output_limit(probe), "investigate")
-        if no_room is not None:
-            # not one more investigation call fits beside the assessment's hold: no session is started (it would use
-            # up a hypothesis's session for nothing)
+        # a session starts only when its first call (its real first prompt: the hypothesis card with its cites and
+        # earlier summaries) fits beside the assessment's hold and the first calls of the sessions started with it
+        room, firsts, no_room = [], [], None
+        for hypothesis in batch[:settings.agent_concurrency]:
+            prompt, request = first_investigate_prompt(repo, hunt_id, hypothesis, prompts, probe_tools,
+                                                       owner_token=owner_token)
+            output = provider.output_limit(request)
+            refused = gate.room_for(prompt, output, "investigate", also=firsts)
+            if refused is not None:
+                no_room = no_room or refused
+                break
+            room.append(hypothesis)
+            firsts.append((prompt, output))
+        if not room:
+            # not one more investigation call fits: no session is started (it would make no call)
             reasons.append(f"budget:{no_room.budget}")
             break
-        room = batch[:settings.agent_concurrency]
         before = {row["id"]: int(row.get("sessions_run") or 0) for row in room}
         # Breadth-first round selection in _next_hypotheses means every selected hypothesis is distinct.
         completed = []
@@ -1344,13 +1447,18 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
         (STOPPED_REASON for session in all_sessions if session.get("reason") == STOPPED_REASON), None)
     if stopped and STOPPED_REASON not in reasons:
         reasons.append(STOPPED_REASON)
-    # the assessment is stale when this run asked the model anything (orient or investigation): its findings changed
-    assessment_stale = budget.calls > calls_before
+    # the assessment is stale when this run asked the model anything (orient or investigation), or when agent work
+    # (a session, a finding, a raw record, a hypothesis change) is newer than it
+    latest = (repo.agent_assessments(hunt_id) or [None])[-1]
+    assessment_stale = budget.calls > calls_before or (
+        latest is not None and latest.get("source") == "agent"
+        and repo.agent_work_since(hunt_id, latest["created_at"]))
     if not assessment_stale and any(item.startswith("budget:") for item in reasons):
         # a continuation whose budget fit no investigation call: said plainly, and not spent on a re-assessment
         reasons.append(NO_NEW_INVESTIGATION)
     existing_assessments = repo.agent_assessments(hunt_id)
     triage_summary = None
+    reused_assessment = None
     if stopped:
         # an analyst stopped the agent: no further model call (no triage pass, no assessment). The latest stored
         # assessment stands; without one, the template says why there is none.
@@ -1364,6 +1472,9 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
         assessment = {"stopped": True}
     elif existing_assessments and existing_assessments[-1].get("source") == "agent" and not assessment_stale:
         assessment = {"revision": existing_assessments[-1]["revision"], "body": existing_assessments[-1]["body"]}
+        # said wherever the assessment is shown: it is the earlier one, not one this run wrote
+        reused_assessment = {"revision": existing_assessments[-1]["revision"],
+                             "created_at": str(existing_assessments[-1]["created_at"])}
     else:
         # the triage pass runs only when an assessment is about to: its verdicts are part of the assess input
         if triage is not None:
@@ -1434,5 +1545,6 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
     provider_data = {**provider_data, "models_reported": usage.get("models_reported", [])}
     heartbeat()
     result = AgentPhaseResult(state, reason, prompt_digests, provider_data, all_sessions,
-                              sorted(limits_hit), _unworked(repo, hunt_id), usage, triage=triage_summary)
+                              sorted(limits_hit), _unworked(repo, hunt_id), usage, triage=triage_summary,
+                              assessment_reused=reused_assessment)
     return _finalize(repo, hunt_id, result, started_at=start, owner_token=owner_token)

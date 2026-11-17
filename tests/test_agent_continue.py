@@ -228,3 +228,175 @@ def test_the_quick_profile_leaves_investigation_a_real_share(tmp_path):
     assert orient_spent <= quick["max_tokens"] * ORIENT_TOKEN_SHARE + quick["max_tokens"] // 10
     assert investigate and all(row["tool_calls"] >= 1 for row in investigate)        # investigation ran
     assert any(row["purpose"] == "assess" for row in sessions)
+
+
+# ---------------------------------------------------------------------------------------------- review follow-ups
+def _session(repo, session_id, purpose, state, *, call=False, hypothesis_id=None):
+    repo.save_agent_session({"id": session_id, "hunt_id": "h1", "hypothesis_id": hypothesis_id, "purpose": purpose,
+                             "state": state, "tool_calls": 0, "summary": "", "started_at": utcnow(),
+                             "ended_at": utcnow()})
+    if call:
+        repo.save_model_call({"id": f"mc-{session_id}", "hunt_id": "h1", "session_id": session_id,
+                              "purpose": purpose, "model": "scripted-model", "options": {}, "prompt_digest": "d",
+                              "status": "ok", "at": utcnow()})
+
+
+def _reopen(repo):
+    from romulus.store import schema as t
+    with repo.engine.begin() as connection:
+        connection.execute(t.agent_hypothesis.update().where(t.agent_hypothesis.c.hunt_id == "h1").values(
+            status="open", sessions_run=1, questions=["what else?"]))
+
+
+class _ByKind(ScriptedProvider):
+    """Answers by the kind of request: the assessment's schema, an orient dossier page, else an investigate turn."""
+
+    def __init__(self, **kwargs):
+        super().__init__([], **kwargs)
+
+    def chat(self, request):
+        with self.lock:
+            self.requests.append(request)
+        if request.response_schema is not None:
+            return response(parsed=BODY)
+        if "Dossier index page" in str(request.messages[1]["content"]):
+            return response(tool_calls=_opens())
+        return response(tool_calls=_finish())
+
+
+def _full_first_run(s, repo):
+    _run(s, repo, _ByKind())
+    assert repo.agent_assessments("h1")[-1]["source"] == "agent"
+    # left partial (as a budget stop leaves it), so the next run continues instead of returning the completed one
+    run = repo.agent_run("h1")
+    repo.save_agent_run({**{key: run[key] for key in ("hunt_id", "prompt_digests", "provider", "started_at",
+                                                     "ended_at")}, "state": "partial", "reason": "budget:calls"})
+
+
+def test_orient_is_done_only_when_it_finished_or_ran_to_an_end_with_a_call_and_stored_its_plan(tmp_path):
+    from romulus.agent.admission import AgentAdmission
+    from romulus.agent.investigate import _controller_open_hypotheses
+    s = Settings(home=tmp_path)
+    repo = _hunt(tmp_path, s)
+    _session(repo, "as-int", "orient", "interrupted")
+    _controller_open_hypotheses(s, repo, "h1", "as-int", AgentAdmission(s, repo, "h1", "as-int", purpose="orient"))
+    assert repo.agent_hypotheses("h1")
+    # interrupted (a crash or a stop) after storing hypotheses: orient runs again once
+    assert not orient_completed(repo, "h1") and continuation_plan(s, repo, "h1")["starting_phase"] == "orient"
+    # ended on its token share before any call: not done, so a later extension lets it run
+    _session(repo, "as-cap", "orient", "budget")
+    assert not orient_completed(repo, "h1")
+    # a budget-limited orient that made a call and left its hypotheses stored: done, never re-run on each extension
+    _session(repo, "as-cut", "orient", "budget", call=True)
+    assert orient_completed(repo, "h1") and continuation_plan(s, repo, "h1")["starting_phase"] == "investigate"
+
+
+def test_a_capped_orient_makes_no_call_and_an_extension_re_orients(tmp_path):
+    from romulus.agent.investigate import _prompt_set, _run_session
+    s = Settings(home=tmp_path, agent_triage="off")
+    repo = _hunt(tmp_path, s)
+    limits = BudgetLimits.from_settings(s)
+    gate = _BudgetGate(AgentBudget(limits, clock=lambda: 0.0), s)
+    gate.orient_tokens = int(limits.max_tokens * ORIENT_TOKEN_SHARE) - 500     # its share is all but spent
+    provider = ScriptedProvider([])
+    outcome = _run_session(s, repo, "h1", provider, gate, lambda _s: Toolbox(repo, "h1"), _prompt_set(),
+                           purpose="orient")
+    assert outcome["reason"] == ORIENT_SHARE_LIMIT and provider.requests == []
+    assert "no room for even a minimal dossier page" in repo.agent_sessions("h1")[-1]["summary"]
+    assert not orient_completed(repo, "h1")
+    # with the share free (an extension raised the budget), the next run orients
+    _full_first_run(s, repo)
+    assert [row["state"] for row in repo.agent_sessions("h1", purpose="orient")] == ["budget", "finished"]
+
+
+def test_a_large_dossier_is_sized_under_orients_token_share(tmp_path):
+    from romulus.agent.provider.base import estimate_tokens
+    s = Settings(home=tmp_path, agent_triage="off")
+    repo = _hunt(tmp_path, s, max_tokens=150_000)
+    for index in range(800):
+        repo.save_candidate({
+            "id": f"big{index}", "hunt_id": "h1", "rule_id": "host.test", "rule_version": "1",
+            "claim": f"deterministic finding {index} " + "with a long descriptive claim " * 20,
+            "claim_type": "observed_action", "event_ids": [], "context_event_ids": [], "predicate_fields": [],
+            "entities": [["host", f"host-{index}", "host"]], "ts": datetime.now(UTC), "severity": "high",
+            "confidence": "high", "lane": "high", "priority": 2.0, "priority_reasons": [], "gate_results": {},
+            "benign_alternatives": [], "next_checks": [], "group_key": f"big{index}", "source_case_id": None,
+            "source_anchor_id": None, "source_link_id": None})
+    provider = _ByKind(context=1_000_000)
+    _run(s, repo, provider)
+    first = provider.requests[0]
+    assert "Dossier index page 1 of" in str(first.messages[1]["content"])
+    # a real call, inside the share, on a page the share sized (the context alone would have taken far more)
+    assert estimate_tokens(first.prompt_text()) <= 150_000 * ORIENT_TOKEN_SHARE
+    assert not str(first.messages[1]["content"]).startswith('{"message":"Dossier index page 1 of 1;')
+
+
+def test_a_hypothesis_whose_session_fails_before_a_call_is_counted_and_the_others_proceed(tmp_path):
+    from romulus.agent.investigate import _next_hypotheses
+    s = Settings(home=tmp_path, agent_triage="off", agent_concurrency=1)
+    repo = _hunt(tmp_path, s)
+    _full_first_run(s, repo)
+    _reopen(repo)
+    first = _next_hypotheses(s, repo, "h1")[0]["id"]
+    broken = {"first": True}
+
+    def toolbox(_session_id):
+        if broken["first"]:
+            broken["first"] = False
+            raise RuntimeError("tool registry unavailable")
+        return Toolbox(repo, "h1")
+    run_agent_phase(s, repo, "h1", provider=_ByKind(), toolbox_factory=toolbox, clock=lambda: 0.0)
+    failed = [row for row in repo.agent_sessions("h1") if row["state"] == "failed"]
+    assert [row["hypothesis_id"] for row in failed] == [first], failed
+    counts = {row["id"]: row["sessions_run"] for row in repo.agent_hypotheses("h1")}
+    assert counts[first] == 2                                          # the failure counts against it
+    assert _next_hypotheses(s, repo, "h1")[0]["id"] != first           # so another hypothesis goes first next time
+
+
+def test_a_reused_assessment_is_labelled_and_later_work_makes_it_stale(tmp_path):
+    from romulus.report.manifest import _ai_assessment
+    s = Settings(home=tmp_path, agent_triage="off")
+    repo = _hunt(tmp_path, s)
+    _full_first_run(s, repo)
+    latest = repo.agent_assessments("h1")[-1]
+    assert latest["source"] == "agent" and not repo.agent_work_since("h1", latest["created_at"])
+    from romulus.store import schema as t
+    with repo.engine.begin() as connection:              # every hypothesis worked to its limit: nothing to investigate
+        connection.execute(t.agent_hypothesis.update().where(t.agent_hypothesis.c.hunt_id == "h1").values(
+            sessions_run=s.agent_max_sessions_per_hypothesis))
+    result = _run(s, repo, ScriptedProvider([]))                      # nothing left to do: no call is made
+    assert result.assessment_reused == {"revision": latest["revision"], "created_at": str(latest["created_at"])}
+    assert _ai_assessment(repo, "h1")["header"].startswith(f"The earlier assessment (revision {latest['revision']}")
+    # a finding stored after the assessment (a resumed deterministic run's) makes it stale
+    repo.save_candidate({
+        "id": "late", "hunt_id": "h1", "rule_id": "host.test", "rule_version": "1", "claim": "a later finding",
+        "claim_type": "observed_action", "event_ids": [], "context_event_ids": [], "predicate_fields": [],
+        "entities": [], "ts": None, "severity": "high", "confidence": "high", "lane": "high", "priority": 2.0,
+        "priority_reasons": [], "gate_results": {}, "benign_alternatives": [], "next_checks": [],
+        "group_key": "late", "source_case_id": None, "source_anchor_id": None, "source_link_id": None})
+    assert repo.agent_work_since("h1", latest["created_at"])
+    assert _ai_assessment(repo, "h1")["header"].startswith("Prior AI assessment")
+
+
+def test_the_room_probe_uses_each_hypothesis_s_real_first_prompt(tmp_path, monkeypatch):
+    from romulus.agent import investigate
+    from romulus.agent.investigate import _prompt_set, first_investigate_prompt
+    s = Settings(home=tmp_path, agent_triage="off")
+    repo = _hunt(tmp_path, s)
+    _full_first_run(s, repo)
+    hypothesis = repo.agent_hypotheses("h1")[0]
+    tools = investigate._session_tools(Toolbox(repo, "h1"))
+    short, _ = first_investigate_prompt(repo, "h1", hypothesis, _prompt_set(), tools)
+    session = next(row for row in repo.agent_sessions("h1", purpose="investigate")
+                   if row["hypothesis_id"] == hypothesis["id"])
+    repo.update_agent_session(session["id"], "h1", {"summary": "A long earlier summary. " * 80})
+    longer, _ = first_investigate_prompt(repo, "h1", hypothesis, _prompt_set(), tools)
+    assert longer > short + 300                                       # its earlier summaries are in it
+    # a first prompt that cannot fit starts no session at all
+    _reopen(repo)
+    sessions_before = len(repo.agent_sessions("h1"))
+    monkeypatch.setattr(investigate, "first_investigate_prompt",
+                        lambda *_a, **_k: (s.agent_max_tokens, investigate.ChatRequest(messages=[])))
+    result = _run(s, repo, ScriptedProvider([]))
+    assert "budget:tokens" in result.reason
+    assert len(repo.agent_sessions("h1")) == sessions_before

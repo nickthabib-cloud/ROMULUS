@@ -197,6 +197,8 @@ def panel(repo, hunt, usage, *, with_assessment=True):
             "source_queries": repo.agent_source_queries(hunt["id"]),
             "wall_seconds": repo.agent_elapsed_ms(hunt["id"]) / 1000,
             "limits": sorted(set(limit_items)), "counts": counts(repo, hunt["id"]),
+            # the stored assessment the latest run kept instead of writing one (revision and when it was written)
+            "assessment_reused": ((summary or {}).get("detail") or {}).get("assessment_reused"),
             "assessment": assessment_view(repo, hunt["id"]) if with_assessment else None,
             "refusal": repo.agent_reassessment_refusal(hunt["id"]),
             # why the model's tool calls and assessment answers were refused: counts by tool and reason

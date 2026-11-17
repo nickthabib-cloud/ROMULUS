@@ -5742,6 +5742,25 @@ class Repo:
             result = c.execute(insert(t.model_call).values(**values).on_conflict_do_nothing(index_elements=["id"]))
             return result.rowcount == 1
 
+    def agent_work_since(self, hunt_id: str, at: datetime) -> bool:
+        """Whether anything the assessment reads changed after `at`: an orient or investigate session, a hypothesis, a
+        finding (the agent's, or one a resumed deterministic run stored), a note, a link or a raw record the agent
+        cited. Each is one indexed or hunt-bounded existence check."""
+        checks = [
+            select(t.agent_session.c.id).where(
+                t.agent_session.c.hunt_id == hunt_id, t.agent_session.c.purpose.in_(("orient", "investigate")),
+                or_(t.agent_session.c.ended_at > at, t.agent_session.c.started_at > at)).exists(),
+            select(t.agent_hypothesis.c.id).where(t.agent_hypothesis.c.hunt_id == hunt_id,
+                                                  t.agent_hypothesis.c.updated_at > at).exists(),
+            select(t.candidate.c.id).where(t.candidate.c.hunt_id == hunt_id, t.candidate.c.created_at > at).exists(),
+            select(t.agent_note.c.id).where(t.agent_note.c.hunt_id == hunt_id, t.agent_note.c.created_at > at).exists(),
+            select(t.agent_link.c.id).where(t.agent_link.c.hunt_id == hunt_id, t.agent_link.c.created_at > at).exists(),
+            select(t.agent_raw_record.c.id).where(t.agent_raw_record.c.hunt_id == hunt_id,
+                                                  t.agent_raw_record.c.created_at > at).exists(),
+        ]
+        with self.engine.connect() as c:
+            return any(bool(c.execute(select(check)).scalar_one()) for check in checks)
+
     def model_calls(self, hunt_id: str | None = None, case_id: str | None = None,
                     session_id: str | None = None) -> list[dict]:
         query = select(t.model_call)
