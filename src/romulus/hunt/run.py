@@ -126,10 +126,15 @@ def create_hunt(s: Settings, start: datetime, end: datetime, created_by: str, st
 def arkime_profile_fields(s: Settings, arkime_targets: list[str], transport=None) -> dict[str, dict]:
     """What each Arkime session target's stored profile adds: the viewer's expression fields (read once, from the
     configured viewer, never at the model's request), or a note saying why they are unknown. Nothing when the hunt has
-    no Arkime target or no viewer account is configured."""
-    if not arkime_targets or not s.arkime_username:
+    no Arkime target. The viewer is the one the packet stage reads for the same targets; a viewer that cannot be read
+    never stops a hunt."""
+    if not arkime_targets:
         return {}
-    fields, problem = arkime_expression_fields(s, transport=transport)
+    try:
+        fields, problem = arkime_expression_fields(s, transport=transport)
+    except Exception as exc:      # a diagnostic read must never stop a hunt: recorded as unknown
+        log.exception("Arkime field list read failed")
+        fields, problem = [], f"Arkime expression fields unavailable: the read failed ({type(exc).__name__})"
     extra: dict = {"arkime_fields": fields}
     if problem:
         extra["arkime_fields_note"] = problem

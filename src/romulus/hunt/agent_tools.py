@@ -126,6 +126,7 @@ class HuntToolExecutor:
         self.uncontracted_targets = tuple(uncontracted_targets)
         self._followable: dict[str, tuple[str, ...]] = {}
         self._profile_cache: dict[str, dict] | None = None
+        self._sources: dict[str, tuple[str, str]] | None = None
 
     def _events(self, ids: list[str]) -> list[TypedEvent]:
         rows = self.repo.citation_events(self.hunt_id, ids)
@@ -170,22 +171,35 @@ class HuntToolExecutor:
             self._profile_cache = self.repo.source_profiles(self.hunt_id)
         return self._profile_cache
 
+    def source_table(self) -> dict[str, tuple[str, str]]:
+        """Every source the agent can name, by its exact name: (kind, target). Each target with a field contract (an
+        Elasticsearch or OpenSearch index or data stream) is a source of kind index; each Arkime session target's
+        viewer is a source of kind arkime_viewer named arkime:<target>, unless an index already has that name. A name
+        is only ever looked up here, never parsed."""
+        if self._sources is None:
+            table: dict[str, tuple[str, str]] = {}
+            for target, contract in sorted(self.pivot.contracts.items()):
+                if contract is not None:
+                    table[target] = ("index", target)
+            for target, contract in sorted(self.pivot.contracts.items()):
+                if contract is not None and contract.time_field == "firstPacket":
+                    table.setdefault(ARKIME_SOURCE_PREFIX + target, ("arkime_viewer", target))
+            self._sources = table
+        return self._sources
+
     def search_sources(self) -> list[dict]:
-        """The hunt's sources the agent can name, by name: each target with a field contract (an Elasticsearch or
-        OpenSearch index or data stream), and for each Arkime session target its viewer (arkime:<target>), whose
-        expressions are evaluated by the viewer. No source query."""
+        """The hunt's sources (source_table) with each one's kind, role, time field and field count. No source
+        query."""
         out = []
-        for target, contract in sorted(self.pivot.contracts.items()):
-            if contract is None:
-                continue
-            role = "network" if contract.role == "network" else "host"
-            native = self._native_table(target)
-            out.append({"source": target, "kind": "index", "role": role, "time_field": contract.time_field,
-                        "fields": len(native)})
-            if contract.time_field == "firstPacket":
+        for name, (kind, target) in sorted(self.source_table().items()):
+            contract = self.pivot.contracts[target]
+            if kind == "index":
+                out.append({"source": name, "kind": kind, "role": "network" if contract.role == "network" else "host",
+                            "time_field": contract.time_field, "fields": len(self._native_table(target))})
+            else:
                 profile = self._profiles().get(target) or {}
-                out.append({"source": ARKIME_SOURCE_PREFIX + target, "kind": "arkime_viewer", "role": "network",
-                            "time_field": "firstPacket", "fields": len(profile.get("arkime_fields") or [])})
+                out.append({"source": name, "kind": kind, "role": "network", "time_field": contract.time_field,
+                            "fields": len(profile.get("arkime_fields") or [])})
         return out
 
     def _native_table(self, target: str) -> dict[str, str]:
@@ -204,23 +218,21 @@ class HuntToolExecutor:
         """One source's own fields: an index's mapped fields (type, keyword-like or text, indexed, aggregatable,
         ignore_above), or an Arkime viewer's expression fields as profiled when the hunt started. None for a name
         that is not one of the hunt's sources. No source query."""
-        if source.startswith(ARKIME_SOURCE_PREFIX):
-            target = source[len(ARKIME_SOURCE_PREFIX):]
-            contract = self.pivot.contracts.get(target)
-            if contract is None or contract.time_field != "firstPacket":
-                return None
+        found = self.source_table().get(source)
+        if found is None:
+            return None
+        kind, target = found
+        contract = self.pivot.contracts[target]
+        if kind == "arkime_viewer":
             profile = self._profiles().get(target) or {}
             fields = [dict(item) for item in profile.get("arkime_fields") or [] if isinstance(item, dict)]
             note = profile.get("arkime_fields_note")
             if "arkime_fields" not in profile:
-                note = ("the viewer's expression fields were not profiled for this hunt (no viewer account was "
-                        "configured, or the hunt predates it); its expressions still take the viewer's own names")
+                note = ("the viewer's expression fields were not profiled for this hunt; its expressions still take "
+                        "the viewer's own field names")
             return {"fields": fields, "note": note}
-        contract = self.pivot.contracts.get(source)
-        if contract is None:
-            return None
         fields = []
-        for name, mapped in self._native_table(source).items():
+        for name, mapped in self._native_table(target).items():
             base, _, qualifier = mapped.partition(":")
             item = {"field": name, "type": base,
                     "kind": ("keyword" if base in KEYWORD_LIKE else "text" if base in ANALYZED_TEXT else "other"),

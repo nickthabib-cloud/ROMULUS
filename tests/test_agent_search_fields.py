@@ -299,10 +299,18 @@ def test_the_viewer_field_list_in_its_keyed_form_and_its_failures():
         assert fields == [] and note.startswith("Arkime expression fields unavailable")
 
 
-def test_the_profile_takes_the_viewer_fields_only_for_arkime_targets_with_a_viewer_account(monkeypatch):
+def test_the_profile_takes_the_viewer_fields_only_for_arkime_targets_and_a_failed_read_never_stops_it(monkeypatch):
     transport = httpx.MockTransport(lambda request: httpx.Response(200, json=[{"exp": "ip.dst", "type": "ip"}]))
     assert arkime_profile_fields(_viewer(), [], transport=transport) == {}
-    assert arkime_profile_fields(Settings(), ["arkime_sessions3-1"], transport=transport) == {}
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("romulus.hunt.run.arkime_expression_fields", broken)
+    failed = arkime_profile_fields(_viewer(), ["arkime_sessions3-1"], transport=transport)
+    assert failed["arkime_sessions3-1"] == {
+        "arkime_fields": [], "arkime_fields_note": "Arkime expression fields unavailable: the read failed (RuntimeError)"}
+    monkeypatch.undo()
     added = arkime_profile_fields(_viewer(), ["arkime_sessions3-1"], transport=transport)
     assert added["arkime_sessions3-1"]["arkime_fields"][0]["field"] == "ip.dst"
     assert "arkime_fields_note" not in added["arkime_sessions3-1"]
