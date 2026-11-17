@@ -282,8 +282,8 @@ class SourceQueryRunner:
         events, skips, errors = normalize_hits(records, surrogate_free=last_response_surrogate_free(), **options)
         skipped = sum(count for count in skips.values() if count)
         if skipped:
-            reasons.append(f"{skipped} returned record(s) no normalizer reads: those in the preview are kept as raw "
-                           "records (raw_evidence, Q aliases), citable only as text a record contains")
+            reasons.append(f"{skipped} returned record(s) no normalizer reads: no typed fields were extracted from "
+                           "them and no detection rule ran on them")
         if errors:
             reasons.append(f"normalization_errors:{len(errors)}")
         raw_sources = {f"{record['_index']}/{record['_id']}": record["_source"] for record in records}
@@ -292,11 +292,14 @@ class SourceQueryRunner:
         for event in events:
             for ref in event.raw:
                 by_record.setdefault(f"{ref.target}/{ref.native_id}", []).append(event.id)
-        raw_kept, raw_note = self._keep_raw(records[:MAX_PREVIEW_ROWS], by_record, contract.time_field, args,
-                                            session_id=case_id, task_id=task_id, request_digest=request_digest,
-                                            source_kind="arkime_session" if viewer is not None else "index")
-        if raw_note:
-            reasons.append(raw_note)
+        unread = [(record, contract.time_field) for record in records[:MAX_PREVIEW_ROWS]
+                  if not by_record.get(f"{record['_index']}/{record['_id']}")]
+        query_text = {key: value for key, value in (("query", args.query), ("expression", args.expression),
+                                                    ("aggs", args.aggs)) if value is not None}
+        raw_kept, raw_notes = self.keep_unread(
+            unread, session_id=case_id, task_id=task_id, request_digest=request_digest, query=query_text,
+            source_kind="arkime_session" if viewer is not None else "index", what="preview row")
+        reasons.extend(raw_notes)
         candidate_ids: list[str] = []
         for playbook in bind_windows_site(fresh_direct_pack(), pivot.site_facts):
             for match in playbook.consume(events):
@@ -336,24 +339,22 @@ class SourceQueryRunner:
             coverage=[self._cell(target, args, status, reasons, len(records), total)],
             reasons=sorted(set(reasons)), duration_ms=int((perf_counter() - started) * 1000), query=query)
 
-    def _keep_raw(self, preview: list[dict], by_record: dict, time_field: str | None, args, *, session_id,
-                  task_id: str, request_digest: str, source_kind: str) -> tuple[dict[str, dict], str | None]:
-        """Keep the preview rows no normalizer read as raw records, under the hunt's raw-record cap: {"index/_id":
-        {id, target, native_id, time}} for each row kept (a record kept before keeps its row), and a reason naming
-        the rows the cap left unkept."""
-        unread = [record for record in preview if not by_record.get(f"{record['_index']}/{record['_id']}")]
+    def keep_unread(self, unread: list[tuple[dict, str | None]], *, session_id, task_id: str | None,
+                    request_digest: str, query: dict, source_kind: str,
+                    what: str) -> tuple[dict[str, dict], list[str]]:
+        """Keep returned records no normalizer read ((hit, its source's time field) pairs) as raw records, under the
+        hunt's raw-record cap: {"index/_id": {id, target, native_id, time}} for each record kept (a record kept
+        before keeps its row), and the reasons saying how many were kept and how many the cap left unkept."""
         if not unread:
-            return {}, None
+            return {}, []
         pivot = self.pivot
         cap = getattr(self.settings, "agent_max_raw_records", DEFAULT_MAX_RAW_RECORDS)
-        query = {key: value for key, value in (("query", args.query), ("expression", args.expression),
-                                               ("aggs", args.aggs)) if value is not None}
         query_text = self._redact_text(json.dumps(self._redact(query), ensure_ascii=False, sort_keys=True,
                                                   default=str))
         rows = [build_raw_record(pivot.hunt_id, record, source_kind=source_kind, time_field=time_field,
                                  session_id=session_id, task_id=task_id, query_digest=request_digest,
                                  query_text=query_text, redact=self._redact, flagged=injection_flags)
-                for record in unread]
+                for record, time_field in unread]
         ids, refused = pivot.repo.save_agent_raw_records(pivot.hunt_id, rows, max_count=cap,
                                                          owner_token=pivot.owner_token)
         kept = {}
@@ -361,9 +362,31 @@ class SourceQueryRunner:
             kept[f"{row['target']}/{row['native_id']}"] = {
                 "id": row["id"], "target": row["target"], "native_id": row["native_id"],
                 "time": raw_record_view(row, text=False)["time"]}
-        note = (f"{refused} preview row(s) no normalizer reads were not kept as raw records: the hunt's raw-record "
-                f"cap ({cap}) is reached, so they are not citable" if refused else None)
-        return kept, note
+        notes = []
+        if kept:
+            notes.append(f"{len(kept)} {what}(s) no normalizer reads are kept as raw records (raw_evidence, Q "
+                         "aliases), citable only as text a record contains")
+        if refused:
+            notes.append(f"{refused} {what}(s) no normalizer reads were not kept as raw records: the hunt's "
+                         f"raw-record cap ({cap}) is reached, so they are not citable")
+        return kept, notes
+
+    def keep_search_unread(self, session_id: str, request, result: PivotResult) -> None:
+        """Keep a typed search's first matched records no normalizer read as raw records, and name them on the
+        result: their references go to the stored search summary (the toolbox issues their aliases)."""
+        unread = [(item["record"], self.pivot.contracts[item["target"]].time_field)
+                  for item in result.unread_records if item.get("target") in self.pivot.contracts]
+        if not unread:
+            return
+        kept, notes = self.keep_unread(
+            unread, session_id=session_id, task_id=result.task_ids[0] if result.task_ids else None,
+            request_digest=digest({"case_id": session_id, "tool": request.model_dump(mode="json")}),
+            query=request.arguments.model_dump(mode="json", include={"scope", "conditions"}),
+            source_kind="index", what="matched record")
+        result.reasons = sorted({*result.reasons, *notes})
+        result.query = {**(result.query or {}), "raw_records": [
+            {"id": item["id"], "index": item["target"], "record_id": item["native_id"], "time": item["time"]}
+            for item in kept.values()]}
 
     def _telemetry(self, records: list[dict], aggregations, by_record: dict, raw_kept: dict,
                    args) -> tuple[str, str | None]:

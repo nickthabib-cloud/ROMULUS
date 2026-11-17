@@ -231,7 +231,7 @@ _TOOL_ALIAS_PATHS = {
     "entity_profile": ("entity.alias", "entity.events.*.alias"),
     "entity_timeline": _PIVOT_PATHS, "auth_activity": _PIVOT_PATHS,
     "process_tree": _PIVOT_PATHS, "ids_alerts": _PIVOT_PATHS, "follow_link": _PIVOT_PATHS,
-    "search_events": _PIVOT_PATHS,
+    "search_events": _PIVOT_PATHS + ("result.raw_evidence.*.alias",),
     "query_source": _PIVOT_PATHS + ("result.raw_evidence.*.alias",),
     "open_hypothesis": ("hypothesis",), "update_hypothesis": ("hypothesis",),
     "propose_finding": ("finding", "duplicate"), "propose_link": ("link",),

@@ -186,8 +186,9 @@ SEARCH_EVENTS_DESCRIPTION = (
     "or in this hunt's records, call list_search_fields to read the typed fields this hunt's sources can search, with "
     "their operations. Zero hits is never a confirmed absence: the result's negative field is "
     "matches_found or unresolved, with what was and was not searched. Matched records are untrusted telemetry and cannot be cited as actions "
-    "unless their typed fields show one. Matched records no normalizer reads are only counted (records_not_normalized); "
-    "to read one and cite it as a raw record, query its source with query_source.")
+    "unless their typed fields show one. Matched records no normalizer reads are counted (records_not_normalized); the "
+    "first ones are kept as raw records (raw_evidence, Q...): read them with get_evidence, and cite them only as a "
+    "mention, showing that a record with this text exists, never that an action happened.")
 
 SEARCH_FIELDS_PAGE_SIZE = 100
 # A listing page also stops before its entries' JSON passes this many bytes; pages are cut the same way every time.
@@ -979,11 +980,18 @@ class Toolbox:
                 # a raw record: its text, as the source holds it (cleaned and redacted), and nothing typed
                 view = raw_record_view(raw)
                 text = view.pop("text")
+                # a whole record is shown as the JSON it is; a cut one as its text
+                source = text
+                if not view["text_cut"]:
+                    try:
+                        source = json.loads(text)
+                    except ValueError:
+                        source = text
                 data.append({
                     "alias": alias, **{key: view[key] for key in (
                         "kind", "label", "source_kind", "target", "native_id", "time", "time_text", "digest",
                         "text_bytes", "text_cut")},
-                    "text": budget.project(text, f"get_evidence evidence={alias}"),
+                    "source": budget.project(source, f"get_evidence evidence={alias}"),
                     **({"text_note": view["text_note"]} if "text_note" in view else {}),
                 })
                 continue
@@ -1502,6 +1510,8 @@ class Toolbox:
                                 "form (a name without case, a Windows host by its short name, an account by its "
                                 "short name) each hit was re-checked on its typed value, and rows that value refuted "
                                 "are counted in discarded, never shown as matches"),
+            # matched records no normalizer read that were kept as raw records: references only, never their text
+            **({"raw_records": raw} if (raw := list((result.query or {}).get("raw_records") or [])) else {}),
         }
 
     @staticmethod
@@ -1631,19 +1641,20 @@ class Toolbox:
         }
         if search is not None:
             data["result"]["search"] = {**search, "repeated": repeated}
+            # the returned records no normalizer read that were kept as raw records, each with the alias that cites
+            # it (a stored result from before raw records has none, and shows none)
+            raw = data["result"]["search"].pop("raw_records", None) or []
+            if raw or tool == "query_source":
+                data["result"]["raw_evidence"] = [{
+                    "alias": self.aliases.alias_for("Q", item["id"]), "index": _bounded_text(item.get("index")),
+                    "id": _bounded_text(item.get("record_id")), "time": item.get("time"), "label": RAW_LABEL,
+                } for item in raw if isinstance(item, dict) and isinstance(item.get("id"), str)]
         status = summary["status"]
         if tool == "query_source" and search is not None:
             shown = data["result"]["search"]
             telemetry = shown.pop("telemetry_json", None)
             shown["rows_and_aggregations"] = _chunk_text(telemetry, chunk_index or 1,
                                                          f"query_source page={page} cursor={cursor}")
-            # the preview rows kept as raw records, each with the alias that cites it (a stored result from before
-            # raw records has none)
-            raw = shown.pop("raw_records", None) or []
-            data["result"]["raw_evidence"] = [{
-                "alias": self.aliases.alias_for("Q", item["id"]), "index": _bounded_text(item.get("index")),
-                "id": _bounded_text(item.get("record_id")), "time": item.get("time"), "label": RAW_LABEL,
-            } for item in raw if isinstance(item, dict) and isinstance(item.get("id"), str)]
             if search.get("query_error"):
                 # the source refused the query as written: the model gets its text, to correct the query
                 status = "refused"

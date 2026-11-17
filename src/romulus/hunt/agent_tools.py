@@ -333,6 +333,8 @@ class HuntToolExecutor:
         else:
             result = self.pivot.run(session_id, request, anchor_ts=anchor_ts)
         if isinstance(request, SearchEventsRequest):
+            # matched records no normalizer read: the first ones are kept as raw records the agent can cite as text
+            self.queries.keep_search_unread(session_id, request, result)
             packets = self.packet_sources if request.arguments.scope != "host" else ()
             # a capture whose every packet is known to fall outside the search window is no gap: counted in one
             # summary line, never listed as not searched

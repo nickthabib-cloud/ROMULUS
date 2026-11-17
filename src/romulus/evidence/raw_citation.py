@@ -119,6 +119,8 @@ def raw_record_view(row: dict, *, text: bool = True) -> dict:
         "suspicious_content": bool(row.get("suspicious_content")),
     }
     if text:
+        # the redacted query that returned it, and the record's text: both untrusted, both escaped by renderers
+        view["query"] = row.get("query") or ""
         view["text"] = row["text"]
         if row["text_cut"]:
             view["text_note"] = (f"cut at {MAX_RAW_TEXT_BYTES} bytes of {row['text_bytes']}; the source keeps the "

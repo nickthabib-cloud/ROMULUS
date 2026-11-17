@@ -118,6 +118,30 @@ def test_the_per_hunt_cap_keeps_what_fits_and_names_the_rest():
     assert _raw_aliases(again) == _raw_aliases(result)
 
 
+def test_a_typed_search_keeps_its_matched_unread_records_as_raw_records():
+    from tests.test_agent_search_events import DNS, FakeES, _keyword_contract, _search, _toolbox
+
+    odd = {"_id": "odd", "_index": "net-a", "_source": {"@timestamp": (T + timedelta(minutes=2)).isoformat(),
+                                                         "event": {"dataset": "custom.thing"},
+                                                         "dns": {"question": {"name": "example.test"}}}}
+    records = [_dns("net-a", 1, T + timedelta(minutes=9)), odd]
+    repo = _hunt()
+    toolbox = _toolbox(repo, {"net-a": _keyword_contract("net-a")}, FakeES({"net-a": records}))
+    response = _search(toolbox, DNS)
+    result = response["data"]["result"]
+    assert len(result["evidence"]) == 1
+    assert [(item["id"], item["label"]) for item in result["raw_evidence"]] == [("odd", RAW_LABEL)]
+    assert collect_issued_aliases(response, tool_name="search_events") >= {result["raw_evidence"][0]["alias"]}
+    assert any(reason.startswith("records_not_normalized:1:") for reason in result["reasons"])
+    assert any("kept as raw records" in reason for reason in result["reasons"])
+    stored = repo.agent_raw_records("h1", [raw_record_id("h1", "net-a", "odd")])[0]
+    assert "example.test" in stored["query"] and stored["session_id"] == SESSION
+    # a repeated search reads its stored result: the same alias, nothing stored again
+    again = _search(toolbox, DNS)["data"]["result"]
+    assert again["raw_evidence"] == result["raw_evidence"]
+    assert repo.agent_raw_record_stats("h1") == {"stored": 1, "not_stored": 0}
+
+
 # ---- admission: a raw mention is never an action ---------------------------------------------------------------------
 
 def test_a_raw_only_finding_is_a_capped_mention_never_an_action(tmp_path):
@@ -260,7 +284,55 @@ def _report_repo(tmp_path):
     proposed = toolbox.execute("propose_finding", {"claim": "A camera log names a script tag",
                                                    "claim_kind": "mention", "cites": [alias], "lane": "lead"})
     assert proposed["status"] == "complete", proposed
+    # a second finding with no typed events, so every view meets more than one
+    second = toolbox.execute("propose_finding", {"claim": "A camera log names an image handler",
+                                                 "claim_kind": "mention", "cites": [alias], "lane": "high"})
+    assert second["status"] == "complete" and second["data"]["finding"] != proposed["data"]["finding"]
     return repo, row, AliasBook(repo, "h1").resolve(proposed["data"]["finding"], {"F"})
+
+
+def test_findings_without_typed_events_pass_through_ranking_dossier_and_canonical_views(tmp_path):
+    from romulus.agent.dossier import build_dossier
+    from romulus.hunt.rank import PASS_FINAL, run_rank_pass
+    from romulus.report.manifest import canonical_manifest
+
+    repo, row, _finding_id = _report_repo(tmp_path)
+    raw_only = [item for item in repo.candidates("h1") if item["provenance"] == "agent"]
+    assert len(raw_only) == 2 and all(item["event_ids"] == [] for item in raw_only)
+    run_rank_pass(repo, "h1", PASS_FINAL)
+    ranks = repo.finding_ranks_for("h1", PASS_FINAL, [item["id"] for item in raw_only])
+    # no typed entity: ranked unattributed, never Reported
+    assert set(ranks) == {item["id"] for item in raw_only} and not any(rank["reported"] for rank in ranks.values())
+    manifest = build_manifest(repo, "h1", "test")
+    assert {item["id"] for item in manifest["findings"] if item.get("raw_citations")} == {
+        item["id"] for item in raw_only}
+    assert [item["id"] for item in manifest["raw_records"]["cited"]] == [row["id"]]
+    canonical = canonical_manifest(repo, "h1")
+    assert "raw_records" not in canonical and canonical["ai"]["raw_records"]["cited"][0]["id"] == row["id"]
+    assert all(not item.get("raw_citations") for item in canonical["findings"])
+    build_dossier(repo, "h1", token_budget=20_000)
+    listed = Toolbox(repo, "h1").execute("list_findings", {"lane": "lead"})
+    assert listed["status"] in {"complete", "partial"}
+
+
+def test_assessment_with_a_raw_cite_is_inferred_weak_and_flagged(tmp_path):
+    from romulus.agent.assessment import check_assessment
+    from romulus.report.manifest import narrative_paragraphs
+
+    repo, row, _finding_id = _report_repo(tmp_path)
+    alias = AliasBook(repo, "h1").alias_for("Q", row["id"])
+    sentence = {"text": "A camera log names a script tag.", "cites": [alias], "kind": "observed"}
+    body = {"overall": [sentence], "key_steps": [], "confidence": {"overall": "low", "reasons": []},
+            "alternatives": [], "gaps": [], "next_checks": [],
+            "narrative": [{"time_span": {"start": "", "end": ""}, "phase": "Execution", "sentences": [sentence]}
+                          for _ in range(3)]}
+    checked, checker = check_assessment(repo, "h1", body, triage=TriageContext(False, "off"))
+    assert checked["overall"][0]["kind"] == "inferred" and checked["overall"][0]["suspicious_content"] is True
+    assert checked["overall"][0]["cites"] == [row["id"]]
+    shown = narrative_paragraphs(checked["narrative"])
+    assert shown[0]["support"] == {"raw": 1} and shown[0]["support_reason"] == "raw_records_only"
+    assert shown[0]["sentences"][0]["kind"] == "inferred"
+    assert checker["weakly_supported_raw_records_only"] == 3
 
 
 def test_the_report_keeps_raw_citations_labelled_and_inert_in_json_markdown_and_docx(tmp_path):
@@ -353,6 +425,11 @@ def test_the_web_finding_and_raw_record_pages_label_and_escape_the_raw_text(web_
     assert detail.status_code == 200 and "Raw record, not normalized" in detail.text
     assert "<script>alert(1)</script>" not in detail.text and "possible prompt injection" in detail.text
     assert client.get("/hunts/h1/raw-records/rr-unknown").status_code == 404
+    # every hunt page meets findings with no typed events
+    for path in ("/hunts/h1", "/hunts/h1/findings", "/hunts/h1/timeline", "/hunts/h1/agent/findings"):
+        shown = client.get(path)
+        assert shown.status_code == 200, path
+        assert "<script>alert(1)</script>" not in shown.text
     assert client.get("/hunts/other/raw-records/" + row["id"]).status_code == 404
 
 

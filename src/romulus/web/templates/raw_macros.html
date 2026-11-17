@@ -5,6 +5,7 @@
 <p class="help">{{ r.label }}. Digest of the record as returned: <span class="mono">{{ r.digest }}</span>. Kept from agent session <span class="mono">{{ r.session_id or 'unknown' }}</span>, query <span class="mono">{{ (r.query_digest or '')[:16] }}</span>.</p>
 {% if r.suspicious_content %}<p class="warn"><b>Contains text flagged as possible prompt injection.</b></p>{% endif %}
 <pre class="raw">{{ r.text }}</pre>
+{% if r.query %}<p class="help">Query that returned it (redacted):</p><pre class="val">{{ r.query }}</pre>{% endif %}
 {% if r.text_note %}<p class="help">{{ r.text_note }}</p>{% endif %}
 </details>
 {% endmacro %}

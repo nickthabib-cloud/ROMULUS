@@ -744,6 +744,9 @@ _CASELESS_FIELDS = frozenset({"event.channel", "event.provider", "object.type"})
 # no normalizer read it names before counting the rest together.
 MAX_SEARCH_ENTITIES = 1_000
 MAX_SEARCH_SKIP_REASONS = 10
+# a search's matched records no normalizer read that the hunt layer may keep as raw records (the query_source preview
+# bound): the first ones matched, the rest counted
+MAX_SEARCH_UNREAD = 20
 _ENTITY_ORDER = {"host": 0, "ip": 1, "account": 2, "domain": 3}
 
 
@@ -2530,6 +2533,9 @@ class PivotExecutor:
         incomplete = bool(planning_coverage)
         search_fetched = discarded = 0
         skip_reasons: dict[str, int] = {}
+        # a search's first matched records no normalizer read, with their target, for the hunt layer to keep as raw
+        # records the agent can cite (at most MAX_SEARCH_UNREAD; the rest stay counted in the skip reasons)
+        unread: list[dict] = []
 
         for position, intent in enumerate(intents):
             if search and search_fetched >= MAX_SEARCH_RECORDS:
@@ -2598,6 +2604,12 @@ class PivotExecutor:
                     events, skips, errors = normalize_hits(outcome.records,
                                                            surrogate_free=getattr(outcome, "surrogate_free", False),
                                                            **options)
+                    if search and len(unread) < MAX_SEARCH_UNREAD and any(skips.values()):
+                        read = {f"{ref.target}/{ref.native_id}" for event in events for ref in event.raw}
+                        unread.extend({"target": intent.target, "record": record} for record in outcome.records
+                                      if f"{record['_index']}/{record['_id']}" not in read
+                                      and isinstance(record.get("_source"), dict))
+                        del unread[MAX_SEARCH_UNREAD:]
                     if any(event.family == "script_block" for event in events):
                         events = script_blocks.consume(events, sources)
                         sources.update(script_blocks.sources_for(events))
@@ -2771,6 +2783,7 @@ class PivotExecutor:
             duration_ms=duration_ms,
             zero_caveats=search_plan.caveats if search_plan is not None else [],
             discarded=discarded,
+            unread_records=unread,
         )
 
     @staticmethod

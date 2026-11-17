@@ -84,6 +84,8 @@ def _raw_records_section(m: dict) -> list[str]:
         out += [fence(shown, "json"), ""]
         if notes:
             out += [f"_{cell('; '.join(notes))}._", ""]
+        if raw.get("query"):
+            out += ["Query that returned it (redacted):", "", fence(raw["query"], "json"), ""]
     if index["broken"]:
         out += [f"Cited raw records no longer kept: {cell(', '.join(index['broken'][:50]))}.", ""]
     return out
