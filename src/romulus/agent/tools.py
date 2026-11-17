@@ -68,6 +68,9 @@ SELECTIVE_OPS = frozenset({"eq", "in", "prefix", "cidr"})
 MAX_SEARCH_CONDITIONS = 4
 MAX_SEARCH_VALUES = 20
 MAX_SEARCH_VALUE_CHARS = 256
+# The typed field names a search condition can carry: dot-separated ASCII letters, digits and underscores.
+MAX_SEARCH_FIELD_CHARS = 128
+SEARCH_FIELD_PATTERN = r"^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$"
 # A prefix shorter than this selects too much to be a lead (a drive letter, a single path separator)
 MIN_PREFIX_CHARS = 3
 # A network broader than these is most of an address space, not a lead
@@ -78,7 +81,7 @@ class SearchCondition(_Strict):
     """One typed condition of an agent search: a typed field of the target's field contract, an operation and its
     values. Values stay exactly as written (no case folding, no Unicode normalization); the hunt layer parses each
     one by the field's native type and sends it to the source only as a literal query value."""
-    field: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$", description=(
+    field: str = Field(min_length=1, max_length=MAX_SEARCH_FIELD_CHARS, pattern=SEARCH_FIELD_PATTERN, description=(
         "A typed field name: dot-separated letters, digits and underscores, such as destination.port."))
     op: SearchOp = Field(description=(
         "eq, prefix, cidr, gte and lt take one value; in takes up to 20. A prefix is at least 3 characters; a cidr "

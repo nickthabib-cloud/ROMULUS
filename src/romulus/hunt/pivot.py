@@ -18,7 +18,9 @@ from time import perf_counter
 from romulus.agent.models import EntityRef, PivotCoverage, PivotResult, PivotTimeRange
 from romulus.agent.refusals import reason as refusal_reason
 from romulus.agent.tools import (
+    MAX_SEARCH_FIELD_CHARS,
     MAX_SEARCH_VALUES,
+    SEARCH_FIELD_PATTERN,
     SEARCH_OPS,
     AuthActivityRequest,
     EntityTimelineRequest,
@@ -761,6 +763,63 @@ def _special_form(field_name: str, spec) -> str | None:
     return None
 
 
+# The value kinds search_values parses a condition's values as.
+_SEARCH_VALUE_KINDS = _STRING_KINDS | _INTEGER_KINDS | {"ip", "double", "float", "date", "boolean"}
+_SEARCH_FIELD_NAME = re.compile(SEARCH_FIELD_PATTERN)
+
+
+def searchable_field_name(name: str) -> bool:
+    """Whether a search condition can carry `name` (SearchCondition.field): ASCII letters, digits and underscores in
+    dot-separated parts, at most MAX_SEARCH_FIELD_CHARS long. A source can map other names; no condition names them."""
+    return len(name) <= MAX_SEARCH_FIELD_CHARS and _SEARCH_FIELD_NAME.fullmatch(name) is not None
+
+
+def search_ops(contract: FieldContract, field_name: str, *, os_family: str | None = None) -> tuple[str, ...]:
+    """The agent search ops this target takes on `field_name` before any value is read, in SEARCH_OPS order: each op
+    every variant of the field's spec takes (one per source layout) on a value kind the op's values can be parsed
+    as, and never a prefix on a field the compiler matches by a special equality form. Empty for the time field, a
+    name no condition can carry, and a field the target does not have. Each value is still checked per search
+    (_plan_condition): its type, and the index's length limit."""
+    if field_name == contract.time_field or not searchable_field_name(field_name):
+        return ()
+    spec = contract.spec(field_name, os_family=os_family)
+    if spec is None:
+        return ()
+    variants = (spec, *spec.alternatives)
+    special = _special_form(field_name, spec)
+
+    def takes(variant, op: str) -> bool:
+        # equality on analyzed text is compiled against its keyword subfields: its values are strings
+        kind = "keyword" if variant.exact and op in {"eq", "in"} else variant.type
+        return op in variant.ops and kind.split(":", 1)[0] in _SEARCH_VALUE_KINDS
+
+    return tuple(op for op in SEARCH_OPS
+                 if all(takes(variant, op) for variant in variants) and not (special and op == "prefix"))
+
+
+def search_vocabulary(contracts: dict[str, FieldContract | None]) -> list[dict]:
+    """Every typed field an agent search can name on at least one of these targets, sorted by name, with the ops each
+    takes (search_ops): for each role (host, network) of the targets that take it, how many targets do and how many
+    take each op. Only the field contracts' own typed names: never a native field name, a target name or a value. Its
+    size is the union of the targets' field contracts, which the hunt already holds."""
+    table: dict[str, dict[str, dict]] = {}
+    for _target, contract in sorted(contracts.items()):
+        if contract is None:
+            continue
+        role = "network" if _is_network(contract.target, contract) else "host"
+        for name in contract.fields:
+            ops = search_ops(contract, name)
+            if not ops:
+                continue
+            cell = table.setdefault(name, {}).setdefault(role, {"targets": 0, "ops": dict.fromkeys(SEARCH_OPS, 0)})
+            cell["targets"] += 1
+            for op in ops:
+                cell["ops"][op] += 1
+    return [{"field": name, "roles": {
+        role: {"targets": cell["targets"], "ops": {op: count for op, count in cell["ops"].items() if count}}
+        for role, cell in sorted(roles.items())}} for name, roles in sorted(table.items())]
+
+
 @dataclass(frozen=True)
 class SearchCheck:
     """A condition the compiler sends as a special equality form, which the source matches as a superset of the
@@ -791,14 +850,14 @@ def _plan_condition(contract: FieldContract, condition: SearchCondition,
     if spec is None:
         return None, f"field {field_name} / op {op} not supported: no such field"
     variants = (spec, *spec.alternatives)
-    if any(op not in variant.ops for variant in variants):
-        supported = sorted(set.intersection(*(set(variant.ops) for variant in variants)) & set(SEARCH_OPS))
-        return None, (f"field {field_name} / op {op} not supported: this {spec.type} field takes "
-                      f"{', '.join(supported) or 'no search operation'}")
     special = _special_form(field_name, spec)
-    if special is not None and op == "prefix":
-        return None, (f"field {field_name} / op prefix refused: its typed value is {_SPECIAL_FORMS[special]}, which "
-                      "a prefix of the stored value cannot match")
+    supported = search_ops(contract, field_name, os_family=os_family)
+    if op not in supported:
+        if special is not None and op == "prefix" and all(op in variant.ops for variant in variants):
+            return None, (f"field {field_name} / op prefix refused: its typed value is {_SPECIAL_FORMS[special]}, "
+                          "which a prefix of the stored value cannot match")
+        return None, (f"field {field_name} / op {op} not supported: this {spec.type} field takes "
+                      f"{', '.join(sorted(supported)) or 'no search operation'}")
 
     def kind(variant) -> str:
         # equality on analyzed text is compiled against its keyword subfields: its values are strings
@@ -958,9 +1017,9 @@ def _similar_fields(contracts: list[FieldContract], field_name: str) -> tuple[li
     found: dict[str, dict] = {}
     searchable: set[str] = set()
     for contract in contracts:
-        for name, spec in contract.fields.items():
-            ops = set(spec.ops).intersection(SEARCH_OPS)
-            if not ops or name == contract.time_field:
+        for name in contract.fields:
+            ops = set(search_ops(contract, name))
+            if not ops:
                 continue
             searchable.add(name)
             entry = found.get(name)
@@ -1577,6 +1636,13 @@ class PivotExecutor:
         """The refusal an agent search gets before any source query, or None when some target can evaluate it."""
         return self.plan_search(request).refusal
 
+    def search_vocabulary(self) -> list[dict]:
+        """The typed fields an agent search can name on this hunt's targets (search_vocabulary), derived once from
+        the field contracts without any source query."""
+        if getattr(self, "_vocabulary", None) is None:
+            self._vocabulary = search_vocabulary(self.contracts)
+        return self._vocabulary
+
     @staticmethod
     def _search_refusal(request: SearchEventsRequest, targets: list[FieldContract],
                         skipped: list[tuple[str, str, str | None]]) -> dict:
@@ -1599,7 +1665,7 @@ class PivotExecutor:
             "code": "search_unsupported",
             "message": (f"no {scope} source can evaluate every condition, so nothing was searched; each target's "
                         "problem is listed, and similar_fields names searchable typed fields that resemble each "
-                        "condition's field, with the operations each takes"),
+                        "condition's field, with the operations each takes; list_search_fields lists them all"),
             "reasons": [refusal_reason("conditions[].field", "unsupported_field") if failing
                         else refusal_reason("conditions", "not_compilable")],
             "conditions": conditions,

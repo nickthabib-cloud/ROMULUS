@@ -158,6 +158,15 @@ CASES: dict[str, list[tuple[dict, bool]]] = {
         (window(scope="host", conditions=[{"field": "a", "op": "eq", "values": ["x"]}], max_records=5), False),
         ({"scope": "host", "conditions": [{"field": "a", "op": "eq", "values": ["x"]}]}, False),
     ],
+    "list_search_fields": [
+        ({}, True), ({"listing": "typed_fields", "scope": "network", "prefix": "dns.", "page": 3}, True),
+        ({"listing": "sources", "scope": "host", "prefix": None}, True),
+        ({"listing": "native_fields", "source": "logs-a", "prefix": "winlog.event_data."}, True),
+        ({"listing": "native_fields", "source": "arkime:arkime_sessions3-241118"}, True),
+        ({"listing": "fields"}, False), ({"scope": "disk"}, False), ({"page": 0}, False),
+        ({"prefix": "a b"}, False), ({"prefix": ""}, False), ({"source": "x/y", "listing": "native_fields"}, False),
+        ({"listing": "native_fields", "source": "s" * 301}, False), ({"extra": 1}, False),
+    ],
     "open_hypothesis": [
         ({"statement": "s" * 10}, True),
         ({"statement": "s" * 600, "techniques": ["T1059.001"] * 20, "entities": ["N1"] * 40,
@@ -233,6 +242,8 @@ SCHEMA_CANNOT_STATE = {
         (window(scope="host", start=LATER, end=WHEN, conditions=[{"field": "a", "op": "eq", "values": ["x"]}]),
          "start must be before end"),
     ],
+    "list_search_fields": [({"listing": "native_fields"}, "listing native_fields needs a source"),
+                           ({"source": "logs-a"}, "source is for listing native_fields only")],
     "finish_session": [({"summary": " " * 25}, "surrounding whitespace is not counted")],
 }
 

@@ -17,9 +17,14 @@ from romulus.hunt.pivot import PivotExecutor
 from romulus.hunt.publish import mark_hypothesis_relation, publish_match
 from romulus.site import ensure_site_unchanged
 from romulus.sources.models import Window
-from romulus.sources.profile import SHARDS_UNANSWERED
+from romulus.sources.profile import AGGREGATABLE, LIMITED_KINDS, SHARDS_UNANSWERED
 from romulus.store.db import digest
 from romulus.store.repo import Repo
+
+# An Arkime session target's viewer is a source of its own: its name is this prefix and the target's.
+ARKIME_SOURCE_PREFIX = "arkime:"
+KEYWORD_LIKE = frozenset({"keyword", "constant_keyword", "wildcard", "flattened"})
+ANALYZED_TEXT = frozenset({"text", "match_only_text"})
 
 _PIVOT_LINK_TYPES = {
     "entity_timeline": "agent_entity_timeline",
@@ -120,6 +125,7 @@ class HuntToolExecutor:
         # hunt targets with no field contract in this run: no search can read them, whatever its scope
         self.uncontracted_targets = tuple(uncontracted_targets)
         self._followable: dict[str, tuple[str, ...]] = {}
+        self._profile_cache: dict[str, dict] | None = None
 
     def _events(self, ids: list[str]) -> list[TypedEvent]:
         rows = self.repo.citation_events(self.hunt_id, ids)
@@ -148,6 +154,83 @@ class HuntToolExecutor:
         """Why an agent search cannot run on this hunt's sources, decided without any source query; None when some
         target of its scope can evaluate every condition."""
         return self.pivot.search_refusal(request)
+
+    def search_fields(self) -> dict:
+        """The typed fields an agent search can name on this hunt's targets (PivotExecutor.search_vocabulary), how
+        many targets each role has, and how many sources no typed search reads; no source query."""
+        targets = {"host": 0, "network": 0}
+        for contract in self.pivot.contracts.values():
+            if contract is not None:
+                targets["network" if contract.role == "network" else "host"] += 1
+        return {"fields": self.pivot.search_vocabulary(), "targets": targets,
+                "packet_sources": len(self.packet_sources), "uncontracted": len(self.uncontracted_targets)}
+
+    def _profiles(self) -> dict[str, dict]:
+        if self._profile_cache is None:
+            self._profile_cache = self.repo.source_profiles(self.hunt_id)
+        return self._profile_cache
+
+    def search_sources(self) -> list[dict]:
+        """The hunt's sources the agent can name, by name: each target with a field contract (an Elasticsearch or
+        OpenSearch index or data stream), and for each Arkime session target its viewer (arkime:<target>), whose
+        expressions are evaluated by the viewer. No source query."""
+        out = []
+        for target, contract in sorted(self.pivot.contracts.items()):
+            if contract is None:
+                continue
+            role = "network" if contract.role == "network" else "host"
+            native = self._native_table(target)
+            out.append({"source": target, "kind": "index", "role": role, "time_field": contract.time_field,
+                        "fields": len(native)})
+            if contract.time_field == "firstPacket":
+                profile = self._profiles().get(target) or {}
+                out.append({"source": ARKIME_SOURCE_PREFIX + target, "kind": "arkime_viewer", "role": "network",
+                            "time_field": "firstPacket", "fields": len(profile.get("arkime_fields") or [])})
+        return out
+
+    def _native_table(self, target: str) -> dict[str, str]:
+        """A target's native fields and their mapped types: from its profile, else its contract's direct fields."""
+        profile = self._profiles().get(target) or {}
+        types = profile.get("field_types")
+        if isinstance(types, dict) and types:
+            return {str(name): str(kind) for name, kind in types.items()}
+        contract = self.pivot.contracts.get(target)
+        if contract is None:
+            return {}
+        table = contract.linux_fields or contract.fields
+        return {name: spec.type for name, spec in table.items() if tuple(spec.natives or (spec.native,)) == (name,)}
+
+    def native_fields(self, source: str) -> dict | None:
+        """One source's own fields: an index's mapped fields (type, keyword-like or text, indexed, aggregatable,
+        ignore_above), or an Arkime viewer's expression fields as profiled when the hunt started. None for a name
+        that is not one of the hunt's sources. No source query."""
+        if source.startswith(ARKIME_SOURCE_PREFIX):
+            target = source[len(ARKIME_SOURCE_PREFIX):]
+            contract = self.pivot.contracts.get(target)
+            if contract is None or contract.time_field != "firstPacket":
+                return None
+            profile = self._profiles().get(target) or {}
+            fields = [dict(item) for item in profile.get("arkime_fields") or [] if isinstance(item, dict)]
+            note = profile.get("arkime_fields_note")
+            if "arkime_fields" not in profile:
+                note = ("the viewer's expression fields were not profiled for this hunt (no viewer account was "
+                        "configured, or the hunt predates it); its expressions still take the viewer's own names")
+            return {"fields": fields, "note": note}
+        contract = self.pivot.contracts.get(source)
+        if contract is None:
+            return None
+        fields = []
+        for name, mapped in self._native_table(source).items():
+            base, _, qualifier = mapped.partition(":")
+            item = {"field": name, "type": base,
+                    "kind": ("keyword" if base in KEYWORD_LIKE else "text" if base in ANALYZED_TEXT else "other"),
+                    "indexed": qualifier not in ("not_indexed", "doc_values_only"),
+                    "aggregatable": mapped in AGGREGATABLE}
+            if base in LIMITED_KINDS:
+                known, limit = contract.index_limit(name)
+                item["ignore_above"] = limit if known and limit is not None else ("none" if known else "unknown")
+            fields.append(item)
+        return {"fields": fields, "note": None}
 
     def search_item_bound(self, request: SearchEventsRequest) -> int:
         """The most page items one search's result can hold (PivotExecutor.search_item_bound), plus its named
