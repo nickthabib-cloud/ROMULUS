@@ -118,6 +118,8 @@ def test_orient_cannot_take_more_than_its_share(monkeypatch):
     assert refused == ["agent_session_source_query_share:20"] * 10
     caps = [row["detail"] for row in repo.audit_trail("h1", "agent.source_query_cap", limit=50)[0]]
     assert caps and all(item["cap"] == "agent_session_source_query_share" for item in caps)
+    # one record per call the cap stopped, counted apart from the other caps for the run page
+    assert repo.agent_source_query_caps("h1") == {"agent_session_source_query_share": 10}
 
 
 def test_a_later_investigate_session_still_gets_queries_after_a_greedy_orient(monkeypatch):
@@ -309,6 +311,60 @@ def test_a_packet_span_is_known_only_from_both_bounds_of_a_complete_inventory():
     assert packet_span(_profile("2018-01-01T00:00:00Z", "2018-01-02T00:00:00Z",
                                 [f"ds inventory truncated ({SHARDS_UNANSWERED}: x)"])) is None
     assert packet_span(None) is None
+
+
+class _ProfileClient:
+    """A source whose inventory search answers the time bounds it is asked for, and every other search empty."""
+
+    version = "8.19.0"
+
+    class settings:
+        es_flavor = "elasticsearch"
+
+    def __init__(self, properties: dict):
+        self.properties = properties
+        self.bodies: list[dict] = []
+
+    def mapping(self, target):
+        return {target: {"mappings": {"properties": self.properties}}}
+
+    def search(self, _target, body):
+        self.bodies.append(body)
+        stamps = {"tmin": ("2018-01-01T00:00:00.000Z", 1514764800000),
+                  "tmax": ("2018-01-01T12:00:00.000Z", 1514808000000),
+                  "pmax": ("2018-01-02T00:00:00.000Z", 1514851200000)}
+        aggs = {name: {"value": stamps[name][1], "value_as_string": stamps[name][0]}
+                for name in (body.get("aggs") or {}) if name in stamps}
+        return {"hits": {"total": {"value": 5 if aggs else 0, "relation": "eq"}, "hits": []},
+                "aggregations": aggs}
+
+
+def test_an_arkime_profile_carries_its_packet_span_into_the_agent_toolbox():
+    from romulus.sources.profile import build_profile
+    arkime = _ProfileClient({name: {"type": kind} for name, kind in (
+        ("firstPacket", "date"), ("lastPacket", "date"), ("network.community_id", "keyword"),
+        ("source.ip", "ip"), ("destination.ip", "ip"), ("protocol", "keyword"), ("node", "keyword"))})
+    profile, contract = build_profile(arkime, "arkime_sessions3-180101")
+    assert any("pmax" in (body.get("aggs") or {}) for body in arkime.bodies)
+    assert contract.time_field == "firstPacket"
+    stored = profile.model_dump(mode="json")
+    assert stored["packet_time_max"] == "2018-01-02T00:00:00.000Z"
+
+    host = _ProfileClient({"@timestamp": {"type": "date"}, "event": {"properties": {"dataset": {"type": "keyword"}}},
+                           "host": {"properties": {"name": {"type": "keyword"}}}})
+    host_profile, _ = build_profile(host, "logs-host")
+    assert "packet_time_max" not in host_profile.model_dump(mode="json")
+    assert not any("pmax" in (body.get("aggs") or {}) for body in host.bodies)
+
+    repo = _repo()
+    repo.save_profile("h1", stored)
+    _session(repo, "inv-1", "investigate")
+    toolbox = build_agent_toolbox(_settings(2000), repo, "h1", client=object(),
+                                  contracts={"arkime_sessions3-180101": contract}, session_id="inv-1")
+    label = "packet captures behind arkime_sessions3-180101 (Arkime viewer and TShark)"
+    assert toolbox.executor.packet_sources == (label,)
+    assert toolbox.executor.packet_spans == {label: (datetime(2018, 1, 1, tzinfo=UTC),
+                                                     datetime(2018, 1, 2, tzinfo=UTC))}
 
 
 def test_out_of_window_packet_sources_are_counted_not_listed_and_unknown_ones_stay_listed():

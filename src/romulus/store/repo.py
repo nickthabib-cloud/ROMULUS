@@ -1629,6 +1629,15 @@ class Repo:
                 func.json_extract(t.audit_event.c.detail, "$.purpose") == purpose,
             )).scalar_one())
 
+    def agent_source_query_caps(self, hunt_id: str) -> dict[str, int]:
+        """How many AI-agent tool calls each source-query cap (hunt total, session share, call slice) stopped."""
+        cap = func.json_extract(t.audit_event.c.detail, "$.cap")
+        with self.engine.connect() as c:
+            rows = c.execute(select(cap, func.count()).where(
+                t.audit_event.c.hunt_id == hunt_id, t.audit_event.c.action == "agent.source_query_cap",
+            ).group_by(cap)).all()
+        return {str(kind): int(count) for kind, count in rows if kind}
+
     def reserve_agent_source_query(self, hunt_id: str, limit: int, task_id: str | None,
                                    *, owner_token: str | None = None, session_id: str | None = None,
                                    purpose: str | None = None) -> int | None:

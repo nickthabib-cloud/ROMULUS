@@ -176,6 +176,9 @@ def panel(repo, hunt, usage, *, with_assessment=True):
                    if item.strip().startswith(("cap:", "budget:"))]
     summary = repo.latest_audit(hunt["id"], "hunt.ai_agent_summary")
     limit_items.extend(clip(item, 200) for item in ((summary or {}).get("detail") or {}).get("limits_hit", [])[:100])
+    # each source-query cap the agent's pivots reached, apart: the hunt total, a session's share, a call's slice
+    limit_items.extend(f"{clip(cap, 80)}: reached in {count} tool call(s)"
+                       for cap, count in sorted(repo.agent_source_query_caps(hunt["id"]).items()))
     return {"run": run, "state": "interrupted (lease expired)" if run["state"] == "running"
             and not repo.agent_lease_live(hunt["id"]) else run["state"],
             "reason": clip(reason, 2000), "provider": clip(provider.get("provider"), 200),
