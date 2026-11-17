@@ -171,9 +171,9 @@ class PivotResult(BaseModel):
     # Sources a pivot could not reach at all (no coverage cell describes them), each named with why: a negative
     # beside any of them is unresolved.
     not_searched: list[str] = Field(default_factory=list)
-    # A typed search's reasons why zero hits would not be a confirmed absence even under complete coverage (a field
-    # whose typed value is derived from the stored one, a value past an index length limit), and how many records
-    # the source matched that failed the typed re-check (superset rows, never matches).
+    # What a typed search's source could not see beside its coverage (a value past an index length limit, for
+    # instance; zero hits from a search is never a confirmed absence), and how many records the source matched that
+    # the special-form re-check refuted (superset rows, never matches).
     zero_caveats: list[str] = Field(default_factory=list)
     discarded: int = 0
 

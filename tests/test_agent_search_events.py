@@ -1219,14 +1219,14 @@ def test_superset_rows_the_special_form_check_refutes_are_discarded_and_counted(
     other_domain = hit(1, {**base, "SubjectUserName": "alice", "SubjectDomainName": "OTHER"})
     same_domain = hit(2, {**base, "SubjectUserName": "Alice", "SubjectDomainName": "CORP"})
     with_sid = hit(3, {**base, "SubjectUserSid": "S-1-5-21-9", "SubjectUserName": "alice",
-                       "SubjectDomainName": "OTHER"})
+                       "SubjectDomainName": "corp.example"})
     contract, _hit = _windows_contract_and_record()
     repo, client = _hunt(), FakeES({"win-a": [other_domain, same_domain, with_sid]})
     response = _search(_toolbox(repo, {"win-a": contract}, client),
                        [{"field": "user.entity_id", "op": "eq", "values": ["name:CORP\\alice"]}], scope="host")
     search = response["data"]["result"]["search"]
-    # the source matched the short name in every domain: another domain's alice is refuted by her typed account,
-    # and a typed sid cannot refute a search by name
+    # the source matched the short name in every domain: another domain's alice is refuted by her typed account; a
+    # sid-typed alice is checked on her typed name and domain (corp.example is CORP)
     assert client.returned == 3 and search["discarded"] == 1
     assert len(response["data"]["result"]["evidence"]) == 2
 
@@ -1278,3 +1278,65 @@ def test_the_item_bound_counts_rows_twice_for_the_findings_they_can_raise():
     executor = PivotExecutor(_hunt(), FakeES(), "h1", {"net-a": _keyword_contract("net-a")})
     rows = pivot_module.MAX_SEARCH_RECORDS + pivot_module.MAX_SEARCH_TARGET_RECORDS
     assert executor.search_item_bound(_request(DNS)) >= 2 * rows + pivot_module.MAX_SEARCH_ENTITIES
+
+
+# ---- accounts typed by sid, domain spellings, text lines under any dataset ----------------------------------------
+
+def _logon(record_id: int, *, sid: bool = True, domain: str = "CORP", name: str = "Administrator") -> dict:
+    from tests.windows_fixtures import LogicalWindowsEvent, windows_hit
+
+    data = {"SubjectUserSid": "S-1-5-18", "SubjectUserName": "WS01$", "TargetUserName": name,
+            "TargetDomainName": domain, "LogonType": "3", "IpAddress": "198.51.100.9", "IpPort": "51515",
+            "LogonId": "0x1"}
+    if sid:
+        data["TargetUserSid"] = f"S-1-5-21-1-2-3-{500 + record_id}"
+    event = LogicalWindowsEvent("Security", "Microsoft-Windows-Security-Auditing", 4624, "WS01.corp.example",
+                                record_id, "2024-11-18T14:10:00Z", data)
+    record = windows_hit(event, "winlogbeat_8")
+    record.update(_index="win-a", _id=f"logon-{record_id}")
+    return record
+
+
+@pytest.mark.parametrize("searched, records, kept", [
+    # a sid-typed logon of CORP\\Administrator: another domain's name is refuted by its typed name and domain
+    ("name:other\\administrator", [_logon(1)], 0),
+    ("name:corp\\administrator", [_logon(1)], 1),
+    ("name:CORP.LOCAL\\Administrator", [_logon(1)], 1),       # a NetBIOS domain is its FQDN's first label
+    ("name:administrator", [_logon(1)], 1),                     # no domain searched: any domain's name
+    ("name:other\\administrator", [_logon(1, domain="-")], 1),  # no typed domain: nothing refutes it
+    # a name-typed logon (no sid): the same domain rules on its canonical name
+    ("name:corp.local\\administrator", [_logon(2, sid=False)], 1),
+    ("name:other\\administrator", [_logon(2, sid=False)], 0),
+])
+def test_an_account_name_search_is_checked_on_the_typed_name_and_domain(searched, records, kept):
+    contract, _hit = _windows_contract_and_record()
+    repo, client = _hunt(), FakeES({"win-a": records})
+    response = _search(_toolbox(repo, {"win-a": contract}, client),
+                       [{"field": "auth.target_account", "op": "eq", "values": [searched]}], scope="host")
+    search = response["data"]["result"]["search"]
+    assert client.returned == len(records)                      # the source matched the short name in every case
+    assert len(response["data"]["result"]["evidence"]) == kept
+    assert search["discarded"] == len(records) - kept
+
+
+def test_netbios_and_fqdn_spellings_of_one_domain_are_the_same_domain():
+    assert pivot_module._same_domain("CORP", "corp.local")
+    assert pivot_module._same_domain("corp.local.", "CORP")
+    assert pivot_module._same_domain("corp.local", "CORP.LOCAL")
+    assert not pivot_module._same_domain("corp", "other.local")
+    assert not pivot_module._same_domain("corp.local", "corp.example")
+    assert not pivot_module._same_domain("corp", "other")
+
+
+@pytest.mark.parametrize("inventory, named", [
+    (["generic", "apache.access", "custom.app", "zeek.conn", "windows.security"],
+     {"generic", "apache.access", "custom.app"}),
+    (None, {None}),
+])
+def test_any_dataset_of_a_target_with_a_text_payload_is_named_unless_always_structured(inventory, named):
+    contract = _keyword_contract("host-a", role="host", message="match_only_text")
+    executor = PivotExecutor(_hunt(), FakeES(), "h1", {"host-a": contract},
+                             dataset_inventory=None if inventory is None else {"host-a": inventory})
+    plan = executor.plan_search(_request([{"field": "source.ip", "op": "eq", "values": ["10.0.0.9"]}], scope="host"))
+    cells = {cell.dataset for cell in plan.coverage if cell.reasons[0].startswith("dataset_text_parsed:")}
+    assert cells == named

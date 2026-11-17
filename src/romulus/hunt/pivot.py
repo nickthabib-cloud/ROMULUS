@@ -723,8 +723,6 @@ def search_values(kind: str, op: str, values: list[str]) -> list:
 # form, and a prefix of the typed value cannot be matched on the stored one.
 _CANONICAL_ACCOUNTS = frozenset({"user.entity_id", "auth.target_account"})
 _CASELESS_FIELDS = frozenset({"event.channel", "event.provider", "object.type"})
-# Logical Linux datasets whose typed fields can be parsed from a record's text rather than read from its fields.
-TEXT_PARSED_DATASETS = ("linux.audit", "linux.syslog", "linux.text", "systemd.journal")
 # How many hosts, addresses, accounts and domains one search result lists, and how many distinct reasons for records
 # no normalizer read it names before counting the rest together.
 MAX_SEARCH_ENTITIES = 1_000
@@ -840,17 +838,72 @@ def _short_host(value) -> str:
     return str(value).strip().rstrip(".").split(".", 1)[0].casefold()
 
 
-def _special_holds(check: SearchCheck, typed) -> bool:
+# Each canonical account field's typed name and domain on the same record: a record whose canonical account is its
+# sid still names the account, and a search by name is checked on that name and domain.
+_ACCOUNT_PAIRS = {"user.entity_id": ("user.name", "user.domain"),
+                  "auth.target_account": ("account.name", "account.domain")}
+
+
+def _same_domain(left: str, right: str) -> bool:
+    """Two domain spellings of one domain, without case: equal, or a NetBIOS name and an FQDN whose first label it is
+    (CORP and corp.local)."""
+    left, right = left.strip().rstrip(".").casefold(), right.strip().rstrip(".").casefold()
+    if left == right:
+        return True
+    if ("." in left) == ("." in right):
+        return False
+    return (left.split(".", 1)[0] if "." in left else left) == (right.split(".", 1)[0] if "." in right else right)
+
+
+def _name_matches(name: str, domain: str | None, typed_name, typed_domain) -> bool:
+    """A searched account name (with its domain, when it gave one) against a typed name and domain, without case; a
+    domain either side does not give cannot refute it."""
+    if str(typed_name).strip().casefold() != name.strip().casefold():
+        return False
+    return domain is None or typed_domain in (None, "") or _same_domain(domain, str(typed_domain))
+
+
+def _split_account(body: str) -> tuple[str | None, str]:
+    domain, separator, name = body.rpartition("\\")
+    return (domain if separator and domain else None), name
+
+
+def _account_holds(check: SearchCheck, typed, event: TypedEvent) -> bool:
+    """Whether a typed canonical account meets any searched account. A sid search is checked on a typed sid; a typed
+    name cannot refute it (the compiler matched the sid itself). A name search is checked on a typed name, or, when
+    the typed account is a sid, on the same record's typed name and domain; when those are absent it is kept."""
+    text = str(typed)
+    typed_kind, _, typed_body = text.partition(":")
+    typed_kind = typed_kind.casefold()
+    for value in check.values:
+        kind, _, body = value.partition(":")
+        kind = kind.casefold()
+        if kind == "sid":
+            if typed_kind != "sid" or text.casefold() == value.casefold():
+                return True
+            continue
+        domain, name = _split_account(body)
+        if typed_kind == "name":
+            typed_domain, typed_name = _split_account(typed_body)
+            if _name_matches(name, domain, typed_name, typed_domain):
+                return True
+            continue
+        name_field, domain_field = _ACCOUNT_PAIRS.get(check.field, (None, None))
+        typed_name = event.get(name_field) if name_field else None
+        if typed_name is None or _name_matches(name, domain, typed_name,
+                                               event.get(domain_field) if domain_field else None):
+            return True
+    return False
+
+
+def _special_holds(check: SearchCheck, typed, event: TypedEvent) -> bool:
     """Whether a typed value meets the condition as the compiler's special form means it: a name without case, a host
-    by its short name, an account in its canonical form (a sid by its sid, a name with its domain). A typed account
-    in the other canonical form (a sid where the search named the account) cannot refute it."""
+    by its short name, an account by its canonical form (_account_holds)."""
     text = str(typed)
     if check.form == "host":
         return _short_host(text) in {_short_host(value) for value in check.values}
     if check.form == "account":
-        kind = text.split(":", 1)[0].casefold()
-        wanted = {value.casefold() for value in check.values if value.split(":", 1)[0].casefold() == kind}
-        return not wanted or text.casefold() in wanted
+        return _account_holds(check, typed, event)
     return text.casefold() in {value.casefold() for value in check.values}
 
 
@@ -862,7 +915,7 @@ def _search_keeps(checks: list[SearchCheck], event: TypedEvent) -> bool:
         if value is None:
             continue
         values = value if isinstance(value, list) else [value]
-        if values and not any(_special_holds(check, item) for item in values):
+        if values and not any(_special_holds(check, item, event) for item in values):
             return False
     return True
 
@@ -915,7 +968,7 @@ def _similar_fields(contracts: list[FieldContract], field_name: str) -> tuple[li
 class SearchPlan:
     """An agent search planned over the targets of its scope: an intent for each target that can evaluate every
     condition, a coverage cell naming each one that cannot, and a refusal when none can; with how each target's hits
-    are confirmed, and why zero hits would not be a confirmed absence."""
+    are confirmed, and what the source could not see (zero hits is never a confirmed absence)."""
 
     intents: list[SearchIntent]
     coverage: list[PivotCoverage]
@@ -1323,23 +1376,26 @@ class PivotExecutor:
         return SearchPlan(intents, coverage, checks=checks, caveats=list(dict.fromkeys(caveats)))
 
     def _text_parsed_coverage(self, contract: FieldContract, args) -> list[PivotCoverage]:
-        """A target whose records can carry typed fields only in their text (Linux journal, syslog, text and audit
-        lines; Suricata EVE lines a shipper did not parse) holds records a field search cannot read: each such
-        dataset in its inventory, or the whole target when its inventory is unknown, is an unresolved cell."""
-        if not any(name in contract.fields for name in ("message", "event.original")):
+        """A target that maps a text payload (message, event.original) can hold records whose typed fields are
+        parsed from that text (a journal, syslog or auth line, an access log, a Suricata EVE line its shipper did not
+        parse), under a dataset of any name; a field search cannot read them. Every dataset in its inventory is named
+        in such a cell, except those whose records are always field-structured (Windows event logs, Zeek logs,
+        Arkime sessions, Suricata records its shipper parsed), or the whole target when its inventory is unknown."""
+        if contract.ecar or not any(name in contract.fields for name in ("message", "event.original")):
             return []
         inventory = self.dataset_inventory.get(contract.target)
-        if _is_network(contract.target, contract):
-            if "suricata.eve.event_type" in contract.fields:
-                return []
-            datasets = ([None] if inventory is None
-                        else sorted(name for name in inventory if name.startswith("suricata.eve")))
-        elif contract.ecar:
-            return []
-        elif contract.os_family == "windows":
+        if contract.os_family == "windows" and not _is_network(contract.target, contract):
             datasets = ["linux.text"] if contract.linux_text_mixed is not False else []
+        elif inventory is None:
+            datasets = [None]
         else:
-            datasets = [None] if inventory is None else sorted(set(inventory).intersection(TEXT_PARSED_DATASETS))
+            parsed_suricata = "suricata.eve.event_type" in contract.fields
+
+            def structured(name: str) -> bool:
+                return (name in WINDOWS_HOST_DATASETS or name.startswith(("windows.", "zeek.", "arkime."))
+                        or name in ZEEK_LOGS_BY_TOKEN or (parsed_suricata and name.startswith("suricata.")))
+
+            datasets = sorted(name for name in inventory if not structured(name))
         cells = []
         for dataset in datasets:
             reason = (f"dataset_text_parsed:{dataset or 'inventory unknown'}: typed fields of these records are "
