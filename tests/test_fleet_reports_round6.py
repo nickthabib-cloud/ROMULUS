@@ -7,6 +7,7 @@ from zipfile import ZipFile
 
 import pytest
 
+from romulus.content.attack_tags import technique_tactics
 from romulus.report import markdown
 from romulus.report.manifest import publish_revision
 from tests.test_report import _repo_with_finding
@@ -16,6 +17,8 @@ def test_ten_thousand_host_report_snapshot_and_markdown_stream_keep_every_host(t
     repo, candidate = _repo_with_finding()
     repo.save_candidate_hosts(candidate, "h1", ((f"host-{n:05}", f"event-{n}") for n in range(10000)),
                               expected_count=10000)
+    # the ATT&CK catalog is parsed once per process and cached; this test measures what the report itself costs
+    technique_tactics(("T1059",))
     tracemalloc.start()
     try:
         manifest = publish_revision(repo, "h1", "test")
