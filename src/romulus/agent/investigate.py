@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from time import monotonic
 
+from romulus.agent import hunt_budget
 from romulus.agent.admission import (
     CUTTABLE_TEXT,
     AgentAdmission,
@@ -90,6 +91,16 @@ CACHE_LOOKBACK_POSITIONS = 16
 FINISH_ATTEMPTS = 3
 # The end reason of a session the secret guard ended (its state is `secret_guard`).
 SECRET_GUARD_REASON = "secret_guard"
+# The reason an analyst's stop request ended a session or the phase (a stopped session's state is `interrupted`).
+# A run stopped this way is resumable: `hunt resume` continues it from its persisted work.
+STOPPED_REASON = "stopped_by_analyst"
+
+
+class AgentStopped(BudgetExhausted):
+    """An analyst asked the agent to stop: no further model call starts."""
+
+    def __init__(self, detail: str):
+        super().__init__("stopped", detail)
 
 
 @dataclass
@@ -127,17 +138,46 @@ class _BudgetGate:
     # how often a waiting call re-checks the wall-clock budget while calls in flight hold their reservations
     WAIT_SECONDS = 5.0
 
-    def __init__(self, budget: AgentBudget, settings: Settings, assess_output: int | None = None):
+    def __init__(self, budget: AgentBudget, settings: Settings, assess_output: int | None = None, *,
+                 stop: Callable[[], str | None] | None = None,
+                 refresh: Callable[[BudgetLimits], BudgetLimits | None] | None = None):
         self.budget = budget
         self.settings = settings
         # the assess call's own output limit (romulus.agent.assessment.assess_output), which its hold reserves
         self.assess_output = assess_output
+        # `stop()`: what an analyst's open stop request says (None while there is none); `refresh(limits)`: the hunt's
+        # limits now, raised by budget extensions added while the phase runs (None: unchanged). Both are cheap.
+        self.stop = stop
+        self.refresh = refresh
         self.lock = threading.Lock()
         self.changed = threading.Condition(self.lock)
         self.queue: deque[object] = deque()
         self.calls = 0
         self.tokens = 0
         self.cost = 0.0
+
+    def stopped(self) -> str | None:
+        """The open stop request's description, or None. A failing check never stops the agent by itself."""
+        if self.stop is None:
+            return None
+        try:
+            return self.stop()
+        except Exception:  # noqa: BLE001 - a store hiccup is retried at the next safe point
+            log.exception("could not read the hunt's stop request")
+            return None
+
+    def _refresh_limits(self) -> None:
+        if self.refresh is None:
+            return
+        try:
+            limits = self.refresh(self.budget.limits)
+        except Exception:  # noqa: BLE001 - the limits in force stay until the next read
+            log.exception("could not read the hunt's agent budget extensions")
+            return
+        if limits is not None and limits != self.budget.limits:
+            with self.changed:
+                self.budget.limits = limits
+                self.changed.notify_all()
 
     def _reserve_for_assess(self, prompt: int, output: int) -> tuple[int, int, float, float]:
         limits = self.budget.limits
@@ -193,6 +233,10 @@ class _BudgetGate:
 
     def reserve(self, prompt: int, output: int, purpose: str, *,
                 prefix: _CachedPrefix | None = None) -> _Reservation:
+        stopped = self.stopped()
+        if stopped:
+            raise AgentStopped(stopped)
+        self._refresh_limits()
         limits = self.budget.limits
         cost = limits.worst_cost(prompt, output)
         ticket = object()
@@ -201,6 +245,7 @@ class _BudgetGate:
             try:
                 while True:
                     if self.queue[0] is ticket:
+                        limits = self.budget.limits
                         # decided when the call may start: a wait can outlast the cache entry
                         cached = self.cached_tokens(prefix)
                         tokens = limits.worst_tokens_cached(prompt, cached, output)
@@ -215,6 +260,9 @@ class _BudgetGate:
                             return _Reservation(prompt, output, tokens, cost, purpose, cached=cached)
                     # it fits once the calls in flight settle, or it is not this call's turn yet
                     self.changed.wait(self.WAIT_SECONDS)
+                    stopped = self.stopped()
+                    if stopped:
+                        raise AgentStopped(stopped)
             finally:
                 self.queue.remove(ticket)
                 self.changed.notify_all()
@@ -328,6 +376,18 @@ def skip_agent_phase(settings: Settings, repo: Repo, hunt_id: str, reason: str, 
     result = AgentPhaseResult("skipped", reason[:500], prompt_digests or {}, provider or {},
                               usage=_agent_usage(repo, hunt_id))
     return _finalize(repo, hunt_id, result, owner_token=owner_token)
+
+
+def stop_agent_phase(settings: Settings, repo: Repo, hunt_id: str, detail: str, *, provider: dict | None = None,
+                     owner_token=None) -> AgentPhaseResult:
+    """Record an agent phase an analyst stopped before it made any call: `partial` (resumable), with STOPPED_REASON
+    and who stopped it. The latest stored assessment stands; without one, the template says why there is none."""
+    existing = repo.agent_run(hunt_id) or {}
+    _store_template(repo, hunt_id, STOPPED_REASON, owner_token=owner_token)
+    result = AgentPhaseResult("partial", f"{STOPPED_REASON}: {detail}"[:500], existing.get("prompt_digests") or {},
+                              existing.get("provider") or provider or {}, usage=_agent_usage(repo, hunt_id),
+                              unworked=_unworked(repo, hunt_id))
+    return _finalize(repo, hunt_id, result, started_at=existing.get("started_at"), owner_token=owner_token)
 
 
 def fail_agent_phase(repo: Repo, hunt_id: str, reason: str, *, owner_token=None) -> dict:
@@ -720,6 +780,10 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
             heartbeat()
             try:
                 reservation = budget_gate.reserve(prompt_bound, max_out, purpose, prefix=prefix)
+            except AgentStopped as exc:
+                log.info("agent session %s stopped: %s", session_id, exc.detail)
+                return finish("interrupted", f"Stopped by analyst ({exc.detail}). "
+                              + _deterministic_tool_summary(tool_history, hypothesis_changes), STOPPED_REASON)
             except BudgetExhausted as exc:
                 log.info("agent session %s stopped: %s", session_id, exc)
                 stopped = f"Budget stop: {exc}. " + _deterministic_tool_summary(tool_history, hypothesis_changes)
@@ -846,6 +910,12 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                         reasons = bounded(call.problems) or [reason("$", "invalid_arguments")]
                     else:
                         heartbeat()
+                        stopped = budget_gate.stopped()
+                        if stopped and kind == "read":
+                            # a read may start source queries: none starts after a stop (a write only records)
+                            return finish("interrupted", f"Stopped by analyst ({stopped}). "
+                                          + _deterministic_tool_summary(tool_history, hypothesis_changes),
+                                          STOPPED_REASON)
                         tool_result = toolbox.execute(call.name, call.arguments)
                         reasons = tool_result_reasons(tool_result)
                         field = _overlong_field(call.name, call.arguments, reasons)
@@ -961,6 +1031,8 @@ def _budget(settings: Settings, manifest: dict, repo: Repo, hunt_id: str, clock)
     required = {"max_calls", "max_tokens", "max_wall_seconds"}
     limits = (BudgetLimits.from_dict(config, str((manifest.get("ai_agent") or {}).get("model") or ""))
               if required <= config.keys() else BudgetLimits.from_settings(settings))
+    # the hunt's limits: what its manifest pinned plus every budget extension (prices stay as recorded)
+    limits = hunt_budget.apply_main(limits, hunt_budget.resolve(repo, hunt_id, manifest, settings)["limits"])
     # the triage pass spends from its own budget, never the agent's
     return AgentBudget.from_usage(limits, repo.agent_usage(hunt_id, exclude_purposes=(TRIAGE_PURPOSE,)),
                                   wall_seconds_before=repo.agent_elapsed_ms(
@@ -996,13 +1068,19 @@ def run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
                     toolbox_factory: Callable[[str], Toolbox], owner_token: str | None = None,
                     clock: Callable[[], float] = monotonic,
                     heartbeat: Callable[[], None] | None = None,
-                    triage: Callable[[Callable[[], None]], dict] | None = None) -> AgentPhaseResult:
+                    triage: Callable[[Callable[[], None]], dict] | None = None,
+                    stop: Callable[[], str | None] | None = None,
+                    refresh: Callable[[BudgetLimits], BudgetLimits | None] | None = None) -> AgentPhaseResult:
     """Run bounded agent work; losing ownership never triggers another fenced write. `triage(heartbeat)` runs the AI
     triage pass under this phase's lease and returns its summary; given, it runs after the investigation and before
-    the assessment, whose input then carries its verdicts."""
+    the assessment, whose input then carries its verdicts. `stop()` describes an analyst's open stop request (None
+    while there is none): the phase checks it before every model call, before every read tool call and between rounds,
+    and once it is set starts no further model call; it keeps what it stored, records the template assessment and ends
+    `partial` with STOPPED_REASON. `refresh(limits)` returns the hunt's limits raised by extensions added meanwhile."""
     try:
         return _run_agent_phase(settings, repo, hunt_id, provider=provider, toolbox_factory=toolbox_factory,
-                                owner_token=owner_token, clock=clock, heartbeat=heartbeat, triage=triage)
+                                owner_token=owner_token, clock=clock, heartbeat=heartbeat, triage=triage,
+                                stop=stop, refresh=refresh)
     except Exception as exc:
         if not is_lease_lost(exc):
             raise
@@ -1077,7 +1155,9 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
                     toolbox_factory: Callable[[str], Toolbox], owner_token: str | None = None,
                     clock: Callable[[], float] = monotonic,
                     heartbeat: Callable[[], None] | None = None,
-                    triage: Callable[[Callable[[], None]], dict] | None = None) -> AgentPhaseResult:
+                    triage: Callable[[Callable[[], None]], dict] | None = None,
+                    stop: Callable[[], str | None] | None = None,
+                    refresh: Callable[[BudgetLimits], BudgetLimits | None] | None = None) -> AgentPhaseResult:
     """Run persisted sessions before atomically finalizing their deterministic result projection. The phases run in
     order: orient, investigate, the AI triage pass (when given), assess."""
     heartbeat = heartbeat or (lambda: None)
@@ -1098,6 +1178,7 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
     _recover_running_sessions(repo, hunt_id, owner_token=owner_token)
     budget = _budget(settings, hunt["manifest"], repo, hunt_id, clock)
     gate = _BudgetGate(budget, settings, assess_output=assess_output(settings, provider).limit)
+    gate.stop, gate.refresh = stop, refresh
     start = existing.get("started_at") if existing and existing.get("started_at") else utcnow()
     repo.save_agent_run({"hunt_id": hunt_id, "state": "running", "reason": None,
                          "prompt_digests": prompt_digests,
@@ -1112,7 +1193,10 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
     reportable_count = repo.candidate_count_lanes(hunt_id, ("urgent", "high", "lead"))
     orient_finished = any(row["purpose"] == "orient" and row["state"] == "finished"
                           for row in repo.agent_sessions(hunt_id))
-    if reportable_count and not orient_finished:
+    stopped = gate.stopped()
+    if stopped:
+        reasons.append(STOPPED_REASON)
+    if reportable_count and not orient_finished and not stopped:
         assessment_stale = True
         orient = _run_session(settings, repo, hunt_id, provider, gate, toolbox_factory, prompts,
                               purpose="orient", owner_token=owner_token, heartbeat=heartbeat)
@@ -1129,8 +1213,11 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
             limits_hit.update(admission.limits_hit)
 
     consecutive_outages = 1 if reportable_count and not orient_finished and orient.get("provider_unavailable") else 0
-    stop_scheduling = str(orient.get("reason") or "").startswith("controller_error")
+    stop_scheduling = str(orient.get("reason") or "").startswith("controller_error") or bool(stopped)
     while not stop_scheduling:
+        stopped = gate.stopped()
+        if stopped:
+            break
         batch = _next_hypotheses(settings, repo, hunt_id)
         if not batch:
             break
@@ -1176,9 +1263,24 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
         if _investigation_done(repo, hunt_id):
             break
 
+    stopped = stopped or gate.stopped() or next(
+        (STOPPED_REASON for session in all_sessions if session.get("reason") == STOPPED_REASON), None)
+    if stopped and STOPPED_REASON not in reasons:
+        reasons.append(STOPPED_REASON)
     existing_assessments = repo.agent_assessments(hunt_id)
     triage_summary = None
-    if existing_assessments and existing_assessments[-1].get("source") == "agent" and not assessment_stale:
+    if stopped:
+        # an analyst stopped the agent: no further model call (no triage pass, no assessment). The latest stored
+        # assessment stands; without one, the template says why there is none.
+        try:
+            _store_template(repo, hunt_id, STOPPED_REASON, owner_token=owner_token)
+        except Exception as exc:
+            if is_lease_lost(exc):
+                raise
+            assessment_fault = True
+            reasons.append(f"template_error:{type(exc).__name__}")
+        assessment = {"stopped": True}
+    elif existing_assessments and existing_assessments[-1].get("source") == "agent" and not assessment_stale:
         assessment = {"revision": existing_assessments[-1]["revision"], "body": existing_assessments[-1]["body"]}
     else:
         # the triage pass runs only when an assessment is about to: its verdicts are part of the assess input

@@ -10,13 +10,21 @@ from time import monotonic
 
 from sqlalchemy.exc import OperationalError
 
-from romulus.agent.investigate import recover_agent_finalization, run_agent_phase, skip_agent_phase
-from romulus.agent.provider import AgentReadiness, agent_readiness, build_provider
+from romulus.agent import hunt_budget
+from romulus.agent.investigate import (
+    STOPPED_REASON,
+    recover_agent_finalization,
+    run_agent_phase,
+    skip_agent_phase,
+    stop_agent_phase,
+)
+from romulus.agent.provider import AgentReadiness, BudgetLimits, agent_readiness, build_provider
 from romulus.config import Settings
 from romulus.detect import netdef
 from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.hunt.baseline_stage import run_baseline_stage
 from romulus.hunt.baseline_writer import DEFAULT_RETAIN_BYTES, run_hunt_segment_writer
+from romulus.hunt.controls import HuntStopped, StopWatch
 from romulus.hunt.expansion import PER_ANCHOR_SOURCE_QUERIES, ExpansionEngine
 from romulus.hunt.links import LinkFetcher, is_agent_reach
 from romulus.hunt.manifest import build_manifest, inventory_usable, new_hunt_id, normalizer_versions
@@ -75,8 +83,12 @@ def network_coverage_entry(client, contracts: dict, definition: netdef.SiteNetwo
 
 def create_hunt(s: Settings, start: datetime, end: datetime, created_by: str, style: str = "broad",
                 hypothesis: str = "", original_input: dict | None = None, expand: bool = True,
-                ai_agent: bool | None = None) -> str:
+                ai_agent: bool | None = None, agent_budget: dict | None = None) -> str:
+    """Create a hunt. `agent_budget` is the agent budget chosen for it (romulus.agent.hunt_budget.choose, checked
+    against the requester's role); without one the hunt gets the standard budget. It is pinned in the manifest."""
     repo = open_repo(s)
+    if agent_budget is None:
+        agent_budget = hunt_budget.choose(s, hunt_budget.DEFAULT_PROFILE, role="analyst", chosen_by=created_by)
     window = Window(start=start, end=end)
     client = ElasticClient(s)
     profiles, targets, contracts = {}, [], {}
@@ -98,6 +110,10 @@ def create_hunt(s: Settings, start: datetime, end: datetime, created_by: str, st
     manifest = build_manifest(s, window, original_input or {"start": start.isoformat(), "end": end.isoformat()},
                               style, targets, profiles, hypothesis, ai_agent=ai_agent_entry(s, ai_agent),
                               site_facts=site_facts)
+    # the agent budget is pinned here: every agent stage and every resume reads it (plus any extension), never the
+    # live settings; the provider's prices recorded beside it stay as readiness found them
+    recorded = manifest["ai_agent"].get("budgets") or BudgetLimits.from_settings(s).as_dict()
+    manifest["ai_agent"]["budgets"] = {**recorded, **hunt_budget.pinned_block(agent_budget)}
     manifest["internal_networks"]["coverage"] = network_coverage_entry(
         client, contracts, netdef.SiteNetworks.from_record(manifest["internal_networks"]), window)
     baseline = manifest["baseline"]
@@ -117,6 +133,10 @@ def create_hunt(s: Settings, start: datetime, end: datetime, created_by: str, st
     repo.create_hunt(hid, manifest, digest(manifest), created_by)
     for p in profiles.values():
         repo.save_profile(hid, p)
+    repo.audit(agent_budget["chosen_by"], "hunt.agent_budget_chosen", hid, {
+        "profile": agent_budget["profile"], "overrides": agent_budget["overrides"], "limits": agent_budget["limits"],
+        "role": agent_budget["role"], "above_ceiling": agent_budget["above_ceiling"],
+        "agent_requested": bool(manifest["ai_agent"].get("requested"))})
     return hid
 
 
@@ -190,19 +210,48 @@ def _agent_heartbeat(repo: Repo, hunt_id: str, owner_token: str, lease_seconds: 
         worker.join()
 
 
+# How long the agent's budget gate trusts its last read of the hunt's budget extensions.
+EXTENSION_CHECK_SECONDS = 15.0
+
+
+def _limits_refresh(s: Settings, repo: Repo, hunt_id: str, manifest: dict):
+    """The agent gate's view of extensions added while it runs: the hunt's model-call limits, read again at most every
+    EXTENSION_CHECK_SECONDS (one indexed query)."""
+    state = {"at": None}
+
+    def refresh(limits: BudgetLimits) -> BudgetLimits | None:
+        now = monotonic()
+        if state["at"] is not None and now - state["at"] < EXTENSION_CHECK_SECONDS:
+            return None
+        state["at"] = now
+        return hunt_budget.apply_main(limits, hunt_budget.resolve(repo, hunt_id, manifest, s)["limits"])
+    return refresh
+
+
 def _ai_agent_phase(s: Settings, repo: Repo, hunt_id: str, manifest: dict, owner_token: str | None,
                     client: ElasticClient, contracts: dict, requested: bool | None = None,
                     *, resuming: bool = False, previous_run: dict | None = None, readiness_snapshot=None) -> dict:
-    """Keep all agent failures inside its own lease and preserve the completed detection state."""
+    """Keep all agent failures inside its own lease and preserve the completed detection state. The phase runs on the
+    hunt's pinned agent budget plus its extensions (`hunt_budget.hunt_settings`), and honours an analyst's stop
+    request for the agent or the whole hunt."""
+    live_settings = s
     try:
         existing = previous_run if previous_run is not None else (repo.agent_run(hunt_id) or {})
         if owner_token is None:
             owner_token = repo.claim_agent_lease(hunt_id, _lease_seconds(s))["lease_owner"]
+        s = hunt_budget.hunt_settings(live_settings, repo, hunt_id, manifest)
+        watch = StopWatch(repo, hunt_id, ("hunt", "agent"))
         with _agent_heartbeat(repo, hunt_id, owner_token, _lease_seconds(s)) as heartbeat:
             heartbeat()
             wanted = (manifest.get("ai_agent") or {}).get("requested", False) if requested is None else requested
             if not wanted:
                 return skip_agent_phase(s, repo, hunt_id, "not_requested", owner_token=owner_token).as_dict()
+            stopped = watch()
+            if stopped:
+                # stopped before it started: nothing was asked of the model; a resume runs it
+                result = stop_agent_phase(s, repo, hunt_id, stopped, owner_token=owner_token).as_dict()
+                watch.honor("agent")
+                return result
             readiness = None
             try:
                 readiness = readiness_snapshot if readiness_snapshot is not None else agent_readiness(s)
@@ -222,10 +271,13 @@ def _ai_agent_phase(s: Settings, repo: Repo, hunt_id: str, manifest: dict, owner
                                         owner_token=owner_token).as_dict()
             provider = build_provider(s, readiness=readiness)
             from romulus.hunt.agent_tools import build_agent_toolbox
+            # each session reads the hunt's limits again, so an extension added while the phase runs reaches the
+            # sessions that start after it
             toolbox_factory = lambda session_id: build_agent_toolbox(
-                s, repo, hunt_id, client=client, contracts=contracts, session_id=session_id,
-                owner_token=owner_token, heartbeat=heartbeat,
+                hunt_budget.hunt_settings(live_settings, repo, hunt_id, manifest), repo, hunt_id, client=client,
+                contracts=contracts, session_id=session_id, owner_token=owner_token, heartbeat=heartbeat,
             )
+            refresh = _limits_refresh(live_settings, repo, hunt_id, manifest)
             triage = None
             if s.agent_triage == "on":
                 from romulus.hunt.triage import run_cited_triage_in_phase, run_triage_in_phase
@@ -239,8 +291,12 @@ def _ai_agent_phase(s: Settings, repo: Repo, hunt_id: str, manifest: dict, owner
                                                          build=build_provider)
                     return run_triage_in_phase(s, repo, hunt_id, owner_token=owner_token, heartbeat=phase_heartbeat,
                                                readiness=readiness, build=build_provider)
-            return run_agent_phase(s, repo, hunt_id, provider=provider, toolbox_factory=toolbox_factory,
-                                   owner_token=owner_token, heartbeat=heartbeat, triage=triage).as_dict()
+            result = run_agent_phase(s, repo, hunt_id, provider=provider, toolbox_factory=toolbox_factory,
+                                     owner_token=owner_token, heartbeat=heartbeat, triage=triage, stop=watch,
+                                     refresh=refresh).as_dict()
+            if STOPPED_REASON in str(result.get("reason") or ""):
+                watch.honor("agent")
+            return result
     except Exception as exc:
         if is_lease_lost(exc):
             return {"status": "partial", "reason": "lease_lost", "unworked": []}
@@ -283,8 +339,12 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
             baseline_summary: dict | None = None, ai_agent_summary: dict | None = None,
             owner_token: str | None = None, retain_budget_bytes: int | None = None,
             pending_agent_owner_token: str | None = None,
-            pending_agent_lease_seconds: int | None = None) -> dict:
+            pending_agent_lease_seconds: int | None = None, stopped: dict | None = None) -> dict:
+    """End the deterministic run. `stopped` ({"detail", "stage", "not_run"}) is an analyst's stop the run honoured
+    after its sweep: the hunt is partial, and its stop reason names the stages that did not run."""
     partial_reasons = list(partial_reasons or sweep_summary.get("partial_reasons") or [])
+    if stopped:
+        partial_reasons.insert(0, stopped_text(stopped))
     sweep_complete = bool(sweep_summary.get("complete"))
     missing_summary = not sweep_summary
     packet_status = (packet_summary or {}).get("status")
@@ -298,7 +358,7 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
     if packets_incomplete:
         partial_reasons.append(f"packet_stage:{packet_status}")
     partial = (missing_summary or not sweep_complete or packets_incomplete or baseline_failed
-               or (expansion_summary or {}).get("status") in {"partial", "failed"})
+               or (expansion_summary or {}).get("status") in {"partial", "failed"} or bool(stopped))
     try:
         # The writer decides per hour from each hour's own window cells, so a hunt left partial by another stage still
         # writes the hours whose baseline inputs were complete; whether it is partial decides only how long its window
@@ -355,11 +415,92 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
         "ai_agent": ai_agent_summary or {},
         "baseline": baseline_summary or {},
         "expansion": expansion_summary or {},
+        **({"stopped": stopped} if stopped else {}),
     }
 
 
+def stopped_text(stopped: dict) -> str:
+    """How a stop after the sweep reads in the hunt's stop reason and report."""
+    not_run = [*stopped.get("not_run", []), "AI agent"]
+    return (f"stopped by analyst ({stopped['detail']}) at the {stopped['stage']}: not run: {', '.join(not_run)}; "
+            "these results are partial, and resuming the hunt runs what did not run")
+
+
+def _stopped_in_sweep(repo: Repo, hunt_id: str, sweep, targets: list[str], started: list[str], stop: HuntStopped,
+                      watch: StopWatch, owner_token: str) -> dict:
+    """End a hunt an analyst stopped during its sweep: keep every finding it stored, finalize nothing (an aggregate
+    over part of the window could report what the rest would contradict), and leave it partial and resumable. Its
+    sweep summary says the sweep did not finish and why; ending the hunt narrows every whole-window answer."""
+    sweep.close_stage()
+    current = started[-1] if started else None
+    not_started = [target for target in targets if target not in started]
+    reason = (f"stopped by analyst ({stop.detail}) during the sweep" + (f" of {current}" if current else "")
+              + ": partitions not yet read stay planned and were not evaluated"
+              + (f"; sources not started: {', '.join(not_started)}" if not_started else "")
+              + "; no whole-window answer is complete, and the packet, baseline, expansion and AI agent stages did "
+                "not run. Resuming the hunt runs the sweep again")
+    summary = {"finished": False, "complete": False, "partial_reasons": [*sweep.partial_reasons, reason],
+               "stats": sweep.stats, "stopped": {"detail": stop.detail, "stage": "sweep", "target": current,
+                                                 "not_started": not_started}}
+    repo.audit("system", "hunt.sweep_summary", hunt_id, summary, owner_token=owner_token)
+    counts, result = _detection_result(repo, hunt_id)
+    repo.set_hunt_state(hunt_id, "partial", owner_token=owner_token, detection_result=result, stop_reason=reason)
+    watch.honor("sweep")
+    return {"hunt_id": hunt_id, "execution_state": "partial", "stats": sweep.stats, "lanes": counts,
+            "detection_result": result, "partial_reasons": summary["partial_reasons"], "stopped": summary["stopped"],
+            "agent": {"status": "not_run", "stop_reason": reason},
+            "ai_agent": {"status": "not_run", "reason": STOPPED_REASON}, "baseline": {}, "expansion": {}}
+
+
+def _stages_after_sweep(s: Settings, repo: Repo, client: ElasticClient, hunt_id: str, window: Window,
+                        contracts: dict, owner_token: str, watch: StopWatch, *, packet_summary: dict | None = None,
+                        baseline_summary: dict | None = None) -> tuple[dict | None, dict | None, dict, dict | None]:
+    """The packet and baseline stages (each unless its summary says it finished), the ranking passes and expansion,
+    stopping before the next stage, or before the next expansion link, when an analyst asks the hunt to stop. Returns
+    (packet, baseline, expansion summaries, the stop or None); a stage the stop kept from running records no summary,
+    so a resume runs it."""
+
+    def heartbeat():
+        repo.heartbeat_hunt(hunt_id, _lease_seconds(s), owner_token=owner_token)
+
+    stop: dict | None = None
+    not_run: list[str] = []
+
+    def stopping(stage: str) -> bool:
+        nonlocal stop
+        if stop is None:
+            detail = watch()
+            if detail:
+                stop = {"detail": detail, "stage": stage}
+        if stop is not None:
+            not_run.append(stage)
+        return stop is not None
+
+    # packet findings first, so they can anchor expansion like any sweep finding
+    if not (packet_summary or {}).get("finished") and not stopping("packet stage"):
+        packet_summary = _packet_stage(s, repo, client, hunt_id, window, contracts, heartbeat, owner_token)
+    if not (baseline_summary or {}).get("finished") and not stopping("baseline stage"):
+        baseline_summary = _baseline_stage(
+            repo, client, repo.get_hunt(hunt_id), window, contracts, heartbeat, owner_token,
+            int(s.baseline_carry_disk_gb * 1e9),
+        )
+    # A resumed hunt ranks again over what is stored; each pass replaces its previous rows, so this is idempotent.
+    run_rank_pass(repo, hunt_id, PASS_BEFORE_EXPANSION, owner_token=owner_token, heartbeat=heartbeat)
+    if stopping("expansion"):
+        expansion_summary = {"status": "not_run", "stop_reason": "not run: stopped by analyst"}
+    else:
+        expansion_summary = _run_expansion_safely(s, repo, client, repo.get_hunt(hunt_id), contracts, window,
+                                                  owner_token, stop_check=watch)
+        if expansion_summary.get("stopped") and stop is None:
+            stop = {"detail": expansion_summary["stopped"], "stage": "expansion"}
+    run_rank_pass(repo, hunt_id, PASS_FINAL, owner_token=owner_token, heartbeat=heartbeat)
+    if stop is not None:
+        stop["not_run"] = not_run
+    return packet_summary, baseline_summary, expansion_summary, stop
+
+
 def _run_expansion(s: Settings, repo: Repo, client: ElasticClient, hunt: dict, contracts: dict,
-                   window: Window, owner_token: str) -> dict:
+                   window: Window, owner_token: str, stop_check=None) -> dict:
     manifest = hunt["manifest"]
     config = manifest.get("expansion") or {}
     if config.get("enabled", True) is False:
@@ -401,16 +542,17 @@ def _run_expansion(s: Settings, repo: Repo, client: ElasticClient, hunt: dict, c
         max_depth=int(config.get("max_depth", 3)),
         max_source_queries=max_source_queries,
         per_anchor_source_queries=int(per_anchor) if per_anchor is not None else None,
-        wall_clock_seconds=budget_seconds, owner_token=owner_token, heartbeat=heartbeat,
+        wall_clock_seconds=budget_seconds, owner_token=owner_token, heartbeat=heartbeat, stop_check=stop_check,
     ).run()
 
 
 def _run_expansion_safely(
     s: Settings, repo: Repo, client: ElasticClient, hunt: dict, contracts: dict,
-    window: Window, owner_token: str,
+    window: Window, owner_token: str, stop_check=None,
 ) -> dict:
     try:
-        return _run_expansion(s, repo, client, hunt, contracts, window, owner_token)
+        return _run_expansion(s, repo, client, hunt, contracts, window, owner_token,
+                              **({"stop_check": stop_check} if stop_check is not None else {}))
     except Exception as exc:
         log.exception("expansion failed")
         linked = {
@@ -477,7 +619,9 @@ def _baseline_stage(repo: Repo, client: ElasticClient, hunt: dict, window: Windo
 
 
 def run_hunt(s: Settings, hunt_id: str, on_candidate=None, expand: bool | None = None,
-             claimed_owner: str | None = None) -> dict:
+             claimed_owner: str | None = None, resweep: bool = False) -> dict:
+    """Run a claimed hunt end to end. `resweep`: a resume runs again the sweep of a hunt stopped during it, and its
+    sources must still have the role and OS family the hunt recorded."""
     repo = open_repo(s)
     hunt = repo.get_hunt(hunt_id)
     if hunt is None:
@@ -501,7 +645,7 @@ def run_hunt(s: Settings, hunt_id: str, on_candidate=None, expand: bool | None =
     window = Window(start=datetime.fromisoformat(m["window"]["start"]), end=datetime.fromisoformat(m["window"]["end"]))
     client = ElasticClient(s)
     try:
-        contracts = _contracts(s, repo, h, client, owner_token)
+        contracts = _contracts(s, repo, {**h, "_resume_scope_check": True} if resweep else h, client, owner_token)
     except Exception as exc:
         repo.audit("system", "hunt.sweep_summary", hunt_id, {
             "finished": False, "complete": False, "partial_reasons": [], "stats": {},
@@ -521,9 +665,20 @@ def run_hunt(s: Settings, hunt_id: str, on_candidate=None, expand: bool | None =
         repo, client, hunt_id, window, contracts, on_candidate, heartbeat=heartbeat, stage_dir=stage_dir,
         site_facts=site_facts,
     )
+    # an analyst's request to stop the hunt, read before each source and each partition the sweep reads
+    watch = StopWatch(repo, hunt_id, ("hunt",))
+    sweep.stop_check = watch
+    started: list[str] = []
     try:
-        for target in m["targets"]:
-            sweep.run_target(target)
+        try:
+            for target in m["targets"]:
+                stopped = watch()
+                if stopped:
+                    raise HuntStopped(stopped)
+                started.append(target)
+                sweep.run_target(target)
+        except HuntStopped as stop:
+            return _stopped_in_sweep(repo, hunt_id, sweep, m["targets"], started, stop, watch, owner_token)
         sweep.finalize()
     except Exception as e:
         sweep.close_stage()
@@ -552,17 +707,19 @@ def run_hunt(s: Settings, hunt_id: str, on_candidate=None, expand: bool | None =
     repo.audit(
         "system", "hunt.sweep_summary", hunt_id, sweep_summary, owner_token=owner_token,
     )
-    # packet findings first, so they can anchor expansion like any sweep finding
-    packet_summary = _packet_stage(s, repo, client, hunt_id, window, contracts, heartbeat, owner_token)
-    baseline_summary = _baseline_stage(
-        repo, client, repo.get_hunt(hunt_id), window, contracts, heartbeat, owner_token,
-        int(s.baseline_carry_disk_gb * 1e9),
-    )
-    run_rank_pass(repo, hunt_id, PASS_BEFORE_EXPANSION, owner_token=owner_token, heartbeat=heartbeat)
-    expansion_summary = _run_expansion_safely(
-        s, repo, client, repo.get_hunt(hunt_id), contracts, window, owner_token,
-    )
-    run_rank_pass(repo, hunt_id, PASS_FINAL, owner_token=owner_token, heartbeat=heartbeat)
+    packet_summary, baseline_summary, expansion_summary, stop = _stages_after_sweep(
+        s, repo, client, hunt_id, window, contracts, owner_token, watch)
+    if stop is not None:
+        result = _finish(
+            repo, hunt_id, {"status": "disabled", "mode": "off"}, sweep_summary,
+            stats=sweep.stats, partial_reasons=sweep.partial_reasons,
+            expansion_summary=expansion_summary, packet_summary=packet_summary,
+            baseline_summary=baseline_summary, owner_token=owner_token,
+            retain_budget_bytes=int(s.baseline_retain_disk_gb * 1e9), stopped=stop,
+        )
+        watch.honor(stop["stage"])
+        return {**result, "ai_agent": {"status": "not_run", "reason": STOPPED_REASON},
+                "agent": {"status": "not_run", "stop_reason": STOPPED_REASON}}
     agent_owner = uuid.uuid4().hex
     result = _finish(
         repo, hunt_id, {"status": "disabled", "mode": "off"}, sweep_summary,
@@ -573,8 +730,18 @@ def run_hunt(s: Settings, hunt_id: str, on_candidate=None, expand: bool | None =
         pending_agent_lease_seconds=_lease_seconds(s),
         retain_budget_bytes=int(s.baseline_retain_disk_gb * 1e9),
     )
-    return _with_agent_result(result, repo, _ai_agent_phase(s, repo, hunt_id, m, agent_owner, client, contracts),
-                              settings=s, manifest=m)
+    out = _with_agent_result(result, repo, _ai_agent_phase(s, repo, hunt_id, m, agent_owner, client, contracts),
+                             settings=s, manifest=m)
+    _close_unapplied_stops(repo, hunt_id)
+    return out
+
+
+def _close_unapplied_stops(repo: Repo, hunt_id: str) -> None:
+    """A stop requested after the run's last safe point did not stop anything: say so, never leave it pending."""
+    try:
+        repo.mark_stops_unapplied(hunt_id)
+    except Exception:  # noqa: BLE001 - the run is finished; the request then stays shown as requested
+        log.exception("could not close hunt %s's unapplied stop requests", hunt_id)
 
 
 def _triage_after_agent(s: Settings, repo: Repo, hunt_id: str, manifest: dict, agent_summary: dict) -> dict | None:
@@ -590,6 +757,9 @@ def _triage_after_agent(s: Settings, repo: Repo, hunt_id: str, manifest: dict, a
             return None
         if agent_summary.get("status") in (None, "skipped") or agent_summary.get("reason") == "lease_lost":
             return None
+        if STOPPED_REASON in str(agent_summary.get("reason") or ""):
+            return None                      # an analyst stopped the agent: no further model call
+        s = hunt_budget.hunt_settings(s, repo, hunt_id, manifest)
         readiness = agent_readiness(s)
         if not readiness.ready:
             return None
@@ -651,9 +821,28 @@ def _check_agent_model(s: Settings, repo: Repo, hunt: dict, force_model: bool) -
     return None
 
 
-def resume_hunt(s: Settings, hunt_id: str, *, force_model: bool = False) -> dict:
+def _agent_extended(repo: Repo, hunt_id: str, agent_run: dict) -> bool:
+    """Whether an analyst added budget to the hunt's agent after its run last ended."""
+    added = repo.latest_budget_extension_at(hunt_id)
+    if added is None:
+        return False
+    ended = agent_run.get("ended_at")
+    if ended is not None and ended.tzinfo is None:
+        ended = ended.replace(tzinfo=added.tzinfo)
+    return ended is None or added > ended
+
+
+def resume_hunt(s: Settings, hunt_id: str, *, force_model: bool = False, continue_agent: bool = False,
+                actor: str = "system") -> dict:
     """Resume persisted agent work without repeating a completed deterministic hunt. The agent keeps the model the
-    hunt recorded unless `force_model`."""
+    hunt recorded unless `force_model`.
+
+    A hunt an analyst stopped resumes too, and the resume clears the stop request (`actor` is recorded): one stopped
+    during its sweep runs the sweep again (its writes are idempotent, and its aggregates must read every partition),
+    one stopped later runs the stages it did not run. An agent run that ended partial because it was stopped, was
+    interrupted, or reached a limit that budget was added to after it ended, continues from its persisted
+    hypotheses, sessions and spend. `continue_agent` continues only the agent (never a deterministic stage), also
+    on a partial hunt."""
     repo = open_repo(s)
     hunt = repo.get_hunt(hunt_id)
     if hunt is None:
@@ -714,6 +903,18 @@ def resume_hunt(s: Settings, hunt_id: str, *, force_model: bool = False) -> dict
     install_for_hunt(s, hunt_id, recorded_manifest)
     sweep_audit = repo.latest_audit(hunt_id, "hunt.sweep_summary")
     sweep_summary = dict(sweep_audit["detail"]) if sweep_audit else {}
+    if sweep_summary.get("stopped") and not sweep_summary.get("finished"):
+        # stopped during the sweep (by request, or by a force stop): the sweep runs again from the start
+        if continue_agent:
+            raise ValueError(f"hunt {hunt_id} was stopped during its sweep and its agent never ran: resume the "
+                             "whole hunt")
+        if hunt["execution_state"] != "partial":
+            raise RuntimeError(f"hunt {hunt_id} is {hunt['execution_state']}; only a partial hunt resumes its sweep")
+        owner = repo.claim_hunt(hunt_id, _lease_seconds(s), resume=True)["lease_owner"]
+        repo.clear_stops(hunt_id, actor)
+        if forced is not None:
+            repo.audit("system", AGENT_MODEL_FORCED, hunt_id, forced, owner_token=owner)
+        return run_hunt(s, hunt_id, claimed_owner=owner, resweep=True)
     if sweep_summary and not sweep_summary.get("finished"):
         raise RuntimeError("hunt cannot resume agent work because the sweep did not finish")
     if hunt["execution_state"] == "failed" and not sweep_summary.get("finished"):
@@ -723,14 +924,21 @@ def resume_hunt(s: Settings, hunt_id: str, *, force_model: bool = False) -> dict
     resumable_agent = (
         agent_run.get("state") in {"pending", "running"}
         or (agent_run.get("state") == "partial" and
-            any(reason in agent_reason for reason in ("provider_unavailable", "interrupted")))
+            (any(reason in agent_reason for reason in ("provider_unavailable", "interrupted", STOPPED_REASON))
+             or _agent_extended(repo, hunt_id, agent_run)))
     )
-    agent_only = hunt["execution_state"] == "completed_within_scope" and resumable_agent
+    agent_only = resumable_agent and (hunt["execution_state"] == "completed_within_scope"
+                                      or (continue_agent and hunt["execution_state"] == "partial"))
+    if continue_agent and not agent_only:
+        raise ValueError(f"hunt {hunt_id} has no agent run to continue: it continues after it stopped, was "
+                         "interrupted, or reached a limit that budget was added to afterwards")
     if hunt["execution_state"] == "completed_within_scope" and not agent_only:
         raise ValueError(f"hunt {hunt_id} has no resumable agent phase")
     claimed = (repo.claim_agent_lease(hunt_id, _lease_seconds(s)) if agent_only else
                repo.claim_hunt(hunt_id, _lease_seconds(s), resume=True))
     owner_token = claimed["lease_owner"]
+    # the analyst asked the hunt to run again: an earlier stop request no longer applies
+    repo.clear_stops(hunt_id, actor)
     if forced is not None:
         # recorded only now, under the lease: a refused resume switched nothing
         repo.audit("system", AGENT_MODEL_FORCED, hunt_id, forced, owner_token=owner_token)
@@ -798,40 +1006,31 @@ def resume_hunt(s: Settings, hunt_id: str, *, force_model: bool = False) -> dict
         raise
     if agent_only:
         ai_agent_summary = _ai_agent_phase(s, repo, hunt_id, manifest, owner_token, client, contracts, resuming=True)
-        return _with_agent_result({"hunt_id": hunt_id, "execution_state": hunt["execution_state"],
+        out = _with_agent_result({"hunt_id": hunt_id, "execution_state": hunt["execution_state"],
                 "stats": sweep_summary.get("stats") or {}, "lanes": repo.lane_counts(hunt_id),
                 "detection_result": hunt.get("detection_result"), "agent": ai_agent_summary,
                 "ai_agent": ai_agent_summary, "baseline": {}, "expansion": {}}, repo, ai_agent_summary,
                 settings=s, manifest=manifest)
+        _close_unapplied_stops(repo, hunt_id)
+        return out
     packet_audit = repo.latest_audit(hunt_id, "hunt.packet_summary")
     packet_summary = dict(packet_audit["detail"]) if packet_audit else {}
-    if not packet_summary.get("finished"):
-
-        def heartbeat():
-            repo.heartbeat_hunt(hunt_id, _lease_seconds(s), owner_token=owner_token)
-
-        packet_summary = _packet_stage(s, repo, client, hunt_id, window, contracts, heartbeat, owner_token)
     baseline_audit = repo.latest_audit(hunt_id, "hunt.baseline_summary")
     baseline_summary = dict(baseline_audit["detail"]) if baseline_audit else {}
-    if not baseline_summary.get("finished"):
-
-        def heartbeat():
-            repo.heartbeat_hunt(hunt_id, _lease_seconds(s), owner_token=owner_token)
-
-        baseline_summary = _baseline_stage(
-            repo, client, hunt, window, contracts, heartbeat, owner_token,
-            int(s.baseline_carry_disk_gb * 1e9),
+    watch = StopWatch(repo, hunt_id, ("hunt",))
+    packet_summary, baseline_summary, expansion_summary, stop = _stages_after_sweep(
+        s, repo, client, hunt_id, window, contracts, owner_token, watch,
+        packet_summary=packet_summary, baseline_summary=baseline_summary)
+    if stop is not None:
+        result = _finish(
+            repo, hunt_id, {"status": "disabled", "mode": "off"}, sweep_summary,
+            expansion_summary=expansion_summary, packet_summary=packet_summary,
+            baseline_summary=baseline_summary, owner_token=owner_token,
+            retain_budget_bytes=int(s.baseline_retain_disk_gb * 1e9), stopped=stop,
         )
-
-    def rank_heartbeat():
-        repo.heartbeat_hunt(hunt_id, _lease_seconds(s), owner_token=owner_token)
-
-    # A resumed hunt ranks again over what is stored; each pass replaces its previous rows, so this is idempotent.
-    run_rank_pass(repo, hunt_id, PASS_BEFORE_EXPANSION, owner_token=owner_token, heartbeat=rank_heartbeat)
-    expansion_summary = _run_expansion_safely(
-        s, repo, client, hunt, contracts, window, owner_token,
-    )
-    run_rank_pass(repo, hunt_id, PASS_FINAL, owner_token=owner_token, heartbeat=rank_heartbeat)
+        watch.honor(stop["stage"])
+        return {**result, "ai_agent": {"status": "not_run", "reason": STOPPED_REASON},
+                "agent": {"status": "not_run", "stop_reason": STOPPED_REASON}}
     agent_owner = uuid.uuid4().hex
     result = _finish(
         repo, hunt_id, {"status": "disabled", "mode": "off"}, sweep_summary,
@@ -841,6 +1040,8 @@ def resume_hunt(s: Settings, hunt_id: str, *, force_model: bool = False) -> dict
         pending_agent_lease_seconds=_lease_seconds(s),
         retain_budget_bytes=int(s.baseline_retain_disk_gb * 1e9),
     )
-    return _with_agent_result(result, repo, _ai_agent_phase(
+    out = _with_agent_result(result, repo, _ai_agent_phase(
         s, repo, hunt_id, manifest, agent_owner, client, contracts, resuming=True, previous_run=agent_run),
         settings=s, manifest=manifest)
+    _close_unapplied_stops(repo, hunt_id)
+    return out

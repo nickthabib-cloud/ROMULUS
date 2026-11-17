@@ -12,6 +12,7 @@ import anyio
 from sqlalchemy import func, select, tuple_
 from starlette.concurrency import run_in_threadpool
 
+from romulus.agent.hunt_budget import extended_record
 from romulus.report.manifest import (
     NARRATIVE_KINDS,
     NARRATIVE_PARAGRAPHS,
@@ -183,7 +184,9 @@ def panel(repo, hunt, usage, *, with_assessment=True):
             and not repo.agent_lease_live(hunt["id"]) else run["state"],
             "reason": clip(reason, 2000), "provider": clip(provider.get("provider"), 200),
             "model": clip(provider.get("model") or provider.get("model_requested"), 300),
-            "usage": usage, "budgets": configured.get("budgets") or provider.get("budgets") or {},
+            # the limits in force: those the hunt recorded plus its budget extensions
+            "usage": usage, "budgets": extended_record(configured.get("budgets") or provider.get("budgets") or {},
+                                                       repo, hunt["id"]),
             "source_queries": repo.agent_source_queries(hunt["id"]),
             "wall_seconds": repo.agent_elapsed_ms(hunt["id"]) / 1000,
             "limits": sorted(set(limit_items)), "counts": counts(repo, hunt["id"]),

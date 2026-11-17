@@ -53,6 +53,8 @@
 </div>
 
 {% if agent_message %}<div class="notice warn">{{ agent_message }}</div>{% endif %}
+{% if stop_banner %}<div class="notice warn" id="stop-banner"><span><b>{% if stop_banner.state == 'requested' %}Stop requested{% elif stop_banner.state == 'forced' %}Force-stopped{% else %}Stopped by analyst{% endif %}:</b> {{ stop_banner.text }}</span></div>{% endif %}
+{% if control_message %}<div class="notice">{{ control_message }}</div>{% endif %}
 <section id="newfeed" class="panel feed" hidden><div class="panel-head"><h2>New since this page loaded</h2></div><div class="panel-body"><ul id="feed"></ul></div></section>
 
 {% block tab %}{% endblock %}

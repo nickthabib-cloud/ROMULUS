@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from romulus.agent.aliases import AliasBook
+from romulus.agent.hunt_budget import with_extensions
 from romulus.agent.provider.base import estimate_tokens
 from romulus.agent.provider.budget import AgentBudget, BudgetLimits
 from romulus.agent.safety import injection_flags
@@ -282,6 +283,8 @@ def _budget(repo: Repo, hunt_id: str, manifest: dict) -> dict:
     if not required <= configured.keys():
         return {"configured": False, "spent": {}, "remaining": {}}
     limits = BudgetLimits.from_dict(configured, str((manifest.get("ai_agent") or {}).get("model") or ""))
+    # the limits the hunt pinned plus every budget extension an analyst added
+    limits = with_extensions(limits, repo, hunt_id)
     # the agent's own budget: the triage pass spends from its own
     usage = repo.agent_usage(hunt_id, exclude_purposes=(TRIAGE_PURPOSE,))
     budget = AgentBudget.from_usage(

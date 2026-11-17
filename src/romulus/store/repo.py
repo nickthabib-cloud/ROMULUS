@@ -1069,6 +1069,10 @@ class Repo:
             rm("report_hosts", t.report_host.delete().where(t.report_host.c.hunt_id == hunt_id))
             rm("report_zeek_visibility", t.report_zeek_visibility.delete().where(t.report_zeek_visibility.c.hunt_id == hunt_id))
             rm("source_profiles", t.source_profile.delete().where(t.source_profile.c.hunt_id == hunt_id))
+            rm("stop_requests", t.hunt_stop_request.delete().where(t.hunt_stop_request.c.hunt_id == hunt_id))
+            rm("budget_extensions", t.hunt_budget_extension.delete().where(
+                t.hunt_budget_extension.c.hunt_id == hunt_id))
+            rm("hunt_processes", t.hunt_process.delete().where(t.hunt_process.c.hunt_id == hunt_id))
             self._exec_holders.pop(hunt_id, None)
             rm("audit_records", t.audit_event.delete().where(t.audit_event.c.hunt_id == hunt_id,
                                                              t.audit_event.c.actor == SYSTEM_ACTOR))
@@ -6396,3 +6400,230 @@ class Repo:
                 self._fence_lease(c, hunt_id, owner_token)
             c.execute(t.audit_event.insert().values(at=utcnow(), actor=actor, action=action, hunt_id=hunt_id,
                                                     detail=detail or {}))
+
+    # ---- analyst controls: stop requests, budget extensions, the worker process -------------------------------
+    def _live_leases(self, c, hunt_id: str, now: datetime) -> tuple[dict, dict | None, bool, bool]:
+        hunt = c.execute(select(t.hunt).where(t.hunt.c.id == hunt_id)).mappings().first()
+        if hunt is None:
+            raise KeyError(hunt_id)
+        run = c.execute(select(t.agent_run).where(t.agent_run.c.hunt_id == hunt_id)).mappings().first()
+        hunt_live = (hunt["execution_state"] == "running" and _stored_utc(hunt["lease_until"]) is not None
+                     and _stored_utc(hunt["lease_until"]) > now)
+        agent_live = (run is not None and run["state"] in ("pending", "running")
+                      and _stored_utc(run["lease_until"]) is not None and _stored_utc(run["lease_until"]) > now)
+        return dict(hunt), (dict(run) if run is not None else None), hunt_live, agent_live
+
+    def run_liveness(self, hunt_id: str, *, now: datetime | None = None) -> dict:
+        """Whether the hunt's detection run and its agent phase hold live leases."""
+        with self.engine.connect() as c:
+            _, _, hunt_live, agent_live = self._live_leases(c, hunt_id, now or utcnow())
+        return {"hunt": hunt_live, "agent": agent_live}
+
+    def request_hunt_stop(self, hunt_id: str, scope: str, actor: str, *, now: datetime | None = None) -> dict:
+        """Record an analyst's stop request for a running hunt (scope "hunt") or its AI agent (scope "agent"). A request
+        already open for the same or a wider scope is returned as it is. Raises ValueError when nothing runs."""
+        if scope not in ("hunt", "agent"):
+            raise ValueError(f"unknown stop scope {scope!r}")
+        now = now or utcnow()
+        with write_txn(self.engine) as c:
+            c.execute(t.hunt.update().where(t.hunt.c.id == hunt_id).values(id=t.hunt.c.id))
+            hunt, run, hunt_live, agent_live = self._live_leases(c, hunt_id, now)
+            agent_wanted = bool(((hunt["manifest"] or {}).get("ai_agent") or {}).get("requested"))
+            if scope == "hunt" and not (hunt_live or agent_live):
+                raise ValueError(f"hunt {hunt_id} is not running ({hunt['execution_state']})")
+            if scope == "agent" and not (agent_live or (hunt_live and agent_wanted)):
+                raise ValueError(f"hunt {hunt_id} has no AI agent running or still to run")
+            open_rows = c.execute(select(t.hunt_stop_request).where(
+                t.hunt_stop_request.c.hunt_id == hunt_id, t.hunt_stop_request.c.state == "requested",
+            ).order_by(t.hunt_stop_request.c.id.desc())).mappings().all()
+            for row in open_rows:
+                if row["scope"] == "hunt" or row["scope"] == scope:
+                    return {**_with_utc(row, ("requested_at", "honored_at", "closed_at")), "existing": True}
+            row_id = c.execute(t.hunt_stop_request.insert().values(
+                hunt_id=hunt_id, scope=scope, requested_by=actor, requested_at=now, state="requested",
+                detail={"hunt_state": hunt["execution_state"], "agent_state": (run or {}).get("state")},
+            )).inserted_primary_key[0]
+            c.execute(t.audit_event.insert().values(at=now, actor=actor, action="hunt.stop_requested",
+                                                    hunt_id=hunt_id, detail={"scope": scope, "request": row_id}))
+            row = c.execute(select(t.hunt_stop_request).where(t.hunt_stop_request.c.id == row_id)).mappings().one()
+            return {**_with_utc(row, ("requested_at", "honored_at", "closed_at")), "existing": False}
+
+    def active_stop(self, hunt_id: str, scopes: tuple[str, ...] = ("hunt", "agent")) -> dict | None:
+        """The open stop request a run must honour (requested, or honoured and not yet cleared by a resume), of one of
+        `scopes`; None when there is none. One indexed lookup."""
+        with self.engine.connect() as c:
+            row = c.execute(select(t.hunt_stop_request).where(
+                t.hunt_stop_request.c.hunt_id == hunt_id,
+                t.hunt_stop_request.c.state.in_(("requested", "honored")),
+                t.hunt_stop_request.c.scope.in_(scopes),
+            ).order_by(t.hunt_stop_request.c.id.desc()).limit(1)).mappings().first()
+        return _with_utc(row, ("requested_at", "honored_at", "closed_at")) if row is not None else None
+
+    def latest_stop(self, hunt_id: str) -> dict | None:
+        """The hunt's latest stop request in any state, for the stopped-by banner."""
+        with self.engine.connect() as c:
+            row = c.execute(select(t.hunt_stop_request).where(t.hunt_stop_request.c.hunt_id == hunt_id)
+                            .order_by(t.hunt_stop_request.c.id.desc()).limit(1)).mappings().first()
+        return _with_utc(row, ("requested_at", "honored_at", "closed_at")) if row is not None else None
+
+    def honor_stop(self, request_id: int, where: str, *, now: datetime | None = None) -> None:
+        """The run stopped for this request at `where` (a stage name)."""
+        now = now or utcnow()
+        with write_txn(self.engine) as c:
+            row = c.execute(select(t.hunt_stop_request).where(t.hunt_stop_request.c.id == request_id)).mappings().first()
+            if row is None or row["state"] not in ("requested", "honored"):
+                return
+            detail = {**(row["detail"] or {}), "honored_in": list(dict.fromkeys([
+                *((row["detail"] or {}).get("honored_in") or []), where]))[:10]}
+            c.execute(t.hunt_stop_request.update().where(t.hunt_stop_request.c.id == request_id).values(
+                state="honored", honored_at=row["honored_at"] or now, detail=detail))
+            c.execute(t.audit_event.insert().values(at=now, actor=row["requested_by"], action="hunt.stop_honored",
+                                                    hunt_id=row["hunt_id"], detail={"request": request_id,
+                                                                                    "scope": row["scope"],
+                                                                                    "where": where}))
+
+    def clear_stops(self, hunt_id: str, actor: str, *, scopes: tuple[str, ...] = ("hunt", "agent"),
+                    now: datetime | None = None) -> int:
+        """A resume or continuation clears the hunt's open stop requests: the analyst asked it to run again."""
+        now = now or utcnow()
+        with write_txn(self.engine) as c:
+            cleared = c.execute(t.hunt_stop_request.update().where(
+                t.hunt_stop_request.c.hunt_id == hunt_id,
+                t.hunt_stop_request.c.state.in_(("requested", "honored", "forced")),
+                t.hunt_stop_request.c.scope.in_(scopes),
+            ).values(state="cleared", closed_at=now, closed_by=actor)).rowcount or 0
+            if cleared:
+                c.execute(t.audit_event.insert().values(at=now, actor=actor, action="hunt.stop_cleared",
+                                                        hunt_id=hunt_id, detail={"requests": cleared}))
+            return cleared
+
+    def mark_stops_unapplied(self, hunt_id: str, scopes: tuple[str, ...] = ("hunt", "agent"), *,
+                             now: datetime | None = None) -> int:
+        """Requests the run never reached a safe point for, because it ended first."""
+        now = now or utcnow()
+        with write_txn(self.engine) as c:
+            return c.execute(t.hunt_stop_request.update().where(
+                t.hunt_stop_request.c.hunt_id == hunt_id, t.hunt_stop_request.c.state == "requested",
+                t.hunt_stop_request.c.scope.in_(scopes),
+            ).values(state="unapplied", closed_at=now, closed_by=SYSTEM_ACTOR)).rowcount or 0
+
+    def record_hunt_process(self, hunt_id: str, *, pid: int, start_marker: str, host: str, command: str) -> None:
+        with write_txn(self.engine) as c:
+            values = {"pid": pid, "start_marker": start_marker, "host": host, "command": command[:200],
+                      "recorded_at": utcnow(), "ended_at": None}
+            c.execute(insert(t.hunt_process).values(hunt_id=hunt_id, **values).on_conflict_do_update(
+                index_elements=["hunt_id"], set_=values))
+
+    def end_hunt_process(self, hunt_id: str, pid: int, start_marker: str) -> None:
+        with write_txn(self.engine) as c:
+            c.execute(t.hunt_process.update().where(
+                t.hunt_process.c.hunt_id == hunt_id, t.hunt_process.c.pid == pid,
+                t.hunt_process.c.start_marker == start_marker, t.hunt_process.c.ended_at.is_(None),
+            ).values(ended_at=utcnow()))
+
+    def hunt_process(self, hunt_id: str) -> dict | None:
+        with self.engine.connect() as c:
+            row = c.execute(select(t.hunt_process).where(t.hunt_process.c.hunt_id == hunt_id)).mappings().first()
+        return _with_utc(row, ("recorded_at", "ended_at")) if row is not None else None
+
+    def end_force_stopped(self, hunt_id: str, *, request_id: int, actor: str, hunt_owner: str | None,
+                          agent_owner: str | None, now: datetime | None = None) -> dict:
+        """After a force stop ended the hunt's worker, leave the hunt resumable: in one transaction, provided the leases
+        are still the dead worker's, a running hunt ends `partial` (a sweep that had not finished gets a summary that
+        says it was stopped, so a resume runs it again) and an agent phase that was running ends `partial` with an
+        `interrupted` reason. Returns what changed."""
+        now = now or utcnow()
+        reason = f"interrupted: force-stopped by {actor} at {now.isoformat()}"
+        changed: dict[str, Any] = {}
+        with write_txn(self.engine) as c:
+            c.execute(t.hunt.update().where(t.hunt.c.id == hunt_id).values(id=t.hunt.c.id))
+            hunt, run, _, _ = self._live_leases(c, hunt_id, now)
+            if hunt["execution_state"] == "running" and hunt["lease_owner"] == hunt_owner:
+                summary = c.execute(select(t.audit_event.c.detail).where(
+                    t.audit_event.c.hunt_id == hunt_id, t.audit_event.c.action == "hunt.sweep_summary",
+                ).order_by(t.audit_event.c.id.desc()).limit(1)).scalar()
+                summary = summary if isinstance(summary, dict) else {}
+                if not summary.get("finished"):
+                    c.execute(t.audit_event.insert().values(
+                        at=now, actor=SYSTEM_ACTOR, action="hunt.sweep_summary", hunt_id=hunt_id,
+                        detail={"finished": False, "complete": False, "partial_reasons": [reason],
+                                "stats": summary.get("stats") or {},
+                                "stopped": {"by": actor, "at": now.isoformat(), "force": True,
+                                            "request": request_id},
+                                "error": "the sweep was force-stopped before it finished"}))
+                c.execute(t.hunt.update().where(t.hunt.c.id == hunt_id).values(
+                    execution_state="partial", ended_at=now, lease_until=None, lease_owner=None,
+                    stop_reason=reason))
+                self._narrow_unfinished_windows(c, hunt_id, "partial")
+                c.execute(t.audit_event.insert().values(at=now, actor=actor, action="hunt.partial", hunt_id=hunt_id,
+                                                        detail={"stop_reason": reason}))
+                changed["hunt"] = "partial"
+            if run is not None and run["state"] in ("pending", "running") and run["lease_owner"] == agent_owner:
+                c.execute(t.agent_run.update().where(t.agent_run.c.hunt_id == hunt_id).values(
+                    state="partial", reason=reason, ended_at=now, lease_owner=None, lease_until=None,
+                    updated_at=now))
+                changed["agent"] = "partial"
+            c.execute(t.hunt_stop_request.update().where(t.hunt_stop_request.c.id == request_id).values(
+                state="forced", honored_at=now, detail={"forced_by": actor, "changed": changed}))
+            c.execute(t.audit_event.insert().values(at=now, actor=actor, action="hunt.force_stopped",
+                                                    hunt_id=hunt_id, detail={"request": request_id, **changed}))
+        return changed
+
+    def add_budget_extension(self, hunt_id: str, *, added_by: str, role: str, amounts: dict, profile: str | None,
+                             above_ceiling: list[str], max_extensions: int, now: datetime | None = None) -> dict:
+        now = now or utcnow()
+        with write_txn(self.engine) as c:
+            c.execute(t.hunt.update().where(t.hunt.c.id == hunt_id).values(id=t.hunt.c.id))
+            if c.execute(select(t.hunt.c.id).where(t.hunt.c.id == hunt_id)).scalar() is None:
+                raise KeyError(hunt_id)
+            count = c.execute(select(func.count()).select_from(t.hunt_budget_extension).where(
+                t.hunt_budget_extension.c.hunt_id == hunt_id)).scalar_one()
+            if count >= max_extensions:
+                raise ValueError(f"hunt {hunt_id} already has {count} budget extensions, the most one hunt keeps; "
+                                 "add a larger amount in one extension")
+            row_id = c.execute(t.hunt_budget_extension.insert().values(
+                hunt_id=hunt_id, added_by=added_by, role=role, added_at=now, profile=profile, amounts=amounts,
+                above_ceiling=above_ceiling)).inserted_primary_key[0]
+            c.execute(t.audit_event.insert().values(at=now, actor=added_by, action="hunt.agent_budget_extended",
+                                                    hunt_id=hunt_id, detail={"extension": row_id, "role": role,
+                                                                             "profile": profile, "amounts": amounts,
+                                                                             "above_ceiling": above_ceiling}))
+            row = c.execute(select(t.hunt_budget_extension).where(
+                t.hunt_budget_extension.c.id == row_id)).mappings().one()
+            return _with_utc(row, ("added_at",))
+
+    def agent_budget_extensions(self, hunt_id: str) -> list[dict]:
+        with self.engine.connect() as c:
+            rows = c.execute(select(t.hunt_budget_extension).where(t.hunt_budget_extension.c.hunt_id == hunt_id)
+                             .order_by(t.hunt_budget_extension.c.id)).mappings().all()
+        return [_with_utc(row, ("added_at",)) for row in rows]
+
+    def latest_budget_extension_at(self, hunt_id: str) -> datetime | None:
+        with self.engine.connect() as c:
+            return _stored_utc(c.execute(select(func.max(t.hunt_budget_extension.c.added_at)).where(
+                t.hunt_budget_extension.c.hunt_id == hunt_id)).scalar())
+
+    def create_budget_grant(self, *, created_by: str, role: str, choice: dict, max_age_seconds: int,
+                            now: datetime | None = None) -> str:
+        """Store a checked budget choice for the hunt process the web starts; grants older than `max_age_seconds`
+        (never read: their process failed to start) are removed at the same time."""
+        now = now or utcnow()
+        grant_id = uuid.uuid4().hex
+        with write_txn(self.engine) as c:
+            c.execute(t.agent_budget_grant.delete().where(
+                t.agent_budget_grant.c.created_at < now - timedelta(seconds=max_age_seconds)))
+            c.execute(t.agent_budget_grant.insert().values(id=grant_id, created_at=now, created_by=created_by,
+                                                           role=role, choice=choice))
+        return grant_id
+
+    def consume_budget_grant(self, grant_id: str, *, max_age_seconds: int, now: datetime | None = None) -> dict | None:
+        """Read and delete one grant; None when it does not exist or is older than `max_age_seconds`."""
+        now = now or utcnow()
+        with write_txn(self.engine) as c:
+            row = c.execute(select(t.agent_budget_grant).where(t.agent_budget_grant.c.id == grant_id)).mappings().first()
+            if row is None:
+                return None
+            c.execute(t.agent_budget_grant.delete().where(t.agent_budget_grant.c.id == grant_id))
+            if _stored_utc(row["created_at"]) < now - timedelta(seconds=max_age_seconds):
+                return None
+            return dict(row)

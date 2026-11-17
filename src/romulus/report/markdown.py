@@ -261,12 +261,57 @@ def outcome_sentence(m: dict) -> str:
     agent_count = sum(finding.get("provenance") == "agent" for finding in m["findings"])
     if agent_count:
         s += f" The AI agent added {agent_count} unconfirmed finding(s)."
+    stopped = stop_sentence(m)
+    if stopped:
+        s += " " + stopped
     if partial:
         s += f" The hunt is {m['execution_state']}: some sources, windows or tasks were not fully searched."
     unresolved = {rule for gap in (m.get("coverage") or {}).get("gaps") or [] for rule in gap["rules"]}
     if unresolved:
         s += f" {len(unresolved)} rule(s) searched only part of their scope; see Coverage gaps."
     return s
+
+
+def stop_sentence(m: dict) -> str:
+    """What an analyst's stop did to this hunt, in plain words; empty when none applies."""
+    stop = (m.get("controls") or {}).get("stop")
+    if not stop or stop.get("state") in ("cleared", "unapplied"):
+        return ""
+    who = f"{stop.get('requested_by')} at {stop.get('requested_at')}"
+    if stop.get("state") == "requested":
+        return (f"A stop of the {'AI agent' if stop.get('scope') == 'agent' else 'hunt'} was requested by {who} "
+                "and had not taken effect when this revision was published.")
+    if stop.get("state") == "forced":
+        return (f"An analyst stopped this hunt (requested by {who}) and, when it did not stop in time, "
+                f"{stop.get('forced_by')} force-stopped its worker process. The run was interrupted: its results are "
+                "partial, and what it had not searched is unknown, not absent.")
+    if stop.get("scope") == "agent":
+        return (f"An analyst stopped the AI agent (requested by {who}). Its investigation is partial; the "
+                "deterministic results do not depend on it.")
+    where = ", ".join(stop.get("honored_in") or []) or "a safe point"
+    return (f"An analyst stopped this hunt (requested by {who}; it stopped at: {where}). Everything it found is "
+            "reported; what it did not run is named in the stop reason, and what it did not search is unknown, "
+            "not absent. These results are partial.")
+
+
+def _agent_budget_cell(m: dict) -> str:
+    budget = (m.get("controls") or {}).get("agent_budget") or {}
+    # only for a hunt that asked for the agent, and that pinned its budget or was given more
+    if not budget or not (m.get("ai_agent") or {}).get("requested") or not (
+            budget.get("pinned") or budget.get("extensions")):
+        return ""
+    limits = budget.get("limits") or {}
+    text = (f"{budget.get('profile') or 'recorded'} profile" if budget.get("pinned")
+            else "created before budgets were pinned; limits it did not record were read from the settings")
+    shown = ", ".join(f"{key.removeprefix('max_')} {value}" for key, value in limits.items() if value is not None)
+    if shown:
+        text += f": {shown}"
+    if budget.get("above_ceiling"):
+        text += f"; chosen above the site ceiling for {', '.join(budget['above_ceiling'])}"
+    extensions = budget.get("extensions") or []
+    if extensions:
+        text += f"; {len(extensions)} extension(s), the latest by {extensions[-1]['added_by']}"
+    return text
 
 
 def _ai_agent_cell(m: dict) -> str:
@@ -440,6 +485,8 @@ def _render_body(m: dict, banner: str = BANNER) -> str:
            *([f"| Model investigator | {esc(m['agent'].get('status'))}: {esc(m['agent'].get('stop_reason', ''))} |"]
              if m["agent"].get("stop_reason") or m["agent"].get("status") not in (None, "disabled") else []),
            f"| AI agent | {cell(_ai_agent_cell(m))} |",
+           *([f"| AI agent budget | {cell(_agent_budget_cell(m))} |"] if _agent_budget_cell(m) else []),
+           *([f"| Analyst stop | {cell(stop_sentence(m))} |"] if stop_sentence(m) else []),
            f"| Stop reason | {esc(m['stop_reason'])} |",
            f"| Broken citations | {m['integrity']['broken_citations']} |",
            f"| Broken investigation citations | {m['integrity'].get('broken_investigation_citations', 0)} |", ""]

@@ -88,6 +88,7 @@ from romulus.hunt.publish import (
     bind_aggregate_history,
     publish_match,
 )
+from romulus.hunt.controls import HuntStopped
 from romulus.hunt.stage import EventStage
 from romulus.site import SiteFacts, absent_site_facts
 from romulus.sources.es import ElasticClient, fetch_limit
@@ -359,6 +360,8 @@ class Sweep:
         self._windows_record_ids: RecordIdContinuity | None = None
         self._windows_scripts: ScriptBlockAssembler | None = None
         self.on_candidate = on_candidate or (lambda c: None)
+        # `stop_check()`: an analyst's open stop request (its description), checked before each partition is read
+        self.stop_check: Callable[[], str | None] | None = None
         beat = heartbeat or (lambda: None)
 
         def heartbeat_and_touch():
@@ -2214,6 +2217,12 @@ class Sweep:
                       *, estimated: bool = False, any_of: list[list[Predicate]] | None = None, partition_tag: str = ""):
         """Evaluate one partition. `est` is the histogram's exact count for a planned partition; for a half of a
         split one (`estimated`) it is only an estimate, so the half is counted before it is fetched."""
+        stop_check = getattr(self, "stop_check", None)
+        if stop_check is not None:
+            # a safe point: nothing of this partition is read yet, and its cell (and every later one) stays planned
+            stopped = stop_check()
+            if stopped:
+                raise HuntStopped(stopped)
         self.heartbeat()
         splittable = (w.end - w.start) > MIN_SPLIT * 2
         if est > PARTITION_MAX_DOCS and splittable:

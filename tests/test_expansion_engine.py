@@ -991,7 +991,7 @@ def test_resumed_hunt_with_recorded_unexpanded_anchor_stays_partial(tmp_path, mo
     monkeypatch.setattr(hunt_run, "_contracts", lambda *_args: {})
     monkeypatch.setattr(
         hunt_run, "_run_expansion",
-        lambda _s, repo, _client, hunt, _contracts, window, owner_token: ExpansionEngine(
+        lambda _s, repo, _client, hunt, _contracts, window, owner_token, **_kwargs: ExpansionEngine(
             repo, hunt["id"], window, ScriptedFetcher(repo), owner_token=owner_token).run(),
     )
 

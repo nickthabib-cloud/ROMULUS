@@ -83,6 +83,59 @@
 </div>
 
 <div class="stack">
+<section class="panel" id="controls">
+  <div class="panel-head"><h2>Controls and agent budget</h2>{% if controls.profile %}<span class="help small">profile {{ controls.profile }}</span>{% endif %}</div>
+  <div class="panel-body">
+    {% if controls.stop %}<p class="small">Latest stop request: {{ controls.stop.scope }} · {{ controls.stop.state }} · {{ controls.stop_text }}</p>{% endif %}
+    {% if controls.running %}
+      {% if controls.can_stop_hunt or controls.can_stop_agent %}
+      <p class="help small">A stop takes effect at the run's next safe point (before the next source partition, expansion link, model call or tool call). Everything already found is kept; what did not run is named as not run, and the hunt can be resumed.</p>
+      <div class="links">
+        {% if controls.can_stop_hunt %}<form method="post" action="/hunts/{{ h.id | urlencode }}/stop"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="scope" value="hunt"><button type="submit" class="btn-danger">Stop hunt</button></form>{% endif %}
+        {% if controls.can_stop_agent %}<form method="post" action="/hunts/{{ h.id | urlencode }}/stop"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="scope" value="agent"><button type="submit" class="ghost">Stop agent</button></form>{% endif %}
+      </div>
+      {% endif %}
+      {% if controls.can_force %}
+        {% if controls.force_ready %}
+        <form method="post" action="/hunts/{{ h.id | urlencode }}/force-stop"><input type="hidden" name="csrf" value="{{ csrf }}">
+          <p class="warn small">The run has not stopped within {{ controls.grace_seconds }} s of the request. A force stop ends its worker process; the hunt is left partial (interrupted) and can be resumed.</p>
+          <label>Type the hunt ID <b class="mono">{{ h.id }}</b> to confirm <input name="confirm" autocomplete="off" spellcheck="false" required></label>
+          <button type="submit" class="btn-danger">Force stop</button></form>
+        {% else %}<p class="help small">Force stop is available from <span class="mono">{{ controls.force_at }}</span> if the run has not stopped by then.</p>{% endif %}
+      {% endif %}
+    {% else %}<p class="help small">The hunt is not running{% if controls.stop and controls.stop.state in ['honored', 'forced'] %}; resume it (<code>romulus hunt resume {{ h.id }}</code>) to continue what the stop left unrun{% endif %}.</p>{% endif %}
+    {% if not controls.agent_requested %}<p class="help small">This hunt ran without the AI agent.</p>{% endif %}
+    {% if controls.source == 'settings' %}<p class="warn small">This hunt was created before agent budgets were pinned to hunts: {% if controls.from_settings %}{{ controls.from_settings | join(', ') }} {{ 'is' if controls.from_settings | length == 1 else 'are' }} read from the current site settings{% else %}its limits are those it recorded{% endif %}.</p>{% endif %}
+  </div>
+  <div class="table-wrap"><table class="grid small">
+    <thead><tr><th>Limit</th><th class="n">Pinned</th><th class="n">Added</th><th class="n">Limit now</th><th class="n">Spent</th></tr></thead><tbody>
+    {% for row in controls.rows %}<tr><th>{{ row.label }}{% if row.from_settings %} <span class="help small">(current settings)</span>{% endif %}</th>
+      <td class="n">{{ row.pinned if row.pinned is not none else '—' }}</td><td class="n">{{ row.added or '—' }}</td>
+      <td class="n">{% if row.key == 'max_cost_usd' and not row.limit %}no cost budget{% else %}{{ row.limit }}{% endif %}</td>
+      <td class="n">{{ row.spent if row.spent is not none else '—' }}</td></tr>{% endfor %}
+  </tbody></table></div>
+  <div class="panel-body">
+    <p class="help small">Pinned when the hunt was created; spending persists across resumes, so each limit counts everything the agent used. Hypotheses, sessions per hypothesis and tool calls per session are limits on how the agent spends, not spending.</p>
+    {% if controls.extensions %}<h3>Budget extensions ({{ controls.extensions_total }})</h3>
+    <ul class="small">{% for ext in controls.extensions %}<li><span class="mono">{{ ext.added_at }}</span> · {{ ext.added_by }} ({{ ext.role }}){% if ext.profile %} · raised to {{ ext.profile }}{% endif %}: {% for key, value in ext.amounts.items() %}{{ key }} +{{ value }}{% if not loop.last %}, {% endif %}{% endfor %}{% if ext.above_ceiling %} · above the site ceiling: {{ ext.above_ceiling | join(', ') }}{% endif %}</li>{% endfor %}</ul>
+    {% if controls.extensions_more %}<p class="small">{{ controls.extensions_more }} earlier extension(s) are in the audit log.</p>{% endif %}{% endif %}
+    {% if controls.can_extend %}
+    <details id="extend"><summary>Give the agent more budget</summary>
+      <form method="post" action="/hunts/{{ h.id | urlencode }}/extend"><input type="hidden" name="csrf" value="{{ csrf }}">
+        <p class="help small">Amounts are added to the limits above (or raise every limit to a profile's). New totals stay within the site ceiling{% if controls.is_lead %} unless you, as a lead, go above it{% endif %}. A stopped or budget-limited agent continues from its persisted work; the sweep is not run again.</p>
+        <label>Model calls to add <input name="calls" inputmode="numeric" autocomplete="off"></label>
+        <label>Budget tokens to add <input name="tokens" inputmode="numeric" autocomplete="off"></label>
+        <label>Wall-clock minutes to add <input name="minutes" inputmode="decimal" autocomplete="off"></label>
+        <label>Source queries to add <input name="source_queries" inputmode="numeric" autocomplete="off"></label>
+        <label>Cost (USD) to add <input name="cost_usd" inputmode="decimal" autocomplete="off"></label>
+        <label>Or raise every limit to a profile
+          <select name="effort"><option value="">(use the amounts above)</option>{% for name in controls.profiles %}<option value="{{ name }}">{{ name }}</option>{% endfor %}</select></label>
+        <button type="submit">Add budget</button>
+      </form></details>
+    {% endif %}
+  </div>
+</section>
+
 <section class="panel" id="ai-agent">
   <div class="panel-head"><h2>AI agent</h2>{% if ai_panel %}<span class="ai-label">{{ ai_panel.state }}</span>{% endif %}</div>
   {% if ai_panel %}
