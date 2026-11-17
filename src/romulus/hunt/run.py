@@ -228,10 +228,15 @@ def _ai_agent_phase(s: Settings, repo: Repo, hunt_id: str, manifest: dict, owner
             )
             triage = None
             if s.agent_triage == "on":
-                from romulus.hunt.triage import run_triage_in_phase
+                from romulus.hunt.triage import run_cited_triage_in_phase, run_triage_in_phase
 
-                def triage(phase_heartbeat):
-                    # the triage pass under this phase's lease, before the assessment reads its verdicts
+                def triage(phase_heartbeat, cited=None):
+                    # the triage pass under this phase's lease, before the assessment reads its verdicts; with
+                    # `cited`, its extension to the groups the assessment's narrative cites without a verdict
+                    if cited is not None:
+                        return run_cited_triage_in_phase(s, repo, hunt_id, cited, owner_token=owner_token,
+                                                         heartbeat=phase_heartbeat, readiness=readiness,
+                                                         build=build_provider)
                     return run_triage_in_phase(s, repo, hunt_id, owner_token=owner_token, heartbeat=phase_heartbeat,
                                                readiness=readiness, build=build_provider)
             return run_agent_phase(s, repo, hunt_id, provider=provider, toolbox_factory=toolbox_factory,

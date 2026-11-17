@@ -77,6 +77,13 @@ class FindingStrength:
     reported: bool
     confirmed: bool
     triage: str             # an assessment, or NOT_TRIAGED
+    # its triage group (`triage_order.group_fields`), for a deterministic surfaced finding
+    group: tuple | None = None
+
+    @property
+    def untriaged_reported(self) -> bool:
+        """Reported, not confirmed, and without any triage verdict: a cite a verdict could still weaken."""
+        return self.reportable and self.reported and not self.confirmed and self.triage == NOT_TRIAGED
 
     @property
     def reportable(self) -> bool:
@@ -171,7 +178,8 @@ class EvidenceStrength:
             rows = [row for row in self.repo.candidates_by_ids(wanted, hunt_id=self.hunt_id)
                     if row.get("hunt_id", self.hunt_id) == self.hunt_id]
             ranks = self._ranks(rows)
-            verdicts = self._verdicts(rows, ranks)
+            groups = self._groups(rows, ranks)
+            verdicts = self._verdicts(groups)
             found = {row["id"] for row in rows}
             for row in rows:
                 rank = ranks.get(row["id"])
@@ -180,7 +188,7 @@ class EvidenceStrength:
                 self._findings[row["id"]] = FindingStrength(
                     lane=row["lane"], deterministic=row.get("provenance") != rank_model.AGENT_PROVENANCE,
                     reported=reported, confirmed=row["lane"] == rank_model.CONFIRMED_LANE,
-                    triage=verdicts.get(row["id"], NOT_TRIAGED))
+                    triage=verdicts.get(row["id"], NOT_TRIAGED), group=groups.get(row["id"]))
             self._findings.update((item, None) for item in wanted if item not in found)
         return {item: value for item in ids if (value := self._findings.get(item)) is not None}
 
@@ -216,11 +224,9 @@ class EvidenceStrength:
         late = rank_unranked(self.repo, self.hunt_id, [row for row in surfaced if row["id"] not in ranks])
         return {**late, **ranks}
 
-    def _verdicts(self, rows: list[dict], ranks: dict[str, dict]) -> dict[str, str]:
-        """Each deterministic surfaced finding's group verdict from the usable triage pass, read by group key."""
-        if not self.triage.usable:
-            return {}
-        keys: dict[tuple, list[str]] = {}
+    def _groups(self, rows: list[dict], ranks: dict[str, dict]) -> dict[str, tuple]:
+        """Each deterministic surfaced finding's triage group key."""
+        out = {}
         for row in rows:
             if row["lane"] not in REPORTABLE_LANES or row.get("provenance") == rank_model.AGENT_PROVENANCE:
                 continue
@@ -228,7 +234,16 @@ class EvidenceStrength:
             if self.ranked and rank is None:
                 continue
             section, _order, target = placement(row, rank, self.ranked)
-            keys.setdefault(group_fields(row, section, target), []).append(row["id"])
+            out[row["id"]] = group_fields(row, section, target)
+        return out
+
+    def _verdicts(self, groups: dict[str, tuple]) -> dict[str, str]:
+        """Each finding's group verdict from the usable triage pass, read by group key."""
+        if not self.triage.usable:
+            return {}
+        keys: dict[tuple, list[str]] = {}
+        for finding_id, key in groups.items():
+            keys.setdefault(key, []).append(finding_id)
         out: dict[str, str] = {}
         if not keys:
             return out

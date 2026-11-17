@@ -20,6 +20,10 @@ Budgets (calls, prompt tokens, output tokens, wall time) are the pass's own, che
 worst case. A budget hit, a provider failure or invalid output leaves the untriaged groups in deterministic order and
 says how many. The pass's prompt digest covers the prompt, schema, grouping, provider, model, settings and every card,
 so the same input gives the same order, and a completed pass with the same digest is not run again.
+
+After the AI assessment, the pass can be extended to the groups its narrative cites that it left without a verdict
+(`run_cited_triage`): the same model, prompt, cards, digest, placement and budget, published again under the same
+pass number, so the narrative check can weigh those citations. An extension that gets no verdict publishes nothing.
 """
 from __future__ import annotations
 
@@ -54,6 +58,7 @@ from romulus.agent.triage_order import (
     OrderWorkspace,
     StageRefused,
     clip,
+    group_key,
 )
 from romulus.config import Settings
 from romulus.store.db import digest
@@ -141,6 +146,29 @@ class TriageBudget(AgentBudget):
                          max_wall_seconds=s.agent_triage_max_wall_seconds)
         return cls(limits, max_input_tokens=s.agent_triage_max_input_tokens,
                    max_output_tokens=s.agent_triage_max_output_tokens, clock=clock)
+
+    @classmethod
+    def resume(cls, s: Settings, usage: dict, clock: Callable[[], float] = monotonic, *,
+               billed: dict | None = None) -> TriageBudget:
+        """The budget a pass left: an extension of that pass spends from the same budget. `usage` is the pass's
+        recorded snapshot; `billed` what the store holds for the pass's calls (`triage_totals` since the pass began),
+        which also counts calls billed by an extension that ended before publishing. Each counter takes the larger."""
+        billed = billed or {}
+        budget = cls.from_settings(s, clock)
+        budget.calls = max(int(usage.get("calls") or 0), int(billed.get("calls") or 0))
+        budget.tokens = max(int(usage.get("tokens") or 0), int(billed.get("tokens") or 0))
+        budget.budget_tokens = max(int(usage.get("budget_tokens") or usage.get("tokens") or 0),
+                                   int(billed.get("budget_tokens") or 0))
+        budget.cost_usd = max(float(usage.get("cost_usd") or 0.0), float(billed.get("cost_usd") or 0.0))
+        budget.estimated = bool(usage.get("usage_estimated")) or bool(billed.get("estimated"))
+        budget.wall_seconds_before = max(float(usage.get("wall_seconds") or 0.0),
+                                         int(billed.get("model_ms") or 0) / 1000.0)
+        budget.input_tokens = max(int(usage.get("input_tokens") or 0), int(billed.get("prompt_tokens") or 0))
+        budget.budget_input_tokens = max(int(usage.get("budget_input_tokens") or usage.get("input_tokens") or 0),
+                                         int(billed.get("budget_tokens") or 0)
+                                         - int(billed.get("completion_tokens") or 0))
+        budget.output_tokens = max(int(usage.get("output_tokens") or 0), int(billed.get("completion_tokens") or 0))
+        return budget
 
     def check(self, prompt_tokens_est: int, max_output_tokens: int) -> None:
         super().check(prompt_tokens_est, max_output_tokens)
@@ -235,14 +263,18 @@ def build_cards(ws: OrderWorkspace, titles: dict[str, str]) -> tuple[str, int, i
     return digest_.hexdigest(), ws.card_count(), excluded
 
 
-def _chunks(ws: OrderWorkspace, s: Settings, system: str) -> Iterator[tuple[list[dict], dict[str, list[str]]]]:
-    """The stored cards in deterministic order, in chunks that fit one call's input and output room."""
+def _chunks(ws: OrderWorkspace, s: Settings, system: str,
+            only: set[int] | None = None) -> Iterator[tuple[list[dict], dict[str, list[str]]]]:
+    """The stored cards in deterministic order (only the groups numbered in `only`, when given), in chunks that fit
+    one call's input and output room."""
     per_call = max(1, min(MAX_GROUPS_PER_CALL, (s.agent_triage_call_output_tokens - 256) // OUTPUT_TOKENS_PER_GROUP))
     room = s.agent_triage_call_input_tokens - estimate_tokens(system) - estimate_tokens(_user([])) - 256
     cards: list[dict] = []
     shown: dict[str, list[str]] = {}
     used = 0
-    for _group_no, text, ids, size in ws.cards():
+    for group_no, text, ids, size in ws.cards():
+        if only is not None and group_no not in only:
+            continue
         if cards and (len(cards) >= per_call or used + size > room):
             yield cards, shown
             cards, shown, used = [], {}, 0
@@ -312,6 +344,28 @@ def _titles(repo: Repo, hunt_id: str) -> dict[str, str]:
             hunt_rule_metadata(repo, manifest=hunt.get("manifest") or {}).items()}
 
 
+TOTAL_KEYS = ("calls", "tokens", "budget_tokens", "cost_usd", "model_ms", "prompt_tokens", "completion_tokens")
+
+
+def triage_totals(repo: Repo, hunt_id: str) -> dict:
+    """What the store holds for all of the hunt's triage calls (billed failures included)."""
+    usage = repo.agent_usage(hunt_id, purposes=(TRIAGE_PURPOSE,))
+    prompt, completion = repo.model_call_token_sums(hunt_id, (TRIAGE_PURPOSE,))
+    return {"calls": usage["calls"], "tokens": usage["tokens"], "budget_tokens": usage["budget_tokens"],
+            "cost_usd": usage["cost_usd"], "model_ms": usage.get("model_ms", 0), "estimated": usage["estimated"],
+            "prompt_tokens": prompt, "completion_tokens": completion}
+
+
+def pass_billed(repo: Repo, hunt_id: str, summary: dict) -> dict:
+    """What the store holds for one pass's calls: the hunt's triage calls since the pass began (`usage_base`), its
+    extensions and any extension that ended before publishing included. Empty for a pass recorded without a base."""
+    base = summary.get("usage_base")
+    if not isinstance(base, dict):
+        return {}
+    now = triage_totals(repo, hunt_id)
+    return {**{key: max(0, now[key] - (base.get(key) or 0)) for key in TOTAL_KEYS}, "estimated": now["estimated"]}
+
+
 def latest_summary(repo: Repo, hunt_id: str) -> dict | None:
     audit = repo.latest_audit(hunt_id, TRIAGE_SUMMARY)
     return dict(audit["detail"]) if audit else None
@@ -358,7 +412,7 @@ def run_triage_pass(settings: Settings, repo: Repo, hunt_id: str, provider, *, o
                     and previous.get("placement") == PLACEMENT_VERSION):
                 return {**previous, "reused": True}
             return _run(settings, repo, hunt_id, provider, ws, budget, system, prompt_digest, eligible, excluded,
-                        previous, owner_token, heartbeat, model_source)
+                        previous, owner_token, heartbeat, model_source, usage_base=triage_totals(repo, hunt_id))
     except StageRefused as exc:
         summary = {"label": LABEL, "status": "failed", "reason": f"stage_refused: {exc}"[:500],
                    "usage": budget.snapshot()}
@@ -368,7 +422,7 @@ def run_triage_pass(settings: Settings, repo: Repo, hunt_id: str, provider, *, o
 
 def _run(settings, repo, hunt_id, provider, ws: OrderWorkspace, budget: TriageBudget, system: str,
          prompt_digest: str, eligible: int, excluded: int, previous: dict | None, owner_token, heartbeat,
-         model_source: str | None = None) -> dict:
+         model_source: str | None = None, usage_base: dict | None = None) -> dict:
     drops: Counter = Counter()
     assessments: Counter = Counter()
     chunks_sent = chunks_failed = failures = 0
@@ -439,6 +493,9 @@ def _run(settings, repo, hunt_id, provider, ws: OrderWorkspace, budget: TriageBu
     }
     if model_source:
         summary["model_source"] = model_source         # the setting that chose the pass's model
+    if usage_base is not None:
+        # the hunt's triage calls before this pass: what an extension resumes from is what the store holds since
+        summary["usage_base"] = {key: usage_base[key] for key in TOTAL_KEYS}
     # the rows are finished in the stage: the write transaction only copies them
     repo.publish_triage(hunt_id, summary["pass"], ws.view_rows(), summary, owner_token=owner_token)
     return summary
@@ -520,3 +577,157 @@ def _call(settings, repo, hunt_id, provider, request, budget: TriageBudget, prom
         ws.set_verdict(number, status="assessed", shown=shown[group], **verdict)
         assessments[verdict["assessment"]] += 1
     return None
+
+
+# -- extending a pass to the groups the narrative cites ---------------------------------------------------------------
+def run_cited_triage(settings: Settings, repo: Repo, hunt_id: str, provider, group_keys: list[tuple], *,
+                     owner_token: str | None = None, heartbeat: Callable[[], None] | None = None,
+                     clock: Callable[[], float] = monotonic, workdir: str | None = None,
+                     max_bytes: int | None = None, reserve_bytes: int = 0) -> dict:
+    """Extend the latest triage pass to the groups `group_keys` names (`triage_order.group_fields` tuples, in the
+    order to triage them) that it left without a verdict: the same model, prompt, cards, validation and redaction,
+    spending from what is left of that pass's own budget (calls, tokens, cost and wall time). The pass keeps its number,
+    prompt digest and placement version; its rows and summary are published again with the new verdicts, so its view
+    stays current. Like the pass, it changes no lane, rank or Reported flag: verdicts only order the triage view and
+    weigh the narrative's citations.
+
+    Returns what the extension did: `status` complete (every requested group got a verdict), partial, failed (no new
+    verdict) or skipped (nothing to do, or the pass cannot be extended: no usable pass, another model, settings or
+    cards, or a changed order), with its reason, the counts and `by_assessment`. Nothing is published without a new
+    verdict, and a failure is never a verdict."""
+    heartbeat = heartbeat or (lambda: None)
+    previous = latest_summary(repo, hunt_id)
+    out = {"requested": len(group_keys), "triaged": 0, "by_assessment": {}}
+    if not group_keys:
+        return {**out, "status": "skipped", "reason": "no cited group lacks a verdict"}
+    if not previous or previous.get("status") not in ("complete", "partial") or previous.get(
+            "placement") != PLACEMENT_VERSION:
+        return {**out, "status": "skipped", "reason": "no usable triage pass to extend"}
+    budget = TriageBudget.resume(settings, previous.get("usage") or {}, clock,
+                                 billed=pass_billed(repo, hunt_id, previous))
+    system = _prompt()
+    try:
+        with OrderWorkspace(repo, hunt_id, directory=workdir, heartbeat=heartbeat, max_bytes=max_bytes,
+                            reserve_bytes=reserve_bytes) as ws:
+            ws.build()
+            cards_digest, eligible, excluded = build_cards(ws, _titles(repo, hunt_id))
+            prompt_digest = pass_digest(cards_digest, settings, provider, system)
+            if prompt_digest != previous.get("prompt_digest") or ws.order_digest != previous.get("order_digest"):
+                return {**out, "status": "skipped",
+                        "reason": "the pass's model, settings, cards or order changed: it cannot be extended"}
+            if not _restore_verdicts(repo, hunt_id, ws):
+                return {**out, "status": "skipped", "reason": "the pass's stored groups no longer match its order"}
+            targets = []
+            for key in group_keys:
+                row = ws.db.execute("SELECT g.group_no, v.status FROM k JOIN g ON g.gid = k.gid "
+                                    "LEFT JOIN v ON v.group_no = g.group_no WHERE k.gkey = ?",
+                                    (group_key(*key),)).fetchone()
+                if row is not None and row[1] == "not_triaged" and key[1] == "deterministic":
+                    targets.append(row[0])
+            if not targets:
+                return {**out, "status": "skipped", "reason": "every cited group already has a verdict"}
+            return _extend(settings, repo, hunt_id, provider, ws, budget, system, prompt_digest, eligible, excluded,
+                           previous, targets, out, owner_token, heartbeat)
+    except StageRefused as exc:
+        return {**out, "status": "failed", "reason": f"stage_refused: {exc}"[:500], "usage": budget.snapshot()}
+
+
+def _restore_verdicts(repo: Repo, hunt_id: str, ws: OrderWorkspace) -> bool:
+    """Load the pass's stored verdicts into the stage, each checked against the group the same number names now."""
+    after = 0
+    while page := repo.triage_groups(hunt_id, after_position=after, limit=500):
+        ws.heartbeat()
+        for row in page:
+            if row["provenance"] != "deterministic" or row["status"] == "excluded":
+                continue
+            number = int(str(row["group_id"])[1:])
+            current = ws.db.execute("SELECT g.section, k.rule_id, k.kind, k.value FROM g JOIN k ON k.gid = g.gid "
+                                    "WHERE g.group_no = ?", (number,)).fetchone()
+            if current is None or tuple(current) != (int(row["section"]), row["rule_id"], row["entity_kind"],
+                                                      row["entity"] or ""):
+                return False
+            assessed = row["status"] in ("assessed", "promoted")
+            ws.set_verdict(number, status="assessed" if assessed else "not_triaged",
+                           reason=None if assessed else row["reason"], assessment=row["assessment"],
+                           incident_label=row["incident_label"], rationale=row["rationale"],
+                           cites=row["cites"] or [], shown=row["finding_ids"] or [])
+        ws.commit()
+        after = page[-1]["position"]
+    return True
+
+
+def _extend(settings, repo, hunt_id, provider, ws: OrderWorkspace, budget: TriageBudget, system: str,
+            prompt_digest: str, eligible: int, excluded: int, previous: dict, targets: list[int], out: dict,
+            owner_token, heartbeat) -> dict:
+    drops: Counter = Counter()
+    assessments: Counter = Counter()
+    sent = failed = failures = 0
+    stop: str | None = None
+    last_failure: str | None = None
+    for cards, shown in _chunks(ws, settings, system, only=set(targets)):
+        numbers = {card["group"]: int(card["group"][1:]) for card in cards}
+        heartbeat()
+        request = ChatRequest(messages=[{"role": "system", "content": system},
+                                        {"role": "user", "content": _user(cards)}],
+                              response_schema=TRIAGE_SCHEMA, schema_name="ai-triage@1", strict_schema=True,
+                              max_output_tokens=settings.agent_triage_call_output_tokens)
+        prompt_est = estimate_tokens(request.prompt_text())
+        max_out = provider.output_limit(request)
+        try:
+            budget.check(prompt_est, max_out)
+        except BudgetExhausted as exc:
+            stop = f"budget:{exc.budget}"
+            break
+        reason = _call(settings, repo, hunt_id, provider, request, budget, prompt_est, max_out, ws, numbers,
+                       shown, drops, assessments, owner_token)
+        sent += 1
+        if reason is not None:
+            failed += 1
+            last_failure = reason
+            failures = failures + 1 if reason in ("provider_unavailable", "provider_error") else 0
+            if reason.startswith("budget:") or failures >= MAX_CONSECUTIVE_FAILURES:
+                stop = reason
+        else:
+            failures = 0
+        ws.commit()
+        heartbeat()
+        if stop is not None:
+            break
+    triaged = sum(assessments.values())
+    out = {**out, "targets": len(targets), "triaged": triaged, "by_assessment": dict(sorted(assessments.items())),
+           "calls": {"sent": sent, "failed": failed}, "usage": budget.snapshot()}
+    if not triaged:
+        return {**out, "status": "failed", "reason": stop or last_failure or "no valid verdict for any cited group"}
+    promoted = ws.promote(settings.agent_triage_promote_per_lane, PROMOTING)
+    not_triaged = ws.not_triaged_reasons()
+    by_assessment = dict(sorted((str(name), int(count)) for name, count in ws.db.execute(
+        "SELECT assessment, COUNT(*) FROM v WHERE status IN ('assessed', 'promoted') GROUP BY assessment")))
+    assessed = sum(by_assessment.values())
+    model = getattr(provider, "model", "") or ""
+    count = ws.materialize_view(promoted, lambda item: _row(item, prompt_digest, model))
+    previous_groups = previous.get("groups") or {}
+    previous_calls = previous.get("calls") or {}
+    summary = {
+        **previous,
+        "rank_state": repo.rank_state(hunt_id),
+        "status": "complete" if assessed == eligible else "partial",
+        "reason": "; ".join(sorted({*not_triaged, *(("dropped_output",) if drops or previous.get("dropped")
+                                                     else ())})) or None,
+        "groups": {**previous_groups, "total": count, "eligible": eligible, "excluded_agent": excluded,
+                   "triaged": assessed, "not_triaged": eligible - assessed,
+                   "promoted": {ws.section_titles[section]: len(numbers) for section, numbers in promoted.items()},
+                   "findings_moved": {ws.section_titles[section]: sum(len(ids) for ids in ws.moved_of(numbers))
+                                      for section, numbers in promoted.items()},
+                   "by_assessment": by_assessment, "not_triaged_by_reason": dict(sorted(not_triaged.items()))},
+        "dropped": dict(sorted((Counter(previous.get("dropped") or {}) + drops).items())),
+        "calls": {"sent": int(previous_calls.get("sent") or 0) + sent,
+                  "failed": int(previous_calls.get("failed") or 0) + failed},
+        "stage_bytes": ws.size(), "usage": budget.snapshot(),
+        "cited": {"extensions": int((previous.get("cited") or {}).get("extensions") or 0) + 1,
+                  "requested": out["requested"], "targets": len(targets), "triaged": triaged,
+                  "by_assessment": out["by_assessment"]},
+    }
+    repo.publish_triage(hunt_id, summary["pass"], ws.view_rows(), summary, owner_token=owner_token)
+    return {**out, "status": "complete" if triaged == len(targets) else "partial",
+            "reason": (stop or last_failure or "no valid verdict for some cited groups")
+            if triaged < len(targets) else None}

@@ -192,6 +192,9 @@ class Settings(BaseModel):
     # one call: the cards it carries (estimated prompt tokens) and the answer it may write
     agent_triage_call_input_tokens: int = Field(default=30_000, ge=2000, le=1_000_000)
     agent_triage_call_output_tokens: int = Field(default=8192, ge=512, le=200_000)
+    # groups of Reported findings the AI narrative cites that the triage pass left without a verdict, triaged after
+    # the assessment so the narrative check can weigh them (those cited by the most paragraphs first); 0 = none
+    agent_triage_cited_max_groups: int = Field(default=20, ge=0, le=1000)
     # Bootstrap-only switch: the one value that lets telemetry excerpts reach a non-local model endpoint.
     model_egress: Literal["", "lab-public-data"] = ""
     # Extra hosts, addresses or CIDR networks treated as local (e.g. a team's model server on an enclave address).
@@ -382,6 +385,7 @@ ENV_MAP = {
     "AGENT_TRIAGE_MAX_WALL_SECONDS": "agent_triage_max_wall_seconds",
     "AGENT_TRIAGE_CALL_INPUT_TOKENS": "agent_triage_call_input_tokens",
     "AGENT_TRIAGE_CALL_OUTPUT_TOKENS": "agent_triage_call_output_tokens",
+    "AGENT_TRIAGE_CITED_MAX_GROUPS": "agent_triage_cited_max_groups",
     "ROMULUS_MODEL_EGRESS": "model_egress", "MODEL_LOCAL_HOSTS": "model_local_hosts",
     "ROMULUS_INTERNAL_NETWORKS": "internal_networks", "ROMULUS_EXTERNAL_NETWORKS": "external_networks",
 }

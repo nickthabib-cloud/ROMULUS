@@ -22,13 +22,14 @@ from romulus.agent.aliases import AliasBook
 from romulus.agent.assessment import _assessment_input, check_assessment
 from romulus.agent.grounding import TriageContext, triage_context
 from romulus.agent.investigate import run_agent_phase
+from romulus.agent.provider import ProviderUnavailable
 from romulus.agent.provider.base import ToolCall
 from romulus.agent.toolbox import Toolbox
 from romulus.agent.triage import latest_summary
 from romulus.config import Settings
 from romulus.hunt import run as hunt_run
 from romulus.hunt.rank import place_late_findings
-from romulus.hunt.triage import run_triage_in_phase, write_export
+from romulus.hunt.triage import run_cited_triage_in_phase, run_triage_in_phase, write_export
 from romulus.report import executive, markdown
 from romulus.report.manifest import build_manifest, narrative_paragraphs
 from romulus.store.db import make_engine, migrate, utcnow
@@ -346,7 +347,9 @@ def test_the_phase_runs_orient_investigate_triage_then_assess_under_one_lease(tm
     # summary is stored on its own); its own usage leaves the triage calls out
     assert result.state == "completed" and result.as_dict()["ai_triage"]["status"] == "complete"
     record = repo.latest_audit("h1", "hunt.ai_agent_summary")["detail"]["ai_triage"]
-    assert record == {"status": "complete", "reason": None, "pass": 1, "model": "fake-triage-model"}
+    assert record == {"status": "complete", "reason": None, "pass": 1, "model": "fake-triage-model",
+                      "cited": {"status": "skipped", "reason": "no cited group lacks a verdict", "groups": 0,
+                                "untriaged_cited_skipped": 0}}
     assert result.usage["calls"] == 3 == len(provider.requests)
     # the agent's late finding was placed into the final ranking before the pass: the view stays current after the
     # phase finalizes, in the manifest and in the web's own check
@@ -589,26 +592,37 @@ def test_the_web_shows_weak_paragraphs_muted_with_their_reason_escaped(web_setup
 
 
 # ------------------------------------------------------------------------- the verdict outweighs Reported; support mix
-def _reported_hunt(verdicts: dict[str, str]):
-    """A ranked hunt where four lead findings on a confirmed host are Reported (not confirmed), triaged by rule:
-    `verdicts` maps a rule to its assessment, every other group is likely benign."""
+def _reported_rows(repo=None):
+    """A ranked hunt where four lead findings on a confirmed host are Reported (not confirmed), untriaged."""
     from datetime import timedelta
 
     from romulus.hunt.rank import PASS_FINAL, compute_rank_pass
-    repo = ta._repo()
+    repo = ta._repo(repo)
     ta._insert(repo, [ta._row("c-urgent", "r.confirmed", lane="urgent", host="quiet"),
                       *[ta._row(f"q-{index}", f"r.q{index}", lane="lead", host="quiet",
                                 ts=ta.START + timedelta(minutes=5 * index)) for index in range(4)]])
     compute_rank_pass(repo, "h1", PASS_FINAL)
     ta._finished(repo)
-
-    def policy(cards):
-        return {"groups": [ta.verdict(card, verdicts.get(card["rule"]["id"], "likely_benign")) for card in cards]}
-    summary = run_triage_in_phase(ta.settings(), repo, "h1", owner_token=None, heartbeat=lambda: None,
-                                  provider=ta.FakeTriage(policy))
-    assert summary["status"] == "complete"
     found = grounding.EvidenceStrength(repo, "h1", OFF).findings([f"q-{index}" for index in range(4)])
     assert all(item.reported and not item.confirmed for item in found.values())
+    return repo
+
+
+def by_rules(verdicts: dict[str, str | None], default: str | None = "likely_benign"):
+    """A triage policy by rule; a rule mapped to None (or the default None) gets no answer, so no verdict."""
+    def policy(cards):
+        return {"groups": [ta.verdict(card, assessment) for card in cards
+                           if (assessment := verdicts.get(card["rule"]["id"], default)) is not None]}
+    return policy
+
+
+def _reported_hunt(verdicts: dict[str, str]):
+    """`_reported_rows`, triaged by rule: `verdicts` maps a rule to its assessment, every other group is likely
+    benign."""
+    repo = _reported_rows()
+    summary = run_triage_in_phase(ta.settings(), repo, "h1", owner_token=None, heartbeat=lambda: None,
+                                  provider=ta.FakeTriage(by_rules(verdicts)))
+    assert summary["status"] == "complete"
     return repo
 
 
@@ -729,3 +743,230 @@ def test_the_support_summary_counts_distinct_cites_and_stays_bounded_at_the_look
                                                                   "reported": "7", "other": True},
                "sentences": [{"text": "t", "kind": "inferred", "cites": []}]}]
     assert narrative_paragraphs(stored)[0]["support"] == {"attack": 2}
+
+
+# ---------------------------------------------------------------- targeted triage of the narrative's cited groups
+# the in-phase pass answers only the confirmed group and r.q0 (benign): r.q1-r.q3 are Reported and left untriaged
+IN_PHASE = {"r.confirmed": "likely_benign", "r.q0": "likely_benign"}
+
+
+def _cited_phase(tmp_path, cited_policy, *, name="cited", settings=None, cited_provider=None):
+    """The agent phase end to end on `_reported_rows`: orient, investigate, the in-phase pass (IN_PHASE), an
+    assessment whose one Persistence paragraph cites q-0..q-2, then the extension to the cited groups."""
+    engine = make_engine(tmp_path / f"{name}.sqlite")
+    migrate(engine)
+    repo = _reported_rows(Repo(engine))
+    settings = settings or _phase_settings()
+    seen: dict = {"calls": []}
+    finish = [ToolCall("f", "finish_session", {"summary": "The evidence review is complete."}, "{}")]
+    body = _reply([_p([_s([_f(repo, "q-0"), _f(repo, "q-1"), _f(repo, "q-2")], "The tool ran at start-up.")],
+                      "Persistence")])
+    provider = ScriptedProvider([response(tool_calls=finish), response(tool_calls=finish), response(parsed=body)])
+    extension = cited_provider or ta.FakeTriage(cited_policy)
+
+    def triage(heartbeat, cited=None):
+        groups = cited
+        if groups is None:
+            return run_triage_in_phase(settings, repo, "h1", owner_token=None, heartbeat=heartbeat,
+                                       provider=ta.FakeTriage(by_rules(IN_PHASE, default=None)))
+        seen["calls"].append(list(groups))
+        seen["before"] = deepcopy(repo.agent_assessments("h1")[-1])
+        return run_cited_triage_in_phase(settings, repo, "h1", groups, owner_token=None, heartbeat=heartbeat,
+                                         provider=extension)
+    lanes = {row["id"]: row["lane"] for row in repo.candidates("h1")}
+    rank_state = repo.rank_state("h1")
+    result = run_agent_phase(settings, repo, "h1", provider=provider,
+                             toolbox_factory=lambda session: Toolbox(repo, "h1", session_id=session),
+                             clock=lambda: 0.0, triage=triage)
+    assert result.state == "completed"
+    # promote-only: no lane, rank or Reported flag changed
+    assert {row["id"]: row["lane"] for row in repo.candidates("h1")} == lanes and repo.rank_state("h1") == rank_state
+    return repo, result, seen
+
+
+def test_cited_untriaged_reported_groups_triaged_benign_make_the_paragraph_weak(tmp_path):
+    repo, result, seen = _cited_phase(tmp_path, by_rules({}))
+    assert [key[2] for key in seen["calls"][0]] == ["r.q1", "r.q2"]
+    # at assess time the untriaged Reported cites held the paragraph
+    before = seen["before"]["body"]["narrative"][0]
+    assert before["phase"] == "Persistence" and before["support"] == {"reported": 2, "benign": 1}
+    # once the extension calls them likely benign, it is grounded again: the model's text unchanged
+    revisions = repo.agent_assessments("h1")
+    stored = revisions[-1]
+    assert len(revisions) == 2 and stored["revision"] == seen["before"]["revision"] + 1
+    paragraph = stored["body"]["narrative"][0]
+    assert paragraph["phase"] == "Context" and paragraph["support_reason"] == "triaged_likely_benign"
+    assert paragraph["support"] == {"benign": 3} and paragraph["model_phase"] == "Persistence"
+    assert paragraph["sentences"][0]["text"] == before["sentences"][0]["text"]
+    assert stored["checker"] == {"weakly_supported_benign_triage": 1, "labelled_uncertain_benign_triage": 1,
+                                 "regrounded_after_cited_triage": 1, "paragraphs_strength_changed": 1}
+    cited = result.as_dict()["ai_triage"]["cited"]
+    assert cited["status"] == "complete" and cited["triaged"] == 2 and cited["paragraphs_strength_changed"] == 1
+    # the pass was extended, not replaced: its number, digest and placement kept, and its view still current
+    from romulus.report.triage import triage_view
+    summary = latest_summary(repo, "h1")
+    assert summary["pass"] == 1 and summary["status"] == "partial" and summary["cited"]["triaged"] == 2
+    assert summary["groups"]["triaged"] == 4 and summary["groups"]["not_triaged"] == 1        # r.q3 still untriaged
+    assert build_manifest(repo, "h1", "test")["ai_triage"]["stale"] is False
+    assert triage_view(repo, "h1")["stale"] is False
+
+
+@pytest.mark.parametrize("verdict", ["possible_attack", "likely_attack"])
+def test_one_attack_verdict_from_the_extension_keeps_the_paragraph_strong(tmp_path, verdict):
+    repo, _result, _seen = _cited_phase(tmp_path, by_rules({"r.q2": verdict}))
+    paragraph = repo.agent_assessments("h1")[-1]["body"]["narrative"][0]
+    assert paragraph["phase"] == "Persistence" and "weakly_supported" not in paragraph
+    assert paragraph["support"] == {"attack": 1, "benign": 2}
+    assert repo.agent_assessments("h1")[-1]["checker"] == {"regrounded_after_cited_triage": 1,
+                                                          "paragraphs_strength_changed": 0}
+
+
+def test_cited_groups_are_capped_by_the_most_cited_first_and_the_rest_counted(tmp_path):
+    from romulus.agent.assessment import cited_triage_groups
+    repo = _reported_rows()
+    run_triage_in_phase(ta.settings(), repo, "h1", owner_token=None, heartbeat=lambda: None,
+                        provider=ta.FakeTriage(by_rules(IN_PHASE, default=None)))
+    context = triage_context(latest_summary(repo, "h1"))
+    body = _reply([_p([_s([_f(repo, "q-1"), _f(repo, "q-3")])], "Execution"),
+                   _p([_s([_f(repo, "q-3"), _f(repo, "q-0")])], "Persistence"),
+                   _p([_s([_f(repo, "q-2"), _f(repo, "q-3")])], "Discovery")])
+    ungrounded: list = []
+    check_assessment(repo, "h1", body, triage=context, ungrounded=ungrounded)
+    groups, skipped = cited_triage_groups(repo, "h1", ungrounded, context, 2)
+    # r.q3 is cited by three paragraphs; r.q1 and r.q2 by one each (ties by section, rule and target)
+    assert [key[2] for key in groups] == ["r.q3", "r.q1"] and skipped == 1
+    assert cited_triage_groups(repo, "h1", ungrounded, context, 0) == ([], 3)
+    # nothing to extend without a usable pass
+    assert cited_triage_groups(repo, "h1", ungrounded, OFF, 5) == ([], 0)
+    # through the phase: over the cap, the rest are counted on the regrounded revision and the phase's record
+    repo, result, seen = _cited_phase(tmp_path, by_rules({}), settings=_phase_settings(
+        agent_triage_cited_max_groups=1))
+    assert [key[2] for key in seen["calls"][0]] == ["r.q1"]
+    assert result.as_dict()["ai_triage"]["cited"]["untriaged_cited_skipped"] == 1
+    assert repo.agent_assessments("h1")[-1]["checker"]["untriaged_cited_skipped"] == 1
+    # r.q2 is still untriaged and Reported: the paragraph stays strong
+    assert repo.agent_assessments("h1")[-1]["body"]["narrative"][0]["phase"] == "Persistence"
+
+
+def test_a_failed_or_spent_extension_leaves_the_grounding_unchanged(tmp_path):
+    failing = ta.FakeTriage(lambda _cards: ProviderUnavailable("down"))
+    # the in-phase pass made one call: with two allowed, the extension has one left; with one, none
+    for name, settings, provider, reason in (
+            ("down", _phase_settings(), failing, "provider_unavailable"),
+            ("spent", _phase_settings(agent_triage_max_calls=1), ta.FakeTriage(by_rules({})), "budget:calls")):
+        repo, result, seen = _cited_phase(tmp_path, None, name=name, settings=settings, cited_provider=provider)
+        cited = result.as_dict()["ai_triage"]["cited"]
+        assert cited["status"] == "failed" and cited["reason"] == reason and cited["triaged"] == 0
+        # no new revision, no new verdict: the paragraph keeps its assess-time grounding, never read as benign
+        assert repo.agent_assessments("h1") == [seen["before"]]
+        assert seen["before"]["body"]["narrative"][0]["phase"] == "Persistence"
+        assert latest_summary(repo, "h1")["groups"]["not_triaged"] == 3 and "cited" not in latest_summary(repo, "h1")
+
+
+def test_the_extension_spends_from_the_pass_budget_and_stops_on_its_wall_clock():
+    from romulus.agent.triage import run_cited_triage
+    repo = _reported_rows()
+    run_triage_in_phase(ta.settings(), repo, "h1", owner_token=None, heartbeat=lambda: None,
+                        provider=ta.FakeTriage(by_rules(IN_PHASE, default=None)))
+    first = latest_summary(repo, "h1")
+    evidence = grounding.EvidenceStrength(repo, "h1", triage_context(first))
+    keys = [found.group for found in evidence.findings(["q-1", "q-2"]).values()]
+    # past its wall budget: no call, nothing published
+    late = run_cited_triage(ta.settings(), repo, "h1", ta.FakeTriage(by_rules({})), keys, clock=iter(
+        [0.0, *[10.0**6] * 50]).__next__)
+    assert late["status"] == "failed" and late["reason"] == "budget:wall-clock"
+    assert latest_summary(repo, "h1") == first
+    # within it: the pass's usage continues from where the pass left it
+    done = run_cited_triage(ta.settings(), repo, "h1", ta.FakeTriage(by_rules({})), keys)
+    assert done["status"] == "complete" and done["triaged"] == 2
+    usage = latest_summary(repo, "h1")["usage"]
+    assert usage["calls"] == first["usage"]["calls"] + 1 and usage["input_tokens"] > first["usage"]["input_tokens"]
+    assert latest_summary(repo, "h1")["calls"]["sent"] == first["calls"]["sent"] + 1
+    # an extension never runs on another model, settings or cards: the pass's digest must hold
+    other = ta.FakeTriage(by_rules({}))
+    other.model = "another-model"
+    assert run_cited_triage(ta.settings(), repo, "h1", other, keys)["status"] == "skipped"
+
+
+def _untriaged(repo=None):
+    """`_reported_rows` after an in-phase pass that answered only IN_PHASE: r.q1-r.q3 have no verdict."""
+    repo = _reported_rows(repo)
+    run_triage_in_phase(ta.settings(), repo, "h1", owner_token=None, heartbeat=lambda: None,
+                        provider=ta.FakeTriage(by_rules(IN_PHASE, default=None)))
+    found = grounding.EvidenceStrength(repo, "h1", triage_context(latest_summary(repo, "h1"))).findings(
+        ["q-1", "q-2", "q-3"])
+    return repo, [found[item].group for item in ("q-1", "q-2", "q-3")]
+
+
+def test_a_partial_extension_says_so_and_counts_why():
+    from romulus.agent.triage import run_cited_triage
+    repo, keys = _untriaged()
+    # the model answers r.q1 only: r.q2 and r.q3 get no valid answer
+    done = run_cited_triage(ta.settings(), repo, "h1", ta.FakeTriage(by_rules({"r.q1": "likely_benign"},
+                                                                              default=None)), keys)
+    assert done["status"] == "partial" and done["triaged"] == 1 and done["targets"] == 3
+    assert done["reason"] == "no valid verdict for some cited groups"
+    summary = latest_summary(repo, "h1")
+    assert summary["status"] == "partial" and summary["groups"]["not_triaged_by_reason"] == {"no valid answer": 2}
+    assert summary["reason"] == "no valid answer" and summary["cited"]["triaged"] == 1
+
+
+def test_an_extension_is_skipped_when_the_pass_digest_or_order_changed():
+    from romulus.agent.triage import run_cited_triage
+    repo, keys = _untriaged()
+    first = latest_summary(repo, "h1")
+    # other settings than the pass ran with: another digest
+    changed = run_cited_triage(ta.settings(agent_triage_call_input_tokens=5000), repo, "h1",
+                               ta.FakeTriage(by_rules({})), keys)
+    assert changed["status"] == "skipped" and "cannot be extended" in changed["reason"]
+    # a finding stored after the pass: another order
+    ta._insert(repo, [ta._row("late-1", "r.late", lane="high", host="elsewhere")])
+    moved = run_cited_triage(ta.settings(), repo, "h1", ta.FakeTriage(by_rules({})), keys)
+    assert moved["status"] == "skipped" and "cannot be extended" in moved["reason"]
+    assert latest_summary(repo, "h1") == first
+
+
+def test_a_reground_failure_after_publishing_is_recorded_as_such(tmp_path, monkeypatch):
+    from romulus.agent import assessment
+
+    def broken(*_a, **_kw):
+        raise RuntimeError("store unavailable")
+    monkeypatch.setattr(assessment, "reground_narrative", broken)
+    repo, result, seen = _cited_phase(tmp_path, by_rules({}))
+    cited = result.as_dict()["ai_triage"]["cited"]
+    assert cited["status"] == "failed" and cited["reason"].startswith("reground_error: RuntimeError")
+    assert cited["triaged"] == 2 and cited["groups"] == 2
+    # the verdicts are published; the stored grounding is the assess-time one, and the mismatch is visible
+    assert latest_summary(repo, "h1")["cited"]["triaged"] == 2
+    assert repo.agent_assessments("h1") == [seen["before"]]
+
+
+def test_an_extension_resumes_from_every_billed_triage_call_of_the_pass(monkeypatch):
+    from romulus.agent.triage import TriageBudget, pass_billed, run_cited_triage
+    repo, keys = _untriaged()
+    first = latest_summary(repo, "h1")
+    assert first["usage_base"]["calls"] == 0 and first["usage"]["calls"] == 1
+
+    # an extension bills its call, then ends before publishing (a crash)
+    def crash(*_a, **_kw):
+        raise RuntimeError("crashed before publishing")
+    monkeypatch.setattr(repo, "publish_triage", crash)
+    with pytest.raises(RuntimeError):
+        run_cited_triage(ta.settings(), repo, "h1", ta.FakeTriage(by_rules({})), keys)
+    monkeypatch.undo()
+    assert latest_summary(repo, "h1") == first                     # nothing published: the snapshot says 1 call
+    billed = pass_billed(repo, "h1", first)
+    assert billed["calls"] == 2 and billed["prompt_tokens"] == 200 and billed["completion_tokens"] == 80
+    resumed = TriageBudget.resume(ta.settings(), first["usage"], billed=billed)
+    assert resumed.calls == 2 and resumed.input_tokens == 200 and resumed.output_tokens == 80
+    # so a pass allowed two calls has none left for another extension
+    from romulus.agent.provider import BudgetExhausted
+    with pytest.raises(BudgetExhausted) as stopped:
+        TriageBudget.resume(ta.settings(agent_triage_max_calls=2), first["usage"], billed=billed).check(100, 100)
+    assert stopped.value.budget == "calls"
+    # with room left, the next extension spends on top of every billed call
+    done = run_cited_triage(ta.settings(), repo, "h1", ta.FakeTriage(by_rules({})), keys)
+    assert done["status"] == "complete" and latest_summary(repo, "h1")["usage"]["calls"] == 3
+    # the pass's base stays the hunt's calls before it: the extension's calls are the pass's
+    assert latest_summary(repo, "h1")["usage_base"] == first["usage_base"]
+    assert latest_summary(repo, "h1")["rank_state"] == repo.rank_state("h1")
