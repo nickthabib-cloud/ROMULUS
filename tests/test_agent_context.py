@@ -124,13 +124,14 @@ def _script(anchor, evidence, hypothesis):
     return [_cached_reply(calls) for calls in steps]
 
 
-def _run(tmp_path, script=None, *, settings=None, stop=None, before_reserve=None, rows_per_result=1):
+def _run(tmp_path, script=None, *, settings=None, stop=None, before_reserve=None, rows_per_result=1,
+         provider_class=ScriptedProvider):
     """Run one investigate session over the scripted replies (`script(anchor, evidence, hypothesis)`, by default
     CALLS queries, a re-read, a citation and the finish). `stop()` is the analyst's stop request; `before_reserve(n)`
     runs before the n-th reservation (from 0)."""
     repo, anchor, evidence, hypothesis = _hunt()
     settings = settings or _settings(tmp_path)
-    provider = ScriptedProvider((script or _script)(anchor, evidence, hypothesis), context=1_000_000, output=4096)
+    provider = provider_class((script or _script)(anchor, evidence, hypothesis), context=1_000_000, output=4096)
     limits = BudgetLimits(400, 100_000_000, 36_000, 0.0, 0.0, 0.0, model="m",
                           cache_read_token_weight=0.1, cache_write_token_weight=1.25)
     gate = _BudgetGate(AgentBudget(limits, clock=lambda: 0.0), settings, stop=stop)

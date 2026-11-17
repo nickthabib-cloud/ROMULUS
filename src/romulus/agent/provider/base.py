@@ -323,6 +323,19 @@ class ChatProvider:
         """Doctor checks as (name, ok|warn|fail, detail). Sends no telemetry."""
         raise NotImplementedError
 
+    # ---- signed reasoning in replayed turns -----------------------------------------------------------------
+    def without_reasoning(self, message: dict) -> dict:
+        """`message` (an assistant turn this adapter returned) without the signed reasoning its provider state
+        replays, for a turn whose earlier conversation changed (a compaction) or that the provider refused. Its text
+        and tool calls stay. The default leaves the turn as it is: an adapter whose replayed reasoning is not bound to
+        the earlier conversation, or that has none, has nothing to remove."""
+        return message
+
+    def reasoning_rejected(self, result: ChatResult) -> bool:
+        """Whether the provider refused `result`'s request because a replayed reasoning block no longer matches the
+        conversation it was produced in (removing the reasoning, `without_reasoning`, is the remedy)."""
+        return False
+
     # ---- the port -------------------------------------------------------------------------------------
     def describe(self) -> dict:
         return {"provider": self.name, "model": self.model, "endpoint_host": self.decision.host,

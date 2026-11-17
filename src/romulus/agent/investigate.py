@@ -21,7 +21,7 @@ from romulus.agent.admission import (
     typed_alias_arguments,
 )
 from romulus.agent.assessment import SECRET_GUARD_SUMMARY, assess_output, run_assessment, template_assessment
-from romulus.agent.context import SessionResults, issued_in, session_tag
+from romulus.agent.context import SessionResults, issued_in, session_tag, strip_reasoning
 from romulus.agent.dossier import build_dossier
 from romulus.agent.grounding import triage_context
 from romulus.agent.provider import (
@@ -107,6 +107,8 @@ ORIENT_SHARE_LIMIT = "cap:orient_token_share"
 MIN_ORIENT_PAGE_TOKENS = 2_000
 # The end reason of a session the secret guard ended (its state is `secret_guard`).
 SECRET_GUARD_REASON = "secret_guard"
+# The end reason of a session whose replayed reasoning the provider refused again after it was removed.
+REASONING_REJECTED_REASON = "reasoning_binding_rejected"
 # The reason an analyst's stop request ended a session or the phase (a stopped session's state is `interrupted`).
 # A run stopped this way is resumable: `hunt resume` continues it from its persisted work.
 STOPPED_REASON = "stopped_by_analyst"
@@ -751,6 +753,8 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
     results: SessionResults | None = None
     reread_count = 0
     rereads_closed = False
+    # whether the provider refused this session's replayed reasoning once (it is then removed and the call retried)
+    reasoning_retried = False
 
     def finish(state: str, final_summary: str, reason: str | None = None) -> dict:
         nonlocal counted
@@ -773,7 +777,10 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                    "write_call_limit": write_limit, "reservation_overruns": overruns,
                    "limits_hit": sorted(admission.limits_hit) if admission is not None else []}
         if results is not None and results.compactions:
-            outcome["context"] = {"compactions": results.compactions, "results_compacted": results.stubbed}
+            outcome["context"] = {"compactions": results.compactions, "results_compacted": results.stubbed,
+                                  "reasoning_turns_stripped": results.reasoning_stripped}
+        if reasoning_retried:
+            outcome["reasoning_retry"] = True
         if session_saved:
             try:
                 repo.update_agent_session(session_id, hunt_id, {
@@ -875,7 +882,7 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
             # older results the model has seen are stubbed in one batch, before the prompt is sized and its cached
             # prefix checked: a compacted conversation no longer extends the previous request, so its prefix is not
             # counted as cached, and between compactions the conversation only grows at its end
-            compacted = results.compact(messages)
+            compacted = results.compact(messages, provider.without_reasoning)
             if compacted:
                 log.info("agent session %s compacted %d earlier tool results", session_id, compacted)
             request = ChatRequest(messages=messages, tools=tools, tool_choice="auto")
@@ -990,6 +997,22 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                               "context_full")
             if result.status == "refused":
                 return finish("refused", result.error or "Provider refused this session.", "refused")
+            if provider.reasoning_rejected(result):
+                # the provider refused a replayed reasoning block bound to an earlier form of this conversation:
+                # nothing was produced. Once per session, every model turn goes out without its reasoning from now
+                # on (the strip stays in the history, so later requests send the same turns) and the call is made
+                # again; a second refusal ends the session under its own reason.
+                if reasoning_retried:
+                    return finish("failed", "The provider refused the session's replayed reasoning again after it "
+                                  "was removed. " + _deterministic_tool_summary(tool_history, hypothesis_changes),
+                                  REASONING_REJECTED_REASON)
+                reasoning_retried = True
+                stripped = strip_reasoning(messages, 0, provider.without_reasoning)
+                log.warning("agent session %s: the provider refused replayed reasoning bound to an earlier form of "
+                            "the conversation (%s); retrying once with the reasoning of %d earlier turns removed",
+                            session_id, REASONING_REJECTED_REASON, stripped)
+                cache_basis = None
+                continue
             messages.append(result.assistant_message())
             if not result.tool_calls:
                 if context_wrap_sent:
