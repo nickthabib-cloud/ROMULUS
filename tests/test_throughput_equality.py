@@ -386,7 +386,7 @@ from tests import throughput_fixture as tf
 # Evidence epoch 18 rehashes every event id, and Suricata and Arkime records carry their own producer identities:
 # with the evidence version, the Windows producer and the network producers set back, the two new network rules left out of the pack and the network rule versions restored, every table is the earlier one except the manifest's reworded network positive-only reasons and its pack digest.
 GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
- 'audit': '3a5e430c696eabb677ce3f9f39a3ad98239bd29dfd10a3d0d2a18246c6161358',
+ 'audit': 'a47a8a17ee37a9a0602a77461806f3ab98d84bb587c19c4e62c6053d6f6af318',
  'baseline_counts': 'be05fabb25336f21341b46eae7d8c2627828f7a7a7e8fdb24f4eb58576099354',
  'baseline_hunt_exclusions': 'c91eefda01c512d6d63e892dc9696016b01a71d44e4abcc429d954bd51864852',
  'baseline_observations': 'a55a6d933fecc9cbe7816e04638a044d82a4e1dd88f2c3b36ac160cf07d85af7',
@@ -403,15 +403,15 @@ GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe55
  'events': '13ccf787c362c3ed292b78492d8acb5e1f67d5ad191fa8113651b2320314af91',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
  'links': 'a4a267240e42c0155c746d50994b0cde06b4e77d95e1af4ced1fa53279046505',
- 'manifest': 'd8b75df7451be03d57ad38cb632de308a0f68dc10584c3270ebb600db5819f7c',
+ 'manifest': 'd6d90944df59bcef786e30c4c030bcba5f63f5c35de2c39eba6ed0682afee4c4',
  'raw': '04715be9c0dfa35e600d0f40ea09e9f738acb76e67eac64551cc380cc93de5f1',
- 'rule_cells': '00c28246462543fd34d8af25cafd5dfc46f3a5151efde188a81d5721d303f2a1',
+ 'rule_cells': '2f841ab607838e71c057da4271d0195a07bf84f28eed412a89b7590e3ee1de0e',
  'stats': 'be588e34e14e570c11a47fc9b3953e564d8f6026d909d9ae7f9c7ef561c99c5a',
- 'tasks': 'd7358b35b2712d1778327fe83190d59472515bfcf3e27829cd2cc3fa996e6cbf'}
+ 'tasks': '1e1eeb69d05da151bec8f6dff43c1863a4eb43a288f84c1ba35168311b303360'}
 # The rule-estimate stack's digests (expansion seeded by the urgent and high lanes, as before evidence ranking;
 # the manifest's moved only with the incident tactics above).
 GOLDEN_STACK_BY_RULE_ESTIMATE = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
- 'audit': '2c1352804ee45f9a68e5f95e9bae1a4b67ea56d23bffa1d4de1c3a0781cf0be0',
+ 'audit': 'ad7203bc0be8e336c46f3fefdb57fb54f8b116f2ef299be4577dabd982a571b9',
  'baseline_counts': 'be05fabb25336f21341b46eae7d8c2627828f7a7a7e8fdb24f4eb58576099354',
  'baseline_hunt_exclusions': 'c91eefda01c512d6d63e892dc9696016b01a71d44e4abcc429d954bd51864852',
  'baseline_observations': 'a55a6d933fecc9cbe7816e04638a044d82a4e1dd88f2c3b36ac160cf07d85af7',
@@ -428,11 +428,11 @@ GOLDEN_STACK_BY_RULE_ESTIMATE = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e
  'events': '13ccf787c362c3ed292b78492d8acb5e1f67d5ad191fa8113651b2320314af91',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
  'links': 'a4a267240e42c0155c746d50994b0cde06b4e77d95e1af4ced1fa53279046505',
- 'manifest': '304c48cedce05a5ccd65a4361b3b255fdb8a60b18543feb61c8c3d709b050de4',
+ 'manifest': 'f184b53aa1c64e235efa8bb100875278a984cf6131534095746a3a5850a7b750',
  'raw': '04715be9c0dfa35e600d0f40ea09e9f738acb76e67eac64551cc380cc93de5f1',
- 'rule_cells': '00c28246462543fd34d8af25cafd5dfc46f3a5151efde188a81d5721d303f2a1',
+ 'rule_cells': '2f841ab607838e71c057da4271d0195a07bf84f28eed412a89b7590e3ee1de0e',
  'stats': 'be588e34e14e570c11a47fc9b3953e564d8f6026d909d9ae7f9c7ef561c99c5a',
- 'tasks': 'd7358b35b2712d1778327fe83190d59472515bfcf3e27829cd2cc3fa996e6cbf'}
+ 'tasks': '1e1eeb69d05da151bec8f6dff43c1863a4eb43a288f84c1ba35168311b303360'}
 GOLDEN_CANDIDATES_BY_RULE_ESTIMATE = GOLDEN_STACK_BY_RULE_ESTIMATE['candidates']
 GOLDEN_NON_BASELINE_SEMANTICS_BY_RULE_ESTIMATE = {'candidates': {'all_fields': '700437956302822956db19de3ac396f2c2bd0f0f5352543147a022e4eed147c6',
                 'benign_alternatives': '16fd65da86c5d4c29ea644b96abb0c02d4b84558e0cb9687e295da52785e42ea',

@@ -167,6 +167,36 @@ def test_repeat_connections_of_a_pair_within_a_minute_are_stored_once_and_still_
     assert lanes(matches) == ['lead'] and stored == 16                                    # one per pair per minute
 
 
+def test_the_repeat_store_spills_to_disk_without_refusals_or_a_different_result():
+    class Tiny(RemoteShellFanout):
+        RECENT_HOT = 2
+    rows = [conn(n, f'10.2.{n % 40}.{n % 7 + 1}', 22, src=f'10.8.0.{n % 30}', ts=n * 3.0) for n in range(600)]
+    rows += shells(5)
+    observations = events(rows, 'plain')
+    batches = [observations[i:i + 25] for i in range(0, len(observations), 25)]
+    results = []
+    for cls in (RemoteShellFanout, Tiny):
+        rule = cls()
+        rule.site_facts = facts()
+        try:
+            matches = run(rule, batches)
+            assert rule.capped == 0 and not rule.limits, (cls, rule.limits)
+            if cls is Tiny:
+                assert rule.recent.on_disk > 0
+            results.append(sorted((m.proposed_lane, m.claim) for m in matches))
+        finally:
+            rule.release_state()
+    assert results[0] == results[1] and any(ATTACKER in claim for _lane, claim in results[0])
+
+
+def test_declared_controllers_calling_each_other_are_not_fanout():
+    controllers = tuple(f'10.0.0.{n}' for n in range(10, 30))
+    rows = [conn(n, controllers[n], 445, src=controllers[0], ts=n) for n in range(1, 20)]
+    site = facts(domain_controller_addresses=controllers)
+    assert evaluate(SmbRpcFanout, rows, site=site)[0] == []
+    assert lanes(evaluate(SmbRpcFanout, rows)[0]) == ['lead']
+
+
 # ---- SMB / RPC fan-out ---------------------------------------------------------------------------------------------
 
 def smb(count, *, spacing=30.0, src=ATTACKER):

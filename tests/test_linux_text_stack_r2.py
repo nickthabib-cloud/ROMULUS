@@ -29,7 +29,7 @@ UNKNOWN_REASON = "text line in no recognized format: custom.unknown"
 # rehashes the event ids (candidates 75b41997... at epoch 17); the rule cells add the SMB impact and service
 # catalog rules (not applicable here).
 GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a6dadaa59988bdf81e',
- 'audit': '11e409ab1fa736cb3ab19984624c6cab9bb0f8662d27a464b5cae0e7a2f8db8a',
+ 'audit': '187b82e390f110430b5cc85ed691d2c627995a6ff19c1a5b6cb4a1ca87aa375a',
  'baseline_counts': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_hunt_exclusions': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_observations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
@@ -46,11 +46,11 @@ GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a
  'events': 'bd5435aef6b275df8abbeb11240c6ab00cff8cfa39fbba70fc1f6acccadf23bb',
  'expansion': 'dae7cbd7929a4cb94bb232a7343d4d70f62885a979b52714b87bd3641a92169b',
  'links': '8abe2a07c083a1ea68a7cb03ccfa539e9e071fc67b2af99a555e04f4badc5928',
- 'manifest': '4ceb5af1650bbdd285ea26bdfa9479ffec8f37ea38963bb6e4b81d790f25f6bb',
+ 'manifest': '033632b665a4567a017d22fa4433ecbe2a4cae45b472e9714d3b93abf08f464c',
  'raw': '64be31e697a32f93b1a71657560af514b2d430469cb3be19f44b8827985a7775',
- 'rule_cells': 'bde8512df4dcf2fe4a4b4536d7f17eb3f5112ecf213b0b625d6cbd57ed85cfea',
+ 'rule_cells': 'af065a9e7ea890637eb13c64ed460182e1a70a5d6f32998780af17429bab2e86',
  'stats': '360c94cf6f93e02aefee3a7da01eeeae2bba877f3d1e318af96992d9e75f2e92',
- 'tasks': '84dea44d6737eb4190cb3dbb46a00598af012da8cd3db39c2e40a8dce8b66684'}
+ 'tasks': '31db5bad23dca3ba0a6c4114135053177ece1b46af44576b3198b8967c6762bb'}
 
 
 def text_documents():

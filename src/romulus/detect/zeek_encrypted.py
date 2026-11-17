@@ -143,6 +143,7 @@ class _ConnFanout(ZeekWindowRule):
     span_words = ''
     research: ClassVar[tuple[str, ...]] = (_CONN_DOC,)
     adds = ''
+    RECENT_HOT = HOT_COUNT
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -172,7 +173,7 @@ class _ConnFanout(ZeekWindowRule):
 
     def __init__(self):
         super().__init__()
-        self.recent = KeyedStore(self, 'fanout_recent', HOT_COUNT)
+        self.recent = KeyedStore(self, 'fanout_recent', self.RECENT_HOT)
 
     def consume(self, events):
         try:
@@ -204,6 +205,9 @@ class _ConnFanout(ZeekWindowRule):
         assume_direction(self)
         if not (networks.is_internal(source) and networks.is_internal(destination)):
             return None
+        controllers = getattr(_site(self), 'domain_controller_addresses', ())
+        if controllers and address_member(str(source), controllers) and address_member(str(destination), controllers):
+            return None             # declared controllers replicating and calling each other
         pair, stamp = (str(source), str(destination)), event.ts.timestamp()
         stored = self.recent.get(pair)
         if stored is not None and 0 <= stamp - stored < REPEAT_SECONDS:

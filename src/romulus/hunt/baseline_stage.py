@@ -714,8 +714,10 @@ class SnapshotView:
         window_failure = self._window_failure(playbook)
         spec_coverage = self._history_coverage(playbook.id)
         history_failure = _coverage_failure(spec_coverage, self.min_live_hours)
-        if playbook.id == "bl.ext_dest" and not self.networks_configured:
-            history_failure = "internal networks not configured for this site; external destinations are unresolved"
+        if playbook.spec.requires_configured_networks and not self.networks_configured:
+            judged = ("external destinations" if playbook.id == "bl.ext_dest"
+                      else "connections between internal hosts")
+            history_failure = f"internal networks not configured for this site; {judged} are unresolved"
         if history_failure:
             # Every scope's verdict is already fixed by the spec's history coverage.
             updated_total = unresolved = self._fix_unresolved(playbook, observations, history_failure)

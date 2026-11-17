@@ -198,6 +198,11 @@ class AdminPairBaseline(BaselinePlaybook):
     required_fields = ("source.ip", "destination.ip", "destination.port", "network.transport")
     direction_dependent = True
     attack = ("T1021.001", "T1021.002", "T1021.003", "T1021.004", "T1021.006")
+    benign = ("a new server, a re-addressed host or an administrator's first visit to a host",
+              "DHCP reassigning a source address that the history knew as another machine")
+    next_checks = ("logons to the destination from the source at this time",
+                   "processes started on the destination by the remote-administration service",
+                   "other first-seen pairs from the same source in the window")
     assures_negative = False
     positive_only_reason = ("remote-administration baselines publish positive deviations only: a pair absent from "
                             "the window is not shown absent from the network")
