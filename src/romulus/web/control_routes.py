@@ -6,12 +6,13 @@ Only a lead may force a stop, or go above the site's agent budget ceiling. romul
 """
 from __future__ import annotations
 
+import math
 import os
 import subprocess
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 
-from fastapi import HTTPException, Request
+from fastapi import Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 
@@ -68,7 +69,7 @@ def _number(name: str, value: str, limit: str) -> float | int | None:
         number = float(value)
     except ValueError:
         raise HTTPException(400, f"{name} must be a number") from None
-    if number != number or number in (float("inf"), float("-inf")) or number < 0:
+    if not math.isfinite(number) or number < 0:
         raise HTTPException(400, f"{name} must be a non-negative number")
     if limit == "max_wall_seconds":
         return int(number * 60)
@@ -165,29 +166,22 @@ def stop_banner(repo, hunt_id: str) -> dict | None:
 
 
 def register_control_routes(app, repo, s, env_file, need):
-    def hunt_or_404(hunt_id: str) -> dict:
-        hunt = repo.get_hunt(hunt_id)
-        if hunt is None:
+    # synchronous handlers: FastAPI runs them in its thread pool, so a force stop's wait never blocks the server
+    def checked(request: Request, hunt_id: str, csrf: str) -> tuple[dict, str]:
+        u = need(request)
+        if not csrf_ok(u, csrf):
+            raise HTTPException(403, "bad CSRF token")
+        if repo.get_hunt(hunt_id) is None:
             raise HTTPException(404)
-        return hunt
+        return u, account_role(repo, u)
 
     def back(hunt_id: str, code: str):
         return RedirectResponse(f"/hunts/{hunt_id}/run?" + urlencode({"control": code}) + "#controls",
                                 status_code=303)
 
-    async def checked(request: Request, hunt_id: str) -> tuple[dict, dict, str, object]:
-        u = need(request)
-        form = await request.form(max_fields=50)
-        if not csrf_ok(u, str(form.get("csrf", ""))):
-            raise HTTPException(403, "bad CSRF token")
-        hunt = hunt_or_404(hunt_id)
-        role = account_role(repo, u)
-        return u, hunt, role, form
-
     @app.post("/hunts/{hunt_id}/stop")
-    async def stop_hunt(request: Request, hunt_id: str):
-        u, hunt, role, form = await checked(request, hunt_id)
-        scope = str(form.get("scope", "hunt"))
+    def stop_hunt(request: Request, hunt_id: str, csrf: str = Form(""), scope: str = Form("hunt")):
+        u, role = checked(request, hunt_id, csrf)
         if scope not in ("hunt", "agent"):
             raise HTTPException(400, "bad stop scope")
         try:
@@ -198,11 +192,11 @@ def register_control_routes(app, repo, s, env_file, need):
         return back(hunt_id, "agent_stop_requested" if scope == "agent" else "stop_requested")
 
     @app.post("/hunts/{hunt_id}/force-stop")
-    async def force_stop_hunt(request: Request, hunt_id: str):
-        u, hunt, role, form = await checked(request, hunt_id)
+    def force_stop_hunt(request: Request, hunt_id: str, csrf: str = Form(""), confirm: str = Form("")):
+        u, role = checked(request, hunt_id, csrf)
         if role != "lead":
             raise HTTPException(403, "only a lead may force a hunt to stop")
-        if str(form.get("confirm", "")) != hunt_id:
+        if confirm != hunt_id:
             raise HTTPException(400, "force stop not confirmed")
         try:
             force_stop(s, repo, hunt_id, actor=f"web:{u['u']}", role=role)
@@ -211,12 +205,15 @@ def register_control_routes(app, repo, s, env_file, need):
         return back(hunt_id, "force_stopped")
 
     @app.post("/hunts/{hunt_id}/extend")
-    async def extend(request: Request, hunt_id: str):
-        u, hunt, role, form = await checked(request, hunt_id)
-        profile = str(form.get("effort", "") or "") or None
+    def extend(request: Request, hunt_id: str, csrf: str = Form(""), effort: str = Form(""),
+               calls: str = Form(""), tokens: str = Form(""), minutes: str = Form(""),
+               source_queries: str = Form(""), cost_usd: str = Form("")):
+        u, role = checked(request, hunt_id, csrf)
+        profile = effort or None
         if profile is not None and profile not in hunt_budget.PROFILES:
             raise HTTPException(400, "bad budget profile")
-        amounts = budget_from_form(form, EXTEND_FIELDS)
+        amounts = budget_from_form({"calls": calls, "tokens": tokens, "minutes": minutes,
+                                    "source_queries": source_queries, "cost_usd": cost_usd}, EXTEND_FIELDS)
         if profile is not None and amounts:
             raise HTTPException(400, "give amounts or a profile, not both")
         actor = f"web:{u['u']}"

@@ -81,6 +81,7 @@ from romulus.evidence.windows_catalog import (
 from romulus.evidence.windows_reassembly import SCRIPT_FINALIZE_BATCH_SIZE, ScriptBlockAssembler
 from romulus.evidence.zeek import ZEEK_INTERIM_SUPERSEDED, ZEEK_NORMALIZER
 from romulus.evidence.zeek_catalog import MALCOLM, SHAPES, ZEEK_LOGS, lookup_log
+from romulus.hunt.controls import HuntStopped
 from romulus.hunt.publish import (
     LineageCitationFetcher,
     SourceCitationFetcher,
@@ -88,7 +89,6 @@ from romulus.hunt.publish import (
     bind_aggregate_history,
     publish_match,
 )
-from romulus.hunt.controls import HuntStopped
 from romulus.hunt.stage import EventStage
 from romulus.site import SiteFacts, absent_site_facts
 from romulus.sources.es import ElasticClient, fetch_limit

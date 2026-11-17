@@ -781,7 +781,6 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
         "tasks": {s: n for s, n in tasks},
         "agent": agent or {"status": "unknown"},
         "ai_agent": _ai_agent(repo, hunt_id, hm),
-        "controls": hunt_controls(repo, hunt_id, hm),
         "ai_assessment": _ai_assessment(repo, hunt_id),
         "banners": egress_banners(hm.get("ai_agent"), repo.agent_usage(hunt_id)),
         "investigations": _investigations(repo, hunt_id, cands, agent or {"status": "unknown"}),
@@ -797,6 +796,10 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
                      **({"pack_digest": hm["pack"]["digest"]} if hm["pack"].get("digest") else {})},
         "generated_by": actor,
     }
+    controls = hunt_controls(repo, hunt_id, hm)
+    if controls["stop"] or controls["agent_budget"]["pinned"] or controls["agent_budget"]["extensions"]:
+        # a hunt nobody stopped, created before budgets were pinned, keeps the manifest it always had
+        m["controls"] = controls
     if ranking is not None:
         m["ranking"], m["entities"] = ranking
     # the AI triage order: a separately labelled view after the deterministic findings, present once a pass ran. It

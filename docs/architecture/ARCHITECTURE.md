@@ -211,6 +211,47 @@ Event-log collection settings do not attest an eCAR sensor: its collection remai
 Hunt manifests record each evidence producer version. Resume compares every recorded producer with the running
 build and refuses a mismatch before fetching more records. Older manifests retain the checks they recorded.
 
+## Hunt controls: agent budgets, extensions, stop
+
+`agent/hunt_budget.py` and `hunt/controls.py`.
+
+**Agent budget.**
+- A hunt pins its AI agent budget in its manifest (`ai_agent.budgets`, schema `agent-budget@1`) when it is created.
+  - The budget is a profile (quick, standard or deep, as multiples of the `.env` limits) plus optional per-limit values.
+  - Its limits are model calls, tokens, wall clock, cost, source queries, hypotheses, sessions per hypothesis and tool calls per session. The triage pass's limits are pinned beside them.
+- The agent phase, its triage pass, `romulus triage`, the dossier's remaining-budget page and every resume read the pinned budget plus the hunt's extensions (`hunt_budget.hunt_settings`), never the live settings.
+- A hunt created before budgets were pinned keeps the limits its manifest recorded. It reads the others from the settings and names them on its Run tab.
+- Choices and extensions stay within the site ceiling (`AGENT_BUDGET_CEILING_MULTIPLIER` times each standard limit, within the limit's own maximum). Only a lead may go above it.
+  - The web checks the role against the database and hands the checked choice to the hunt process as a single-use grant.
+  - On the command line, `--user` authenticates a lead with its password.
+
+**Extensions.**
+- An extension is a row recorded with who added it, when, and the amounts.
+- New limit = pinned + every extension. Spending persists, so the agent continues from what it has already used.
+- A running agent reads the raised call, token, time and cost limits within 15 s, and raised source-query shares from its next session.
+- An agent run that ended partial on a limit becomes resumable once budget is added after it ended. `hunt resume --agent-only` (the web starts it after an extension) continues from the persisted hypotheses, sessions and spend, and never runs a deterministic stage again.
+
+**Stop.**
+- A stop request is a row (scope `hunt` or `agent`, who, when).
+- The run reads it through a cached lookup (at most every 2 s) at these safe points:
+  - before each sweep source and partition;
+  - between the post-sweep stages;
+  - before each expansion link;
+  - in the agent, before every model call, before every read tool call, while waiting for budget, and between rounds.
+
+What happens depends on where the stop arrives:
+- **During the sweep.** The sweep closes its stage and finalizes nothing, since an aggregate over part of the window could report what the rest would contradict. Its summary says it did not finish; the partitions it had not read stay planned; the hunt ends partial; and every whole-window answer is narrowed. A resume runs the sweep again: its writes are idempotent, and aggregates must read every partition.
+- **After the sweep.** The stages that did not run record nothing, and the stop reason names them. Expansion leaves its unfinished anchors pending, so a resume works them.
+- **In the agent.** The agent makes no further model call (no triage pass, no assessment), keeps what it stored, and ends partial with `stopped_by_analyst`.
+
+A resume clears the request. A request the run never reached a safe point for is closed as unapplied.
+
+**Force stop.**
+- Every worker records its pid, a start marker (the kernel's process start time and boot id) and its host.
+- After the grace period (`ROMULUS_HUNT_STOP_GRACE_SECONDS`), a lead may force-stop. ROMULUS signals the recorded process only on its own host, only while the pid still has that start marker and runs ROMULUS, and never a reused pid.
+- It then leaves the hunt partial and its agent interrupted, in one transaction. A sweep that had not finished is marked stopped, so a resume runs it again.
+- Hosts without `/proc` cannot verify a process, so they refuse a force stop.
+
 ## Dependency rules (enforced by `archmap.py --check`)
 
 - `web` and `cli` may import anything below them, but nothing imports `web` or `cli`.

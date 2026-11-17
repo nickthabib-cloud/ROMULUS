@@ -91,7 +91,10 @@ venv/bin/romulus --env-file "$ROMULUS_HOME/.env" web      # serves on ROMULUS_WE
 | `doctor` | Checks sources, privileges, tools, model endpoint (if any) and storage |
 | `hunt start --start <ISO> --end <ISO>` | Runs a hunt: sweep, packet stage, expansion and incidents. Deterministic by default |
 | `hunt start ... --style directed --hypothesis "<text>"` | A hunt focused on one hypothesis |
-| `hunt resume <id>` / `hunt status [id]` | Continue an interrupted hunt / show progress |
+| `hunt start ... --agent --effort quick\|standard\|deep [--agent-max-calls N ...]` | Choose the AI agent's budget for this hunt: a profile and optional per-limit values, pinned to the hunt |
+| `hunt resume <id>` / `hunt status [id]` | Continue an interrupted or stopped hunt / show progress |
+| `hunt stop <id> [--agent-only]` / `hunt stop <id> --force` | Ask a running hunt (or only its AI agent) to stop at its next safe point / end its worker process when it has not stopped within the grace period |
+| `hunt extend <id> --calls N --tokens N --minutes N --source-queries N` (or `--effort deep`) | Give a hunt's AI agent more budget; a stopped or budget-limited agent continues from where it was, without sweeping again |
 | `findings <id> [--lane urgent --lane high]` | List ranked findings |
 | `report <id>` | Publish a new immutable report revision (JSON and Markdown) |
 | `user add <name> --role lead\|analyst` | Create a web UI account (interactive) |
@@ -127,7 +130,21 @@ After the deterministic hunt, an AI agent will read everything ROMULUS found, fo
 
 - Teams connect it to **their own model server**, so telemetry stays on their network.
 - A hosted model is allowed only for testing on public data, behind an explicit install-time switch, with a banner on every hunt and report that used it.
-- Usage is bounded by per-hunt budgets (calls, tokens, time, optional cost). If a budget runs out, the deterministic results are unaffected.
+- Usage is bounded by per-hunt budgets (calls, tokens, time, source queries, hypotheses, sessions and tool calls, optional cost). If a budget runs out, the deterministic results are unaffected.
+- Each hunt pins its agent budget when it starts: a profile (**quick**, **standard** = the `.env` values, or **deep** for long mission hunts) plus optional per-limit values. Resumes read the pinned budget, so a later `.env` change only affects new hunts. More budget can be added later from the hunt's Run tab or with `hunt extend`. Analysts stay within the site ceiling (`AGENT_BUDGET_CEILING_MULTIPLIER`); only a lead can go above it.
+
+### Stopping a hunt
+
+The Run tab and `hunt stop` offer **Stop hunt** and **Stop agent**:
+
+- The run checks for a stop before each source partition, expansion link, model call and tool call.
+- It keeps everything it found and records who stopped it and when.
+- The hunt stays partial: the report names what did not run and never presents it as complete.
+- A stopped hunt can be resumed. Resuming runs again a sweep that was stopped part-way, then the stages that did not run.
+
+If a run has not stopped within `ROMULUS_HUNT_STOP_GRACE_SECONDS`, a lead can force-stop it. This ends the hunt's own recorded worker process, identified by its pid and start time so a reused pid is never signalled. The hunt is left interrupted and resumable.
+
+Analysts may stop or extend the hunts they started; leads may stop or extend any hunt. Every stop, force stop, extension and budget choice is audited.
 
 ### Model providers
 

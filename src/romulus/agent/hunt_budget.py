@@ -162,7 +162,7 @@ def choose(s: Settings, profile: str = DEFAULT_PROFILE, overrides: dict | None =
     overrides = {key: _value(key, value) for key, value in (overrides or {}).items() if value is not None}
     unknown = set(overrides) - set(LIMITS)
     if unknown:
-        raise BudgetRefused(f"unknown agent limit {sorted(unknown)[0]!r}")
+        raise BudgetRefused(f"unknown agent limit {min(unknown)!r}")
     limits = {**profile_limits(s, profile), **overrides}
     above = check_limits(s, limits, role)
     return {"schema": BUDGET_SCHEMA, "profile": profile, "overrides": overrides, "limits": limits,

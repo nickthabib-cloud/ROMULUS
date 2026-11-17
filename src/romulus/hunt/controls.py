@@ -47,7 +47,8 @@ GRANT_MAX_AGE_SECONDS = 600
 UNVERIFIABLE = "unverifiable"
 
 
-class HuntStopped(Exception):  # noqa: N818 - a control-flow signal, not an error
+class HuntStopped(Exception):
+    # a control-flow signal, not an error
     """An analyst's stop request ended the run at a safe point. Never a lease loss: its text never says so."""
 
     def __init__(self, detail: str):
@@ -69,9 +70,10 @@ class StopWatch:
     """Cached reads of a hunt's open stop request of the given scopes. Calling it returns the request's description,
     or None while there is none."""
 
-    def __init__(self, repo, hunt_id: str, scopes: tuple[str, ...], *, ttl: float = STOP_CHECK_SECONDS,
+    def __init__(self, repo, hunt_id: str, scopes: tuple[str, ...], *, ttl: float | None = None,
                  clock: Callable[[], float] = monotonic):
-        self.repo, self.hunt_id, self.scopes, self.ttl, self.clock = repo, hunt_id, scopes, ttl, clock
+        self.repo, self.hunt_id, self.scopes, self.clock = repo, hunt_id, scopes, clock
+        self.ttl = STOP_CHECK_SECONDS if ttl is None else ttl
         self.row: dict | None = None
         self._at: float | None = None
 
