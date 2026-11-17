@@ -8,6 +8,7 @@ from romulus.agent.provider import egress_banners
 from romulus.report.manifest import coverage_for_hunt, internal_networks_view, investigations_for_hunt
 from romulus.web import agent_views, hunt_views
 from romulus.web.auth import csrf_ok
+from romulus.web.control_routes import CONTROL_MESSAGES, controls_view, stop_banner
 
 TIMELINE_PAGE = 50
 
@@ -19,7 +20,8 @@ def make_hunt_page(repo, page):
     def hunt_page(request: Request, name: str, user: dict, h: dict, tab: str, head: dict | None = None, **ctx):
         message = agent_views.REASSESS_MESSAGES.get(request.query_params.get("agent_message"), "")
         return page(request, name, user, h=h, head=head or hunt_views.header(repo, h, user, tab),
-                    agent_message=message, **ctx)
+                    agent_message=message, stop_banner=stop_banner(repo, h["id"]),
+                    control_message=CONTROL_MESSAGES.get(request.query_params.get("control"), ""), **ctx)
     return hunt_page
 
 
@@ -188,4 +190,5 @@ def register_hunt_routes(app, repo, s, need, hunt_page):
                                                               if key not in ("line", "summary", "warning")}),
                          stop_reason={**hunt_views.one_line(h["stop_reason"]), "full": h["stop_reason"] or ""},
                          manifest_rows=hunt_views.detail_rows(h["manifest"]),
-                         tasks=hunt_views.tasks_page(repo, hunt_id, after=cursor(tasks_after)))
+                         tasks=hunt_views.tasks_page(repo, hunt_id, after=cursor(tasks_after)),
+                         controls=controls_view(repo, s, h, u))

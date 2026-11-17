@@ -32,6 +32,7 @@ from romulus.web import agent_views, site_form
 from romulus.web.agent_routes import register_agent_routes
 from romulus.web.auth import RateLimiter, Sessions, csrf_ok, verify
 from romulus.web.catalog_routes import register_catalog_routes
+from romulus.web.control_routes import new_hunt_context, register_control_routes, start_grant
 from romulus.web.hunt_routes import make_hunt_page, register_hunt_routes
 from romulus.web.indicator_routes import IndicatorBodyLimit, register_indicator_routes
 from romulus.web.request_routes import DetectionRequestBodyLimit, register_request_routes
@@ -150,11 +151,15 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         provenance = {**readiness.provenance(s), "requested": True}
         return page(request, "new_hunt.html", u, tz=s.mission_timezone, sources=s.es_index_patterns,
                     readiness=readiness, agent_checked=s.agent_default == "on" and readiness.ready,
-                    egress_banners=egress_banners(provenance, {}))
+                    egress_banners=egress_banners(provenance, {}), budget=new_hunt_context(s, repo, u))
 
     @app.post("/hunts")
     def start_hunt(request: Request, start: str = Form(...), end: str = Form(...), style: str = Form("broad"),
-                   hypothesis: str = Form(""), agent: str = Form(""), csrf: str = Form("")):
+                   hypothesis: str = Form(""), agent: str = Form(""), csrf: str = Form(""),
+                   effort: str = Form("standard"), max_calls: str = Form(""), max_tokens: str = Form(""),
+                   minutes: str = Form(""), max_cost_usd: str = Form(""), max_source_queries: str = Form(""),
+                   max_initial_hypotheses: str = Form(""), max_hypotheses: str = Form(""),
+                   max_sessions_per_hypothesis: str = Form(""), max_tool_calls_per_session: str = Form("")):
         u = need(request)
         if not csrf_ok(u, csrf):
             raise HTTPException(403, "bad CSRF token")
@@ -168,20 +173,29 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         if agent not in ("", "model"):
             raise HTTPException(400, "bad agent option")
         requested = agent == "model"
+        # the agent budget, checked against the account's role now and handed to the hunt process as a grant
+        grant, budget = start_grant(s, repo, u, {
+            "effort": effort, "max_calls": max_calls, "max_tokens": max_tokens, "minutes": minutes,
+            "max_cost_usd": max_cost_usd, "max_source_queries": max_source_queries,
+            "max_initial_hypotheses": max_initial_hypotheses, "max_hypotheses": max_hypotheses,
+            "max_sessions_per_hypothesis": max_sessions_per_hypothesis,
+            "max_tool_calls_per_session": max_tool_calls_per_session})
         cmd = [sys.executable, "-m", "romulus.cli"] + (["--env-file", str(env_file)] if env_file else []) + \
               ["hunt", "start", "--start", start, "--end", end, "--style", style,
-               "--agent" if requested else "--no-agent"]
+               "--agent" if requested else "--no-agent", "--budget-grant", grant]
         if hypothesis.strip():
             cmd += ["--hypothesis", hypothesis.strip()[:500]]
         s.logs_dir.mkdir(parents=True, exist_ok=True)
         env = {**os.environ, "USER": f"web:{u['u']}"}
         with open(s.logs_dir / f"hunt-{datetime.now():%Y%m%d-%H%M%S}.log", "ab") as log:
             subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env, start_new_session=True)
-        repo.audit(f"web:{u['u']}", "web.hunt_start", detail={"start": start, "end": end, "style": style,
-                                                                "agent_requested": requested})
+        repo.audit(f"web:{u['u']}", "web.hunt_start", detail={
+            "start": start, "end": end, "style": style, "agent_requested": requested,
+            "agent_budget": {key: budget[key] for key in ("profile", "overrides", "role", "above_ceiling")}})
         return RedirectResponse("/?started=1", status_code=303)
 
     register_hunt_routes(app, repo, s, need, hunt_page)
+    register_control_routes(app, repo, s, env_file, need)
 
     @app.get("/hunts/{hunt_id}/stream")
     async def stream(request: Request, hunt_id: str, after_seq: str = "0"):

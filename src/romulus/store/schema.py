@@ -1491,6 +1491,67 @@ Index("ix_agent_change_hunt_seq", agent_change.c.hunt_id, agent_change.c.seq)
 Index("ix_agent_change_row_seq", agent_change.c.hunt_id, agent_change.c.kind,
       agent_change.c.row_id, agent_change.c.seq)
 
+# Analyst controls over a running hunt. A stop request is a row the hunt and its agent read at their safe points
+# (one indexed lookup); its state records whether the run honoured it, a force stop ended the process, a resume cleared
+# it, or the run ended first (unapplied).
+hunt_stop_request = Table(
+    "hunt_stop_request", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("scope", String, nullable=False),
+    Column("requested_by", String, nullable=False),
+    Column("requested_at", DateTime(timezone=True), nullable=False),
+    Column("state", String, nullable=False),
+    Column("honored_at", DateTime(timezone=True)),
+    Column("closed_at", DateTime(timezone=True)),
+    Column("closed_by", String),
+    Column("detail", JSON, nullable=False, default=dict),
+    CheckConstraint("scope IN ('hunt','agent')", name="ck_hunt_stop_request_scope"),
+    CheckConstraint("state IN ('requested','honored','forced','cleared','unapplied')",
+                    name="ck_hunt_stop_request_state"),
+)
+Index("ix_hunt_stop_request_hunt_state", hunt_stop_request.c.hunt_id, hunt_stop_request.c.state,
+      hunt_stop_request.c.id)
+
+# Budget added to a hunt's agent after it was created: its limits are the pinned budget plus every row here.
+hunt_budget_extension = Table(
+    "hunt_budget_extension", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("added_by", String, nullable=False),
+    Column("role", String, nullable=False),
+    Column("added_at", DateTime(timezone=True), nullable=False),
+    Column("profile", String),
+    Column("amounts", JSON, nullable=False),
+    Column("above_ceiling", JSON, nullable=False, default=list),
+)
+Index("ix_hunt_budget_extension_hunt", hunt_budget_extension.c.hunt_id, hunt_budget_extension.c.id)
+
+# The process working a hunt (one row per hunt, replaced by each new worker): its pid with the start marker that
+# tells it from a later process given the same pid, and the host it runs on. A force stop targets only this process.
+hunt_process = Table(
+    "hunt_process", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id"), primary_key=True),
+    Column("pid", Integer, nullable=False),
+    Column("pgid", Integer),                 # the process group it leads, when it leads one
+    Column("start_marker", String, nullable=False),
+    Column("host", String, nullable=False),
+    Column("command", String, nullable=False),
+    Column("recorded_at", DateTime(timezone=True), nullable=False),
+    Column("ended_at", DateTime(timezone=True)),
+)
+
+# A budget choice the web checked against the requester's role, handed to the hunt process it starts by id: the
+# process reads it once (and deletes it), so the choice is the checked one, not anything its command line says.
+agent_budget_grant = Table(
+    "agent_budget_grant", metadata,
+    Column("id", String, primary_key=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("created_by", String, nullable=False),
+    Column("role", String, nullable=False),
+    Column("choice", JSON, nullable=False),
+)
+
 # Install only after every source and index table exists, including metadata-only stores.
 for _statement in _change_triggers().values():
     event.listen(metadata, "after_create", DDL(_statement.replace("CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS ")).execute_if(dialect="sqlite"))

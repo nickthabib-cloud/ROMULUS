@@ -16,6 +16,20 @@
       search, let the language model ({{ readiness.provider }}/{{ readiness.model }}) work the leads. Experimental; it never changes findings or lanes.
       Leave unchecked for a deterministic hunt.</label>
     {% if not readiness.ready %}<p class="help">{{ readiness.reason }}</p>{% endif %}
+    <label>AI agent budget
+      <select name="effort">{% for name, limits in budget.profiles.items() %}
+        <option value="{{ name }}"{% if name == budget.default_profile %} selected{% endif %}>{{ name | capitalize }}: {{ limits.max_calls }} model calls, {{ (limits.max_wall_seconds / 60) | round | int }} min, {{ limits.max_source_queries }} source queries, {{ limits.max_hypotheses }} hypotheses</option>{% endfor %}
+      </select></label>
+    <p class="help small">Quick is a first look at the strongest findings; standard is this site's configured budget; deep is for a mission hunt the team will wait hours for. The budget is pinned to the hunt: later changes to the site settings do not change it, and more can be added to it later from the hunt's Run tab. It is not the model's thinking effort.</p>
+    <details>
+      <summary>Advanced limits</summary>
+      <p class="help small">Optional: each value replaces the chosen profile's. Up to the site ceiling shown{% if budget.is_lead %}; as a lead you may go above it, up to each limit's maximum{% else %}; only a lead may go above it{% endif %}.</p>
+      {% for field, limit in [('max_calls', 'max_calls'), ('max_tokens', 'max_tokens'), ('minutes', 'max_wall_seconds'), ('max_source_queries', 'max_source_queries'), ('max_initial_hypotheses', 'max_initial_hypotheses'), ('max_hypotheses', 'max_hypotheses'), ('max_sessions_per_hypothesis', 'max_sessions_per_hypothesis'), ('max_tool_calls_per_session', 'max_tool_calls_per_session'), ('max_cost_usd', 'max_cost_usd')] %}
+      <label>{% if field == 'minutes' %}Wall clock (minutes){% else %}{{ budget.labels[limit] | capitalize }}{% endif %}
+        <input name="{{ field }}" inputmode="decimal" autocomplete="off" placeholder="ceiling {% if field == 'minutes' %}{{ (budget.ceiling[limit] / 60) | round | int }}{% else %}{{ budget.ceiling[limit] or 'none' }}{% endif %}"></label>
+      {% endfor %}
+      {% if budget.ceiling.max_cost_usd %}<p class="help small">A cost of 0 means no cost budget at all; where this site sets one, only a lead may remove it.</p>{% endif %}
+    </details>
     {% for egress in egress_banners %}<p class="warn"><b>Model egress:</b> {{ egress }}</p>{% endfor %}
     <button type="submit">Start hunt</button>
   </form>

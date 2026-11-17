@@ -261,8 +261,13 @@ class ExpansionEngine:
         clock: Callable[[], float] = time.monotonic,
         heartbeat: Callable[[], None] = lambda: None,
         after_link: Callable[[LinkResult], None] | None = None,
+        stop_check: Callable[[], str | None] | None = None,
     ):
         self.repo, self.hunt_id, self.window, self.fetcher = repo, hunt_id, hunt_window, fetcher
+        # `stop_check()`: an analyst's open stop request (its description), checked before each link is fetched. A
+        # stopped run leaves every anchor it did not finish pending, so a resumed hunt expands it.
+        self.stop_check = stop_check
+        self.stopped: str | None = None
         # Without per-anchor shares, max_source_queries is the expansion's fixed total; with them, each anchor that
         # can still be expanded brings per_anchor_source_queries and max_source_queries is the ceiling on the sum.
         self.max_depth, self.max_source_queries = max_depth, max_source_queries
@@ -1442,6 +1447,12 @@ class ExpansionEngine:
                 out[event_id] = rows[cid]
         return out
 
+    def _stop_requested(self) -> bool:
+        """Whether an analyst's stop request ends this run (checked before each link is fetched)."""
+        if self.stopped is None and self.stop_check is not None:
+            self.stopped = self.stop_check() or None
+        return self.stopped is not None
+
     def _budget_reason(self, query_count: int) -> str | None:
         if query_count >= self.budget:
             return "source query budget exhausted"
@@ -1465,7 +1476,7 @@ class ExpansionEngine:
         # anchor id -> (the query limit it was stopped under, the reasons that stop added). The limit grows when the
         # reserve is released or a discovered anchor brings its share; the anchor then spends again.
         budget_blocked: dict[str, tuple[int, list[str]]] = {}
-        while True:
+        while not self._stop_requested():
             self.budget = self._budget_for(all_rows)
             eligible = []
             for row in all_rows:
@@ -1527,6 +1538,8 @@ class ExpansionEngine:
                 link_type, window, stored = slot.link_type, slot.window, slot.stored
                 if stored:
                     budget_reason = None
+                elif self._stop_requested():
+                    break
                 else:
                     budget_reason = self._budget_reason(query_count)
                 if budget_reason:
@@ -1602,6 +1615,8 @@ class ExpansionEngine:
                     all_rows = self.repo.expansion_anchors(self.hunt_id)
                 if {row["id"] for row in added} - known_anchor_ids:
                     break
+            if self.stopped:
+                break
             if not made_progress:
                 continue
 
@@ -1618,6 +1633,10 @@ class ExpansionEngine:
             # as recorded rather than re-attempted: the source-query and wall-clock budgets are hunt-wide and
             # persist across a resume, so the budget that stopped them is still spent.
             if row["status"] != "pending":
+                continue
+            if self.stopped:
+                # an analyst stopped the hunt: whether this anchor's every link ran is not settled, so it stays
+                # pending (never complete); a resumed run plans it again and reuses the links already stored
                 continue
             links = [link for link in final_links if link["anchor_id"] == row["id"]]
             reasons = sorted(set(anchor_reasons[row["id"]] + [
@@ -1652,6 +1671,12 @@ class ExpansionEngine:
             accounting = (f"anchors not fully expanded: {unexpanded_count} unexpanded, "
                           f"{len(unfinished) - unexpanded_count} partial" + (f" ({shown})" if shown else ""))
             stop_reason = accounting if stop_reason == "fixpoint" else f"{stop_reason}; {accounting}"
+        if self.stopped:
+            pending = sum(row["status"] == "pending" for row in anchors)
+            status = "partial"
+            stopped = (f"stopped by analyst ({self.stopped}): {pending} anchor(s) not finished and left pending; "
+                       "resuming the hunt expands them")
+            stop_reason = stopped if stop_reason == "fixpoint" else f"{stopped}; {stop_reason}"
         not_anchored = self._extras_not_anchored()
         if not_anchored:
             stop_reason = f"{stop_reason}; {not_anchored} {self._extras_stopped}"
@@ -1660,6 +1685,8 @@ class ExpansionEngine:
         summary = {
             "status": status,
             "stop_reason": stop_reason, "anchors": len(anchors),
+            **({"stopped": self.stopped, "pending": [row["id"] for row in anchors if row["status"] == "pending"]}
+               if self.stopped else {}),
             "expanded_complete": sum(row["status"] == "expanded_complete" for row in anchors),
             "expanded_partial": sum(row["status"] == "expanded_partial" for row in anchors),
             "unexpanded": [row["id"] for row in anchors if row["status"] == "unexpanded"],

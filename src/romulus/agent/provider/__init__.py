@@ -29,6 +29,7 @@ from romulus.agent.provider.base import (
 )
 from romulus.agent.provider.budget import (
     AgentBudget,
+    AgentStopped,
     BudgetExhausted,
     BudgetLimits,
     charge_of,
@@ -53,6 +54,7 @@ ANTHROPIC_MODULES = ("anthropic", "httpx2")
 
 __all__ = [
     "EGRESS_SWITCH_VALUE", "PROVIDER_STATE", "SECRET_GUARD_ACTION", "AgentBudget", "AgentNotReady", "AgentReadiness",
+    "AgentStopped",
     "BudgetExhausted", "BudgetLimits", "ChatProvider", "ChatRequest", "ChatResult", "HistoryError",
     "ProviderUnavailable", "SecretGuardTripped", "Tool", "ToolCall", "Usage", "agent_readiness", "build_provider",
     "egress_banners", "record_call", "record_failure", "record_secret_guard",

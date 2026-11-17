@@ -8,6 +8,7 @@ from datetime import UTC
 
 from sqlalchemy import func, select
 
+from romulus.agent import hunt_budget
 from romulus.agent.cases import seed_candidate_ids
 from romulus.agent.provider import egress_banners
 from romulus.decide.policy import LANE_ORDER
@@ -795,6 +796,10 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
                      **({"pack_digest": hm["pack"]["digest"]} if hm["pack"].get("digest") else {})},
         "generated_by": actor,
     }
+    controls = hunt_controls(repo, hunt_id, hm)
+    if controls["stop"] or controls["agent_budget"]["pinned"] or controls["agent_budget"]["extensions"]:
+        # a hunt nobody stopped, created before budgets were pinned, keeps the manifest it always had
+        m["controls"] = controls
     if ranking is not None:
         m["ranking"], m["entities"] = ranking
     # the AI triage order: a separately labelled view after the deterministic findings, present once a pass ran. It
@@ -903,6 +908,37 @@ def internal_networks_view(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dic
         warning = " ".join(text for text in (view.get("warning"), check.get("warning")) if text) or None
         view = {**view, "host_address_check": check, "warning": warning}
     return view
+
+
+def _when(value) -> str | None:
+    return value.isoformat() if hasattr(value, "isoformat") else (str(value) if value else None)
+
+
+def hunt_controls(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dict:
+    """What analysts did to the run: the latest stop request (who, when, where the run honoured it, or that a force
+    stop ended it) and the AI agent's budget (the profile and limits pinned at creation, every extension, and the
+    limits in force)."""
+    stop = repo.latest_stop(hunt_id)
+    budgets = (hunt_manifest.get("ai_agent") or {}).get("budgets") or {}
+    extensions = repo.agent_budget_extensions(hunt_id)
+    in_force = hunt_budget.extended_record(budgets, repo, hunt_id)
+    return {
+        "stop": None if stop is None else {
+            "scope": stop["scope"], "state": stop["state"], "requested_by": stop["requested_by"],
+            "requested_at": _when(stop["requested_at"]), "honored_at": _when(stop["honored_at"]),
+            "honored_in": (stop.get("detail") or {}).get("honored_in") or [],
+            "forced_by": (stop.get("detail") or {}).get("forced_by"),
+            "closed_by": stop["closed_by"], "closed_at": _when(stop["closed_at"])},
+        "agent_budget": {
+            "pinned": hunt_budget.is_pinned(hunt_manifest), "profile": budgets.get("profile"),
+            "chosen_by": budgets.get("chosen_by"), "above_ceiling": budgets.get("above_ceiling") or [],
+            "recorded": {key: budgets.get(key) for key in hunt_budget.LIMITS},
+            "limits": {key: in_force.get(key) for key in hunt_budget.LIMITS},
+            "extensions": [{"added_by": row["added_by"], "role": row["role"], "added_at": _when(row["added_at"]),
+                            "profile": row["profile"], "amounts": row["amounts"],
+                            "above_ceiling": row["above_ceiling"]} for row in extensions],
+        },
+    }
 
 
 def _ai_agent(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dict:

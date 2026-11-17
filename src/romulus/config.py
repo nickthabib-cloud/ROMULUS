@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, SecretStr, field_validator, model_validator
 
 from romulus.detect.netdef import EXTERNAL_SETTING, INTERNAL_SETTING, SiteNetworks, parse_networks
 
@@ -104,6 +104,10 @@ class Settings(BaseModel):
     # clock admits), and the wall clock is the expansion phase's own, so a long sweep never leaves it no time.
     expansion_max_source_queries: int = Field(default=20_000, ge=1, le=1_000_000)
     expansion_wall_clock_minutes: float = Field(default=120.0, gt=0.0)
+    # How long a hunt or its agent has to honour an analyst's stop request before a force stop may end its process.
+    # The run checks for a stop between source partitions, expansion links, model calls and tool calls; one source
+    # query or model call can take minutes (AGENT_TIMEOUT_SECONDS), so the grace covers more than one of them.
+    hunt_stop_grace_seconds: int = Field(default=60, ge=5, le=3600)
     # Visibility has its own disk allowance and source time, outside detector state.
     # Per-partition health composites normally fit one 1000-bucket page; 32 pages
     # admit larger sensor fleets while bounding repeated collection at the source.
@@ -172,6 +176,10 @@ class Settings(BaseModel):
     agent_max_hypotheses: int = Field(default=40, ge=1, le=500)
     agent_max_sessions_per_hypothesis: int = Field(default=4, ge=1, le=20)
     agent_assess_reserve_fraction: float = Field(default=0.15, ge=0.0, le=0.5)
+    # The most an analyst may give one hunt's agent, as a multiple of the limits above (the standard budget): each
+    # limit of a hunt's pinned budget plus its extensions stays at or below this multiple (and the limit's own
+    # maximum). Only a lead account may go above it, up to the limit's maximum. romulus/agent/hunt_budget.py.
+    agent_budget_ceiling_multiplier: float = Field(default=8.0, ge=1.0, le=100.0)
     agent_max_findings: int = Field(default=200, ge=1, le=10_000)
     agent_max_links: int = Field(default=300, ge=1, le=10_000)
     agent_max_notes: int = Field(default=500, ge=1, le=20_000)
@@ -208,6 +216,9 @@ class Settings(BaseModel):
     # VPN ranges). Unset, the default RFC 1918 and reserved ranges are used and labelled as the default.
     internal_networks: list[str] = []
     external_networks: list[str] = []
+    # The hunt whose resolved agent budget these settings carry (romulus.agent.hunt_budget.hunt_settings): its
+    # limits are then read as they are, never resolved again. Not configuration: never read from the environment.
+    _budget_hunt: str = PrivateAttr(default="")
 
     @field_validator("es_index_patterns", "pcap_allowed_dirs", "model_local_hosts", "internal_networks",
                      "external_networks", "es_read_only_roles", mode="before")
@@ -349,6 +360,7 @@ ENV_MAP = {
     "ROMULUS_BASELINE_CARRY_DISK_GB": "baseline_carry_disk_gb",
     "ROMULUS_EXPANSION_MAX_SOURCE_QUERIES": "expansion_max_source_queries",
     "ROMULUS_EXPANSION_WALL_CLOCK_MINUTES": "expansion_wall_clock_minutes",
+    "ROMULUS_HUNT_STOP_GRACE_SECONDS": "hunt_stop_grace_seconds",
     "ROMULUS_ZEEK_VISIBILITY_DISK_MB": "zeek_visibility_disk_mb",
     "ROMULUS_ZEEK_VISIBILITY_MAX_PAGES": "zeek_visibility_max_pages",
     "ROMULUS_ZEEK_VISIBILITY_DEADLINE_SECONDS": "zeek_visibility_deadline_seconds",
@@ -379,6 +391,7 @@ ENV_MAP = {
     "AGENT_MAX_HYPOTHESES": "agent_max_hypotheses",
     "AGENT_MAX_SESSIONS_PER_HYPOTHESIS": "agent_max_sessions_per_hypothesis",
     "AGENT_ASSESS_RESERVE_FRACTION": "agent_assess_reserve_fraction",
+    "AGENT_BUDGET_CEILING_MULTIPLIER": "agent_budget_ceiling_multiplier",
     "AGENT_MAX_FINDINGS": "agent_max_findings", "AGENT_MAX_LINKS": "agent_max_links",
     "AGENT_MAX_NOTES": "agent_max_notes",
     "AGENT_TRIAGE": "agent_triage",

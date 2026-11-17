@@ -54,6 +54,58 @@ def _ai_agent_line(result: dict) -> str:
     return line
 
 
+# --agent-* override flag -> agent limit (romulus.agent.hunt_budget.LIMITS)
+BUDGET_FLAGS = {"agent_max_calls": "max_calls", "agent_max_tokens": "max_tokens",
+                "agent_max_cost_usd": "max_cost_usd", "agent_max_source_queries": "max_source_queries",
+                "agent_max_initial_hypotheses": "max_initial_hypotheses", "agent_max_hypotheses": "max_hypotheses",
+                "agent_max_sessions_per_hypothesis": "max_sessions_per_hypothesis",
+                "agent_max_tool_calls_per_session": "max_tool_calls_per_session"}
+
+
+def _cli_user() -> str:
+    return os.environ.get("USER") or os.environ.get("USERNAME") or "cli"
+
+
+def _cli_role(args, repo) -> tuple[str, str]:
+    """(actor, role) for a budget choice: an operator's choices stay within the site ceiling unless a lead account
+    (--user, with its password) is authenticated."""
+    if not getattr(args, "user", None):
+        return f"cli:{_cli_user()}", "analyst"
+    import getpass
+
+    from romulus.web.auth import RateLimiter, verify
+    account = verify(repo.engine, args.user, getpass.getpass("Password: "), "local-cli", RateLimiter())
+    if account is None:
+        raise PermissionError("an active account is required")
+    return f"cli:{account['username']}", account["role"]
+
+
+def _overrides(args) -> dict:
+    out = {limit: getattr(args, flag) for flag, limit in BUDGET_FLAGS.items() if getattr(args, flag, None) is not None}
+    if getattr(args, "agent_minutes", None) is not None:
+        out["max_wall_seconds"] = int(args.agent_minutes * 60)
+    return out
+
+
+def _agent_budget(args, s, repo) -> dict:
+    """The budget a new hunt pins: a grant the web checked (--budget-grant), else --effort and the override flags."""
+    from romulus.agent import hunt_budget
+    from romulus.hunt.controls import GRANT_MAX_AGE_SECONDS
+    grant_id = getattr(args, "budget_grant", None)
+    if grant_id:
+        grant = repo.consume_budget_grant(grant_id, max_age_seconds=GRANT_MAX_AGE_SECONDS)
+        if grant is None:
+            raise hunt_budget.BudgetRefused("the budget grant is unknown or expired; start the hunt again")
+        choice = grant["choice"]
+        # checked again here: the ceiling and maxima in force now, for the role the web verified
+        return hunt_budget.choose(s, choice["profile"], choice["overrides"], role=grant["role"],
+                                  chosen_by=grant["created_by"])
+    actor, role = _cli_role(args, repo)
+    return hunt_budget.choose(s, getattr(args, "effort", None) or hunt_budget.DEFAULT_PROFILE, _overrides(args),
+                              role=role,
+                              chosen_by=actor)
+
+
 def _parse_time(value: str, tz: str):
     from datetime import UTC, datetime
     from zoneinfo import ZoneInfo
@@ -66,6 +118,8 @@ def _parse_time(value: str, tz: str):
 def cmd_hunt(args) -> int:
     import logging
 
+    from romulus.agent.hunt_budget import BudgetRefused
+    from romulus.hunt.controls import ControlRefused, worker
     from romulus.hunt.run import (
         AgentModelMismatch,
         ai_agent_entry,
@@ -86,23 +140,29 @@ def cmd_hunt(args) -> int:
     if force_model and args.action != "resume":
         print("--force-model applies only to hunt resume", file=sys.stderr)
         return EXIT_USAGE
+    if args.action in ("stop", "extend"):
+        return _hunt_control(args, s)
     if args.action == "start":
         from romulus.hunt.run import _lease_seconds
         from romulus.store.db import maintenance_lease
         requested = True if args.agent else False if args.no_agent else None
         start, end = _parse_time(args.start, s.mission_timezone), _parse_time(args.end, s.mission_timezone)
-        user = os.environ.get("USER") or os.environ.get("USERNAME") or "cli"
+        user = _cli_user()
         hid = None
         try:
             repo = open_repo(s)
+            agent_budget = _agent_budget(args, s, repo)
             with maintenance_lease(repo.engine, wait_seconds=30, allow_nested=True, on_wait=lambda: print(
                     "Waiting up to 30 seconds for database maintenance before creating the hunt...", file=sys.stderr,
                     flush=True)):
                 hid = create_hunt(s, start, end, created_by=f"cli:{user}", style=args.style,
                                   hypothesis=args.hypothesis or "",
                                   original_input={"start": args.start, "end": args.end, "tz": s.mission_timezone},
-                                  expand=not args.no_expand, ai_agent=requested)
+                                  expand=not args.no_expand, ai_agent=requested, agent_budget=agent_budget)
                 owner = repo.claim_hunt(hid, _lease_seconds(s))["lease_owner"]
+        except (PermissionError, EOFError) as e:
+            print(f"hunt not created: {e}", file=sys.stderr)
+            return EXIT_FAIL
         except (ValueError, RuntimeError) as e:
             if hid is None:
                 print(f"hunt not created: {e}", file=sys.stderr)
@@ -120,7 +180,8 @@ def cmd_hunt(args) -> int:
         def show(c):
             if c["lane"] in ("urgent", "high"):
                 print(f"  [{c['lane'].upper():6}] {c['rule_id']}: {c['claim'][:180]}", flush=True)
-        res = run_hunt(s, hid, on_candidate=show, expand=not args.no_expand, claimed_owner=owner)
+        with worker(repo, hid, "hunt start"):
+            res = run_hunt(s, hid, on_candidate=show, expand=not args.no_expand, claimed_owner=owner)
         print(json.dumps(res, indent=2, default=str) if args.json else
               f"done: {res['execution_state']} {res['detection_result']} lanes={res['lanes']} "
               f"stats={ {k: v for k, v in res['stats'].items() if k != 'skips'} }\n" + _ai_agent_line(res))
@@ -129,10 +190,19 @@ def cmd_hunt(args) -> int:
         if args.agent or args.no_agent:
             print("resume uses the agent request recorded on the hunt", file=sys.stderr)
             return EXIT_FAIL
+        from contextlib import ExitStack
         try:
-            result = resume_hunt(s, args.hunt_id, force_model=force_model)
-        except AgentModelMismatch as exc:
+            with ExitStack() as stack:
+                repo = open_repo(s)
+                # the worker is recorded only once the resume holds the lease
+                result = resume_hunt(s, args.hunt_id, force_model=force_model, continue_agent=args.agent_only,
+                                     actor=f"cli:{_cli_user()}", on_claimed=lambda: stack.enter_context(
+                                         worker(repo, args.hunt_id, "hunt resume")))
+        except (AgentModelMismatch, ControlRefused, BudgetRefused) as exc:
             print(str(exc), file=sys.stderr)
+            return EXIT_FAIL
+        except (ValueError, RuntimeError, KeyError) as exc:
+            print(f"hunt {args.hunt_id} not resumed: {exc}", file=sys.stderr)
             return EXIT_FAIL
         if args.json:
             print(json.dumps(result, indent=2, default=str))
@@ -154,6 +224,64 @@ def cmd_hunt(args) -> int:
                       f"lanes={repo.lane_counts(h['id'])} " + _stage_status(repo, h["id"], agent))
         return EXIT_OK
     return EXIT_USAGE
+
+
+def _hunt_control(args, s) -> int:
+    """`hunt stop` and `hunt extend`. The command line runs on the server under the service account, so its operator
+    may stop any hunt; an extension stays within the site ceiling unless a lead account is authenticated (--user)."""
+    from romulus.agent.hunt_budget import BudgetRefused
+    from romulus.hunt.controls import ControlRefused, extend_budget, force_stop, request_stop, worker
+    from romulus.hunt.run import AgentModelMismatch, open_repo, resume_hunt
+    repo = open_repo(s)
+    actor = f"cli:{_cli_user()}"
+    try:
+        if repo.get_hunt(args.hunt_id) is None:
+            print(f"unknown hunt: {args.hunt_id}", file=sys.stderr)
+            return EXIT_FAIL
+        if args.action == "stop":
+            if args.force:
+                done = force_stop(s, repo, args.hunt_id, actor=actor, role="lead")
+                print(f"hunt {args.hunt_id}: worker process {done['pid']} "
+                      + ("ended" if done["signalled"] else "had already ended")
+                      + f"; left resumable ({', '.join(f'{k} {v}' for k, v in done['changed'].items()) or 'unchanged'})")
+                return EXIT_OK
+            row = request_stop(repo, args.hunt_id, scope="agent" if args.agent_only else "hunt", actor=actor,
+                               role="lead")
+            print(f"hunt {args.hunt_id}: stop of the {'AI agent' if row['scope'] == 'agent' else 'hunt'} "
+                  + ("already requested" if row.get("existing") else "requested")
+                  + f" by {row['requested_by']}; the run stops at its next safe point. If it has not stopped within "
+                  f"{s.hunt_stop_grace_seconds} s, `romulus hunt stop {args.hunt_id} --force` ends its process.")
+            return EXIT_OK
+        actor, role = _cli_role(args, repo)
+        amounts = {"max_calls": args.calls, "max_tokens": args.tokens, "max_source_queries": args.source_queries,
+                   "max_cost_usd": args.cost_usd,
+                   "max_wall_seconds": int(args.minutes * 60) if args.minutes is not None else None}
+        amounts = {key: value for key, value in amounts.items() if value is not None}
+        # the service account may extend any hunt; its totals stay within the ceiling unless --user is a lead
+        done = extend_budget(s, repo, args.hunt_id, actor=actor, role=role, profile=args.effort,
+                             amounts=amounts or None, control_role="lead")
+        print(f"hunt {args.hunt_id}: agent budget extended by {done['extension']['amounts']}; limits now "
+              + ", ".join(f"{key}={value}" for key, value in done["limits"].items()))
+        if done["running"]:
+            print("the hunt is running: its agent uses the added calls, tokens and time from its next model call, "
+                  "and added source queries from its next session")
+            return EXIT_OK
+        if args.no_continue:
+            print(f"continue the agent with `romulus hunt resume {args.hunt_id} --agent-only`")
+            return EXIT_OK
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            result = resume_hunt(s, args.hunt_id, continue_agent=True, actor=actor, on_claimed=lambda: stack.enter_context(
+                worker(repo, args.hunt_id, "hunt extend")))
+        print(json.dumps(result, indent=2, default=str) if args.json else
+              f"continued: {result['execution_state']}\n" + _ai_agent_line(result))
+        return EXIT_OK
+    except (ControlRefused, BudgetRefused, AgentModelMismatch, PermissionError, EOFError) as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_FAIL
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_FAIL
 
 
 def cmd_findings(args) -> int:
@@ -288,7 +416,10 @@ def cmd_triage(args) -> int:
         return EXIT_FAIL
     summary = None
     if not args.no_run:
-        summary = run_triage(settings, repo, args.hunt_id, force=args.force, model=args.agent_model)
+        from romulus.agent.hunt_budget import hunt_settings
+        # the triage limits the hunt pinned when it was created
+        summary = run_triage(hunt_settings(settings, repo, args.hunt_id), repo, args.hunt_id, force=args.force,
+                             model=args.agent_model)
         print(json.dumps(summary, indent=2, default=str) if args.json else
               f"AI triage: {summary.get('status')}" + (f" ({summary['reason']})" if summary.get("reason") else "")
               + ("; reused the stored pass with the same prompt digest" if summary.get("reused") else "")
@@ -494,6 +625,9 @@ def _stage_status(repo, hunt_id: str, agent: dict) -> str:
             ).group_by(t.agent_hypothesis.c.status).order_by(t.agent_hypothesis.c.status))
             parts.append("hypotheses=" + (",".join(f"{status}:{count}" for status, count in counts) or "none"))
         parts.append(f"agent_findings={repo.agent_cap_count(hunt_id, 'agent_finding')}")
+    stop = repo.latest_stop(hunt_id)
+    if stop is not None and stop["state"] in ("requested", "honored", "forced"):
+        parts.append(f"stop={stop['scope']}:{stop['state']} by {stop['requested_by']}")
     return " ".join(parts)
 
 
@@ -507,7 +641,7 @@ def main(argv: list[str] | None = None) -> int:
     dop = sub.add_parser("doctor", help="check sources, privileges, model endpoint, tools and storage")
     dop.add_argument("--agent-model", help=model_help)
     hp = sub.add_parser("hunt", help="create/run hunts and show status")
-    hp.add_argument("action", choices=["start", "resume", "status"])
+    hp.add_argument("action", choices=["start", "resume", "status", "stop", "extend"])
     hp.add_argument("hunt_id", nargs="?")
     hp.add_argument("--start")
     hp.add_argument("--end")
@@ -521,6 +655,37 @@ def main(argv: list[str] | None = None) -> int:
     hp.add_argument("--force-model", action="store_true",
                     help="resume: let the agent continue with a different model than the hunt recorded")
     hp.add_argument("--no-expand", action="store_true", help=argparse.SUPPRESS)
+    budget = hp.add_argument_group(
+        "AI agent budget", "start: the budget pinned for the hunt's agent (a profile, and limits that replace its "
+        "values); extend: the budget added to a hunt's agent (amounts, or a profile to raise every limit to). The "
+        "limits stay within the site ceiling (AGENT_BUDGET_CEILING_MULTIPLIER) unless --user authenticates a lead")
+    budget.add_argument("--effort", choices=["quick", "standard", "deep"],
+                        help="the agent's budget profile (not the model's thinking effort, AGENT_EFFORT): quick, "
+                             "standard (the .env limits) or deep")
+    budget.add_argument("--agent-max-calls", type=int, help="start: model calls for the hunt's agent")
+    budget.add_argument("--agent-max-tokens", type=int, help="start: budget tokens for the hunt's agent")
+    budget.add_argument("--agent-minutes", type=float, help="start: the agent's wall clock, in minutes")
+    budget.add_argument("--agent-max-cost-usd", type=float, help="start: the agent's cost budget (USD)")
+    budget.add_argument("--agent-max-source-queries", type=int, help="start: the agent's source queries")
+    budget.add_argument("--agent-max-initial-hypotheses", type=int, help="start: hypotheses the agent opens first")
+    budget.add_argument("--agent-max-hypotheses", type=int, help="start: hypotheses in all")
+    budget.add_argument("--agent-max-sessions-per-hypothesis", type=int, help="start: sessions per hypothesis")
+    budget.add_argument("--agent-max-tool-calls-per-session", type=int, help="start: tool calls per session")
+    budget.add_argument("--calls", type=int, help="extend: model calls to add")
+    budget.add_argument("--tokens", type=int, help="extend: budget tokens to add")
+    budget.add_argument("--minutes", type=float, help="extend: wall-clock minutes to add")
+    budget.add_argument("--source-queries", type=int, help="extend: source queries to add")
+    budget.add_argument("--cost-usd", type=float, help="extend: cost budget (USD) to add")
+    budget.add_argument("--no-continue", action="store_true",
+                        help="extend: record the extension without continuing the agent now")
+    budget.add_argument("--user", help="a lead account (its password is asked) to go above the site ceiling")
+    budget.add_argument("--budget-grant", help=argparse.SUPPRESS)
+    hp.add_argument("--agent-only", action="store_true",
+                    help="resume: continue only the AI agent from its persisted state (never a deterministic stage); "
+                         "stop: stop only the AI agent (the deterministic hunt keeps running)")
+    hp.add_argument("--force", action="store_true",
+                    help="stop: end the hunt's worker process when a stop requested more than "
+                         "ROMULUS_HUNT_STOP_GRACE_SECONDS ago has not taken effect")
     ap = sub.add_parser("agent", help="run an AI assessment for a stored hunt")
     agent_actions = ap.add_subparsers(dest="action", required=True)
     reassess = agent_actions.add_parser("reassess", help="store a new assessment and report revision")
@@ -593,8 +758,15 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     if args.cmd == "hunt" and args.action == "start" and not (args.start and args.end):
         p.error("hunt start needs --start and --end")
-    if args.cmd == "hunt" and args.action == "resume" and not args.hunt_id:
-        p.error("hunt resume needs a hunt id")
+    if args.cmd == "hunt" and args.action in ("resume", "stop", "extend") and not args.hunt_id:
+        p.error(f"hunt {args.action} needs a hunt id")
+    if args.cmd == "hunt" and args.action == "extend" and not (
+            args.effort or any(getattr(args, name) is not None
+                               for name in ("calls", "tokens", "minutes", "source_queries", "cost_usd"))):
+        p.error("hunt extend needs --calls, --tokens, --minutes, --source-queries, --cost-usd or --effort")
+    if args.cmd == "hunt" and args.action == "extend" and args.effort and any(
+            getattr(args, name) is not None for name in ("calls", "tokens", "minutes", "source_queries", "cost_usd")):
+        p.error("hunt extend takes amounts or --effort, not both")
     handlers = {"doctor": cmd_doctor, "hunt": cmd_hunt, "agent": cmd_agent, "triage": cmd_triage,
                 "findings": cmd_findings, "report": cmd_report,
                 "user": cmd_user, "web": cmd_web, "db": cmd_db,
