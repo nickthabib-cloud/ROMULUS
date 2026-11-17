@@ -8,7 +8,13 @@ from datetime import UTC, datetime
 
 from romulus.agent import context
 from romulus.agent.aliases import AliasBook
-from romulus.agent.context import SessionResults, prompt_composition, result_token_cap
+from romulus.agent.context import (
+    SessionResults,
+    compact_threshold,
+    prompt_composition,
+    result_token_cap,
+    session_tag,
+)
 from romulus.agent.investigate import _BudgetGate, _prompt_set, _run_session
 from romulus.agent.provider import AgentBudget, BudgetLimits
 from romulus.agent.provider.base import ChatRequest, ToolCall, Usage, estimate_tokens
@@ -90,16 +96,28 @@ def _cached_reply(calls):
     """A reply whose usage says the prompt was read from the cache but for its last 1,000 tokens."""
     def answer(request):
         prompt = estimate_tokens(request.prompt_text())
-        result = response(tool_calls=calls)
+        result = response(tool_calls=calls(request) if callable(calls) else calls)
         result.usage = Usage(prompt, 200, max(0, prompt - 1000), min(prompt, 1000))
         return result
     return answer
 
 
+def _handle_of(request, call_id: str) -> str:
+    """The handle the model was shown for the result of `call_id`: its stub's, or its first page's."""
+    content = json.loads(next(m["content"] for m in request.messages if m.get("tool_call_id") == call_id))
+    # a result shown whole and never compacted names no handle: a guess, which the session refuses
+    return content.get("handle") or (content.get("paged") or {}).get("handle") or "R1"
+
+
+def _get_result(call_id: str, of: str, page: int):
+    """A get_result call for the result of call `of`, by the handle the conversation names (handles are per session)."""
+    return lambda request: [ToolCall(call_id, "get_result", {"handle": _handle_of(request, of), "page": page}, "{}")]
+
+
 def _script(anchor, evidence, hypothesis):
     query = {"anchor": anchor, "source": "net-a", "query": {"wildcard": {"process.command_line": {"value": "*-enc*"}}}}
     steps = [[ToolCall(f"q{i}", "query_source", query, json.dumps(query))] for i in range(1, CALLS + 1)]
-    steps.append([ToolCall("g1", "get_result", {"handle": "R1", "page": 1}, "{}")])
+    steps.append(_get_result("g1", "q1", 1))
     update = {"hypothesis": hypothesis, "add_support": [evidence], "note": "Encoded PowerShell seen on the host."}
     steps.append([ToolCall("u1", "update_hypothesis", update, json.dumps(update))])
     steps.append([ToolCall("f1", "finish_session", {"summary": "Followed the encoded PowerShell lead."}, "{}")])
@@ -195,7 +213,9 @@ def test_a_stub_keeps_the_leads_and_the_compacted_result_is_reread_redacted(tmp_
     repo, provider, _outcome, _sizes, produced, _reserved, evidence, settings = _run(tmp_path)
     final = provider.requests[-1].messages
     stub = json.loads(next(m["content"] for m in final if m.get("tool_call_id") == "q1"))
-    assert stub["handle"] == "R1" and stub["tool"] == "query_source" and stub["status"] == "complete"
+    # handles are per session: the call's number and the session's tag
+    handle = "R1-" + session_tag(repo.agent_sessions("h1")[0]["id"])
+    assert stub["handle"] == handle and stub["tool"] == "query_source" and stub["status"] == "complete"
     assert stub["aliases"] == [evidence] and stub["kept"] == {"evidence": 1, "raw_records": 0}
     assert stub["negative"] == "matches_found" and stub["total"] == 40 and stub["cursor"] == "P" + "0" * 19 + "1"
     assert stub["next_chunk"].endswith("chunk_index=2") and "wildcard" in stub["arguments"]
@@ -204,8 +224,9 @@ def test_a_stub_keeps_the_leads_and_the_compacted_result_is_reread_redacted(tmp_
     # the re-read is the stored result's own text, with the secret removed
     reread = json.loads(next(m["content"] for m in final if m.get("tool_call_id") == "g1"))
     expected = redact_text(json.dumps(produced[0], sort_keys=True, ensure_ascii=False, default=str), settings)
-    assert reread["status"] == "complete" and reread["data"]["handle"] == "R1"
-    assert reread["data"]["pages"] == 1 and reread["data"]["text"] == expected
+    assert reread["status"] == "complete" and reread["data"]["handle"] == handle
+    assert reread["data"]["page"] == 1 and expected.startswith(reread["data"]["text"])
+    assert len(reread["data"]["text"]) > len(expected) / 2
     assert SECRET not in reread["data"]["text"] and "powershell" in reread["data"]["text"]
     # the alias the first result issued, compacted long before, is cited after the compactions
     calls = {row["seq"]: row for row in repo.agent_tool_calls("h1")}
@@ -443,34 +464,39 @@ def test_a_session_pages_an_oversized_result_counts_its_secrets_and_bounds_rerea
     def script(anchor, _evidence, _hypothesis):
         query = {"anchor": anchor, "source": "net-a", "query": {"match_all": {}}}
         steps = [[ToolCall("q1", "query_source", query, json.dumps(query))]]
-        steps += [[ToolCall(f"g{page}", "get_result", {"handle": "R1", "page": page}, "{}")] for page in (1, 2, 3, 4)]
+        # a model that keeps re-reading: thirty pages asked for, with an allowance of three
+        steps += [_get_result(f"g{n}", "q1", min(n, 4)) for n in range(1, 31)]
         steps.append([ToolCall("f1", "finish_session", {"summary": "Paged through the large result."}, "{}")])
         return [_cached_reply(calls) for calls in steps]
     settings = _settings(tmp_path, agent_max_tool_calls_per_session=3)
-    repo, provider, outcome, sizes, *_ = _run(tmp_path, script, settings=settings, rows_per_result=9)
-    assert outcome["state"] == "finished"
+    repo, provider, outcome, _sizes, *_ = _run(tmp_path, script, settings=settings, rows_per_result=9)
     entered = provider.requests[1].messages[-1]["content"]
     first = json.loads(entered)
+    handle = first["paged"]["handle"]
     assert first["paged"]["page"] == 1 and first["paged"]["pages"] >= 4 and first["aliases"]
     assert len(entered) <= SessionResults(settings, context_tokens=1_000_000).cap_chars
     # the secrets removed before the paged result entered are counted once, for the call that sent it
     calls = repo.model_calls("h1")
     assert calls[1]["options"]["redactions"] == {"ES_PASSWORD": 9}
     assert all("redactions" not in call["options"] for n, call in enumerate(calls) if n != 1)
-    # re-reads have their own allowance (the session's reads): the fourth is refused, and no source read is spent
+    # re-reads have their own allowance (the session's reads), spend no source read, and close like the others: the
+    # model is told, and a reply that makes only a refused re-read ends the session capped
+    assert "Tool-call limit reached for re-read tools" in provider.requests[4].messages[-1]["content"]
+    assert len(provider.requests) == 5
+    assert outcome["state"] == "capped" and outcome["reason"] == (
+        "tool-call limit reached and the reply used no remaining tool")
     rows = sorted(repo.agent_tool_calls("h1"), key=lambda row: row["seq"])
     assert [(row["name"], row["status"]) for row in rows] == [
         ("query_source", "complete"), ("get_result", "complete"), ("get_result", "complete"),
-        ("get_result", "complete"), ("get_result", "refused"), ("finish_session", "complete")]
+        ("get_result", "complete"), ("get_result", "refused")]
     assert rows[4]["refusal_reasons"] == ["$: reread_call_limit"]
     # a re-read page is compacted like a result, to a stub that names the same page
     final = provider.requests[-1].messages
     stub = json.loads(next(m["content"] for m in final if m.get("tool_call_id") == "g1"))
-    assert stub == {"compacted": "a re-read of R1 page 1; get_result handle=R1 page=1 shows it again",
-                    "handle": "R1", "page": 1, "pages": first["paged"]["pages"], "tool": "get_result",
+    assert stub == {"compacted": f"a re-read of {handle} page 1; get_result handle={handle} page=1 shows it again",
+                    "handle": handle, "page": 1, "pages": first["paged"]["pages"], "tool": "get_result",
                     "of_tool": "query_source"}
     assert SECRET not in json.dumps([m.get("content") for m in final])
-    assert sizes[-1] < sizes[2] + 2_000
 
 
 def test_text_heavy_in_escapes_never_makes_a_page_larger_than_the_cap(tmp_path):
@@ -486,3 +512,77 @@ def test_text_heavy_in_escapes_never_makes_a_page_larger_than_the_cap(tmp_path):
     assert all(len(json.dumps(text, ensure_ascii=False)) <= results.page_chars for text in texts)
     assert "".join(texts) == redact_text(json.dumps(heavy, sort_keys=True, ensure_ascii=False), settings)
     results.close()
+
+
+def test_a_reread_of_a_result_that_fits_is_paged_within_the_cap_too(tmp_path):
+    settings = _settings(tmp_path)
+    results = SessionResults(settings, context_tokens=1_000_000)
+    heavy = {"status": "complete", "data": {"rows": "\\\"" * (results.cap_chars // 4 - 50)}}
+    handle, content = results.enter(1, "query_source", {}, heavy, set())
+    # it fits, so it enters whole as before; escaped again inside a re-read it would be about twice the cap
+    assert content == json.dumps(heavy, sort_keys=True, ensure_ascii=False) and len(content) <= results.cap_chars
+    pages = results.entries[handle].pages
+    assert pages >= 2
+    texts = [results.page(handle, n) for n in range(1, pages + 1)]
+    assert all(len(json.dumps(page, ensure_ascii=False)) <= results.cap_chars for page in texts)
+    assert "".join(page["text"] for page in texts) == content
+    results.close()
+
+
+def test_the_compaction_threshold_is_at_most_a_quarter_of_a_small_context(tmp_path):
+    assert compact_threshold(0) == compact_threshold(1_000_000) == context.COMPACT_AFTER_TOKENS
+    assert compact_threshold(32_000) == 8_000
+    results = SessionResults(_settings(tmp_path), context_tokens=32_000)
+    messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"},
+                {"role": "assistant", "content": None, "tool_calls": []}]
+    for n in range(1, 11):     # ten paged results of about 2,000 tokens: 12,000 stale tokens past the kept four
+        handle, content = results.enter(n, "query_source", {}, _query_result(n, "E1"), {"E1"})
+        messages.append({"role": "tool", "tool_call_id": f"c{n}", "content": content})
+        results.track(len(messages) - 1, handle)
+    messages.append({"role": "assistant", "content": None, "tool_calls": []})
+    assert results.compact(messages) == 6
+    results.close()
+
+
+def test_a_lone_surrogate_is_stored_and_read_back_unchanged(tmp_path):
+    results = SessionResults(_settings(tmp_path))
+    odd = {"status": "complete", "data": {"text": "before \ud800 after " + "x" * 50_000}}
+    handle, content = results.enter(1, "query_source", {}, odd, set())
+    text = json.dumps(odd, sort_keys=True, ensure_ascii=False)
+    pages = [results.page(handle, n)["text"] for n in range(1, results.entries[handle].pages + 1)]
+    assert "".join(pages) == text and "\ud800" in pages[0]
+    assert json.loads(content)["paged"]["text"] == pages[0]
+    results.close()
+
+
+def test_a_paged_envelope_and_a_stub_keep_where_the_safety_flags_are(tmp_path):
+    results = SessionResults(_settings(tmp_path))
+    flagged = _query_result(1, "E1")
+    flagged["data"]["safety_flags"] = [{"code": "A7", "path": f"$.data.result.rows[{i}]", "detections": ["x"],
+                                        "reason": "untrusted data contains instruction-shaped content"}
+                                       for i in range(12)]
+    flagged["data"]["result"]["search"]["rows_and_aggregations"]["text"] = "".join(_rows(i) for i in range(4))
+    handle, content = results.enter(1, "query_source", {}, flagged, {"E1"})
+    shown = json.loads(content)
+    assert "paged" in shown and shown["safety_flags"] == 12
+    assert shown["safety_flag_paths"] == [f"$.data.result.rows[{i}]" for i in range(10)]
+    assert json.loads(results.entries[handle].stub)["safety_flag_paths"] == shown["safety_flag_paths"]
+    results.close()
+
+
+def test_handles_are_per_session(tmp_path):
+    settings = _settings(tmp_path)
+    one, two = (SessionResults(settings, tag=session_tag(name)) for name in ("as-one", "as-two"))
+    handle, _content = one.enter(1, "query_source", {}, _query_result(1, "E1"), {"E1"})
+    other, _content = two.enter(1, "query_source", {}, _query_result(1, "E1"), {"E1"})
+    assert handle != other and handle.startswith("R1-") and other.startswith("R1-")
+    toolbox = Toolbox(_repo_with_finding()[0], "h1")
+    toolbox.results = two
+    assert toolbox.execute("get_result", {"handle": other})["status"] == "complete"
+    for foreign in (handle, "R1"):
+        refused = toolbox.execute("get_result", {"handle": foreign})
+        assert refused["status"] == "refused" and refused["data"]["error"]["code"] == "unknown_handle"
+        assert "handles are per session" in refused["data"]["error"]["message"]
+        assert other.split("-")[1] in refused["data"]["error"]["message"]
+    one.close()
+    two.close()

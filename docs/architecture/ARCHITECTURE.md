@@ -257,9 +257,9 @@ A resume clears the requests made before it claimed the hunt; one made after the
 ## Agent working context
 
 `agent/context.py`. An agent session's prompt is kept bounded however much it reads:
-- Every tool result is stored whole for the session (in memory, overflowing to a temporary file), with configured secrets removed, under a handle (`R<n>`). `get_result` re-reads it in pages without a source query.
+- Every tool result is stored whole for the session (in memory, overflowing to a temporary file), with configured secrets removed, under a handle (`R<n>-<session tag>`; handles are per session). `get_result` re-reads it in pages, each within the result cap as shown, without a source query. Re-reads have their own allowance (the session's reads); once it is spent the model is told, and a reply that makes only refused calls ends the session capped.
 - A result larger than one page (at most 10,000 estimated tokens, or 5 % of a smaller context) enters the conversation as its envelope (status, counts, what to read next, the aliases it issued) and its first page.
-- Once the results the model has already been sent, older than the latest four, reach 32,000 estimated tokens, all of them are replaced at once by stubs: the tool, its arguments, status, counts, negative statement, cursor and next chunk, and every alias the result issued (aliases stay issued, so they stay citable). A stub carries no telemetry text and never changes once written. The model's own turns and the results of the tools that record its work are never compacted.
+- Once the results the model has already been sent, older than the latest four, reach 32,000 estimated tokens (at most a quarter of a smaller context), all of them are replaced at once by stubs: the tool, its arguments, status, counts, negative statement, cursor and next chunk, and every alias the result issued (aliases stay issued, so they stay citable). A stub carries no telemetry text and never changes once written. The model's own turns and the results of the tools that record its work are never compacted.
 - Between compactions the conversation only grows at its end, so the provider's prompt cache keeps reading its prefix. The call after a compaction is reserved against the budget as written to the cache.
 
 ## Dependency rules (enforced by `archmap.py --check`)

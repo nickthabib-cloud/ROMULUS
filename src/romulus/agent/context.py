@@ -21,6 +21,7 @@ record its work are never compacted: they are its working memory.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import tempfile
@@ -42,6 +43,9 @@ KEEP_FULL_RESULTS = 4
 # rewrites below, more stale re-reads above); the lower end also keeps the largest prompt lower. With a provider that
 # bills cached input at the full price, compaction is pure saving, and this threshold only keeps it batched.
 COMPACT_AFTER_TOKENS = 32_000
+# For a model with a small context the threshold is at most this share of it, so compaction still runs well before
+# the context fills (the session wraps up at 85 % of it).
+COMPACT_CONTEXT_SHARE = 0.25
 # The most estimated tokens one tool result may add to the conversation: the smaller of this and RESULT_CONTEXT_SHARE
 # of the model's context, never under MIN_RESULT_TOKENS. It fits a query_source chunk (12 KB of rows and aggregations)
 # and a search page's telemetry allowance (24 KB) with their envelopes in one page; larger content is paged.
@@ -58,13 +62,24 @@ STUB_ALIASES = 200
 # How many characters of the call's arguments a stub repeats (the call itself stays in the model's own turn).
 STUB_ARGUMENT_CHARS = 400
 # The stored results of a session stay in memory up to this many bytes and overflow to a temporary file past it:
-# nothing a session read is dropped to bound memory. A session's results are bounded by its tool-call allowance.
+# nothing a session read is dropped to bound memory. The file is bounded by the session itself: it stores one result
+# per tool call the session runs or refuses, never a get_result page again. The calls run are at most its read
+# allowance (AGENT_MAX_TOOL_CALLS_PER_SESSION plus at most three times that for its cited findings or dossier pages)
+# plus its write allowance (four times AGENT_MAX_TOOL_CALLS_PER_SESSION) plus a few finish_session attempts; refused
+# calls are short refusals, and a reply that makes only refused calls ends the session. Each result is bounded by its
+# own tool's caps (a query_source page holds at most 64 KB of stored rows and aggregations, a search page 24 KB of
+# telemetry text), so at the default allowance a session's file stays within a few tens of megabytes, and it is
+# deleted when the session ends.
 STORE_MEMORY_BYTES = 8 * 1024 * 1024
 # The tools that record the session's work: their results are never stubbed.
 NEVER_COMPACTED = frozenset({"open_hypothesis", "update_hypothesis", "propose_finding", "propose_link", "add_note",
                              "request_rule", "finish_session"})
-HANDLE_PATTERN = r"^R[1-9][0-9]*$"
+# A handle: R, the call's number in its session, and the session's tag (handles are per session).
+HANDLE_PATTERN = r"^R[1-9][0-9]{0,5}(-[0-9a-f]{6})?$"
 _ALIAS_ORDER = re.compile(r"^([A-Z])([0-9]+)$")
+# How many safety flag paths an envelope or stub names; the rest are counted.
+FLAG_PATHS = 10
+FLAG_PATH_CHARS = 160
 
 
 def result_token_cap(context_tokens: int) -> int:
@@ -72,6 +87,18 @@ def result_token_cap(context_tokens: int) -> int:
     if not context_tokens:
         return RESULT_TOKEN_CAP
     return max(MIN_RESULT_TOKENS, min(RESULT_TOKEN_CAP, int(context_tokens * RESULT_CONTEXT_SHARE)))
+
+
+def compact_threshold(context_tokens: int) -> int:
+    """The estimated tokens of stale full results at which a compaction runs, for a model with this context."""
+    if not context_tokens:
+        return COMPACT_AFTER_TOKENS
+    return max(1, min(COMPACT_AFTER_TOKENS, int(context_tokens * COMPACT_CONTEXT_SHARE)))
+
+
+def session_tag(session_id: str) -> str:
+    """The short tag a session's result handles carry: six hexadecimal characters of its id."""
+    return hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:6]
 
 
 def _alias_key(alias: str) -> tuple:
@@ -139,8 +166,11 @@ class _Slot:
 class SessionResults:
     """One session's tool results: stored whole, entered bounded, re-read by handle, compacted in batches."""
 
-    def __init__(self, settings: Settings, *, context_tokens: int = 0):
+    def __init__(self, settings: Settings, *, context_tokens: int = 0, tag: str = ""):
         self.settings = settings
+        self.context_tokens = context_tokens
+        # the session's tag, which its handles carry so that a handle from another session is never read here
+        self.tag = tag
         self.cap_tokens = result_token_cap(context_tokens)
         self.cap_chars = int(self.cap_tokens * CHARS_PER_TOKEN)
         self.page_chars = max(1_000, int(self.cap_chars * PAGE_SHARE))
@@ -162,17 +192,20 @@ class SessionResults:
         """Store `result` (the result of call `seq` of the session, run as `tool` with `arguments`, which issued
         `aliases`) and return its handle and the content its tool message carries: the result's JSON as before when
         it fits one page, else its envelope and first page."""
-        handle = f"R{seq}"
+        handle = f"R{seq}-{self.tag}" if self.tag else f"R{seq}"
         text = json.dumps(result, sort_keys=True, ensure_ascii=False, default=str)
         counts: dict[str, int] = {}
         redacted = redact_counted(text, self.settings, counts)
-        encoded = redacted.encode("utf-8")
+        # surrogatepass: a lone surrogate in telemetry text is stored and read back as the same character, so the
+        # stored text and its pages are exactly what the conversation shows
+        encoded = redacted.encode("utf-8", errors="surrogatepass")
         self.store.seek(0, 2)
         offset = self.store.tell()
         self.store.write(encoded)
         shown = redact_value(json.loads(json.dumps(result, default=str)), self.settings)
+        # whether the result enters whole; its re-read pages are always cut to the page size as shown
         fits = len(text) <= self.cap_chars
-        bounds = [0, len(redacted)] if fits else _page_bounds(redacted, self.page_chars)
+        bounds = _page_bounds(redacted, self.page_chars)
         argument_text = _bounded(redact_text(json.dumps(arguments, sort_keys=True, ensure_ascii=False, default=str),
                                              self.settings), STUB_ARGUMENT_CHARS)
         envelope = self._envelope(tool, shown, sorted(aliases, key=_alias_key))
@@ -217,13 +250,15 @@ class SessionResults:
         """One page of a stored result's redacted JSON text, with the call that reads the next."""
         entry = self.entries.get(handle)
         if entry is None:
-            return {"error": {"code": "unknown_handle",
-                              "message": f"no result {handle} in this session; handles are R<n>, as stubs name them"}}
+            mine = f"R<n>-{self.tag}" if self.tag else "R<n>"
+            return {"error": {"code": "unknown_handle", "message": (
+                f"no result {handle} in this session: handles are per session, and this session's are {mine}, as "
+                "its stubs and pages name them; a result of an earlier session cannot be re-read")}}
         if page > entry.pages:
             return {"error": {"code": "page_out_of_range",
                               "message": f"result {handle} has {entry.pages} page(s)"}}
         self.store.seek(entry.offset)
-        text = self.store.read(entry.length).decode("utf-8")
+        text = self.store.read(entry.length).decode("utf-8", errors="surrogatepass")
         part = text[entry.bounds[page - 1]:entry.bounds[page]]
         return {"handle": handle, "tool": entry.tool, "arguments": entry.arguments, "page": page,
                 "pages": entry.pages, "encoding": "json", "text": part,
@@ -245,7 +280,7 @@ class SessionResults:
         kept = {id(slot) for slot in full[-KEEP_FULL_RESULTS:]} if KEEP_FULL_RESULTS else set()
         # a result the model has not been sent yet (after its last turn) is never stubbed
         candidates = [slot for slot in full if id(slot) not in kept and slot.index < last_assistant]
-        if sum(slot.tokens for slot in candidates) < COMPACT_AFTER_TOKENS:
+        if sum(slot.tokens for slot in candidates) < compact_threshold(self.context_tokens):
             return 0
         for slot in candidates:
             message = messages[slot.index]
@@ -270,8 +305,12 @@ class SessionResults:
         error = data.get("error")
         if isinstance(error, dict) and isinstance(error.get("code"), str):
             out["error_code"] = error["code"]
-        if data.get("safety_flags"):
-            out["safety_flags"] = len(data["safety_flags"])
+        flags = data.get("safety_flags")
+        if isinstance(flags, list) and flags:
+            out["safety_flags"] = len(flags)
+            # where the instruction-shaped text is (paths only, never the text), so a paged result keeps them
+            out["safety_flag_paths"] = [_bounded(str(flag.get("path")), FLAG_PATH_CHARS)
+                                        for flag in flags[:FLAG_PATHS] if isinstance(flag, dict)]
         inner = data.get("result") if isinstance(data.get("result"), dict) else {}
         if inner.get("cursor"):
             out["cursor"] = inner["cursor"]

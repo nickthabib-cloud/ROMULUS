@@ -340,8 +340,8 @@ GET_RESULT_DESCRIPTION = (
 
 
 class GetResultArgs(_Args):
-    handle: str = Field(pattern=r"^R[1-9][0-9]*$", max_length=12, description=(
-        "The result's handle (R...), as its stub or first page names it."))
+    handle: str = Field(pattern=r"^R[1-9][0-9]{0,5}(-[0-9a-f]{6})?$", max_length=16, description=(
+        "The result's handle (R...), exactly as its stub or first page names it; handles are per session."))
     page: int = Field(default=1, ge=1, description="Which page of the result's text, from 1.")
 
 

@@ -21,7 +21,7 @@ from romulus.agent.admission import (
     typed_alias_arguments,
 )
 from romulus.agent.assessment import SECRET_GUARD_SUMMARY, assess_output, run_assessment, template_assessment
-from romulus.agent.context import SessionResults, issued_in
+from romulus.agent.context import SessionResults, issued_in, session_tag
 from romulus.agent.dossier import build_dossier
 from romulus.agent.grounding import triage_context
 from romulus.agent.provider import (
@@ -750,6 +750,7 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
     # the session's tool results, stored whole and compacted in the conversation (romulus.agent.context)
     results: SessionResults | None = None
     reread_count = 0
+    rereads_closed = False
 
     def finish(state: str, final_summary: str, reason: str | None = None) -> dict:
         nonlocal counted
@@ -798,7 +799,8 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
         admission = AgentAdmission(settings, repo, hunt_id, session_id, hypothesis_id=hypothesis_id,
                                    owner_token=owner_token, purpose=purpose)
         admission.register(toolbox)
-        results = SessionResults(settings, context_tokens=provider.context_tokens() or settings.agent_context_tokens)
+        results = SessionResults(settings, context_tokens=provider.context_tokens() or settings.agent_context_tokens,
+                                 tag=session_tag(session_id))
         toolbox.results = results
         tools = _session_tools(toolbox)
         followable = None
@@ -993,7 +995,7 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 if context_wrap_sent:
                     return finish("context_full", _deterministic_tool_summary(tool_history, hypothesis_changes),
                                   "context wrap-up did not finish the session")
-                if reads_closed or writes_closed:
+                if reads_closed or writes_closed or rereads_closed:
                     return finish("capped", _deterministic_tool_summary(tool_history, hypothesis_changes),
                                   "tool-call wrap-up did not finish the session")
                 no_tool_misses += 1
@@ -1125,6 +1127,9 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
             if not writes_closed and write_count >= write_limit:
                 writes_closed = True
                 closing.append("write")
+            if not rereads_closed and reread_count >= call_limit:
+                rereads_closed = True
+                closing.append("re-read")
             if closing:
                 # a spent kind closes; the session may still use the other and must then finish
                 writes = ", ".join(sorted(name for name in WRITE_TOOLS if name in toolbox.registry))
@@ -1133,9 +1138,13 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 messages.append({"role": "user", "content": (
                     f"Tool-call limit reached for {' and '.join(closing)} tools in this session. "
                     + ("Only " + left + " remain. Record what you found, then call finish_session with a summary."
-                       if reads_closed else "Call finish_session with a summary when the remaining reads are done."))})
+                       if reads_closed else
+                       f"{REREAD_TOOL} is closed: rely on the stubs and what you recorded. "
+                       if closing == ["re-read"] else "")
+                    + ("" if reads_closed else
+                       "Call finish_session with a summary when the remaining reads are done."))})
                 continue
-            if (reads_closed or writes_closed) and finish_tried:
+            if (reads_closed or writes_closed or rereads_closed) and finish_tried:
                 if not finish_retried:
                     # finish_session was refused (its result says why): one corrected call is allowed
                     messages.append({"role": "user", "content": "finish_session was refused; its result says why. "
@@ -1144,7 +1153,7 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                     continue
                 return finish("capped", _deterministic_tool_summary(tool_history, hypothesis_changes),
                               "wrap_up_not_finished")
-            if (reads_closed or writes_closed) and not executed:
+            if (reads_closed or writes_closed or rereads_closed) and not executed:
                 return finish("capped", _deterministic_tool_summary(tool_history, hypothesis_changes),
                               "tool-call limit reached and the reply used no remaining tool")
     except Exception as exc:
