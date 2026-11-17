@@ -995,7 +995,8 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 if context_wrap_sent:
                     return finish("context_full", _deterministic_tool_summary(tool_history, hypothesis_changes),
                                   "context wrap-up did not finish the session")
-                if reads_closed or writes_closed or rereads_closed:
+                # a spent re-read allowance alone leaves reads open: a text-only reply gets the usual nudge
+                if reads_closed or writes_closed:
                     return finish("capped", _deterministic_tool_summary(tool_history, hypothesis_changes),
                                   "tool-call wrap-up did not finish the session")
                 no_tool_misses += 1
@@ -1144,7 +1145,7 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                     + ("" if reads_closed else
                        "Call finish_session with a summary when the remaining reads are done."))})
                 continue
-            if (reads_closed or writes_closed or rereads_closed) and finish_tried:
+            if (reads_closed or writes_closed) and finish_tried:
                 if not finish_retried:
                     # finish_session was refused (its result says why): one corrected call is allowed
                     messages.append({"role": "user", "content": "finish_session was refused; its result says why. "
