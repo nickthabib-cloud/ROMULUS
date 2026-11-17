@@ -845,14 +845,11 @@ _ACCOUNT_PAIRS = {"user.entity_id": ("user.name", "user.domain"),
 
 
 def _same_domain(left: str, right: str) -> bool:
-    """Two domain spellings of one domain, without case: equal, or a NetBIOS name and an FQDN whose first label it is
-    (CORP and corp.local)."""
+    """Whether two domain spellings can name one domain, without case. Two spellings of the same style (both NetBIOS,
+    or both FQDN) must be equal. A NetBIOS name and an FQDN never refute each other: a forest's NetBIOS name need not
+    be the FQDN's first label (CONTOSO and ad.contoso.com), and the record cannot tell which pairs belong together."""
     left, right = left.strip().rstrip(".").casefold(), right.strip().rstrip(".").casefold()
-    if left == right:
-        return True
-    if ("." in left) == ("." in right):
-        return False
-    return (left.split(".", 1)[0] if "." in left else left) == (right.split(".", 1)[0] if "." in right else right)
+    return left == right or ("." in left) != ("." in right)
 
 
 def _name_matches(name: str, domain: str | None, typed_name, typed_domain) -> bool:

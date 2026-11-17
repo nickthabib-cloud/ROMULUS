@@ -1301,7 +1301,7 @@ def _logon(record_id: int, *, sid: bool = True, domain: str = "CORP", name: str 
     # a sid-typed logon of CORP\\Administrator: another domain's name is refuted by its typed name and domain
     ("name:other\\administrator", [_logon(1)], 0),
     ("name:corp\\administrator", [_logon(1)], 1),
-    ("name:CORP.LOCAL\\Administrator", [_logon(1)], 1),       # a NetBIOS domain is its FQDN's first label
+    ("name:CORP.LOCAL\\Administrator", [_logon(1)], 1),       # NetBIOS and FQDN spellings never refute each other
     ("name:administrator", [_logon(1)], 1),                     # no domain searched: any domain's name
     ("name:other\\administrator", [_logon(1, domain="-")], 1),  # no typed domain: nothing refutes it
     # a name-typed logon (no sid): the same domain rules on its canonical name
@@ -1323,7 +1323,8 @@ def test_netbios_and_fqdn_spellings_of_one_domain_are_the_same_domain():
     assert pivot_module._same_domain("CORP", "corp.local")
     assert pivot_module._same_domain("corp.local.", "CORP")
     assert pivot_module._same_domain("corp.local", "CORP.LOCAL")
-    assert not pivot_module._same_domain("corp", "other.local")
+    assert pivot_module._same_domain("CONTOSO", "ad.contoso.com")       # a NetBIOS name need not be the first label
+    assert pivot_module._same_domain("corp", "other.local")             # so an FQDN never refutes a NetBIOS name
     assert not pivot_module._same_domain("corp.local", "corp.example")
     assert not pivot_module._same_domain("corp", "other")
 
