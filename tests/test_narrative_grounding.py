@@ -886,3 +886,87 @@ def test_the_extension_spends_from_the_pass_budget_and_stops_on_its_wall_clock()
     other = ta.FakeTriage(by_rules({}))
     other.model = "another-model"
     assert run_cited_triage(ta.settings(), repo, "h1", other, keys)["status"] == "skipped"
+
+
+def _untriaged(repo=None):
+    """`_reported_rows` after an in-phase pass that answered only IN_PHASE: r.q1-r.q3 have no verdict."""
+    repo = _reported_rows(repo)
+    run_triage_in_phase(ta.settings(), repo, "h1", owner_token=None, heartbeat=lambda: None,
+                        provider=ta.FakeTriage(by_rules(IN_PHASE, default=None)))
+    found = grounding.EvidenceStrength(repo, "h1", triage_context(latest_summary(repo, "h1"))).findings(
+        ["q-1", "q-2", "q-3"])
+    return repo, [found[item].group for item in ("q-1", "q-2", "q-3")]
+
+
+def test_a_partial_extension_says_so_and_counts_why():
+    from romulus.agent.triage import run_cited_triage
+    repo, keys = _untriaged()
+    # the model answers r.q1 only: r.q2 and r.q3 get no valid answer
+    done = run_cited_triage(ta.settings(), repo, "h1", ta.FakeTriage(by_rules({"r.q1": "likely_benign"},
+                                                                              default=None)), keys)
+    assert done["status"] == "partial" and done["triaged"] == 1 and done["targets"] == 3
+    assert done["reason"] == "no valid verdict for some cited groups"
+    summary = latest_summary(repo, "h1")
+    assert summary["status"] == "partial" and summary["groups"]["not_triaged_by_reason"] == {"no valid answer": 2}
+    assert summary["reason"] == "no valid answer" and summary["cited"]["triaged"] == 1
+
+
+def test_an_extension_is_skipped_when_the_pass_digest_or_order_changed():
+    from romulus.agent.triage import run_cited_triage
+    repo, keys = _untriaged()
+    first = latest_summary(repo, "h1")
+    # other settings than the pass ran with: another digest
+    changed = run_cited_triage(ta.settings(agent_triage_call_input_tokens=5000), repo, "h1",
+                               ta.FakeTriage(by_rules({})), keys)
+    assert changed["status"] == "skipped" and "cannot be extended" in changed["reason"]
+    # a finding stored after the pass: another order
+    ta._insert(repo, [ta._row("late-1", "r.late", lane="high", host="elsewhere")])
+    moved = run_cited_triage(ta.settings(), repo, "h1", ta.FakeTriage(by_rules({})), keys)
+    assert moved["status"] == "skipped" and "cannot be extended" in moved["reason"]
+    assert latest_summary(repo, "h1") == first
+
+
+def test_a_reground_failure_after_publishing_is_recorded_as_such(tmp_path, monkeypatch):
+    from romulus.agent import assessment
+
+    def broken(*_a, **_kw):
+        raise RuntimeError("store unavailable")
+    monkeypatch.setattr(assessment, "reground_narrative", broken)
+    repo, result, seen = _cited_phase(tmp_path, by_rules({}))
+    cited = result.as_dict()["ai_triage"]["cited"]
+    assert cited["status"] == "failed" and cited["reason"].startswith("reground_error: RuntimeError")
+    assert cited["triaged"] == 2 and cited["groups"] == 2
+    # the verdicts are published; the stored grounding is the assess-time one, and the mismatch is visible
+    assert latest_summary(repo, "h1")["cited"]["triaged"] == 2
+    assert repo.agent_assessments("h1") == [seen["before"]]
+
+
+def test_an_extension_resumes_from_every_billed_triage_call_of_the_pass(monkeypatch):
+    from romulus.agent.triage import TriageBudget, pass_billed, run_cited_triage
+    repo, keys = _untriaged()
+    first = latest_summary(repo, "h1")
+    assert first["usage_base"]["calls"] == 0 and first["usage"]["calls"] == 1
+
+    # an extension bills its call, then ends before publishing (a crash)
+    def crash(*_a, **_kw):
+        raise RuntimeError("crashed before publishing")
+    monkeypatch.setattr(repo, "publish_triage", crash)
+    with pytest.raises(RuntimeError):
+        run_cited_triage(ta.settings(), repo, "h1", ta.FakeTriage(by_rules({})), keys)
+    monkeypatch.undo()
+    assert latest_summary(repo, "h1") == first                     # nothing published: the snapshot says 1 call
+    billed = pass_billed(repo, "h1", first)
+    assert billed["calls"] == 2 and billed["prompt_tokens"] == 200 and billed["completion_tokens"] == 80
+    resumed = TriageBudget.resume(ta.settings(), first["usage"], billed=billed)
+    assert resumed.calls == 2 and resumed.input_tokens == 200 and resumed.output_tokens == 80
+    # so a pass allowed two calls has none left for another extension
+    from romulus.agent.provider import BudgetExhausted
+    with pytest.raises(BudgetExhausted) as stopped:
+        TriageBudget.resume(ta.settings(agent_triage_max_calls=2), first["usage"], billed=billed).check(100, 100)
+    assert stopped.value.budget == "calls"
+    # with room left, the next extension spends on top of every billed call
+    done = run_cited_triage(ta.settings(), repo, "h1", ta.FakeTriage(by_rules({})), keys)
+    assert done["status"] == "complete" and latest_summary(repo, "h1")["usage"]["calls"] == 3
+    # the pass's base stays the hunt's calls before it: the extension's calls are the pass's
+    assert latest_summary(repo, "h1")["usage_base"] == first["usage_base"]
+    assert latest_summary(repo, "h1")["rank_state"] == repo.rank_state("h1")

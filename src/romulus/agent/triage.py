@@ -148,18 +148,26 @@ class TriageBudget(AgentBudget):
                    max_output_tokens=s.agent_triage_max_output_tokens, clock=clock)
 
     @classmethod
-    def resume(cls, s: Settings, usage: dict, clock: Callable[[], float] = monotonic) -> TriageBudget:
-        """The budget a pass's recorded usage left: an extension of that pass spends from the same budget."""
+    def resume(cls, s: Settings, usage: dict, clock: Callable[[], float] = monotonic, *,
+               billed: dict | None = None) -> TriageBudget:
+        """The budget a pass left: an extension of that pass spends from the same budget. `usage` is the pass's
+        recorded snapshot; `billed` what the store holds for the pass's calls (`triage_totals` since the pass began),
+        which also counts calls billed by an extension that ended before publishing. Each counter takes the larger."""
+        billed = billed or {}
         budget = cls.from_settings(s, clock)
-        budget.calls = int(usage.get("calls") or 0)
-        budget.tokens = int(usage.get("tokens") or 0)
-        budget.budget_tokens = int(usage.get("budget_tokens") or budget.tokens)
-        budget.cost_usd = float(usage.get("cost_usd") or 0.0)
-        budget.estimated = bool(usage.get("usage_estimated"))
-        budget.wall_seconds_before = float(usage.get("wall_seconds") or 0.0)
-        budget.input_tokens = int(usage.get("input_tokens") or 0)
-        budget.budget_input_tokens = int(usage.get("budget_input_tokens") or budget.input_tokens)
-        budget.output_tokens = int(usage.get("output_tokens") or 0)
+        budget.calls = max(int(usage.get("calls") or 0), int(billed.get("calls") or 0))
+        budget.tokens = max(int(usage.get("tokens") or 0), int(billed.get("tokens") or 0))
+        budget.budget_tokens = max(int(usage.get("budget_tokens") or usage.get("tokens") or 0),
+                                   int(billed.get("budget_tokens") or 0))
+        budget.cost_usd = max(float(usage.get("cost_usd") or 0.0), float(billed.get("cost_usd") or 0.0))
+        budget.estimated = bool(usage.get("usage_estimated")) or bool(billed.get("estimated"))
+        budget.wall_seconds_before = max(float(usage.get("wall_seconds") or 0.0),
+                                         int(billed.get("model_ms") or 0) / 1000.0)
+        budget.input_tokens = max(int(usage.get("input_tokens") or 0), int(billed.get("prompt_tokens") or 0))
+        budget.budget_input_tokens = max(int(usage.get("budget_input_tokens") or usage.get("input_tokens") or 0),
+                                         int(billed.get("budget_tokens") or 0)
+                                         - int(billed.get("completion_tokens") or 0))
+        budget.output_tokens = max(int(usage.get("output_tokens") or 0), int(billed.get("completion_tokens") or 0))
         return budget
 
     def check(self, prompt_tokens_est: int, max_output_tokens: int) -> None:
@@ -336,6 +344,28 @@ def _titles(repo: Repo, hunt_id: str) -> dict[str, str]:
             hunt_rule_metadata(repo, manifest=hunt.get("manifest") or {}).items()}
 
 
+TOTAL_KEYS = ("calls", "tokens", "budget_tokens", "cost_usd", "model_ms", "prompt_tokens", "completion_tokens")
+
+
+def triage_totals(repo: Repo, hunt_id: str) -> dict:
+    """What the store holds for all of the hunt's triage calls (billed failures included)."""
+    usage = repo.agent_usage(hunt_id, purposes=(TRIAGE_PURPOSE,))
+    prompt, completion = repo.model_call_token_sums(hunt_id, (TRIAGE_PURPOSE,))
+    return {"calls": usage["calls"], "tokens": usage["tokens"], "budget_tokens": usage["budget_tokens"],
+            "cost_usd": usage["cost_usd"], "model_ms": usage.get("model_ms", 0), "estimated": usage["estimated"],
+            "prompt_tokens": prompt, "completion_tokens": completion}
+
+
+def pass_billed(repo: Repo, hunt_id: str, summary: dict) -> dict:
+    """What the store holds for one pass's calls: the hunt's triage calls since the pass began (`usage_base`), its
+    extensions and any extension that ended before publishing included. Empty for a pass recorded without a base."""
+    base = summary.get("usage_base")
+    if not isinstance(base, dict):
+        return {}
+    now = triage_totals(repo, hunt_id)
+    return {**{key: max(0, now[key] - (base.get(key) or 0)) for key in TOTAL_KEYS}, "estimated": now["estimated"]}
+
+
 def latest_summary(repo: Repo, hunt_id: str) -> dict | None:
     audit = repo.latest_audit(hunt_id, TRIAGE_SUMMARY)
     return dict(audit["detail"]) if audit else None
@@ -382,7 +412,7 @@ def run_triage_pass(settings: Settings, repo: Repo, hunt_id: str, provider, *, o
                     and previous.get("placement") == PLACEMENT_VERSION):
                 return {**previous, "reused": True}
             return _run(settings, repo, hunt_id, provider, ws, budget, system, prompt_digest, eligible, excluded,
-                        previous, owner_token, heartbeat, model_source)
+                        previous, owner_token, heartbeat, model_source, usage_base=triage_totals(repo, hunt_id))
     except StageRefused as exc:
         summary = {"label": LABEL, "status": "failed", "reason": f"stage_refused: {exc}"[:500],
                    "usage": budget.snapshot()}
@@ -392,7 +422,7 @@ def run_triage_pass(settings: Settings, repo: Repo, hunt_id: str, provider, *, o
 
 def _run(settings, repo, hunt_id, provider, ws: OrderWorkspace, budget: TriageBudget, system: str,
          prompt_digest: str, eligible: int, excluded: int, previous: dict | None, owner_token, heartbeat,
-         model_source: str | None = None) -> dict:
+         model_source: str | None = None, usage_base: dict | None = None) -> dict:
     drops: Counter = Counter()
     assessments: Counter = Counter()
     chunks_sent = chunks_failed = failures = 0
@@ -463,6 +493,9 @@ def _run(settings, repo, hunt_id, provider, ws: OrderWorkspace, budget: TriageBu
     }
     if model_source:
         summary["model_source"] = model_source         # the setting that chose the pass's model
+    if usage_base is not None:
+        # the hunt's triage calls before this pass: what an extension resumes from is what the store holds since
+        summary["usage_base"] = {key: usage_base[key] for key in TOTAL_KEYS}
     # the rows are finished in the stage: the write transaction only copies them
     repo.publish_triage(hunt_id, summary["pass"], ws.view_rows(), summary, owner_token=owner_token)
     return summary
@@ -570,7 +603,8 @@ def run_cited_triage(settings: Settings, repo: Repo, hunt_id: str, provider, gro
     if not previous or previous.get("status") not in ("complete", "partial") or previous.get(
             "placement") != PLACEMENT_VERSION:
         return {**out, "status": "skipped", "reason": "no usable triage pass to extend"}
-    budget = TriageBudget.resume(settings, previous.get("usage") or {}, clock)
+    budget = TriageBudget.resume(settings, previous.get("usage") or {}, clock,
+                                 billed=pass_billed(repo, hunt_id, previous))
     system = _prompt()
     try:
         with OrderWorkspace(repo, hunt_id, directory=workdir, heartbeat=heartbeat, max_bytes=max_bytes,
@@ -675,6 +709,7 @@ def _extend(settings, repo, hunt_id, provider, ws: OrderWorkspace, budget: Triag
     previous_calls = previous.get("calls") or {}
     summary = {
         **previous,
+        "rank_state": repo.rank_state(hunt_id),
         "status": "complete" if assessed == eligible else "partial",
         "reason": "; ".join(sorted({*not_triaged, *(("dropped_output",) if drops or previous.get("dropped")
                                                      else ())})) or None,

@@ -6070,6 +6070,17 @@ class Repo:
             ).order_by(t.agent_assessment.c.revision)).mappings()
             return [dict(row) for row in rows]
 
+    def model_call_token_sums(self, hunt_id: str, purposes: tuple[str, ...]) -> tuple[int, int]:
+        """The prompt and output tokens the hunt's calls of `purposes` reported (a call without reported usage counts
+        its prompt estimate and no output), summed in the database."""
+        c = t.model_call.c
+        query = select(func.coalesce(func.sum(func.coalesce(c.prompt_eval_count, c.prompt_tokens_est, 0)), 0),
+                       func.coalesce(func.sum(func.coalesce(c.eval_count, 0)), 0)).where(
+            c.hunt_id == hunt_id, c.provider.is_not(None), c.purpose.in_(purposes))
+        with self.engine.connect() as connection:
+            prompt, completion = connection.execute(query).one()
+        return int(prompt), int(completion)
+
     def agent_usage(self, hunt_id: str, *, group_limit: int | None = None,
                     exclude_purposes: tuple[str, ...] = (), purposes: tuple[str, ...] | None = None) -> dict:
         """Persisted spending, streamed in bounded pages; UI model breakdowns may be limited. A budget counts only its

@@ -1036,6 +1036,8 @@ def _triage_cited(settings: Settings, repo: Repo, hunt_id: str, triage, assessme
     stands as it is: a missing verdict is never benign. Returns what was done, with the reason."""
     from romulus.agent.assessment import cited_triage_groups, reground_narrative, save_assessment_revision
     started = budget.clock()
+    out: dict = {}
+    published = False
     try:
         groups, skipped = cited_triage_groups(repo, hunt_id, assessment["ungrounded"], context,
                                               settings.agent_triage_cited_max_groups)
@@ -1048,6 +1050,7 @@ def _triage_cited(settings: Settings, repo: Repo, hunt_id: str, triage, assessme
         out.update({key: result[key] for key in ("status", "reason", "triaged", "by_assessment") if key in result})
         if not result.get("triaged"):
             return out
+        published = True
         regrounded = triage_context(latest_summary(repo, hunt_id))
         narrative, checker, changed = reground_narrative(
             repo, hunt_id, assessment["ungrounded"], assessment["body"]["narrative"], assessment["checker"],
@@ -1062,8 +1065,10 @@ def _triage_cited(settings: Settings, repo: Repo, hunt_id: str, triage, assessme
     except Exception as exc:
         if is_lease_lost(exc):
             raise
-        log.exception("AI triage of the narrative's cited groups failed")
-        return {"status": "failed", "reason": f"triage_error: {type(exc).__name__}: {exc}"[:300]}
+        # once verdicts are published, a failure leaves the stored grounding behind the pass: said apart
+        stage = "reground_error" if published else "triage_error"
+        log.exception("AI triage of the narrative's cited groups failed (%s)", stage)
+        return {**out, "status": "failed", "reason": f"{stage}: {type(exc).__name__}: {exc}"[:300]}
     finally:
         budget.exclude_wall(budget.clock() - started)
 
