@@ -25,6 +25,7 @@ from romulus.report.markdown import (
     MOSTLY_BENIGN,
     SUPPORT_LABELS,
     SUPPORT_LIMIT,
+    WEAK_MODEL_CONTEXT,
     WEAK_NO_REPORTED,
     WEAK_REASONS,
 )
@@ -1156,7 +1157,8 @@ def narrative_paragraphs(value) -> list[dict]:
             sentences.append({"text": sentence["text"],
                               "kind": sentence.get("kind") if sentence.get("kind") in NARRATIVE_KINDS else "uncertain",
                               "cites": [cite for cite in cites if isinstance(cite, str)],
-                              **({"suspicious_content": True} if sentence.get("suspicious_content") else {})})
+                              **({"suspicious_content": True} if sentence.get("suspicious_content") else {}),
+                              **({"strong_support": True} if sentence.get("strong_support") is True else {})})
         if not sentences:
             continue
         tactic = paragraph.get("tactic")
@@ -1179,7 +1181,8 @@ def narrative_paragraphs(value) -> list[dict]:
                            else {})}
                        if not weak and paragraph.get("context_reason") in CONTEXT_REASONS else {}),
                     **(_attack_steps(paragraph)
-                       if not weak and paragraph.get("context_reason") == MOSTLY_BENIGN else {}),
+                       if (not weak and paragraph.get("context_reason") == MOSTLY_BENIGN)
+                       or (weak and reason == WEAK_MODEL_CONTEXT) else {}),
                     **({"support": support} if support else {}),
                     "sentences": sentences})
     return out
@@ -1189,9 +1192,9 @@ ATTACK_STEP_SUPPORT = ("confirmed", "attack", "reported")
 
 
 def _attack_steps(paragraph: dict) -> dict:
-    """The attack-associated steps a mostly-benign paragraph lifts out, in the shape every renderer reads: each a
-    finding id with its rule, title, lane, triage verdict and support category, at most ATTACK_STEPS, and how many
-    more it cited (a step past the bound, or one not of that shape, is counted there, never dropped silently)."""
+    """The findings a mostly-benign paragraph, or a weak paragraph the model labelled context, lifts out, in the
+    shape every renderer reads: each a finding id with its rule, title, lane, triage verdict and support category,
+    at most ATTACK_STEPS, and how many more it cited (a step past the bound, or one not of that shape, is counted there, never dropped silently)."""
     stored = (paragraph.get("attack_steps") if isinstance(paragraph.get("attack_steps"), list) else [])[:SUPPORT_LIMIT]
     steps = []
     for step in stored:

@@ -511,8 +511,8 @@ def _ground_paragraph(paragraph: dict, strengths: dict, counts: dict) -> dict:
       that support is a small minority of what it cites and the rest was triaged likely benign (`_mostly_benign`):
       then the paragraph is shown as Context (`context_reason` MOSTLY_BENIGN, muted, its sentences as written, the
       model's label kept as `model_phase`, any tactic dropped) and every strong finding it cites is lifted out beside
-      it as an attack-associated step (`attack_steps`: finding, rule, title, lane, verdict), shown unmuted. A
-      confirmed cite never allows this. It is presentation only: no finding's lane, verdict, Reported flag or rank
+      it as an attack-associated step (`attack_steps`: finding, rule, title, lane, verdict), shown unmuted, as is
+      each sentence citing one (`strong_support`). A confirmed cite never allows this. It is presentation only: no finding's lane, verdict, Reported flag or rank
       changes;
     - a paragraph, whatever its label, with no strong cite is weakly supported: its phase becomes Context (the model's
       label is kept as `model_phase`, any ATT&CK tactic is dropped), it is shown muted, and it says why, in this order:
@@ -525,7 +525,8 @@ def _ground_paragraph(paragraph: dict, strengths: dict, counts: dict) -> dict:
       space) is context: weakly supported and muted like the above, unless it cites a confirmed or attack-triaged
       finding. Attack activity is never demoted: such a paragraph is labelled Context as the model asked, but stays
       unmuted with its sentences as written, and says that it cites confirmed or attack-triaged findings
-      (`context_reason`). A Reported finding without a verdict does not make that exception.
+      (`context_reason`). A Reported finding without a verdict does not make that exception, but each such finding
+      it cites is lifted out beside the muted paragraph (`attack_steps`) so it is named in full view.
     Precedence, first match wins: a model Context label (unmuted MODEL_CONTEXT_ATTACK when it cites confirmed or
     attack-triaged findings, else weak `model_labelled_context`); then strong support (kept, or split as mostly
     benign); then the weak reasons in the order above. So a split paragraph is never also weakly supported, and a
@@ -554,15 +555,19 @@ def _ground_paragraph(paragraph: dict, strengths: dict, counts: dict) -> dict:
         reason = WEAK_MODEL_CONTEXT
         counts["model_labelled_context"] += 1
     elif any(item.strong for item in cites):
-        if not _mostly_benign(cites, mix):
+        if not _mostly_benign(distinct, cites):
             return out
         steps = _attack_steps(cites)
         if len(steps) > ATTACK_STEPS:
             # more strong findings than can be listed beside it (a cited record standing for many): kept as written
             return out
         counts["context_mostly_benign_support"] += 1
+        # a sentence citing a strong finding stays in full view; only the others are muted with the paragraph
+        strong = {ref for ref in distinct if strengths[ref].strong}
         out = {key: value for key, value in out.items() if key != "tactic"}
         out.update(phase=CONTEXT_PHASE, context_reason=MOSTLY_BENIGN, attack_steps=steps,
+                   sentences=[{**sentence, "strong_support": True} if strong.intersection(refs) else sentence
+                              for sentence, refs in sentences],
                    **({"model_phase": paragraph["phase"]} if paragraph["phase"] else {}))
         return out
     elif cites and all(item.benign for item in cites):
@@ -584,6 +589,11 @@ def _ground_paragraph(paragraph: dict, strengths: dict, counts: dict) -> dict:
     out = {key: value for key, value in out.items() if key != "tactic"}
     out.update(phase=CONTEXT_PHASE, weakly_supported=True, support_reason=reason,
                **({"model_phase": paragraph["phase"]} if paragraph["phase"] else {}))
+    if reason == WEAK_MODEL_CONTEXT and (steps := _attack_steps(cites)):
+        # model context citing Reported findings without a verdict: muted as asked, each such finding named beside
+        # it in full view (at most ATTACK_STEPS, the rest counted)
+        out.update(attack_steps=steps[:ATTACK_STEPS],
+                   **({"attack_steps_more": len(steps) - ATTACK_STEPS} if len(steps) > ATTACK_STEPS else {}))
     return out
 
 
@@ -591,26 +601,49 @@ def _ground_paragraph(paragraph: dict, strengths: dict, counts: dict) -> dict:
 # support is a small minority of what it cites and the rest was judged benign:
 # - no cite is confirmed: deterministically confirmed activity always keeps the paragraph's label;
 # - every cite's lookup is complete: a capped evidence lookup could hide a confirmed finding past what it read;
-# - at most SPLIT_MAX_STRONG cites are strong (attack-triaged, or Reported without a benign verdict);
-# - at least SPLIT_MIN_BENIGN cites are triaged likely benign, and they are at least two-thirds of all its distinct
-#   cites (any category counts toward the whole, so unreported or raw cites make a split less likely).
+# - at most SPLIT_MAX_STRONG verdict units are strong (attack-triaged, or Reported without a benign verdict);
+# - at least SPLIT_MIN_BENIGN units are triaged likely benign, and they are at least two-thirds of all its units
+#   (any category counts toward the whole, so unreported or raw cites make a split less likely).
+# A unit is one independent judgement, not one alias: a triage group (its findings share one verdict), or a finding
+# outside any group; a cite resting on no finding (a raw record, a link) is a unit of its own. So a finding cited
+# directly and through its evidence records, or several findings of one triage group, count once, and a single
+# verdict can never make up the benign floor.
 # The bounds are counts within one paragraph, which the narrative's own caps bound (sentences per paragraph,
-# citations per sentence), not volumes of telemetry, so they hold on any hunt size. Two strong cites is "one step,
-# perhaps with its companion record"; past that the paragraph describes several attack-associated steps and keeps its
-# label. The benign floor keeps a short paragraph from flipping on one verdict; the two-thirds share means the
+# citations per sentence), not volumes of telemetry, so they hold on any hunt size. Two strong units is "one step,
+# perhaps with its companion"; past that the paragraph describes several attack-associated steps and keeps its
+# label. The benign floor keeps a short paragraph from flipping on one or two verdicts; the two-thirds share means the
 # benign activity outnumbers the strong at least two to one. A split never hides the strong cites: each strong
-# finding is lifted out beside the paragraph, unmuted, with its own lane and verdict; a paragraph whose strong cites
-# stand for more findings than ATTACK_STEPS (a cited evidence record can stand for many) is never split.
+# finding is lifted out beside the paragraph, unmuted, with its own lane and verdict, and each sentence citing one
+# stays unmuted; a paragraph whose strong cites stand for more findings than ATTACK_STEPS (a cited evidence record
+# can stand for many) is never split.
 SPLIT_MAX_STRONG = 2
 SPLIT_MIN_BENIGN = 3
+_CATEGORY_RANK = {name: index for index, name in enumerate(SUPPORT_CATEGORIES)}
 
 
-def _mostly_benign(cites: list, mix: Counter) -> bool:
+def _support_units(refs: list, cites: list) -> Counter:
+    """The paragraph's verdict units (see above), each in the strongest category any of its findings gives."""
+    units: dict[tuple, str] = {}
+    for ref, cite in zip(refs, cites, strict=True):
+        if not cite.findings:
+            units[("cite", tuple(ref))] = cite.category
+            continue
+        for finding in cite.findings:
+            key = (("group", finding.group) if finding.group is not None
+                   else ("finding", finding.finding_id or tuple(ref)))
+            if key not in units or _CATEGORY_RANK[finding.category] < _CATEGORY_RANK[units[key]]:
+                units[key] = finding.category
+    return Counter(units.values())
+
+
+def _mostly_benign(refs: list, cites: list) -> bool:
     """Whether a paragraph with strong support is mostly benign by the split rule above."""
-    strong = sum(item.strong for item in cites)
-    return (not mix["confirmed"] and all(item.complete for item in cites)
-            and 0 < strong <= SPLIT_MAX_STRONG and mix["benign"] >= SPLIT_MIN_BENIGN
-            and 3 * mix["benign"] >= 2 * len(cites))
+    if not all(item.complete for item in cites):
+        return False
+    units = _support_units(refs, cites)
+    strong = units["confirmed"] + units["attack"] + units["reported"]
+    return (not units["confirmed"] and 0 < strong <= SPLIT_MAX_STRONG and units["benign"] >= SPLIT_MIN_BENIGN
+            and 3 * units["benign"] >= 2 * sum(units.values()))
 
 
 STEP_ORDER = {"confirmed": 0, "attack": 1, "reported": 2}

@@ -189,6 +189,7 @@ td.lead { color: var(--lead); font-weight: 600; }
 .narrative > li.context-split { color: var(--muted); }
 .narrative > li.context-split .narrative-head b { font-weight: 600; font-style: italic; }
 .narrative > li.context-split .ns { color: var(--muted); }
+.narrative > li.context-split .strong-cite, .narrative > li.context-split .strong-cite .ns { color: var(--ink); }
 .narrative p.attack-step { color: var(--ink); padding: 4px 8px; border-left: 3px solid var(--danger);
                            background: var(--surface-2); border-radius: var(--radius-sm); }
 .notice p { margin: 2px 0 0; }

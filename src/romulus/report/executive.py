@@ -6,7 +6,6 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from romulus.evidence.raw_citation import RAW_LABEL_PLURAL
 from romulus.report.markdown import (
-    ATTACK_STEP_LABEL,
     BANNER,
     NARRATIVE_EMPTY,
     NARRATIVE_NOTE,
@@ -16,6 +15,7 @@ from romulus.report.markdown import (
     narrative_context_reason,
     narrative_heading,
     narrative_muted,
+    narrative_step_label,
     narrative_step_text,
     narrative_steps_more,
     narrative_support,
@@ -123,14 +123,15 @@ def write(m, path, technical_name):
                     paragraph(weak, muted=True)
                 if context := narrative_context_reason(story):
                     paragraph(context)
-                # each attack-associated step a context paragraph cites: bold and never muted
+                # each finding a context paragraph lifts out: bold and never muted
                 for step in story.get("attack_steps") or []:
-                    paragraph(f"{ATTACK_STEP_LABEL}: {narrative_step_text(step)} (finding {step.get('finding')})",
-                              bold=True)
+                    paragraph(f"{narrative_step_label(step)}: {narrative_step_text(step)} "
+                              f"(finding {step.get('finding')})", bold=True)
                 if more := narrative_steps_more(story):
                     paragraph(more, bold=True)
+                # a sentence citing a lifted finding stays in full ink
                 for sentence in story["sentences"]:
-                    statement(sentence, muted=muted)
+                    statement(sentence, muted=muted and not sentence.get("strong_support"))
                 if support := narrative_support(story):
                     paragraph(support, muted=True)
             if not assessment["narrative"]:
