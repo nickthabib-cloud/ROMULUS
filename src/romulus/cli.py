@@ -91,8 +91,9 @@ def _agent_budget(args, s, repo) -> dict:
     """The budget a new hunt pins: a grant the web checked (--budget-grant), else --effort and the override flags."""
     from romulus.agent import hunt_budget
     from romulus.hunt.controls import GRANT_MAX_AGE_SECONDS
-    if args.budget_grant:
-        grant = repo.consume_budget_grant(args.budget_grant, max_age_seconds=GRANT_MAX_AGE_SECONDS)
+    grant_id = getattr(args, "budget_grant", None)
+    if grant_id:
+        grant = repo.consume_budget_grant(grant_id, max_age_seconds=GRANT_MAX_AGE_SECONDS)
         if grant is None:
             raise hunt_budget.BudgetRefused("the budget grant is unknown or expired; start the hunt again")
         choice = grant["choice"]
@@ -100,7 +101,8 @@ def _agent_budget(args, s, repo) -> dict:
         return hunt_budget.choose(s, choice["profile"], choice["overrides"], role=grant["role"],
                                   chosen_by=grant["created_by"])
     actor, role = _cli_role(args, repo)
-    return hunt_budget.choose(s, args.effort or hunt_budget.DEFAULT_PROFILE, _overrides(args), role=role,
+    return hunt_budget.choose(s, getattr(args, "effort", None) or hunt_budget.DEFAULT_PROFILE, _overrides(args),
+                              role=role,
                               chosen_by=actor)
 
 
