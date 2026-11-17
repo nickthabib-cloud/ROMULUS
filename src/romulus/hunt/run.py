@@ -13,6 +13,7 @@ from sqlalchemy.exc import OperationalError
 from romulus.agent import hunt_budget
 from romulus.agent.investigate import (
     STOPPED_REASON,
+    continuation_plan,
     recover_agent_finalization,
     run_agent_phase,
     skip_agent_phase,
@@ -1015,6 +1016,15 @@ def resume_hunt(s: Settings, hunt_id: str, *, force_model: bool = False, continu
     hunt = repo.get_hunt(hunt_id)
     manifest = hunt["manifest"]
     if agent_only:
+        # who continued the agent, why, and where it starts (a continuation never orients again once orient is done)
+        why = ("stop_cleared" if STOPPED_REASON in agent_reason else
+               "extension" if _agent_extended(repo, hunt_id, agent_run) else
+               "provider_unavailable" if "provider_unavailable" in agent_reason else
+               "interrupted")
+        plan = continuation_plan(hunt_budget.hunt_settings(s, repo, hunt_id, manifest), repo, hunt_id)
+        repo.audit(actor, "hunt.agent_resume", hunt_id, {
+            "reason": why, "starting_phase": plan["starting_phase"], "previous_state": agent_run.get("state"),
+            "previous_reason": agent_reason[:500] or None})
         base_result = {"hunt_id": hunt_id, "execution_state": hunt["execution_state"],
                        "stats": sweep_summary.get("stats") or {}, "lanes": repo.lane_counts(hunt_id),
                        "detection_result": hunt.get("detection_result"), "baseline": {}, "expansion": {}}

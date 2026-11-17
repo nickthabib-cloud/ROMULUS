@@ -544,7 +544,7 @@ def test_added_budget_lets_a_budget_limited_agent_continue_from_its_persisted_wo
     result = run_agent_phase(s, repo, "h1", provider=first, toolbox_factory=lambda _s: Toolbox(repo, "h1"),
                              clock=lambda: 0.0)
     assert result.state == "partial" and "budget:calls" in result.reason
-    assert repo.agent_hypotheses("h1")[0]["sessions_run"] == 1     # its session met the budget before any call
+    assert repo.agent_hypotheses("h1")[0]["sessions_run"] == 0     # no session was started that could make no call
 
     controls.extend_budget(s, repo, "h1", actor="web:alice", role="analyst", amounts={"max_calls": 10})
     later = ScriptedProvider([response(tool_calls=finish), response(parsed=ASSESSMENT)])
@@ -552,7 +552,7 @@ def test_added_budget_lets_a_budget_limited_agent_continue_from_its_persisted_wo
                              clock=lambda: 0.0)
     assert len(later.requests) == 2              # the hypothesis got its next session, then the assessment
     assert "budget:calls" not in (result.reason or "")
-    assert repo.agent_hypotheses("h1")[0]["sessions_run"] == 2
+    assert repo.agent_hypotheses("h1")[0]["sessions_run"] == 1
     assert repo.agent_usage("h1")["calls"] == 4  # spending persisted across both runs
 
 

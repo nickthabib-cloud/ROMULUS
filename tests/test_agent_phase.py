@@ -503,7 +503,9 @@ def test_investigation_reserve_exhaustion_goes_to_assess_with_budget_reason(tmp_
                              clock=lambda: 0.0)
 
     sessions = repo.agent_sessions("h1")
-    assert [row["state"] for row in sessions] == ["finished", "budget", "finished"]
+    # no investigation session is started that could make no call: orient, then the assessment
+    assert [row["state"] for row in sessions] == ["finished", "finished"]
+    assert repo.agent_hypotheses("h1")[0]["sessions_run"] == 0
     assert "budget:calls" in result.reason
     assert len(provider.requests) == 2
     assert result.state == "partial" and "budget:calls" in result.reason
