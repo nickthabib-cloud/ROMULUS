@@ -415,3 +415,30 @@ def test_background_time_grows_linearly(cls):
             rule.release_state()
         timings.append(time.perf_counter() - start)
     assert timings[1] <= 8 * timings[0], timings              # linear is 4x; quadratic would be 16x
+
+
+# ---- first-seen remote-administration pair baseline -----------------------------------------------------------------
+
+def test_admin_pair_baseline_keys_answered_internal_admin_connections_by_source():
+    from romulus.baseline.spec import SPEC_BY_ID, KeyContext, Missing, NotApplicable
+    spec, context = SPEC_BY_ID['bl.admin_pair'], KeyContext()
+    [event] = events([conn(0, '10.5.0.7', 445, service='smb')], 'plain')
+    [key] = spec.keys(event, context)
+    assert key.scope == 'internal_ip:10.1.0.66' and key.key == {'kind': 'admin_service', 'dest_ip': '10.5.0.7',
+                                                                 'service': 'smb'}
+    assert key.dedup_token is not None                       # Zeek's community id: one connection counts once
+    [other] = spec.keys(events([conn(1, '10.5.0.7', 445, src='10.1.0.67')], 'plain')[0], context)
+    assert other.key_id == key.key_id and other.key_digest != key.key_digest      # peer prevalence of one key
+    for row in (conn(2, '10.5.0.7', 443), conn(3, '203.0.113.9', 22),
+                conn(4, '10.5.0.7', 22, history='S', state='S0', sent=0, received=0)):
+        assert isinstance(spec.keys(events([row], 'plain')[0], context), NotApplicable), row
+    missing = spec.keys(events([replace(conn(5, '10.5.0.7', 3389), history=None)], 'plain')[0], context)
+    assert isinstance(missing, Missing) and missing.fields == ('conn.history',)
+    assert spec.requires_configured_networks and spec.datasets and spec.measure == 'prevalence'
+
+
+def test_admin_pair_baseline_is_positive_only_and_lead_capped():
+    from romulus.baseline.playbook import AdminPairBaseline
+    playbook = AdminPairBaseline()
+    assert playbook.assures_negative is False and playbook.positive_only_reason
+    assert playbook.lane == 'lead' and playbook.severity == 'info' and playbook.direction_dependent

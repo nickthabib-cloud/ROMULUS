@@ -67,7 +67,7 @@ def test_the_direction_dependent_rules_are_exactly_these():
                                  "net.outbound_ssh_external", "corr.alert_then_host_execution",
                                  "network.service_catalog", "net.long_inbound_session",
                                  "net.long_inbound_remote_access", "net.remote_shell_fanout",
-                                 "net.smb_rpc_fanout", "net.epm_dynamic_rpc"}
+                                 "net.smb_rpc_fanout", "net.epm_dynamic_rpc", "bl.admin_pair"}
     # each can write a complete negative, which is what the reason protects
     assert all(pb.assures_negative for pb in ALL_PLAYBOOKS if pb.id in AFFECTED)
     assert all(not pb.assures_negative for pb in ALL_PLAYBOOKS if pb.id == "win.rdp_external_source")
@@ -90,7 +90,8 @@ def test_each_changed_rule_carries_a_new_version():
 
 def test_bl_ext_dest_requires_a_configured_internal_network():
     assert SPEC_BY_ID["bl.ext_dest"].requires_configured_networks is True
-    assert {spec.id for spec in BASELINE_SPECS if spec.requires_configured_networks} == {"bl.ext_dest"}
+    assert {spec.id for spec in BASELINE_SPECS if spec.requires_configured_networks} == {"bl.ext_dest",
+                                                                                       "bl.admin_pair"}
 
 
 # ---- each affected rule counts only records skipped for their direction ------------------------------------

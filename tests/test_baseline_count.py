@@ -186,6 +186,7 @@ def test_every_accepted_spec_runs_through_the_counter():
         "bl.ext_dest": _event("net_flow", "flow", **{
             "source.ip": "10.0.0.4", "destination.ip": "198.51.100.8",
         }),
+        "bl.admin_pair": _event("net_flow", "admin", **{"source.ip": "10.0.0.4", "destination.ip": "10.0.0.9", "destination.port": 445, "network.transport": "tcp", "conn.history": "ShADadFf", "tcp.opened_by_orig": True, "flow.bytes_toserver": 900, "flow.bytes_toclient": 2400}),
         "bl.svc_exec_rate": _event("process_exec", "rate", **{
             "process.user": "svc", "process.uid": 100,
         }),

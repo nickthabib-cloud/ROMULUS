@@ -29,13 +29,13 @@ UNKNOWN_REASON = "text line in no recognized format: custom.unknown"
 # rehashes the event ids (candidates 75b41997... at epoch 17); the rule cells add the SMB impact and service
 # catalog rules (not applicable here).
 GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a6dadaa59988bdf81e',
- 'audit': '8395bf7d0ac298b365edfa15ada85dc4c72dc772b4cfe5323cc6d09cbd391c7e',
+ 'audit': '11e409ab1fa736cb3ab19984624c6cab9bb0f8662d27a464b5cae0e7a2f8db8a',
  'baseline_counts': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_hunt_exclusions': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_observations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_scope_hours': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_segments': '1b81635a62e727fcb94ea06feaee1010eeb2cd33ddf87629208179d6e1f9aa69',
- 'baseline_snapshot': 'c4d83cc473697b70a3d6d02e3b4fd86ff6f624e0c80a41e4ddacbc54fb663353',
+ 'baseline_snapshot': 'aa2a03261ede19b7643889b4212cd96408b23bb1720e586e28565aa881a5b1cb',
  'baseline_window_counts': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_window_event_hours': 'dbbcb75b0e5ad202089e3eeaf84801202f5f1b8b3fcfb214f42edbdd7e007f47',
  'baseline_window_scope_hours': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
@@ -46,11 +46,11 @@ GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a
  'events': 'bd5435aef6b275df8abbeb11240c6ab00cff8cfa39fbba70fc1f6acccadf23bb',
  'expansion': 'dae7cbd7929a4cb94bb232a7343d4d70f62885a979b52714b87bd3641a92169b',
  'links': '8abe2a07c083a1ea68a7cb03ccfa539e9e071fc67b2af99a555e04f4badc5928',
- 'manifest': 'd78b77ffe3d9d629b94903f203560ff2a985ad17d27f0f5b8c013768d6d4b633',
+ 'manifest': '4ceb5af1650bbdd285ea26bdfa9479ffec8f37ea38963bb6e4b81d790f25f6bb',
  'raw': '64be31e697a32f93b1a71657560af514b2d430469cb3be19f44b8827985a7775',
- 'rule_cells': '8d267da131c9c0ac6fdbb62445847da829ff11c3b4a42e43f6aeae9fb9efa8f6',
+ 'rule_cells': 'bde8512df4dcf2fe4a4b4536d7f17eb3f5112ecf213b0b625d6cbd57ed85cfea',
  'stats': '360c94cf6f93e02aefee3a7da01eeeae2bba877f3d1e318af96992d9e75f2e92',
- 'tasks': 'a287691a5843ccb9f7b3d279364567cefb3dc6eb49f9d4753eaed993593437c4'}
+ 'tasks': '84dea44d6737eb4190cb3dbb46a00598af012da8cd3db39c2e40a8dce8b66684'}
 
 
 def text_documents():

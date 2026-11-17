@@ -746,6 +746,50 @@ def _service_rate(event: TypedEvent, context: KeyContext, spec: BaselineSpec) ->
 
 _FLOW_IDS = ("suricata.flow_id", "network.community_id")
 
+# Remote-administration services: SSH, RDP, WinRM over HTTP and HTTPS, SMB (direct and over NetBIOS) and the RPC
+# endpoint mapper (the entry to DCOM, WMI, remote task scheduling and service control over TCP).
+ADMIN_SERVICES = {22: "ssh", 3389: "rdp", 5985: "winrm", 5986: "winrm-tls", 445: "smb", 139: "smb-netbios",
+                  135: "rpc-epm"}
+
+
+def _count_field(event: TypedEvent, name: str) -> int | Missing:
+    value = event.get(name)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return Missing(f"{name} is not recorded", (name,))
+    return value
+
+
+def _admin_pair(event: TypedEvent, context: KeyContext, spec: BaselineSpec) -> KeyResult:
+    """An internal source's answered connection to an internal host's remote-administration service: one Zeek shows
+    the source opening, with payload from both sides (a refused or unanswered attempt is no use of the service)."""
+    source, destination = _ip(event, "source.ip"), _ip(event, "destination.ip")
+    for value in (source, destination):
+        if isinstance(value, Missing):
+            return value
+    port = _count_field(event, "destination.port")
+    if isinstance(port, Missing):
+        return port
+    transport = event.get("network.transport")
+    if not isinstance(transport, str) or not transport:
+        return Missing("network.transport is not recorded", ("network.transport",))
+    if transport != "tcp" or port not in ADMIN_SERVICES:
+        return NotApplicable("not a TCP connection to a remote-administration port")
+    if not context.is_internal(source) or not context.is_internal(destination) or source == destination:
+        return NotApplicable("not a connection between two internal hosts")
+    history = event.get("conn.history")
+    if not isinstance(history, str) or not history:
+        return Missing("conn.history is not recorded", ("conn.history",))
+    sent, received = _count_field(event, "flow.bytes_toserver"), _count_field(event, "flow.bytes_toclient")
+    for value in (sent, received):
+        if isinstance(value, Missing):
+            return value
+    if event.get("tcp.opened_by_orig") is not True or sent <= 0 or received <= 0:
+        return NotApplicable("the source is not shown opening an answered connection with payload both ways")
+    scope = _scope("internal_ip", address=str(source))
+    key = _key(spec, scope, {"kind": "admin_service", "dest_ip": str(destination), "service": ADMIN_SERVICES[port]})
+    flow = _flow_identity(event)
+    return _with_token([key], None if flow is None else _sha256(canonical_json(["flow", flow])))
+
 BASELINE_SPECS = (
     BaselineSpec(
         id="bl.ssh_tuple", version="1", key_version="1", families=("auth",),
@@ -811,6 +855,19 @@ BASELINE_SPECS = (
             "net_session": ("tls.client.server_name", *_FLOW_IDS),
         },
         _extract=_destination,
+        requires_configured_networks=True,
+        deduplicates_records=True,
+    ),
+    BaselineSpec(
+        id="bl.admin_pair", version="1", key_version="1", families=("net_flow",),
+        # Zeek conn records only: the opening and the payload both ways are read from Zeek's history and payload
+        # counters, which other flow producers do not record
+        datasets=tuple(log.token for log in ZEEK_LOGS if log.name == "conn"),
+        scope="internal_ip", measure="prevalence", bucket="day",
+        required_fields={"net_flow": ("source.ip", "destination.ip", "destination.port", "network.transport",
+                                      "conn.history", "flow.bytes_toserver", "flow.bytes_toclient")},
+        optional_fields={"net_flow": ("tcp.opened_by_orig", *_FLOW_IDS)},
+        _extract=_admin_pair,
         requires_configured_networks=True,
         deduplicates_records=True,
     ),
