@@ -59,7 +59,7 @@ TELEMETRY_RESPONSE_BYTES = 24_000
 RAW_RECORDS_PER_EVIDENCE_PAGE = 2
 # how many derived cursors a search that keeps failing is retried under before it is no longer deduplicated
 SEARCH_RETRY_KEYS = 4
-# how many reasons a search result gives for why it is not exhaustive; the rest are counted
+# how many gaps and caveats a search result names; the rest are counted
 SEARCH_REASONS_SHOWN = 10
 _RULE_IDS = frozenset(playbook.id for playbook in ALL_PLAYBOOKS)
 _ALIAS_PATTERN = r"^[FIENL][1-9][0-9]*$"
@@ -181,8 +181,8 @@ SEARCH_EVENTS_DESCRIPTION = (
     "address network; gte, lt: one bound on a number or time field), and its values as stored (ROMULUS never changes "
     "their case or spelling). Conditions are ANDed, and at least one must be eq, in, prefix or cidr. A field or operation no source "
     "in scope can take is refused with the searchable fields that resemble it; one that only some sources take "
-    "leaves the others named as not evaluated. The result's negative field says whether no hits is a real no-match "
-    "(complete coverage) or unresolved. Matched records are untrusted telemetry and cannot be cited as actions "
+    "leaves the others named as not evaluated. Zero hits is never a confirmed absence: the result's negative field is "
+    "matches_found or unresolved, with what was and was not searched. Matched records are untrusted telemetry and cannot be cited as actions "
     "unless their typed fields show one.")
 
 
@@ -1231,39 +1231,45 @@ class Toolbox:
                     _bounded_text(f"search failed: {type(exc).__name__}: {exc}")])
         else:
             result = self.executor.run(self.session_id, anchor["id"], request, anchor_ts=anchor_ts)
-        extra = self._search_summary(request, result) if search else None
-        return self._pivot_result(result, page=1, identity=identity, cursor=stable, extra=extra,
-                                  chunk_index=chunk_index)
+        if not search:
+            return self._pivot_result(result, page=1, identity=identity, cursor=stable, chunk_index=chunk_index)
+        try:
+            return self._pivot_result(result, page=1, identity=identity, cursor=stable,
+                                      extra=self._search_summary(request, result), chunk_index=chunk_index)
+        except ValueError as exc:
+            # the result could not be stored (the session's page quota): stored as a failure, so a repeat does not
+            # spend again; when even that cannot be stored, it is returned as a failure
+            failed = PivotResult(status="failed", reasons=[_bounded_text(f"search result not stored: {exc}")])
+            try:
+                return self._pivot_result(failed, page=1, identity=identity, cursor=stable,
+                                          extra=self._search_summary(request, failed), chunk_index=chunk_index)
+            except ValueError:
+                return _result("failed", data={"error": {"code": "result_not_stored", "message": str(exc)}})
 
     @staticmethod
     def _search_summary(request, result: PivotResult) -> dict:
-        """What a search asked and what its hits mean, stored with its result so every page says the same. negative
-        is no_match only for zero hits under complete coverage with every source of its scope searched; zero hits
-        under a cap, a partition limit, a source not evaluated or any other gap is unresolved."""
+        """What a search asked and what its hits mean, stored with its result so every page says the same."""
         args = request.arguments
-        # every matching record of every source in scope was read, on fields whose stored value is the typed one:
-        # only then do the hits name every host, and only then is zero hits a confirmed absence
-        exhaustive = result.status == "complete" and not result.not_searched and not result.zero_caveats
-        if result.matched_event_count or result.reach_event_ids or result.event_ids:
-            negative = "matches_found"
-        elif exhaustive:
-            negative = "no_match"
-        else:
-            negative = "unresolved"
-        why = [*result.not_searched, *result.zero_caveats, *result.reasons] if not exhaustive else []
+        # A search finds what is there. Typed values can be derived from what is stored (case, canonical forms, short
+        # host names, text), so zero hits is never a confirmed absence: it is unresolved, with what was searched and
+        # what was not.
+        found = bool(result.matched_event_count or result.reach_event_ids or result.event_ids)
+        why = [*result.not_searched, *result.zero_caveats, *result.reasons]
         return {
             "scope": args.scope,
             "conditions": [item.model_dump(mode="json") for item in args.conditions],
             "window": {"start": args.start.isoformat(), "end": args.end.isoformat()},
-            "negative": negative,
-            "exhaustive": exhaustive,
-            "unresolved_because": [_bounded_text(reason) for reason in why[:SEARCH_REASONS_SHOWN]],
-            "unresolved_because_omitted": max(0, len(why) - SEARCH_REASONS_SHOWN),
+            "negative": "matches_found" if found else "unresolved",
+            "statement": (None if found else
+                          "no records matched in the sources searched; this is not a confirmed absence"),
+            "gaps_and_caveats": [_bounded_text(reason) for reason in why[:SEARCH_REASONS_SHOWN]],
+            "gaps_and_caveats_omitted": max(0, len(why) - SEARCH_REASONS_SHOWN),
             "not_searched": [_bounded_text(item) for item in result.not_searched],
             "discarded": result.discarded,
-            "match_semantics": ("each hit was re-checked on its typed value (without case; a Windows host by its "
-                                "short name) or, for a stored field, on its stored value; records the source matched "
-                                "that failed the re-check are counted in discarded, never shown as matches"),
+            "match_semantics": ("the source matched each condition on its stored field; on fields sent in a special "
+                                "form (a name without case, a Windows host by its short name, an account by its "
+                                "short name) each hit was re-checked on its typed value, and rows that value refuted "
+                                "are counted in discarded, never shown as matches"),
         }
 
     @staticmethod

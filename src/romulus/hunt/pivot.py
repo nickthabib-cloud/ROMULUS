@@ -74,7 +74,7 @@ from romulus.sources.compile import (
 from romulus.sources.es import ElasticClient, SourceError
 from romulus.sources.execute import execute
 from romulus.sources.models import Completeness, Predicate, SearchIntent, SearchOutcome, Window
-from romulus.sources.profile import LIMITED_KINDS, VERBATIM_FIELDS, FieldContract
+from romulus.sources.profile import LIMITED_KINDS, FieldContract
 from romulus.store.db import digest
 from romulus.store.repo import Repo
 
@@ -732,42 +732,40 @@ MAX_SEARCH_SKIP_REASONS = 10
 _ENTITY_ORDER = {"host": 0, "ip": 1, "account": 2, "domain": 3}
 
 
+# The special equality forms, and what each sends in place of the typed value.
+_SPECIAL_FORMS = {"account": "a canonical sid: or name: account form", "host": "a short host name",
+                  "caseless": "a case-folded name"}
+
+
 def _special_form(field_name: str, spec) -> str | None:
     natives = set(spec.natives or (spec.native,))
     if field_name in _CANONICAL_ACCOUNTS:
-        return "a canonical sid: or name: account form"
+        return "account"
     if field_name == "host.name" and natives & _WINDOWS_COMPUTER_NATIVES:
-        return "a short host name"
+        return "host"
     if field_name in _CASELESS_FIELDS and natives & _CASELESS_WINDOWS_NATIVES:
-        return "a case-folded name"
+        return "caseless"
     return None
 
 
 @dataclass(frozen=True)
 class SearchCheck:
-    """How one condition is confirmed on a matched record. A condition on a stored native (`stored`) is checked on the
-    record's stored value with the source's own exact semantics; any other is checked on the event's typed field of
-    the same name, without case (normalizers fold the case of several), a Windows host by its short name."""
+    """A condition the compiler sends as a special equality form, which the source matches as a superset of the
+    typed value: a case-insensitive name, a host's short name in any domain, an account's short name in any domain.
+    A hit is re-checked on the event's typed field with the compiler's own semantics; an event without that typed
+    field is kept. Every other condition is the source's exact term, terms, prefix or range: never re-checked."""
 
     field: str
-    op: str
+    form: str
     values: tuple
-    stored: tuple[str, ...] = ()
-    kind: str = "keyword"
-    host: bool = False
 
 
 @dataclass
 class _PlannedCondition:
     filters: list[Predicate]
     groups: list[list[Predicate]]          # alternatives (an `in` sent as one special equality form per value)
-    check: SearchCheck
-    caveats: list[str]                     # why zero hits on this condition are not a confirmed absence
-
-
-def _derived(field_name: str) -> str:
-    return (f"{field_name}: typed values are derived from the stored value (case/form/text); zero hits are not a "
-            "confirmed absence")
+    check: SearchCheck | None
+    caveats: list[str]                     # what the source cannot see for this condition
 
 
 def _plan_condition(contract: FieldContract, condition: SearchCondition,
@@ -786,8 +784,8 @@ def _plan_condition(contract: FieldContract, condition: SearchCondition,
                       f"{', '.join(supported) or 'no search operation'}")
     special = _special_form(field_name, spec)
     if special is not None and op == "prefix":
-        return None, (f"field {field_name} / op prefix refused: its typed value is {special}, which a prefix of the "
-                      "stored value cannot match")
+        return None, (f"field {field_name} / op prefix refused: its typed value is {_SPECIAL_FORMS[special]}, which "
+                      "a prefix of the stored value cannot match")
 
     def kind(variant) -> str:
         # equality on analyzed text is compiled against its keyword subfields: its values are strings
@@ -828,111 +826,44 @@ def _plan_condition(contract: FieldContract, condition: SearchCondition,
                       f"{native}")
     caveats.extend(f"{field_name}: a value longer than {limit} characters is not indexed in {native}"
                    for native, limit in beyond)
-    direct = (spec.native == field_name and tuple(spec.natives) in {(), (field_name,)} and not spec.alternatives
-              and not spec.exact)
-    base = spec.type.split(":", 1)[0]
-    if not (direct and base in VERBATIM_FIELDS.get(field_name, frozenset())):
-        caveats.append(_derived(field_name))
     value = parsed if op == "in" else parsed[0]
     if special is not None and op == "in":
         # each value in the compiler's special equality form, any one of them
         filters, groups = [], [[Predicate(field=field_name, op="eq", value=item)] for item in parsed]
     else:
         filters, groups = [Predicate(field=field_name, op=op, value=value)], []
-    if direct:
-        check = SearchCheck(field_name, op, tuple(parsed), stored=(spec.native,), kind=base)
-    else:
-        check = SearchCheck(field_name, op, tuple(condition.values), host=special == "a short host name")
+    check = SearchCheck(field_name, special, tuple(condition.values)) if special is not None else None
     return _PlannedCondition(filters, groups, check, list(dict.fromkeys(caveats))), None
-
-
-def _stored_values(source, path: str) -> list:
-    """The stored values at a dotted path, through nested objects, dotted keys or a mix, and lists. A keyword
-    subfield (`CommandLine.keyword`) indexes its parent's value."""
-    found: list = []
-
-    def walk(node, parts: list[str]) -> None:
-        if not parts:
-            found.extend(node if isinstance(node, list) else [node])
-            return
-        if isinstance(node, list):
-            for item in node:
-                walk(item, parts)
-            return
-        if not isinstance(node, dict):
-            return
-        for index in range(1, len(parts) + 1):
-            key = ".".join(parts[:index])
-            if key in node:
-                walk(node[key], parts[index:])
-
-    walk(source, path.split("."))
-    if not found and "." in path:
-        walk(source, path.rsplit(".", 1)[0].split("."))
-    return found
 
 
 def _short_host(value) -> str:
     return str(value).strip().rstrip(".").split(".", 1)[0].casefold()
 
 
-def _typed_match(check: SearchCheck, value) -> bool:
-    if value is None:
-        return False
-    try:
-        if check.op == "cidr":
-            address = ipaddress.ip_address(str(value))
-            address = getattr(address, "ipv4_mapped", None) or address
-            return address in ipaddress.ip_network(check.values[0], strict=False)
-        if check.op in {"gte", "lt"}:
-            bound = check.values[0]
-            if isinstance(value, bool):
-                return False
-            try:
-                left, right = float(value), float(bound)
-            except (TypeError, ValueError):
-                left, right = _time_ns(str(value)), _time_ns(str(bound))
-                if left is None or right is None:
-                    return False
-            return left >= right if check.op == "gte" else left < right
-    except (TypeError, ValueError):
-        return False
-    text = ("true" if value else "false") if isinstance(value, bool) else str(value)
-    if check.host:
-        return _short_host(text) in {_short_host(item) for item in check.values}
-    if check.op == "prefix":
-        return text.casefold().startswith(str(check.values[0]).casefold())
-    return text.casefold() in {str(item).casefold() for item in check.values}
+def _special_holds(check: SearchCheck, typed) -> bool:
+    """Whether a typed value meets the condition as the compiler's special form means it: a name without case, a host
+    by its short name, an account in its canonical form (a sid by its sid, a name with its domain). A typed account
+    in the other canonical form (a sid where the search named the account) cannot refute it."""
+    text = str(typed)
+    if check.form == "host":
+        return _short_host(text) in {_short_host(value) for value in check.values}
+    if check.form == "account":
+        kind = text.split(":", 1)[0].casefold()
+        wanted = {value.casefold() for value in check.values if value.split(":", 1)[0].casefold() == kind}
+        return not wanted or text.casefold() in wanted
+    return text.casefold() in {value.casefold() for value in check.values}
 
 
-def _stored_match(check: SearchCheck, value) -> bool:
-    if check.kind not in _STRING_KINDS:
-        # the source compares addresses, numbers, times and booleans by value: what it matched holds exactly
-        return True
-    if isinstance(value, bool):
-        text = "true" if value else "false"
-    elif isinstance(value, (str, int, float)):
-        text = str(value)
-    else:
-        return False
-    if check.op == "prefix":
-        return text.startswith(check.values[0])
-    return text in check.values
-
-
-def _search_keeps(checks: list[SearchCheck], event: TypedEvent, sources: dict[str, dict]) -> bool:
-    """Whether every condition holds on the event: its stored record's value, or its typed value. A record the
-    source matched that fails is a superset row, discarded and counted, never a match."""
+def _search_keeps(checks: list[SearchCheck], event: TypedEvent) -> bool:
+    """Whether a source match survives the special-form re-checks: kept unless the event's typed value of such a
+    field is present and refutes it. A refuted row is a superset row, discarded and counted, never a match."""
     for check in checks:
-        if check.stored:
-            records = [sources[ref.key] for ref in event.raw if ref.key in sources]
-            if not any(_stored_match(check, value) for record in records for path in check.stored
-                       for value in _stored_values(record, path)):
-                return False
-        else:
-            value = event.get(check.field)
-            if not any(_typed_match(check, item) for item in (value if isinstance(value, list) else [value])):
-                return False
+        value = event.get(check.field)
+        if value is None:
+            continue
+        values = value if isinstance(value, list) else [value]
+        if values and not any(_special_holds(check, item) for item in values):
+            return False
     return True
 
 
@@ -1365,7 +1296,7 @@ class PivotExecutor:
                         problem = f"the conditions compile to a {unsafe} clause, which agent search does not send"
             if problem is None:
                 intents.append(intent)
-                checks[contract.target] = [item.check for item in planned]
+                checks[contract.target] = [item.check for item in planned if item.check is not None]
                 caveats.extend(caveat for item in planned for caveat in item.caveats)
             else:
                 skipped.append((contract.target, problem, field_name))
@@ -1420,12 +1351,13 @@ class PivotExecutor:
         return cells
 
     def search_item_bound(self, request: SearchEventsRequest) -> int:
-        """The most page items one search's result can hold: its kept rows, its listed entities, and a few coverage
-        cells and reasons for every target of its scope."""
+        """The most page items one search's result can hold."""
         targets = sum(1 for contract in self.contracts.values()
                       if contract is None or _scoped(contract, request.arguments.scope))
-        return (MAX_SEARCH_RECORDS + MAX_SEARCH_TARGET_RECORDS + MAX_SEARCH_ENTITIES
-                + 2 * (SEARCH_PARTITIONS + 8) * targets + MAX_SEARCH_SKIP_REASONS + 64)
+        rows = MAX_SEARCH_RECORDS + MAX_SEARCH_TARGET_RECORDS
+        # its kept rows, the direct-detection findings they can raise (each cites at least one of them), its listed
+        # entities, and a few coverage cells and reasons for every target of its scope
+        return 2 * rows + MAX_SEARCH_ENTITIES + 2 * (SEARCH_PARTITIONS + 8) * targets + MAX_SEARCH_SKIP_REASONS + 64
 
     def search_refusal(self, request: SearchEventsRequest) -> dict | None:
         """The refusal an agent search gets before any source query, or None when some target can evaluate it."""
@@ -2362,7 +2294,7 @@ class PivotExecutor:
                         )]
                     if search:
                         selected = [event for event in events
-                                    if _search_keeps(search_plan.checks[intent.target], event, sources)]
+                                    if _search_keeps(search_plan.checks[intent.target], event)]
                         discarded += len(events) - len(selected)
                     else:
                         selected = [event for event in events if self._retain(request, event)]
@@ -2420,8 +2352,7 @@ class PivotExecutor:
             final_script_reasons.update(_script_metadata_reasons([event]))
             sources = script_blocks.sources_for([event])
             if search:
-                if not any(_search_keeps(checks, event, {**raw_sources, **sources})
-                           for checks in search_plan.checks.values()):
+                if not any(_search_keeps(checks, event) for checks in search_plan.checks.values()):
                     discarded += 1
                     continue
             elif not self._retain(request, event):

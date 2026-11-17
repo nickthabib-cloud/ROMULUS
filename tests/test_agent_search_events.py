@@ -48,6 +48,32 @@ def _dns(target: str, number: int, ts: datetime, name: str = "example.test", por
         "destination": {"ip": "10.0.0.53", "port": port}}}
 
 
+def _stored_values(source, path: str) -> list:
+    """The stored values at a dotted path, through nested objects, dotted keys or a mix, and lists; a keyword subfield
+    (`CommandLine.keyword`) indexes its parent's value."""
+    found: list = []
+
+    def walk(node, parts: list[str]) -> None:
+        if not parts:
+            found.extend(node if isinstance(node, list) else [node])
+            return
+        if isinstance(node, list):
+            for item in node:
+                walk(item, parts)
+            return
+        if not isinstance(node, dict):
+            return
+        for index in range(1, len(parts) + 1):
+            key = ".".join(parts[:index])
+            if key in node:
+                walk(node[key], parts[index:])
+
+    walk(source, path.split("."))
+    if not found and "." in path:
+        walk(source, path.rsplit(".", 1)[0].split("."))
+    return found
+
+
 def _stamp(value) -> datetime | None:
     try:
         return datetime.fromisoformat(str(value))
@@ -95,7 +121,7 @@ class FakeES:
         yield object()
 
     def _indexed(self, source: dict, path: str) -> list:
-        values = pivot_module._stored_values(source, path)
+        values = _stored_values(source, path)
         limit = self.limits.get(path)
         return [value for value in values
                 if not (isinstance(value, str) and limit is not None and utf16_length(value) > limit)]
@@ -133,7 +159,7 @@ class FakeES:
             need = body.get("minimum_should_match", 0 if required else 1) if should else 0
             return sum(self.matches(item, source) for item in should) >= need
         if kind == "exists":
-            return bool(pivot_module._stored_values(source, body["field"]))
+            return bool(_stored_values(source, body["field"]))
         (path, spec), = body.items()
         values = self._indexed(source, path)
         if kind == "term":
@@ -243,9 +269,9 @@ def _search(toolbox: Toolbox, conditions, *, scope="network", **extra) -> dict:
 
 
 DNS = [{"field": "dns.question.name", "op": "eq", "values": ["example.test"]}]
-# a condition on a field declared verbatim (an address stored as an address): zero hits on it can be a no-match
-VERBATIM = [{"field": "destination.ip", "op": "eq", "values": ["10.0.0.53"]}]
+ADDRESS = [{"field": "destination.ip", "op": "eq", "values": ["10.0.0.53"]}]
 ABSENT = [{"field": "destination.ip", "op": "eq", "values": ["192.0.2.99"]}]
+NOT_CONFIRMED = "no records matched in the sources searched; this is not a confirmed absence"
 
 
 # ---- schema and validation ---------------------------------------------------------------------------------------
@@ -378,27 +404,38 @@ def test_an_unsupported_field_on_one_of_two_targets_is_a_partial_naming_the_unev
     assert search["negative"] == "matches_found" and len(response["data"]["result"]["evidence"]) == 1
 
 
-def test_zero_hits_beside_an_unevaluated_target_is_unresolved_never_no_match():
+def test_zero_hits_beside_an_unevaluated_target_is_unresolved():
     repo, client = _hunt(), FakeES()
     other = contract_from_types("net-b", {"@timestamp": "date"}, role="network")
     response = _search(_toolbox(repo, {"net-a": _keyword_contract("net-a"), "net-b": other}, client), DNS)
     assert response["status"] == "partial"
     search = response["data"]["result"]["search"]
     assert search["negative"] == "unresolved"
-    assert any("not evaluated: net-b" in why for why in search["unresolved_because"])
+    assert any("not evaluated: net-b" in why for why in search["gaps_and_caveats"])
 
 
-def test_zero_hits_under_complete_coverage_is_a_real_no_match():
-    records = [_dns("net-a", 1, T + timedelta(minutes=3)), _dns("net-b", 2, T + timedelta(minutes=4))]
-    repo, client = _hunt(), FakeES({"net-a": records[:1], "net-b": records[1:]})
-    contracts = {"net-a": _keyword_contract("net-a"), "net-b": _keyword_contract("net-b")}
-    response = _search(_toolbox(repo, contracts, client), ABSENT)
-    assert response["status"] == "complete"
+@pytest.mark.parametrize("conditions", [
+    ABSENT, [{"field": "destination.port", "op": "eq", "values": ["8443"]}],
+    [{"field": "source.ip", "op": "cidr", "values": ["192.0.2.0/24"]}],
+    [{"field": "dns.question.name", "op": "in", "values": ["absent.test", "missing.test"]}],
+    [{"field": "dns.question.name", "op": "prefix", "values": ["absent"]}],
+    [{"field": "dns.question.name", "op": "eq", "values": ["example.test"]},
+     {"field": "event.duration", "op": "gte", "values": ["99999"]}],
+])
+@pytest.mark.parametrize("role", ["network", "host"])
+def test_zero_hits_is_never_a_confirmed_absence_even_under_complete_coverage(conditions, role):
+    targets = ("t-a", "t-b")
+    records = [_dns(target, n, T + timedelta(minutes=3 + n)) for n, target in enumerate(targets)]
+    repo, client = _hunt(), FakeES({target: [record] for target, record in zip(targets, records, strict=True)})
+    contracts = {target: _keyword_contract(target, role=role) for target in targets}
+    response = _search(_toolbox(repo, contracts, client, inventory={target: [] for target in targets}),
+                       conditions, scope=role)
     search = response["data"]["result"]["search"]
-    assert search["negative"] == "no_match" and search["unresolved_because"] == []
-    assert search["exhaustive"] is True
-    assert {cell["target"] for cell in response["data"]["result"]["coverage"]} == {"net-a", "net-b"}
+    assert response["status"] == "complete"
     assert all(cell["status"] == "complete" for cell in response["data"]["result"]["coverage"])
+    assert search["negative"] == "unresolved" and search["statement"] == NOT_CONFIRMED
+    assert "exhaustive" not in search and "no_match" not in json.dumps(response)
+
 
 
 def test_packet_captures_are_named_as_not_searched_and_keep_a_zero_unresolved():
@@ -407,7 +444,7 @@ def test_packet_captures_are_named_as_not_searched_and_keep_a_zero_unresolved():
                        packet_sources=("packet captures behind arkime-sessions (Arkime viewer and TShark)",))
     response = _search(toolbox, ABSENT)
     search = response["data"]["result"]["search"]
-    assert search["negative"] == "unresolved" and search["exhaustive"] is False
+    assert search["negative"] == "unresolved"
     # the source not searched makes the tool result and its coverage partial, with a gap that names it
     assert response["status"] == "partial" and response["coverage"]["status"] == "partial"
     assert any(gap["target"] == "packet captures behind arkime-sessions (Arkime viewer and TShark)"
@@ -472,8 +509,8 @@ def test_the_partition_limit_is_named_and_zero_unresolved_is_never_claimed(monke
     assert response["status"] == "partial"
     assert f"pivot_partition_limit:{pivot_module.SEARCH_PARTITIONS}" in response["data"]["result"]["reasons"]
     search = response["data"]["result"]["search"]
-    assert search["negative"] == "matches_found" and search["exhaustive"] is False
-    assert any("pivot_partition_limit" in why for why in search["unresolved_because"])
+    assert search["negative"] == "matches_found" and search["statement"] is None
+    assert any("pivot_partition_limit" in why for why in search["gaps_and_caveats"])
     cells = response["data"]["result"]["coverage"]
     assert any(cell["unresolved_ranges"] for cell in cells)
 
@@ -667,7 +704,7 @@ def test_each_search_spends_the_hunt_source_query_budget():
     toolbox = _toolbox(repo, {"net-a": _keyword_contract("net-a")}, client, budget=1)
     first = _search(toolbox, ABSENT)
     second = _search(toolbox, [{"field": "destination.ip", "op": "eq", "values": ["192.0.2.98"]}])
-    assert first["data"]["result"]["search"]["negative"] == "no_match"
+    assert first["status"] == "complete" and first["data"]["result"]["search"]["negative"] == "unresolved"
     assert second["status"] == "partial"
     assert second["data"]["result"]["search"]["negative"] == "unresolved"
     assert repo.agent_source_queries("h1") == 1
@@ -708,7 +745,7 @@ def test_the_prompt_and_catalog_name_the_tool():
     from importlib import resources
 
     prompt = resources.files("romulus.agent.prompts").joinpath("investigate.md").read_text(encoding="utf-8")
-    assert "search_events" in prompt and "no_match" in prompt
+    assert "search_events" in prompt and "never evidence of absence" in prompt and "no_match" not in prompt
     assert "search_events" in tool_catalog()
     assert "contains" not in tool_catalog()["search_events"]["arguments"]
 
@@ -788,7 +825,7 @@ def test_a_target_without_a_contract_is_named_and_keeps_a_zero_unresolved():
     response = _search(Toolbox(repo, "h1", executor=executor, session_id=SESSION), DNS)
     assert response["status"] == "partial"
     search = response["data"]["result"]["search"]
-    assert search["negative"] == "unresolved" and search["exhaustive"] is False
+    assert search["negative"] == "unresolved" and search["statement"] == NOT_CONFIRMED
     assert "net-c: not searched (no field contract for this target)" in search["not_searched"]
     assert any(reason == "not evaluated: net-b: no field contract for this target"
                for reason in response["data"]["result"]["reasons"])
@@ -853,17 +890,13 @@ def _windows_contract_and_record():
     ([{"field": "user.name", "op": "prefix", "values": ["ws0"]}], "unresolved"),
     ([{"field": "source.ip", "op": "eq", "values": ["198.51.100.10"]}], "unresolved"),
 ])
-def test_a_value_copied_from_a_typed_event_is_a_hit_or_unresolved_never_no_match(conditions, expect):
+def test_a_value_copied_from_a_typed_event_is_a_hit_or_unresolved(conditions, expect):
     contract, hit = _windows_contract_and_record()
     repo, client = _hunt(), FakeES({"win-a": [hit]})
     response = _search(_toolbox(repo, {"win-a": contract}, client), conditions, scope="host")
     search = response["data"]["result"]["search"]
     assert search["negative"] == expect, response["data"]["result"]
-    assert search["exhaustive"] is False
-    if expect == "unresolved":
-        field_name = conditions[0]["field"]
-        assert (f"{field_name}: typed values are derived from the stored value (case/form/text); zero hits are not "
-                "a confirmed absence") in search["unresolved_because"]
+    assert search["statement"] == (NOT_CONFIRMED if expect == "unresolved" else None)
 
 
 def test_an_in_on_a_special_field_is_sent_as_each_value_s_equality_form():
@@ -898,18 +931,19 @@ def test_a_hash_typed_in_another_case_than_stored_is_unresolved():
                        [{"field": "file.hash.sha256", "op": "eq", "values": ["ab" * 32]}])
     search = response["data"]["result"]["search"]
     assert response["status"] == "complete" and search["negative"] == "unresolved"
-    assert any(why.startswith("file.hash.sha256: typed values are derived") for why in search["unresolved_because"])
+    assert search["statement"] == NOT_CONFIRMED
 
 
-def test_superset_rows_the_re_check_refutes_are_discarded_never_matches():
-    # a lowercase normalizer on the stored field: the source matches another case, the stored value does not
+def test_a_source_match_on_a_plain_field_is_trusted_never_re_checked():
+    # a lowercase normalizer on the stored field: the source matched another case, and that match is kept
     repo = _hunt()
     client = FakeES({"net-a": [_dns("net-a", 1, T + timedelta(minutes=2))]}, caseless={"dns.question.name"})
     response = _search(_toolbox(repo, {"net-a": _keyword_contract("net-a")}, client),
                        [{"field": "dns.question.name", "op": "eq", "values": ["EXAMPLE.test"]}])
     search = response["data"]["result"]["search"]
-    assert search["discarded"] == 1 and search["negative"] == "unresolved"
-    assert response["data"]["result"]["evidence"] == []
+    assert search["discarded"] == 0 and search["negative"] == "matches_found"
+    assert len(response["data"]["result"]["evidence"]) == 1
+
 
 
 def test_a_text_parsed_host_dataset_keeps_an_address_search_unresolved():
@@ -922,12 +956,6 @@ def test_a_text_parsed_host_dataset_keeps_an_address_search_unresolved():
         assert response["data"]["result"]["search"]["negative"] == "unresolved"
         reasons = response["data"]["result"]["reasons"]
         assert any(reason.startswith(f"dataset_text_parsed:{dataset or 'inventory unknown'}") for reason in reasons)
-    # the same search on a target that maps no text payload can be a confirmed no-match
-    repo, client = _hunt(), FakeES({"host-b": []})
-    response = _search(_toolbox(repo, {"host-b": _keyword_contract("host-b", role="host")}, client,
-                                inventory={"host-b": ["linux.audit"]}),
-                       [{"field": "source.ip", "op": "eq", "values": ["198.51.100.9"]}], scope="host")
-    assert response["data"]["result"]["search"]["negative"] == "no_match"
 
 
 # ---- index length limits -----------------------------------------------------------------------------------------
@@ -960,12 +988,12 @@ def test_a_prefix_on_a_limited_keyword_misses_long_values_and_is_unresolved():
     search = response["data"]["result"]["search"]
     assert search["negative"] == "unresolved"
     assert ("cmd: values longer than 64 characters are not indexed in cmd, so a prefix cannot see them"
-            in search["unresolved_because"])
+            in search["gaps_and_caveats"])
     # a keyword with no limit names none; the long value is found
     response = _search(toolbox, [{"field": "free", "op": "prefix", "values": ["powershell.exe -enc"]}])
     search = response["data"]["result"]["search"]
     assert search["negative"] == "matches_found"
-    assert not any("not indexed" in why for why in search["unresolved_because"])
+    assert not any("not indexed" in why for why in search["gaps_and_caveats"])
 
 
 def test_an_equality_value_past_the_limit_in_utf16_units_is_not_evaluated():
@@ -1062,7 +1090,7 @@ def test_a_reach_link_with_an_unsearched_source_is_stored_partial():
     repo = _hunt()
     client = FakeES({"net-a": [_dns("net-a", 1, T + timedelta(minutes=2))]})
     toolbox = _toolbox(repo, {"net-a": _keyword_contract("net-a")}, client, packet_sources=("pcap-behind-net-a",))
-    response = _search(toolbox, VERBATIM)
+    response = _search(toolbox, ADDRESS)
     assert response["status"] == "partial"
     link, = [row for row in repo.expansion_links("h1") if row["link_type"] == "agent_search_events"]
     assert link["status"] == "partial"
@@ -1092,7 +1120,7 @@ def test_reasons_past_ten_are_counted_and_similar_field_names_are_bounded():
     targets["net-a"] = _keyword_contract("net-a")
     repo, client = _hunt(), FakeES({"net-a": []})
     search = _search(_toolbox(repo, targets, client), DNS)["data"]["result"]["search"]
-    assert len(search["unresolved_because"]) == 10 and search["unresolved_because_omitted"] > 0
+    assert len(search["gaps_and_caveats"]) == 10 and search["gaps_and_caveats_omitted"] > 0
     long_name = "file.hash." + "a" * 300
     contract = contract_from_types("net-a", {"@timestamp": "date", long_name: "keyword"}, role="network")
     refusal = PivotExecutor(_hunt(), FakeES(), "h1", {"net-a": contract}).plan_search(_request(
@@ -1109,3 +1137,144 @@ def test_the_searched_fields_are_never_cut_from_an_event_summary():
                         {"field": "source.ip", "op": "eq", "values": ["198.51.100.9"]}], scope="host")
     summary, = response["data"]["result"]["event_summaries"]
     assert summary["searched_fields"] == {"host.name": "ws01", "source.ip": "198.51.100.9"}
+
+
+# ---- the reviewer's probes: what the source matched is kept -------------------------------------------------------
+
+def _probe_windows():
+    win = {"_id": "w1", "_index": "win-a", "_source": {
+        "@timestamp": "2024-11-18T14:05:00+00:00", "agent": {"type": "winlogbeat"},
+        "event": {"dataset": "windows.security", "code": "4624"}, "data_stream": {"dataset": "windows.security"},
+        "winlog": {"channel": "Security", "provider_name": "Microsoft-Windows-Security-Auditing", "event_id": "4624",
+                   "computer_name": "WS01.corp.local", "record_id": "77", "event_data": {
+                       "SubjectUserSid": "S-1-5-18", "SubjectUserName": "WS01$", "SubjectDomainName": "CORP",
+                       "TargetUserSid": "S-1-5-21-1-2-3-500", "TargetUserName": "Administrator",
+                       "TargetDomainName": "CORP", "LogonType": "3", "IpAddress": "::ffff:10.0.0.9",
+                       "IpPort": "50000", "WorkstationName": "WS02", "TargetLogonId": "0x1234"}}}}
+    sysmon = {"_id": "s1", "_index": "win-a", "_source": {
+        "@timestamp": "2024-11-18T14:06:00+00:00", "agent": {"type": "winlogbeat"},
+        "event": {"dataset": "windows.sysmon_operational", "code": "1"},
+        "data_stream": {"dataset": "windows.sysmon_operational"},
+        "winlog": {"channel": "Microsoft-Windows-Sysmon/Operational", "provider_name": "Microsoft-Windows-Sysmon",
+                   "event_id": "1", "computer_name": "WS01.corp.local", "record_id": "88", "event_data": {
+                       "Image": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                       "CommandLine": "powershell.exe -enc AAAA", "ParentImage": "C:\\Windows\\explorer.exe",
+                       "ProcessId": "100", "ParentProcessId": "50",
+                       "ProcessGuid": "{11111111-1111-1111-1111-111111111111}",
+                       "ParentProcessGuid": "{22222222-2222-2222-2222-222222222222}", "User": "CORP\\Alice",
+                       "LogonId": "0x1234"}}}}
+    types = {"@timestamp": "date", "agent.type": "keyword", "event.dataset": "keyword",
+             "data_stream.dataset": "keyword", "event.code": "keyword", "winlog.channel": "keyword",
+             "winlog.computer_name": "keyword", "winlog.event_id": "keyword", "winlog.provider_name": "keyword",
+             "winlog.record_id": "keyword", "host.name": "keyword"}
+    for name in ("SubjectUserSid", "SubjectUserName", "SubjectDomainName", "TargetUserSid", "TargetUserName",
+                 "TargetDomainName", "LogonType", "IpAddress", "IpPort", "WorkstationName", "TargetLogonId", "Image",
+                 "CommandLine", "ParentImage", "ProcessId", "ParentProcessId", "ProcessGuid", "ParentProcessGuid",
+                 "User", "LogonId"):
+        types["winlog.event_data." + name] = "keyword"
+    contract = contract_from_types("win-a", types, role="host", os_family="windows",
+                                   datasets=["windows.sysmon_operational", "windows.security"], index_limits={})
+    return contract, [win, sysmon]
+
+
+@pytest.mark.parametrize("conditions, kept", [
+    # Windows events carry no typed event.dataset: the source's exact match is kept
+    ([{"field": "event.dataset", "op": "eq", "values": ["windows.sysmon_operational"]}], 1),
+    ([{"field": "process.guid", "op": "eq", "values": ["{11111111-1111-1111-1111-111111111111}"]}], 1),
+    ([{"field": "winlog.event_data.CommandLine", "op": "prefix", "values": ["powershell"]}], 1),
+    ([{"field": "process.executable", "op": "in",
+       "values": ["C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"]}], 1),
+    # an IPv4-mapped spelling on an alias of a keyword field: the stored spelling matched, and it is kept
+    ([{"field": "source.ip", "op": "eq", "values": ["::ffff:10.0.0.9"]}], 1),
+])
+def test_what_the_source_matched_exactly_is_kept(conditions, kept):
+    contract, records = _probe_windows()
+    repo, client = _hunt(), FakeES({"win-a": records})
+    response = _search(_toolbox(repo, {"win-a": contract}, client), conditions, scope="host")
+    search = response["data"]["result"]["search"]
+    assert len(response["data"]["result"]["evidence"]) == kept, response["data"]["result"]
+    assert search["discarded"] == 0 and search["negative"] == "matches_found"
+
+
+def test_a_typed_event_without_the_special_field_is_kept():
+    contract, records = _probe_windows()
+    repo, client = _hunt(), FakeES({"win-a": records})
+    response = _search(_toolbox(repo, {"win-a": contract}, client),
+                       [{"field": "event.channel", "op": "eq", "values": ["SECURITY"]}], scope="host")
+    assert response["data"]["result"]["search"]["discarded"] == 0
+    assert len(response["data"]["result"]["evidence"]) == 1
+
+
+def test_superset_rows_the_special_form_check_refutes_are_discarded_and_counted():
+    from tests.windows_fixtures import LogicalWindowsEvent, windows_hit
+
+    def hit(record_id, data):
+        event = LogicalWindowsEvent("Security", "Microsoft-Windows-Security-Auditing", 4688, "WS01.corp.example",
+                                    record_id, "2024-11-18T14:10:00Z", data)
+        record = windows_hit(event, "winlogbeat_8")
+        record.update(_index="win-a", _id=f"w{record_id}")
+        return record
+
+    base = {"SubjectLogonId": "0x5", "NewProcessName": "C:\\x.exe", "NewProcessId": "0x10", "ProcessId": "0x4"}
+    other_domain = hit(1, {**base, "SubjectUserName": "alice", "SubjectDomainName": "OTHER"})
+    same_domain = hit(2, {**base, "SubjectUserName": "Alice", "SubjectDomainName": "CORP"})
+    with_sid = hit(3, {**base, "SubjectUserSid": "S-1-5-21-9", "SubjectUserName": "alice",
+                       "SubjectDomainName": "OTHER"})
+    contract, _hit = _windows_contract_and_record()
+    repo, client = _hunt(), FakeES({"win-a": [other_domain, same_domain, with_sid]})
+    response = _search(_toolbox(repo, {"win-a": contract}, client),
+                       [{"field": "user.entity_id", "op": "eq", "values": ["name:CORP\\alice"]}], scope="host")
+    search = response["data"]["result"]["search"]
+    # the source matched the short name in every domain: another domain's alice is refuted by her typed account,
+    # and a typed sid cannot refute a search by name
+    assert client.returned == 3 and search["discarded"] == 1
+    assert len(response["data"]["result"]["evidence"]) == 2
+
+
+def test_a_text_parsed_record_on_a_generic_dataset_gives_unresolved():
+    record = {"_id": "g1", "_index": "host-a", "_source": {
+        "@timestamp": "2024-11-18T14:05:00+00:00", "event": {"dataset": "generic"}, "input": {"type": "filestream"},
+        "log": {"file": {"path": "/var/log/auth.log"}}, "host": {"name": "web01"},
+        "message": "Nov 18 14:05:00 web01 sshd[123]: Accepted password for bob from 10.0.0.9 port 50022 ssh2"}}
+    contract = contract_from_types("host-a", {
+        "@timestamp": "date", "event.dataset": "keyword", "input.type": "keyword", "log.file.path": "keyword",
+        "host.name": "keyword", "message": "match_only_text", "source.ip": "ip", "source.port": "long"},
+        role="host", os_family="linux", index_limits={})
+    for inventory in ({"host-a": ["generic"]}, None):
+        repo, client = _hunt(), FakeES({"host-a": [record]})
+        response = _search(_toolbox(repo, {"host-a": contract}, client, inventory=inventory),
+                           [{"field": "source.ip", "op": "eq", "values": ["10.0.0.9"]}], scope="host")
+        search = response["data"]["result"]["search"]
+        assert search["negative"] == "unresolved" and search["statement"] == NOT_CONFIRMED
+
+
+def test_a_flattened_leaf_takes_its_root_s_index_limit():
+    contract = FieldContract(target="net-a", fields={}, keyword_limits={"labels": 32, "labels.x.keyword": 8},
+                             keyword_limits_known=True)
+    assert contract.index_limit("labels.owner.name") == (True, 32)
+    assert contract.index_limit("labels.x.keyword") == (True, 8)
+    assert contract.index_limit("other.field") == (True, None)
+
+
+def test_a_result_the_session_cannot_store_is_a_stored_failure(monkeypatch):
+    repo = _hunt()
+    client = FakeES({"net-a": [_dns("net-a", 1, T + timedelta(minutes=2))]})
+    toolbox = _toolbox(repo, {"net-a": _keyword_contract("net-a")}, client)
+    real = Repo.create_agent_page_plan
+
+    def refuse_large(self, hunt_id, cursor, identity, summary, items, **kwargs):
+        items = list(items)
+        if len(items) > 3:
+            raise ValueError("agent page item quota exceeded")
+        return real(self, hunt_id, cursor, identity, summary, items, **kwargs)
+
+    monkeypatch.setattr(Repo, "create_agent_page_plan", refuse_large)
+    first = _search(toolbox, DNS)
+    assert first["status"] == "failed"
+    assert any("search result not stored" in reason for reason in first["data"]["result"]["reasons"])
+
+
+def test_the_item_bound_counts_rows_twice_for_the_findings_they_can_raise():
+    executor = PivotExecutor(_hunt(), FakeES(), "h1", {"net-a": _keyword_contract("net-a")})
+    rows = pivot_module.MAX_SEARCH_RECORDS + pivot_module.MAX_SEARCH_TARGET_RECORDS
+    assert executor.search_item_bound(_request(DNS)) >= 2 * rows + pivot_module.MAX_SEARCH_ENTITIES

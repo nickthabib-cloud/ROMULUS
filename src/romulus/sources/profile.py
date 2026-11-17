@@ -51,19 +51,6 @@ OPS_BY_TYPE: dict[str, set[str]] = {
     # is never used for a value predicate.
     "flattened": {"eq", "in", "not_in", "prefix", "contains", "exists", "missing"},
 }
-# Typed fields whose value equals the stored value of the same-named native field, declared with the native mapping
-# types under which that holds whatever the shipper's spelling: the source compares addresses and integers by value,
-# and every normalizer that reads these fields from a stored field copies the value unchanged (an address in its
-# canonical text, a port as an integer). An agent search calls zero hits a confirmed absence only on fields declared
-# here, searched on their own stored field; every other field is derived (case folded, a canonical account form, a
-# short host name, parsed from text, or not yet verified) and zero hits on it stay unresolved. A field joins only
-# after every normalizer that emits it is checked to copy it unchanged.
-VERBATIM_FIELDS: dict[str, frozenset[str]] = {
-    "source.ip": frozenset({"ip"}),
-    "destination.ip": frozenset({"ip"}),
-    "source.port": frozenset({"long", "integer", "short"}),
-    "destination.port": frozenset({"long", "integer", "short"}),
-}
 AGGREGATABLE = {
     "keyword", "constant_keyword", "ip", "long", "integer", "short", "boolean", "date", "wildcard",
 }
@@ -206,10 +193,16 @@ class FieldContract(BaseModel):
 
     def index_limit(self, native: str) -> tuple[bool, int | None]:
         """(known, limit) for a keyword-like native: the longest value it indexes (None: any length), and whether
-        that is known from the mapping."""
+        that is known from the mapping. A leaf of a flattened field takes the limit recorded on the nearest
+        recorded ancestor (the flattened root carries it)."""
         if not self.keyword_limits_known:
             return False, None
-        return True, self.keyword_limits.get(native)
+        parts = native.split(".")
+        for size in range(len(parts), 0, -1):
+            path = ".".join(parts[:size])
+            if path in self.keyword_limits:
+                return True, self.keyword_limits[path]
+        return True, None
 
     def spec(self, typed: str, *, os_family: str | None = None) -> FieldSpec | None:
         if os_family == "linux" and self.linux_fields:
