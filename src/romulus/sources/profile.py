@@ -145,6 +145,12 @@ class FieldContract(BaseModel):
     text_missing_host_records: int | None = None
     ecar: bool = False
     temporal_gaps: tuple[str, ...] = ()
+    # Each keyword-like native (keyword, wildcard, flattened; a text field's keyword subfield) with its ignore_above:
+    # the longest value the source indexes, None when it indexes values of any length. Only when
+    # keyword_limits_known: a contract built without the mapping's limits knows none, and every such limit is then
+    # finite and unknown.
+    keyword_limits: dict[str, int | None] = {}
+    keyword_limits_known: bool = False
 
     @model_validator(mode="after")
     def _untyped_names(self):
@@ -179,7 +185,24 @@ class FieldContract(BaseModel):
             data.pop("ecar", None)
         if not self.temporal_gaps:
             data.pop("temporal_gaps", None)
+        if not self.keyword_limits:
+            data.pop("keyword_limits", None)
+        if not self.keyword_limits_known:
+            data.pop("keyword_limits_known", None)
         return data
+
+    def index_limit(self, native: str) -> tuple[bool, int | None]:
+        """(known, limit) for a keyword-like native: the longest value it indexes (None: any length), and whether
+        that is known from the mapping. A leaf of a flattened field takes the limit recorded on the nearest
+        recorded ancestor (the flattened root carries it)."""
+        if not self.keyword_limits_known:
+            return False, None
+        parts = native.split(".")
+        for size in range(len(parts), 0, -1):
+            path = ".".join(parts[:size])
+            if path in self.keyword_limits:
+                return True, self.keyword_limits[path]
+        return True, None
 
     def spec(self, typed: str, *, os_family: str | None = None) -> FieldSpec | None:
         if os_family == "linux" and self.linux_fields:
@@ -296,6 +319,38 @@ def flatten_mapping(mapping: dict) -> dict[str, str]:
     for body in mapping.values():
         walk("", body.get("mappings", {}).get("properties", {}))
     return out
+
+
+# Keyword-like mapping types that take an ignore_above.
+LIMITED_KINDS = frozenset({"keyword", "wildcard", "flattened"})
+
+
+def keyword_index_limits(mapping: dict) -> dict[str, int | None]:
+    """Every keyword-like native (a field, or a subfield of any field) with its ignore_above: the longest value the
+    source indexes there, or None when it indexes values of any length. Across the indices of a pattern target, the
+    smallest limit any of them sets. Elasticsearch counts ignore_above in characters of the Java string, that is in
+    UTF-16 code units (sources.compile.utf16_length), not in bytes:
+    https://www.elastic.co/guide/en/elasticsearch/reference/current/ignore-above.html"""
+    limits: dict[str, list[int | None]] = {}
+
+    def note(path: str, spec: dict) -> None:
+        if spec.get("type") in LIMITED_KINDS:
+            limit = spec.get("ignore_above")
+            limits.setdefault(path, []).append(int(limit) if limit is not None else None)
+
+    def walk(prefix: str, props: dict[str, Any]):
+        for name, spec in props.items():
+            full = f"{prefix}{name}"
+            if "properties" in spec:
+                walk(full + ".", spec["properties"])
+            note(full, spec)
+            for sub, sspec in spec.get("fields", {}).items():
+                note(f"{full}.{sub}", sspec)
+
+    for body in mapping.values():
+        walk("", body.get("mappings", {}).get("properties", {}))
+    return {path: min((value for value in values if value is not None), default=None)
+            for path, values in limits.items()}
 
 
 def keyword_subfield_limits(mapping: dict) -> dict[str, int | None]:
@@ -600,6 +655,7 @@ def contract_from_types(
     keyword_limits: dict[str, int | None] | None = None,
     linux_text_mixed: bool | None | Literal["mapping"] = "mapping",
     temporal_gaps: tuple[str, ...] = (),
+    index_limits: dict[str, int | None] | None = None,
 ) -> FieldContract:
     """Build a typed contract, adding explicit aliases for native schemas such as Windows event data. `datasets` is
     the target's dataset inventory, when known: a Linux dataset in it makes a mapping that also holds NXLog's flat
@@ -731,6 +787,7 @@ def contract_from_types(
         nxlog_mixed=nxlog_mixed(field_types, resolved_role, resolved_os),
         windows_shapes=evtx_json_shapes(field_types) if evtx else (),
         ecar=ecar, temporal_gaps=temporal_gaps,
+        keyword_limits=dict(index_limits or {}), keyword_limits_known=index_limits is not None,
         linux_text_mixed=(not ecar and resolved_role == "host" and resolved_os == "windows"
                           and any(name in field_types for name in ("message", "event.original"))
                           and any(name in field_types for name in ("event.dataset", "data_stream.dataset",
@@ -1274,6 +1331,7 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
         host_inventory_complete=not any(note.startswith("hosts inventory truncated") for note in notes),
         datasets=datasets,
         keyword_limits=keyword_subfield_limits(mapping),
+        index_limits=keyword_index_limits(mapping),
         linux_text_mixed=mixed_text,
         temporal_gaps=tuple(item["reason"] for item in temporal),
     )

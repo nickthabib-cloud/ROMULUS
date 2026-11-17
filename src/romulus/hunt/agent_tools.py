@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from romulus.agent.models import EntityRef, PivotResult
+from romulus.agent.models import EntityRef, PivotCoverage, PivotResult
 from romulus.agent.toolbox import FOLLOW_LINK_KINDS, Toolbox
+from romulus.agent.tools import SearchEventsRequest
 from romulus.config import Settings
 from romulus.detect.registry import bind_windows_site, fresh_direct_pack
 from romulus.evidence.typed import TypedEvent
@@ -23,6 +24,7 @@ _PIVOT_LINK_TYPES = {
     "auth_activity": "agent_auth_activity",
     "process_tree": "agent_process_tree",
     "ids_alerts": "agent_ids_alerts",
+    "search_events": "agent_search_events",
 }
 _AGENT_HYPOTHESIS = "agent_hypothesis"
 _EVENT_DIGEST_LIMIT = 50
@@ -38,13 +40,18 @@ class HuntToolExecutor:
     """Own source access, direct detection, and agent-hypothesis reach persistence."""
 
     def __init__(self, repo: Repo, hunt_id: str, pivot: PivotExecutor, fetcher: LinkFetcher,
-                 hunt_start: datetime, hunt_end: datetime, *, owner_token: str | None = None):
+                 hunt_start: datetime, hunt_end: datetime, *, owner_token: str | None = None,
+                 packet_sources: tuple[str, ...] = (), uncontracted_targets: tuple[str, ...] = ()):
         self.repo = repo
         self.hunt_id = hunt_id
         self.pivot = pivot
         self.fetcher = fetcher
         self.window = Window(start=_utc(hunt_start), end=_utc(hunt_end))
         self.owner_token = owner_token
+        # packet sources the hunt can read (packet captures, the Arkime viewer): a typed search never reaches them
+        self.packet_sources = tuple(packet_sources)
+        # hunt targets with no field contract in this run: no search can read them, whatever its scope
+        self.uncontracted_targets = tuple(uncontracted_targets)
         self._followable: dict[str, tuple[str, ...]] = {}
 
     def _events(self, ids: list[str]) -> list[TypedEvent]:
@@ -70,7 +77,21 @@ class HuntToolExecutor:
         }, owner_token=self.owner_token)
         self.repo.mark_expansion_link_evaluated(link_id, owner_token=self.owner_token)
 
+    def search_refusal(self, request: SearchEventsRequest) -> dict | None:
+        """Why an agent search cannot run on this hunt's sources, decided without any source query; None when some
+        target of its scope can evaluate every condition."""
+        return self.pivot.search_refusal(request)
+
+    def search_item_bound(self, request: SearchEventsRequest) -> int:
+        """The most page items one search's result can hold (PivotExecutor.search_item_bound), plus its named
+        unsearched sources."""
+        return self.pivot.search_item_bound(request) + len(self.packet_sources) + len(self.uncontracted_targets)
+
     def run(self, session_id: str, anchor_id: str, request, *, anchor_ts: datetime | None) -> PivotResult:
+        link_type = _PIVOT_LINK_TYPES.get(request.tool)
+        if link_type is None:
+            # a tool this boundary cannot record reach for is refused before any source query
+            return PivotResult(status="unsupported", reasons=[f"tool {request.tool} has no agent reach link type"])
         candidate = self.repo.candidate(anchor_id)
         if candidate is None or candidate["hunt_id"] != self.hunt_id:
             return PivotResult(status="unsupported", reasons=["anchor finding is not in this hunt"])
@@ -82,9 +103,27 @@ class HuntToolExecutor:
         link_key = {"agent_tool": request.tool}
         if request.tool == "auth_activity":
             link_key["entity"] = request.arguments.entity.model_dump(mode="json")
+        if isinstance(request, SearchEventsRequest):
+            link_key["search"] = request.arguments.model_dump(mode="json", include={"scope", "conditions"})
         result = self.pivot.run(session_id, request, anchor_ts=anchor_ts)
+        if isinstance(request, SearchEventsRequest):
+            packets = self.packet_sources if request.arguments.scope != "host" else ()
+            unsearched = [*(f"{name}: not searched (scope unsupported for agent search)" for name in packets),
+                          *(f"{target}: not searched (no field contract for this target)"
+                            for target in self.uncontracted_targets)]
+            if unsearched:
+                # a source the search could not read makes it partial everywhere its outcome is kept: the tool
+                # result, its coverage, and the reach link
+                gaps = [PivotCoverage(target=item.split(":", 1)[0], dataset=None, start=request.arguments.start,
+                                      end=request.arguments.end, status="partial", reasons=[item], returned=0,
+                                      total=None)
+                        for item in unsearched]
+                result = result.model_copy(update={
+                    "not_searched": unsearched, "coverage": [*result.coverage, *gaps],
+                    "reasons": sorted({*result.reasons, *unsearched}),
+                    "status": "partial" if result.status == "complete" else result.status,
+                })
         reach_ids = list(getattr(result, "reach_event_ids", []) or result.event_ids)
-        link_type = _PIVOT_LINK_TYPES[request.tool]
         link_id = "agent-link-" + digest({
             "hunt_id": self.hunt_id, "anchor_id": anchor_id,
             "request": request.model_dump(mode="json"),
@@ -239,5 +278,13 @@ def build_agent_toolbox(settings: Settings, repo: Repo, hunt_id: str, *, client,
     )
     pivot.source_queries = repo.agent_source_queries(hunt_id)
     fetcher = LinkFetcher(pivot, start, end)
-    executor = HuntToolExecutor(repo, hunt_id, pivot, fetcher, start, end, owner_token=owner_token)
+    # The packet stage reads the captures behind each Arkime session target (the viewer, then TShark); a typed
+    # search reads the session records alone, so those captures are named as not searched.
+    packet_sources = tuple(f"packet captures behind {target} (Arkime viewer and TShark)"
+                           for target, contract in sorted(contracts.items())
+                           if contract is not None and getattr(contract, "time_field", "") == "firstPacket")
+    uncontracted = tuple(sorted({str(target) for target in manifest.get("targets") or []
+                                 if contracts.get(target) is None}))
+    executor = HuntToolExecutor(repo, hunt_id, pivot, fetcher, start, end, owner_token=owner_token,
+                                packet_sources=packet_sources, uncontracted_targets=uncontracted)
     return Toolbox(repo, hunt_id, executor=executor, session_id=session_id, owner_token=owner_token)
