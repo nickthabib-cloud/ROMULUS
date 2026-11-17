@@ -119,7 +119,7 @@ def test_executor_counts_and_stops_actual_source_queries(monkeypatch):
     assert outcomes[2].reasons == ["expansion_source_query_budget:2"]
 
 
-def test_agent_source_query_cap_is_a_partial_bounded_stop():
+def test_a_source_query_cap_that_stops_every_cell_is_a_failed_pivot_with_its_reason():
     contracts = {"romulus-host-x": contract_from_types("romulus-host-x", {
         "@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword",
     })}
@@ -131,7 +131,8 @@ def test_agent_source_query_cap_is_a_partial_bounded_stop():
         _repo(), FakeClient(), "h1", contracts, source_query_budget=0,
     ).run("case-1", request)
 
-    assert result.status == "partial"
+    # every cell failed: the headline says so, and the reason says it was the budget
+    assert result.status == "failed"
     assert result.reasons == ["expansion_source_query_budget:0"]
     assert result.coverage[0].status == "failed"
 
@@ -165,7 +166,7 @@ def test_agent_source_query_cap_is_atomic_and_survives_new_executors(monkeypatch
     assert repo.agent_source_queries("h1") == 1
 
 
-def test_agent_source_query_cap_makes_link_fetch_partial_not_failed():
+def test_a_spent_agent_cap_makes_a_link_fetch_failed_without_tasks():
     repo = _repo()
     contract = contract_from_types("host-x", {"@timestamp": "date"})
     intent = SearchIntent(kind="raw", target="host-x", window=Window(start=START, end=END), max_records=10)
@@ -176,8 +177,11 @@ def test_agent_source_query_cap_makes_link_fetch_partial_not_failed():
 
     batch = executor.fetch_intents("anchor", "fetch-key", [intent], lambda _event: True)
 
-    assert batch.status == "partial"
+    assert batch.status == "failed"
     assert batch.reasons == ["agent_source_query_budget:0"]
+    assert batch.task_ids == [] and repo.tasks("h1") == []
+    assert [cell.status for cell in batch.coverage] == ["failed"]
+    assert batch.coverage[0].unresolved_ranges
 
 
 def test_agent_link_fetch_uses_its_own_task_kind_and_never_counts_as_expansion(monkeypatch):

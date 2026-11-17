@@ -1187,6 +1187,10 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
         body['aggs'].pop('ds')
     if host_field is None:
         body['aggs'].pop('hosts')
+    if tf == "firstPacket" and field_types.get("lastPacket") == "date":
+        # a session record's packets run from its first to its last packet: with the earliest first packet, the
+        # latest last packet bounds the times of every packet behind the index's sessions
+        body["aggs"]["pmax"] = {"max": {"field": "lastPacket"}}
     host_counts: dict[str, int] = {}
     if not windows:
         d = _inventory_search(client, target, body, notes)
@@ -1287,6 +1291,8 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
                         if aggs.get("tmax", {}).get("value") is not None else None)
     if inventory is not None:
         prof["inventory"] = inventory
+    if "pmax" in body["aggs"]:
+        prof["packet_time_max"] = aggs.get("pmax", {}).get("value_as_string")
     if ecar and role == "host":
         count, reason = _source_count(client, target, {"bool": {"filter": [
             {"exists": {"field": name}} for name in ("object", "action", "objectID", "actorID", "hostname")]}})

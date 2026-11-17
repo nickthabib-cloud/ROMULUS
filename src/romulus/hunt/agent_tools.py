@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from math import ceil
 
 from romulus.agent.models import EntityRef, PivotCoverage, PivotResult
 from romulus.agent.toolbox import FOLLOW_LINK_KINDS, Toolbox
@@ -16,6 +17,7 @@ from romulus.hunt.pivot import PivotExecutor
 from romulus.hunt.publish import mark_hypothesis_relation, publish_match
 from romulus.site import ensure_site_unchanged
 from romulus.sources.models import Window
+from romulus.sources.profile import SHARDS_UNANSWERED
 from romulus.store.db import digest
 from romulus.store.repo import Repo
 
@@ -30,10 +32,71 @@ _AGENT_HYPOTHESIS = "agent_hypothesis"
 _EVENT_DIGEST_LIMIT = 50
 # anchors whose followable link kinds one session's executor remembers (each costs one read of the anchor's records)
 _FOLLOWABLE_CACHE = 256
+# A follow_link fetch spends at most this many source queries (the deterministic link planner's own bound).
+_FOLLOW_LINK_QUERIES = 12
+
+# How the hunt's AI-agent source queries (AGENT_MAX_SOURCE_QUERIES) are shared, so that no session or tool call
+# starves the rest. Each share is derived when a session starts, from the spend persisted so far, so a resumed hunt
+# never gets a fresh budget and what one session leaves unused flows to the sessions after it.
+# - orient reads the whole dossier to open hypotheses: all orient sessions together take at most this part of the
+#   total, which leaves most of it for following the hypotheses' leads;
+ORIENT_SHARE = 0.20
+# - an investigate session takes the remaining queries divided by the open hypotheses that can still be given a
+#   session (its own included); the assessment reads no source, so nothing is held back for it;
+# - one tool call spends at most this part of its session's share, and never less than the floor (one pivot can fan
+#   out over many indices and time partitions), and never more than the share.
+CALL_SLICE_SHARE = 0.10
+CALL_SLICE_FLOOR = 32
+# out-of-window packet sources named together in one summary line
+_OUTSIDE_NAMES = 5
 
 
 def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def agent_query_shares(settings: Settings, repo: Repo, hunt_id: str, session: dict | None) -> tuple[int | None,
+                                                                                                    int | None]:
+    """(session share, call slice) of the hunt's AI-agent source queries for one session (see ORIENT_SHARE); (None,
+    None) for a session of another purpose, which the hunt total alone bounds."""
+    purpose = (session or {}).get("purpose")
+    total = settings.agent_max_source_queries
+    remaining = max(0, total - repo.agent_source_queries(hunt_id))
+    if purpose == "orient":
+        orient_left = max(0, ceil(total * ORIENT_SHARE) - repo.agent_purpose_source_queries(hunt_id, "orient"))
+        share = min(remaining, orient_left)
+    elif purpose == "investigate":
+        own = session.get("hypothesis_id")
+        planned = {row["id"] for row in repo.agent_hypotheses(hunt_id)
+                   if row["status"] == "open"
+                   and int(row.get("sessions_run") or 0) < settings.agent_max_sessions_per_hypothesis}
+        share = ceil(remaining / max(1, len(planned | ({own} if own else set()))))
+    else:
+        return None, None
+    return share, min(share, max(CALL_SLICE_FLOOR, ceil(share * CALL_SLICE_SHARE)))
+
+
+def packet_span(profile: dict | None) -> tuple[datetime, datetime] | None:
+    """The times of every packet behind an Arkime session index, as profiled when the hunt started: its earliest
+    first packet to its latest last packet. None unless both are known from a complete inventory search."""
+    profile = profile or {}
+    if any(SHARDS_UNANSWERED in str(note) for note in profile.get("notes") or []):
+        return None
+    bounds = []
+    for key in ("time_min", "packet_time_max"):
+        try:
+            value = datetime.fromisoformat(str(profile.get(key)))
+        except (TypeError, ValueError):
+            return None
+        if value.tzinfo is None:
+            return None
+        bounds.append(value.astimezone(UTC))
+    return (bounds[0], bounds[1]) if bounds[0] <= bounds[1] else None
+
+
+def _outside(span: tuple[datetime, datetime] | None, start: datetime, end: datetime) -> bool:
+    """Whether a known span cannot overlap the half-open window [start, end)."""
+    return span is not None and (span[1] < _utc(start) or span[0] >= _utc(end))
 
 
 class HuntToolExecutor:
@@ -41,7 +104,8 @@ class HuntToolExecutor:
 
     def __init__(self, repo: Repo, hunt_id: str, pivot: PivotExecutor, fetcher: LinkFetcher,
                  hunt_start: datetime, hunt_end: datetime, *, owner_token: str | None = None,
-                 packet_sources: tuple[str, ...] = (), uncontracted_targets: tuple[str, ...] = ()):
+                 packet_sources: tuple[str, ...] = (), uncontracted_targets: tuple[str, ...] = (),
+                 packet_spans: dict[str, tuple[datetime, datetime]] | None = None):
         self.repo = repo
         self.hunt_id = hunt_id
         self.pivot = pivot
@@ -50,6 +114,8 @@ class HuntToolExecutor:
         self.owner_token = owner_token
         # packet sources the hunt can read (packet captures, the Arkime viewer): a typed search never reaches them
         self.packet_sources = tuple(packet_sources)
+        # each packet source's known packet times (packet_span); one without a known span is always named
+        self.packet_spans = dict(packet_spans or {})
         # hunt targets with no field contract in this run: no search can read them, whatever its scope
         self.uncontracted_targets = tuple(uncontracted_targets)
         self._followable: dict[str, tuple[str, ...]] = {}
@@ -99,7 +165,10 @@ class HuntToolExecutor:
             return PivotResult(status="partial", reasons=[
                 "anchor observation time unavailable; time-based pivot was not evaluated",
             ])
-        query_start = int(getattr(self.pivot, "source_queries", 0))
+        begin = getattr(self.pivot, "begin_call", None)
+        if begin is not None:
+            begin()
+        query_start = self._spent()
         link_key = {"agent_tool": request.tool}
         if request.tool == "auth_activity":
             link_key["entity"] = request.arguments.entity.model_dump(mode="json")
@@ -108,6 +177,18 @@ class HuntToolExecutor:
         result = self.pivot.run(session_id, request, anchor_ts=anchor_ts)
         if isinstance(request, SearchEventsRequest):
             packets = self.packet_sources if request.arguments.scope != "host" else ()
+            # a capture whose every packet is known to fall outside the search window is no gap: counted in one
+            # summary line, never listed as not searched
+            outside = [name for name in packets
+                       if _outside(self.packet_spans.get(name), request.arguments.start, request.arguments.end)]
+            excluded = set(outside)
+            packets = tuple(name for name in packets if name not in excluded)
+            if outside:
+                named = ", ".join(outside[:_OUTSIDE_NAMES]) + (
+                    f", and {len(outside) - _OUTSIDE_NAMES} more" if len(outside) > _OUTSIDE_NAMES else "")
+                result = result.model_copy(update={"reasons": sorted({*result.reasons, (
+                    f"{len(outside)} packet source(s) not listed as not searched: every packet behind them, as "
+                    f"profiled when the hunt started, is outside the search window ({named})")})})
             unsearched = [*(f"{name}: not searched (scope unsupported for agent search)" for name in packets),
                           *(f"{target}: not searched (no field contract for this target)"
                             for target in self.uncontracted_targets)]
@@ -133,10 +214,18 @@ class HuntToolExecutor:
             start=request.arguments.start, end=request.arguments.end, status=result.status,
             coverage=result.coverage, reasons=result.reasons, task_ids=result.task_ids,
             duration_ms=result.duration_ms,
-            query_spend=max(0, int(getattr(self.pivot, "source_queries", query_start)) - query_start),
+            query_spend=max(0, self._spent() - query_start),
             key=link_key,
         )
         return result
+
+    def _spent(self, executor=None) -> int:
+        """The queries this session's executor reserved itself (concurrent sessions raise the hunt-wide count too)."""
+        executor = executor if executor is not None else self.pivot
+        budgeted = getattr(executor, "_agent_budgeted", None)
+        if budgeted is not None and budgeted():
+            return int(executor.session_spent)
+        return int(getattr(executor, "source_queries", 0))
 
     def _publish_direct(self, session_id: str, candidate: dict, result: LinkResult,
                         events: list[TypedEvent]) -> list[str]:
@@ -211,10 +300,23 @@ class HuntToolExecutor:
             ])
         anchor = self._link_anchor(candidate)
         window = self._link_window(anchor, window_label)
-        used = int(getattr(self.fetcher.executor, "source_queries", 0))
-        maximum = getattr(self.fetcher.executor, "source_query_budget", None)
-        remaining = max(0, int(maximum) - used) if isinstance(maximum, int) else 12
-        result = self.fetcher.fetch(anchor, link_type, window, query_cap=min(12, remaining))
+        executor = self.fetcher.executor
+        begin = getattr(executor, "begin_call", None)
+        if begin is not None:
+            begin()
+        available = executor.agent_available() if getattr(executor, "agent_available", None) else None
+        if available is not None:
+            if available[0] == 0:
+                # nothing can be fetched: one result with the cap's reason, and no task
+                return PivotResult(status="failed", anchor_event_ids=candidate["event_ids"], reasons=[
+                    available[1], "the agent's source-query cap is reached: the link was not followed, and no record "
+                    "was found or ruled out; rely on the results already returned"])
+            remaining = available[0]
+        else:
+            used = int(getattr(executor, "source_queries", 0))
+            maximum = getattr(executor, "source_query_budget", None)
+            remaining = max(0, int(maximum) - used) if isinstance(maximum, int) else _FOLLOW_LINK_QUERIES
+        result = self.fetcher.fetch(anchor, link_type, window, query_cap=min(_FOLLOW_LINK_QUERIES, remaining))
         agent_link_id = "agent-link-" + digest({
             "hunt_id": self.hunt_id, "anchor_id": candidate["id"], "source_link_id": result.id,
         })[:20]
@@ -277,14 +379,22 @@ def build_agent_toolbox(settings: Settings, repo: Repo, hunt_id: str, *, client,
         site_facts=ensure_site_unchanged(settings.home, manifest.get("site")),
     )
     pivot.source_queries = repo.agent_source_queries(hunt_id)
+    session = repo.agent_session(hunt_id, session_id)
+    share, call_slice = agent_query_shares(settings, repo, hunt_id, session)
+    pivot.configure_agent_shares(session_id=session_id, purpose=(session or {}).get("purpose"),
+                                 session_share=share, call_slice=call_slice)
     fetcher = LinkFetcher(pivot, start, end)
     # The packet stage reads the captures behind each Arkime session target (the viewer, then TShark); a typed
     # search reads the session records alone, so those captures are named as not searched.
-    packet_sources = tuple(f"packet captures behind {target} (Arkime viewer and TShark)"
-                           for target, contract in sorted(contracts.items())
-                           if contract is not None and getattr(contract, "time_field", "") == "firstPacket")
+    packet_targets = {f"packet captures behind {target} (Arkime viewer and TShark)": target
+                      for target, contract in sorted(contracts.items())
+                      if contract is not None and getattr(contract, "time_field", "") == "firstPacket"}
+    profiles = repo.source_profiles(hunt_id) if packet_targets else {}
+    spans = {name: span for name, target in packet_targets.items()
+             if (span := packet_span(profiles.get(target))) is not None}
     uncontracted = tuple(sorted({str(target) for target in manifest.get("targets") or []
                                  if contracts.get(target) is None}))
     executor = HuntToolExecutor(repo, hunt_id, pivot, fetcher, start, end, owner_token=owner_token,
-                                packet_sources=packet_sources, uncontracted_targets=uncontracted)
+                                packet_sources=tuple(packet_targets), uncontracted_targets=uncontracted,
+                                packet_spans=spans)
     return Toolbox(repo, hunt_id, executor=executor, session_id=session_id, owner_token=owner_token)

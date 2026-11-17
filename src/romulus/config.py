@@ -161,7 +161,12 @@ class Settings(BaseModel):
     agent_cache_read_token_weight: float = Field(default=0.1, gt=0.0, le=1.0)
     agent_cache_write_token_weight: float = Field(default=1.25, ge=1.0, le=10.0)
     agent_max_tool_calls_per_session: int = Field(default=25, ge=1, le=500)
-    agent_max_source_queries: int = Field(default=200, ge=1, le=100_000)
+    # The AI agent's source queries per hunt, shared out per session and per tool call (hunt/agent_tools.py). Each is a
+    # read-only request with a capped record count, and one pivot fans out over the hunt's indices and a few time
+    # partitions, so following one lead commonly takes tens of queries. The agent is bounded apart from this by its
+    # model calls, tokens and wall clock, so this cap only has to keep its source load proportionate (deterministic
+    # expansion's default is 20,000), not stop it from following its leads.
+    agent_max_source_queries: int = Field(default=2000, ge=1, le=100_000)
     agent_concurrency: int = Field(default=2, ge=1, le=16)
     agent_max_initial_hypotheses: int = Field(default=8, ge=1, le=40)
     agent_max_hypotheses: int = Field(default=40, ge=1, le=500)
