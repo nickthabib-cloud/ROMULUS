@@ -191,4 +191,5 @@ def register_hunt_routes(app, repo, s, need, hunt_page):
                          stop_reason={**hunt_views.one_line(h["stop_reason"]), "full": h["stop_reason"] or ""},
                          manifest_rows=hunt_views.detail_rows(h["manifest"]),
                          tasks=hunt_views.tasks_page(repo, hunt_id, after=cursor(tasks_after)),
-                         controls=controls_view(repo, s, h, u))
+                         controls=controls_view(repo, s, h, u),
+                         agent_history=agent_views.run_history(repo, hunt_id))

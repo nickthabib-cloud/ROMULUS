@@ -210,6 +210,24 @@ def panel(repo, hunt, usage, *, with_assessment=True):
             "secret_guard": repo.agent_secret_guard_counts(hunt["id"])}
 
 
+RUN_HISTORY = 20
+
+
+def run_history(repo, hunt_id) -> dict:
+    """The agent's runs on one hunt, oldest first: each run's end (its state and reason, kept even when a later
+    continuation clears a stop) and each continuation (who, why, where it started). The latest RUN_HISTORY of each."""
+    ends, ended_total = repo.audit_trail(hunt_id, "hunt.ai_agent_summary", limit=RUN_HISTORY)
+    starts, started_total = repo.audit_trail(hunt_id, "hunt.agent_resume", limit=RUN_HISTORY)
+    rows = [{"at": row["at"], "kind": "run ended", "who": "",
+             "what": clip((row["detail"] or {}).get("status") or (row["detail"] or {}).get("state"), 40),
+             "why": clip((row["detail"] or {}).get("reason"), 600)} for row in ends]
+    rows += [{"at": row["at"], "kind": "continued", "who": clip(row["actor"], 120),
+              "what": f"from {clip((row['detail'] or {}).get('starting_phase'), 40)}",
+              "why": clip((row["detail"] or {}).get("reason"), 120)} for row in starts]
+    rows.sort(key=lambda row: str(row["at"]))
+    return {"rows": rows, "more": max(0, ended_total - len(ends)) + max(0, started_total - len(starts))}
+
+
 def hypotheses_page(repo, hunt_id, after=""):
     rows, remaining, cursor = page_rows(repo, t.agent_hypothesis, hunt_id, after=after)
     ids = [row["id"] for row in rows]

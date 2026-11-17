@@ -159,6 +159,11 @@
     {% endif %}
   </tbody></table></div>
   <div class="panel-body">
+  {% if agent_history.rows %}<h3 id="agent-history">Run history</h3>
+  <p class="help small">Each run of the agent on this hunt and each continuation, oldest first. A continuation (after a stop, an interruption or added budget) carries on from the stored hypotheses and sessions; it does not orient again.</p>
+  <table class="grid small"><thead><tr><th>When</th><th>Event</th><th>By</th><th>State / start</th><th>Reason</th></tr></thead><tbody>
+  {% for row in agent_history.rows %}<tr><td class="mono">{{ row.at }}</td><td>{{ row.kind }}</td><td>{{ row.who }}</td><td>{{ row.what }}</td><td>{{ row.why }}</td></tr>{% endfor %}
+  </tbody></table>{% if agent_history.more %}<p class="small">{{ agent_history.more }} earlier event(s) are in the audit log.</p>{% endif %}{% endif %}
   {% if ai_panel.limits %}<h3>Limits reached</h3><ul>{% for limit in ai_panel.limits %}<li class="mono small">{{ limit }}</li>{% endfor %}</ul>{% endif %}
   {% if ai_panel.refused_calls and ai_panel.refused_calls.by_tool %}<h3>Refused model calls</h3>
   <p class="help small">Tool calls and assessment answers that validation refused, by tool and reason (field and error type).</p>
