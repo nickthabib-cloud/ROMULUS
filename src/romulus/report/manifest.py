@@ -64,6 +64,10 @@ def _citations(repo: Repo, cand: dict) -> list[dict]:
     return cites
 
 
+# how many cited raw records carry their (at most 16 KB) text in the manifest; the rest carry reference and digest
+RAW_TEXT_IN_MANIFEST = 200
+
+
 def _raw_citations(repo: Repo, hunt_id: str, raw_ids: list[str]) -> list[dict]:
     """A finding's cited raw records (returned rows no normalizer read): each one's label, source reference, time
     and digest, or marked broken when the hunt no longer keeps it. Their text is in the manifest's raw-record
@@ -114,9 +118,20 @@ def _raw_record_index(repo: Repo, hunt_id: str, manifest: dict, findings: list[d
     if not cited and not stats["stored"] and not stats["not_stored"]:
         return None
     rows = {row["id"]: row for row in repo.agent_raw_records(hunt_id, cited)}
-    return {"label": RAW_LABEL_PLURAL, "stored": stats["stored"], "not_stored_at_cap": stats["not_stored"],
-            "cited": [raw_record_view(rows[item]) for item in cited if item in rows],
-            "broken": [item for item in cited if item not in rows]}
+    kept = [item for item in cited if item in rows]
+    # the first RAW_TEXT_IN_MANIFEST cited records carry their text; the rest their reference and digest, each kept
+    # in the hunt and shown whole on the web
+    shown = [raw_record_view(rows[item], text=index < RAW_TEXT_IN_MANIFEST) for index, item in enumerate(kept)]
+    out = {"label": RAW_LABEL_PLURAL, "stored": stats["stored"],
+           # one per returned row the cap refused, per query: a record two queries returned counts twice
+           "refused_at_cap": stats["not_stored"],
+           "cited": shown, "broken": [item for item in cited if item not in rows]}
+    if len(kept) > RAW_TEXT_IN_MANIFEST:
+        out["text_omitted"] = {"count": len(kept) - RAW_TEXT_IN_MANIFEST,
+                               "note": (f"only the first {RAW_TEXT_IN_MANIFEST} cited raw records carry their text "
+                                        "here; the rest carry their source reference and digest, and their text is "
+                                        "kept in the hunt and shown on its web pages")}
+    return out
 
 
 # Counted with the skip reasons, but about records that were evaluated: reported as coverage notes, never as data
@@ -1331,7 +1346,11 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
     canonical["ai"] = canonicalize(ai_content)
     canonical.pop("ai_triage", None)
     canonical.pop("raw_records", None)
-    canonical["integrity"].pop("broken_raw_citations", None)
+    if broken_raw := canonical["integrity"].pop("broken_raw_citations", None):
+        # the deterministic floor is unaffected; the AI output's broken raw citations stay named with it
+        canonical["ai"]["integrity"] = {
+            "broken_raw_citations": broken_raw,
+            "reason": "the AI output cites raw records the hunt no longer keeps, so the full report is not finalizable"}
     deterministic_findings = [row for row in repo.candidates(hunt_id)
                               if row.get("provenance", "deterministic") != "agent"]
     deterministic_views = [row for row in manifest["findings"] if row.get("provenance") != "agent"]

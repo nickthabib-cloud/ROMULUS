@@ -10,6 +10,7 @@ from romulus.report.markdown import (
     NARRATIVE_EMPTY,
     NARRATIVE_NOTE,
     NARRATIVE_TITLE,
+    cite_text,
     is_ranked,
     narrative_context_reason,
     narrative_heading,
@@ -101,7 +102,7 @@ def write(m, path, technical_name):
         paragraph(assessment.get("header") or "Template narrative.")
 
         def statement(sentence, *, muted=False):
-            cites = ", ".join(str(cite) for cite in sentence.get("cites") or [])
+            cites = ", ".join(cite_text(None, cite) for cite in sentence.get("cites") or [])
             suffix = f" [{cites}]" if cites else ""
             marker = (" Cites only content flagged as possible prompt injection."
                       if sentence.get("suspicious_content") else "")

@@ -276,14 +276,25 @@ def _suspicious_alias(aliases: AliasBook, row: dict, cache: dict[str, bool]) -> 
         raws = aliases.repo.agent_raw_records(aliases.hunt_id, [row["target_id"]])
         cache[key] = bool(raws) and bool(raws[0]["suspicious_content"])
         return cache[key]
+    raw_ids: list[str] = []
     if row["kind"] == "E":
         event_ids = [row["target_id"]]
     elif row["kind"] == "F":
         finding = aliases.repo.candidate(row["target_id"])
         event_ids = (finding or {}).get("event_ids") or []
+        # an AI finding's raw records support it too: each must be flagged, as each event must
+        raw_ids = list(((finding or {}).get("gate_results") or {}).get(RAW_GATE) or [])
     else:
         cache[key] = False
         return False
+    if raw_ids:
+        raws = aliases.repo.agent_raw_records(aliases.hunt_id, raw_ids)
+        if len(raws) != len(set(raw_ids)) or not all(item["suspicious_content"] for item in raws):
+            cache[key] = False
+            return False
+        if not event_ids:
+            cache[key] = True
+            return True
     if not event_ids:
         cache[key] = False
         return False

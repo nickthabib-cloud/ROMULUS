@@ -507,14 +507,24 @@ class AgentAdmission:
             contradiction = self._resolve_many(args.add_contradiction, {"F", "E", "L", "A", "Q"},
                                                "add_contradiction[]")
             existing = self.repo.agent_hypothesis_cites(hypothesis_id=hypothesis_id)
-            supports_after = any(row["role"] == "support" for row in existing) or bool(support)
-            contradictions_after = any(row["role"] == "contradiction" for row in existing) or bool(contradiction)
             status = args.status or current["status"]
-            if status == "supported" and not supports_after:
-                raise Refusal("supported requires at least one support citation", "status", "needs_support_citation")
-            if status == "refuted" and not contradictions_after:
-                raise Refusal("refuted requires at least one contradiction citation", "status",
-                              "needs_contradiction_citation")
+            # A raw record shows only that a record with its text exists: it may be attached to any hypothesis, but
+            # a decision (supported, refuted) rests on at least one typed cite, never on raw text alone, which
+            # telemetry could word to steer it.
+            for role, added, wanted, code in (("support", support, "supported", "needs_support_citation"),
+                                              ("contradiction", contradiction, "refuted",
+                                               "needs_contradiction_citation")):
+                if status != wanted:
+                    continue
+                cites_after = [row["target_kind"] for row in existing if row["role"] == role]
+                cites_after += [_CITE_KINDS[kind] for kind, _target in added]
+                if not cites_after:
+                    raise Refusal(f"{wanted} requires at least one {role} citation", "status", code)
+                if all(kind == "raw_record" for kind in cites_after):
+                    raise Refusal(f"{wanted} requires at least one {role} citation that is not a raw record: raw "
+                                  "records (Q...) show only that records with this text exist, so they cannot "
+                                  f"decide a hypothesis on their own; cite a finding (F...), evidence (E...), an "
+                                  "expansion link (L...) or an agent link (A...)", "status", code)
             changes = {"updated_at": utcnow()}
             payload = {"note": args.note.strip()}
             if args.status is not None:
@@ -572,6 +582,11 @@ class AgentAdmission:
             if events and not any(supports_claim_kind(event.family, args.claim_kind) for event in events):
                 raise Refusal(f"cited event families do not support a {args.claim_kind} claim", "claim_kind",
                               "unsupported_by_cites")
+            if not events and args.techniques:
+                # an ATT&CK technique names a behavior; raw text shows none, so a mention on it maps to no technique
+                raise Refusal("a finding citing only raw records (Q...) takes no ATT&CK techniques: raw records show "
+                              "that records with this text exist, not a behavior; omit techniques, or cite typed "
+                              "evidence (E...) that shows the behavior", "techniques[]", "unsupported_by_cites")
             techniques = self._check_techniques(args.techniques)
             hypothesis_id = self._hypothesis_id(args.hypothesis)
             claim_type = {"mention": "mention", "network": "network_observation"}.get(
@@ -618,10 +633,11 @@ class AgentAdmission:
                 note_id = self._save_note("finding", duplicate["id"], text[:1000], note_cites, suspicious)
                 return _ok({"duplicate": target_alias, "note_id": note_id,
                             "message": "proposal recorded as a note on the existing finding"})
-            # entities and times come from typed fields only; a raw record adds its source time, never an entity
+            # entities and times come from typed fields only; a raw record never adds an entity, and its source time
+            # dates only a finding that cites no typed event
             entity_values = sorted({entity for event in events for entity in event.entities()})
-            timestamps = [_aware(event.ts) for event in events] + [_aware(row["ts"]) for row in raws
-                                                                   if row["ts"] is not None]
+            timestamps = ([_aware(event.ts) for event in events] if events
+                          else [_aware(row["ts"]) for row in raws if row["ts"] is not None])
             identity = {"hunt_id": self.hunt_id, "evidence": sorted(citations), "claim": args.claim.strip(),
                         "kind": args.claim_kind}
             group = {"evidence": sorted(citations), "kind": args.claim_kind}

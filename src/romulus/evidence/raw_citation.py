@@ -55,9 +55,17 @@ def _field(source: dict, name: str):
     return node
 
 
-def record_time(source: dict, time_field: str | None) -> tuple[datetime | None, str | None]:
+# how a number in the time field counts from the epoch: seconds (Zeek's `ts`) or milliseconds (an Elasticsearch date
+# written as a number, an eCAR native clock); `sources.compile.time_unit` names it per target
+EPOCH_UNITS = {"s": 1, "ms": 1_000, "ns": 1_000, "epoch_ms": 1_000}
+
+
+def record_time(source: dict, time_field: str | None, *, unit: str = "ms",
+                window: tuple[datetime, datetime] | None = None) -> tuple[datetime | None, str | None]:
     """(time in UTC, the value as the record holds it, bounded) from the source's time field; (None, None) when the
-    record has none. A value that is not an RFC 3339 time or epoch milliseconds keeps its text and no time."""
+    record has none. A number counts from the epoch in the target's `unit` (seconds or milliseconds); a string
+    must be an RFC 3339 time with its UTC offset. Anything else (a time without an offset among them: its clock is
+    not known), or a time outside `window` (the hunt's), keeps its text and no time."""
     if not time_field:
         return None, None
     value = _field(source, time_field)
@@ -69,7 +77,7 @@ def record_time(source: dict, time_field: str | None) -> tuple[datetime | None, 
     moment = None
     if isinstance(value, (int, float)):
         try:
-            moment = datetime.fromtimestamp(value / 1000, tz=UTC)
+            moment = datetime.fromtimestamp(value / EPOCH_UNITS.get(unit, 1_000), tz=UTC)
         except (OverflowError, OSError, ValueError):
             moment = None
     elif isinstance(value, str):
@@ -77,22 +85,28 @@ def record_time(source: dict, time_field: str | None) -> tuple[datetime | None, 
             parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00").replace("z", "+00:00"))
         except ValueError:
             parsed = None
-        if parsed is not None:
-            moment = parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+        if parsed is not None and parsed.tzinfo is not None:
+            moment = parsed.astimezone(UTC)
+    if moment is not None and window is not None and not (window[0] <= moment <= window[1]):
+        moment = None
     return moment, text
 
 
 def build_raw_record(hunt_id: str, hit: dict, *, source_kind: str, time_field: str | None, session_id: str | None,
-                     task_id: str | None, query_digest: str, query_text: str, redact, flagged) -> dict:
+                     task_id: str | None, query_digest: str, query_text: str, redact, flagged,
+                     time_unit: str = "ms", window: tuple[datetime, datetime] | None = None) -> dict:
     """The stored row for one returned record (`hit` has _index, _id and _source). `redact` removes configured
-    secrets from a JSON-like value; `flagged` says whether a value carries instruction-shaped text. The digest is of
-    the record as the source returned it; the text kept is cleaned (recognized credentials masked) and redacted."""
+    secrets from a JSON-like value; `flagged` says whether a value carries instruction-shaped text (it is given the
+    cleaned, redacted record, its strings read one by one). The digest is of the record as the source returned it;
+    the text kept is cleaned (recognized credentials masked) and redacted. `time_unit` and `window` are the target's
+    epoch unit and the hunt window (`record_time`)."""
     if source_kind not in SOURCE_KINDS:
         raise ValueError(f"unknown raw record source kind {source_kind}")
     source = hit["_source"]
-    full = json.dumps(redact(clean_source(source)), ensure_ascii=False, sort_keys=True, default=str)
+    kept = redact(clean_source(source))
+    full = json.dumps(kept, ensure_ascii=False, sort_keys=True, default=str)
     text, cut = _bounded_bytes(full, MAX_RAW_TEXT_BYTES)
-    ts, time_text = record_time(source, time_field)
+    ts, time_text = record_time(source, time_field, unit=time_unit, window=window)
     query = query_text if len(query_text) <= MAX_RAW_QUERY_CHARS else query_text[:MAX_RAW_QUERY_CHARS] + "…"
     return {
         "id": raw_record_id(hunt_id, hit["_index"], hit["_id"]), "hunt_id": hunt_id,
@@ -100,7 +114,7 @@ def build_raw_record(hunt_id: str, hit: dict, *, source_kind: str, time_field: s
         "ts": ts, "time_field": time_field, "time_text": time_text,
         "text": text, "text_cut": cut, "text_bytes": len(full.encode("utf-8")),
         "digest": digest(source), "session_id": session_id, "task_id": task_id,
-        "query_digest": query_digest, "query": query, "suspicious_content": bool(flagged(full)),
+        "query_digest": query_digest, "query": query, "suspicious_content": bool(flagged(kept)),
     }
 
 

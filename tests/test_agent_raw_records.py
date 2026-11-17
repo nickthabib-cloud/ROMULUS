@@ -18,6 +18,7 @@ from romulus.agent.aliases import AliasBook
 from romulus.agent.assessment import _ground_paragraph, _non_observed_alias
 from romulus.agent.grounding import CiteStrength, EvidenceStrength, TriageContext
 from romulus.agent.investigate import _hypothesis_context
+from romulus.agent.safety import injection_flags
 from romulus.agent.toolbox import Toolbox
 from romulus.config import Settings
 from romulus.evidence.raw_citation import (
@@ -274,7 +275,7 @@ def _report_repo(tmp_path):
         "@timestamp": "2024-11-18T11:00:00Z", "event": {"dataset": "zoneminder"}, "message": HOSTILE}}
     row = build_raw_record("h1", hit, source_kind="index", time_field="@timestamp", session_id=SESSION,
                            task_id=None, query_digest="q" * 64, query_text="{}", redact=lambda value: value,
-                           flagged=lambda text: "ignore previous" in text)
+                           flagged=injection_flags)
     kept, refused = repo.save_agent_raw_records("h1", [row], max_count=10)
     assert kept == [row["id"]] and refused == 0
     toolbox = Toolbox(repo, "h1", session_id=SESSION)
@@ -345,7 +346,7 @@ def test_the_report_keeps_raw_citations_labelled_and_inert_in_json_markdown_and_
     assert cited[0]["target"] == "idx" and cited[0]["native_id"] == row["native_id"] and "text" not in cited[0]
     assert cited[0]["time"] == "2024-11-18T11:00:00Z" and cited[0]["digest"] == row["digest"]
     index = manifest["raw_records"]
-    assert index["stored"] == 1 and index["not_stored_at_cap"] == 0 and index["broken"] == []
+    assert index["stored"] == 1 and index["refused_at_cap"] == 0 and index["broken"] == []
     assert index["cited"][0]["text"] == row["text"] and index["cited"][0]["suspicious_content"] is True
     assert manifest["integrity"]["finalizable"] is True
     paths = write_reports(repo, manifest, tmp_path / "out")
@@ -445,7 +446,7 @@ def test_the_migration_adds_raw_records_and_q_aliases_and_reverses_cleanly(tmp_p
     AliasBook(repo, "h1")
     row = build_raw_record("h1", _ghost(1), source_kind="index", time_field="@timestamp", session_id=SESSION,
                            task_id=None, query_digest="q", query_text="{}", redact=lambda value: value,
-                           flagged=lambda text: False)
+                           flagged=lambda value: [])
     repo.save_agent_raw_records("h1", [row], max_count=5)
     assert AliasBook(repo, "h1").alias_for("Q", row["id"]) == "Q1"
     config = Config()
@@ -473,3 +474,140 @@ def test_deleting_a_hunt_removes_its_raw_records(tmp_path):
     assert counts["agent_raw_record"] == 1
     with repo.engine.connect() as connection:
         assert connection.exec_driver_sql("SELECT count(*) FROM agent_raw_record").scalar_one() == 0
+
+
+# ---- decisions, techniques, clocks, flags and alias scope -------------------------------------------------------------
+
+def test_a_hypothesis_is_never_decided_on_raw_records_alone(tmp_path):
+    repo = _hunt(tmp_path / "decide.sqlite")
+    toolbox = _box(QueryES(_response([_ghost(1, text="scheduled admin job")])), repo=repo)
+    admission = _admission(toolbox, Settings(home=tmp_path))
+    result = _query(toolbox, query=TERM)
+    admission.issue_aliases(result, tool_name="query_source")
+    raws = _raw_aliases(result)
+    opened = toolbox.execute("open_hypothesis", {"statement": "An implant beacons from web01 to 10.9.9.9"})
+    hypothesis = opened["data"]["hypothesis"]
+    admission.issue_aliases(opened, tool_name="open_hypothesis")
+    for status, field in (("supported", "add_support"), ("refuted", "add_contradiction")):
+        refused = toolbox.execute("update_hypothesis", {"hypothesis": hypothesis, "status": status, field: raws,
+                                                        "note": "the log says so"})
+        assert refused["status"] == "refused" and "not a raw record" in refused["errors"][0], refused
+    # raw records attach to an open hypothesis, and a typed cite beside them can decide it
+    attached = toolbox.execute("update_hypothesis", {"hypothesis": hypothesis, "add_contradiction": raws,
+                                                     "note": "a log names an admin job"})
+    assert attached["status"] == "complete"
+    still = toolbox.execute("update_hypothesis", {"hypothesis": hypothesis, "status": "refuted",
+                                                  "note": "only the log contradicts it"})
+    assert still["status"] == "refused"
+    anchor = AliasBook(repo, "h1").alias_for("F", "anchor")
+    decided = toolbox.execute("update_hypothesis", {"hypothesis": hypothesis, "status": "supported",
+                                                    "add_support": [anchor, *raws], "note": "the finding shows it"})
+    assert decided["status"] == "complete", decided
+
+
+def test_a_raw_only_finding_takes_no_techniques_but_a_typed_one_does(tmp_path):
+    hits = [_dns("net-a", 1, T + timedelta(minutes=1), "beacon.example"), _ghost(1)]
+    toolbox = _box(QueryES(_response(hits)), repo=_hunt(tmp_path / "tech.sqlite"))
+    admission = _admission(toolbox, Settings(home=tmp_path))
+    result = _query(toolbox, query=TERM)
+    admission.issue_aliases(result, tool_name="query_source")
+    refused = toolbox.execute("propose_finding", {"claim": "A log names a beacon port", "claim_kind": "mention",
+                                                  "cites": _raw_aliases(result), "lane": "lead",
+                                                  "techniques": ["T1071"]})
+    assert refused["status"] == "refused" and "takes no ATT&CK techniques" in refused["errors"][0]
+    typed = toolbox.execute("propose_finding", {"claim": "A host resolved a beacon domain", "claim_kind": "network",
+                                                "cites": result["data"]["result"]["evidence"] + _raw_aliases(result),
+                                                "lane": "high", "techniques": ["T1071"]})
+    assert typed["status"] == "complete", typed
+    finding = toolbox.repo.candidate(AliasBook(toolbox.repo, "h1").resolve(typed["data"]["finding"], {"F"}))
+    # dated from its typed event only, not the raw record
+    assert finding["ts"].replace(tzinfo=None) == (T + timedelta(minutes=1)).replace(tzinfo=None)
+
+
+@pytest.mark.parametrize(("value", "unit", "expected"), [
+    (1731938400, "s", "2024-11-18T14:00:00+00:00"),            # Zeek ts: epoch seconds
+    (1731938400.5, "s", "2024-11-18T14:00:00.500000+00:00"),
+    (1731938400000, "ms", "2024-11-18T14:00:00+00:00"),        # an Elasticsearch date written as a number
+    (1731938400000, "epoch_ms", "2024-11-18T14:00:00+00:00"),  # an eCAR native clock
+    ("2024-11-18T14:00:00Z", "ms", "2024-11-18T14:00:00+00:00"),
+    ("2024-11-18T15:00:00+01:00", "ms", "2024-11-18T14:00:00+00:00"),
+    ("2024-11-18T14:00:00", "ms", None),                       # no offset: the clock is unknown
+    (1731938400, "ms", None),                                  # seconds read as milliseconds: 1970, outside
+    ("2023-01-01T00:00:00Z", "ms", None),                      # outside the hunt window
+    ("not a time", "ms", None),
+])
+def test_a_raw_record_time_is_read_with_its_clock_and_kept_only_inside_the_window(value, unit, expected):
+    from romulus.evidence.raw_citation import record_time
+
+    window = (T - timedelta(hours=1), T + timedelta(hours=1))
+    moment, text = record_time({"ts": value}, "ts", unit=unit, window=window)
+    assert (moment.isoformat() if moment is not None else None) == expected
+    assert text == str(value)
+
+
+def test_a_zeek_target_reads_epoch_seconds_and_markdown_controls_are_flagged():
+    from romulus.sources.compile import time_unit
+    from tests.test_agent_search_events import _keyword_contract
+
+    contract = _keyword_contract("zeek-a").model_copy(update={"zeek_sensor": "sensor", "time_field": "ts"})
+    assert time_unit(contract) == "s"
+    hit = {"_index": "zeek-a", "_id": "z1", "_source": {"ts": (T + timedelta(minutes=3)).timestamp(),
+                                                        "note": "<script>alert(1)</script>"}}
+    row = build_raw_record("h1", hit, source_kind="index", time_field="ts", session_id=None, task_id=None,
+                           query_digest="q", query_text="{}", redact=lambda value: value, flagged=injection_flags,
+                           time_unit=time_unit(contract), window=(T, T + timedelta(hours=1)))
+    assert row["ts"] == T + timedelta(minutes=3)
+    # the flag reads each string of the record, not its escaped JSON text
+    assert row["suspicious_content"] is True
+
+
+def test_a_q_alias_never_issued_or_from_another_hunt_is_refused(tmp_path):
+    from romulus.agent.aliases import AliasFromOtherHunt
+
+    repo = _hunt(tmp_path / "scope.sqlite")
+    toolbox = _box(QueryES(_response([_ghost(1)])), repo=repo)
+    _admission(toolbox, Settings(home=tmp_path))
+    alias = _raw_aliases(_query(toolbox, query=TERM))[0]
+    # the result was not shown to this admission session: its alias was never issued
+    refused = toolbox.execute("propose_finding", {"claim": "A log names a port 4444", "claim_kind": "mention",
+                                                  "cites": [alias], "lane": "lead"})
+    assert refused["status"] == "refused" and "was not issued" in refused["errors"][0]
+    repo.create_hunt("h2", {"window": {"start": T.isoformat(), "end": (T + timedelta(hours=1)).isoformat()}},
+                     "d", "test")
+    other = build_raw_record("h2", _ghost(9), source_kind="index", time_field="@timestamp", session_id=None,
+                             task_id=None, query_digest="q", query_text="{}", redact=lambda value: value,
+                             flagged=lambda value: [])
+    repo.save_agent_raw_records("h2", [other], max_count=5)
+    with pytest.raises(AliasFromOtherHunt):
+        AliasBook(repo, "h1").alias_for("Q", other["id"])
+    assert AliasBook(repo, "h2").alias_for("Q", other["id"]) == "Q1"
+    # h1's Q1 is its own record, never h2's, and h1 cannot read h2's record
+    assert AliasBook(repo, "h1").resolve("Q1", {"Q"}) != other["id"]
+    assert repo.agent_raw_records("h1", [other["id"]]) == []
+
+
+def test_a_flagged_raw_record_reached_through_a_finding_keeps_the_suspicious_label(tmp_path):
+    from romulus.agent.assessment import check_assessment
+
+    repo, _row, finding_id = _report_repo(tmp_path)
+    alias = AliasBook(repo, "h1").alias_for("F", finding_id)
+    sentence = {"text": "A camera log names a script tag.", "cites": [alias], "kind": "inferred"}
+    body = {"overall": [sentence], "key_steps": [], "confidence": {"overall": "low", "reasons": []},
+            "alternatives": [], "gaps": [], "next_checks": [],
+            "narrative": [{"time_span": {"start": "", "end": ""}, "phase": "Execution", "sentences": [sentence]}
+                          for _ in range(3)]}
+    checked, _checker = check_assessment(repo, "h1", body, triage=TriageContext(False, "off"))
+    assert checked["overall"][0]["suspicious_content"] is True
+
+
+def test_every_markdown_cite_list_labels_raw_records():
+    from romulus.report.markdown import _agent_note_line, _raw_cites_suffix, cite_text, raw_time
+
+    assert cite_text("raw_record", "rr-1") == "rr-1 (raw record, not normalized)"
+    assert cite_text(None, "rr-1") == "rr-1 (raw record, not normalized)" and cite_text("E", "ev1") == "ev1"
+    line = _agent_note_line({"text": "seen", "cites": [{"kind": "Q", "id": "rr-1"}, {"kind": "E", "id": "ev1"}]})
+    assert "rr-1 (raw record, not normalized), ev1" in line
+    assert _raw_cites_suffix([{"kind": "Q", "id": "rr-1"}]) == " (cites raw record, not normalized: rr-1)"
+    assert raw_time({"time": None, "time_text": "2024-11-18 14:00"}) == (
+        "source time text (unparsed): 2024-11-18 14:00")
+    assert raw_time({"time": "2024-11-18T14:00:00Z"}) == "2024-11-18T14:00:00Z UTC"
