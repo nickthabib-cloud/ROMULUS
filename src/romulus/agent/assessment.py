@@ -702,7 +702,7 @@ def _assessment_input(repo, hunt_id: str, token_budget: int, *, owner_token=None
               "agent_links": agent_link_cards, "incidents": incident_cards,
               "coverage_gaps": dossier.payload.get("scope", {}).get("coverage", {}).get("gaps", [])}
     caps = getattr(repo, "agent_source_query_caps", None)
-    reached = caps(hunt_id) if caps is not None else {}
+    reached = caps(hunt_id, limiting_only=True) if caps is not None else {}
     if reached:
         # the investigation was budget-limited: what its pivots left unsearched is unknown, never absent
         output["investigation_limits"] = {

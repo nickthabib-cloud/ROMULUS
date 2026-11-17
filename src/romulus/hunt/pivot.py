@@ -76,7 +76,7 @@ from romulus.sources.execute import execute
 from romulus.sources.models import Completeness, Predicate, SearchIntent, SearchOutcome, Window
 from romulus.sources.profile import LIMITED_KINDS, FieldContract
 from romulus.store.db import digest
-from romulus.store.repo import Repo
+from romulus.store.repo import AGENT_HUNT_BUDGET_CAP, AGENT_SESSION_SHARE_CAP, Repo
 
 MAX_PIVOT_RECORDS = 10_000
 MAX_EVENT_SUMMARIES = 50
@@ -575,8 +575,8 @@ MAX_SAMPLE_QUERIES = 4
 
 # The AI agent's source-query caps, each stopping with its own reason so a result, the run page and the audit tell
 # them apart: the hunt's total, one session's share of it, and one tool call's slice of that share.
-AGENT_HUNT_BUDGET = "agent_source_query_budget"
-AGENT_SESSION_SHARE = "agent_session_source_query_share"
+AGENT_HUNT_BUDGET = AGENT_HUNT_BUDGET_CAP
+AGENT_SESSION_SHARE = AGENT_SESSION_SHARE_CAP
 AGENT_CALL_SLICE = "agent_call_source_query_slice"
 # one planned source's part of what its call may still spend (the rest divided by the sources still to search)
 AGENT_SOURCE_SHARE = "agent_call_source_share"

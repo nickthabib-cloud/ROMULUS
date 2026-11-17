@@ -249,6 +249,16 @@ def test_a_reached_cap_is_a_limit_of_the_agent_run_and_reaches_the_assessment_in
     assert "budget-limited" in cell
 
 
+def test_only_the_hunt_total_and_session_share_caps_limit_the_investigation():
+    repo = _repo()
+    for kind in ("agent_call_source_query_slice", "agent_call_source_share"):
+        repo.audit("system", "agent.source_query_cap", "h1", {"cap": kind, "limit": 32})
+    assert repo.agent_source_query_caps("h1", limiting_only=True) == {}       # routine on dense sources
+    assert set(repo.agent_source_query_caps("h1")) == {"agent_call_source_query_slice", "agent_call_source_share"}
+    repo.audit("system", "agent.source_query_cap", "h1", {"cap": "agent_source_query_budget", "limit": 2000})
+    assert repo.agent_source_query_caps("h1", limiting_only=True) == {"agent_source_query_budget": 1}
+
+
 def test_the_toolbox_configures_the_session_share_from_its_session_row():
     repo = _repo()
     _session(repo, "orient-1", "orient")

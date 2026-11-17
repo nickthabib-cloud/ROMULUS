@@ -446,6 +446,12 @@ TRIAGE_FAILED = "hunt.ai_triage_failed"
 AGENT_MODEL_FORCED = "hunt.agent_model_forced"
 # Each secret-guard trip of an agent session: the setting, the part of the reply and the session (never a value).
 SECRET_GUARD_ACTION = "agent.secret_guard_tripped"
+# The AI agent's hunt-total and session-share source-query caps. Reaching either one means some leads could not be
+# followed at all, so they limit the investigation. The per-call slice and per-source caps are routine on dense
+# sources (a later call or a narrower window reads on); they are counted on the run page only.
+AGENT_HUNT_BUDGET_CAP = "agent_source_query_budget"
+AGENT_SESSION_SHARE_CAP = "agent_session_source_query_share"
+AGENT_LIMITING_CAPS = (AGENT_HUNT_BUDGET_CAP, AGENT_SESSION_SHARE_CAP)
 # A secret's setting as the agent's counts name it (an environment name), and how many distinct names are kept.
 SECRET_SETTING_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 SECRET_NAMES_KEPT = 32
@@ -1638,14 +1644,16 @@ class Repo:
                     and_(func.json_extract(detail, "$.purpose").is_(None), session_purpose == purpose)),
             )).scalar_one())
 
-    def agent_source_query_caps(self, hunt_id: str) -> dict[str, int]:
-        """How many AI-agent tool calls each source-query cap (hunt total, session share, call slice) stopped."""
+    def agent_source_query_caps(self, hunt_id: str, *, limiting_only: bool = False) -> dict[str, int]:
+        """How many AI-agent tool calls each source-query cap (hunt total, session share, call slice, source share)
+        stopped; with `limiting_only`, only the caps that limit the investigation (`AGENT_LIMITING_CAPS`)."""
         cap = func.json_extract(t.audit_event.c.detail, "$.cap")
         with self.engine.connect() as c:
             rows = c.execute(select(cap, func.count()).where(
                 t.audit_event.c.hunt_id == hunt_id, t.audit_event.c.action == "agent.source_query_cap",
             ).group_by(cap)).all()
-        return {str(kind): int(count) for kind, count in rows if kind}
+        return {str(kind): int(count) for kind, count in rows
+                if kind and (not limiting_only or kind in AGENT_LIMITING_CAPS)}
 
     def reserve_agent_source_query(self, hunt_id: str, limit: int, task_id: str | None,
                                    *, owner_token: str | None = None, session_id: str | None = None,
