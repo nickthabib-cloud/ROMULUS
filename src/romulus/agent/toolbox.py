@@ -332,6 +332,19 @@ class ListSearchFieldsArgs(_Args):
         return self
 
 
+GET_RESULT_DESCRIPTION = (
+    "Read again, in full and in pages, an earlier tool result of this session by its handle (R...). Older results "
+    "are compacted to short stubs to save context, and a result larger than one page shows only its first page: the "
+    "stub or the page names the handle and its page count. Spends no source query, and the text is exactly what the "
+    "result held (with any secret removed). The aliases a result issued stay citable whether or not it is re-read.")
+
+
+class GetResultArgs(_Args):
+    handle: str = Field(pattern=r"^R[1-9][0-9]{0,5}(-[0-9a-f]{6})?$", max_length=16, description=(
+        "The result's handle (R...), exactly as its stub or first page names it; handles are per session."))
+    page: int = Field(default=1, ge=1, description="Which page of the result's text, from 1.")
+
+
 class SearchEventsToolArgs(_Args):
     anchor: AliasArg = Field(description="The finding alias (F...) whose lead this search follows.")
     scope: pivot_tools.SearchScope = Field(description=(
@@ -633,8 +646,16 @@ class Toolbox:
                     "query_source", QUERY_SOURCE_DESCRIPTION,
                     QuerySourceToolArgs, self._query_source,
                 ),
+                # Registered for every session, like list_search_fields, so the tool definitions stay the same; it
+                # reads the session's own stored results (romulus.agent.context.SessionResults) and nothing else.
+                RegisteredTool(
+                    "get_result", GET_RESULT_DESCRIPTION,
+                    GetResultArgs, self._get_result,
+                ),
             )
         }
+        # the session's stored tool results, which get_result reads (set by the session that owns this toolbox)
+        self.results = None
 
     def provider_tools(self) -> list[Tool]:
         return [self.registry[name].provider_tool() for name in sorted(self.registry)]
@@ -1785,6 +1806,16 @@ class Toolbox:
             if refusal is not None:
                 return _result("refused", data={"error": refusal})
         return self._run_pivot(anchor, request, page=args.page, cursor=args.cursor, chunk_index=args.chunk_index)
+
+    def _get_result(self, args: GetResultArgs) -> dict:
+        if self.results is None:
+            return _result("unsupported", data={"error": {
+                "code": "results_unavailable", "message": "this session keeps no stored tool results"}})
+        data = self.results.page(args.handle, args.page)
+        if "error" in data:
+            return _result("refused", data=data)
+        return _result("complete", counts={"returned": 1, "total": data["pages"]}, data=data,
+                       more=data["page"] < data["pages"])
 
     def _list_search_fields(self, args: ListSearchFieldsArgs) -> dict:
         """One page of a listing of what the hunt's sources can be searched on, read from the hunt layer's field

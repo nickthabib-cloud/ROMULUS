@@ -21,6 +21,7 @@ from romulus.agent.admission import (
     typed_alias_arguments,
 )
 from romulus.agent.assessment import SECRET_GUARD_SUMMARY, assess_output, run_assessment, template_assessment
+from romulus.agent.context import SessionResults, issued_in, session_tag
 from romulus.agent.dossier import build_dossier
 from romulus.agent.grounding import triage_context
 from romulus.agent.provider import (
@@ -585,6 +586,9 @@ TOOL_CALL_EXTRA_FACTOR = 3
 # session may attempt, refused ones included, at the largest number of reads a session can ever have.
 WRITE_TOOLS = frozenset({"open_hypothesis", "update_hypothesis", "propose_finding", "propose_link", "add_note",
                          "request_rule"})
+# The tool that re-reads the session's own stored results. It spends no source query and has its own allowance (as
+# many calls as the session's reads), so re-reading never costs the session a source read, and stays bounded.
+REREAD_TOOL = "get_result"
 
 
 def _tool_call_allowance(settings: Settings, *, reads: int) -> int:
@@ -743,6 +747,10 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
     cache_trusted = True
     overruns = 0
     counted = True
+    # the session's tool results, stored whole and compacted in the conversation (romulus.agent.context)
+    results: SessionResults | None = None
+    reread_count = 0
+    rereads_closed = False
 
     def finish(state: str, final_summary: str, reason: str | None = None) -> dict:
         nonlocal counted
@@ -764,6 +772,8 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                    "provider_unavailable": provider_unavailable, "tool_call_limit": call_limit,
                    "write_call_limit": write_limit, "reservation_overruns": overruns,
                    "limits_hit": sorted(admission.limits_hit) if admission is not None else []}
+        if results is not None and results.compactions:
+            outcome["context"] = {"compactions": results.compactions, "results_compacted": results.stubbed}
         if session_saved:
             try:
                 repo.update_agent_session(session_id, hunt_id, {
@@ -789,6 +799,9 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
         admission = AgentAdmission(settings, repo, hunt_id, session_id, hypothesis_id=hypothesis_id,
                                    owner_token=owner_token, purpose=purpose)
         admission.register(toolbox)
+        results = SessionResults(settings, context_tokens=provider.context_tokens() or settings.agent_context_tokens,
+                                 tag=session_tag(session_id))
+        toolbox.results = results
         tools = _session_tools(toolbox)
         followable = None
         if getattr(toolbox.executor, "followable_links", None) is not None:
@@ -859,6 +872,12 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
             context, messages = _investigate_messages(repo, hunt_id, hypothesis, prompts, owner_token=owner_token)
             admission.issue_aliases(context, source="hypothesis")
         while True:
+            # older results the model has seen are stubbed in one batch, before the prompt is sized and its cached
+            # prefix checked: a compacted conversation no longer extends the previous request, so its prefix is not
+            # counted as cached, and between compactions the conversation only grows at its end
+            compacted = results.compact(messages)
+            if compacted:
+                log.info("agent session %s compacted %d earlier tool results", session_id, compacted)
             request = ChatRequest(messages=messages, tools=tools, tool_choice="auto")
             prompt_est = estimate_tokens(request.prompt_text())
             ctx = provider.context_tokens()
@@ -941,6 +960,13 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                               "provider_error")
             budget_gate.settle(reservation, result=result)
             heartbeat()
+            entered = results.take_redactions()
+            if entered:
+                # secrets removed from paged results before they entered the conversation, which this call sent
+                merged = dict(result.redactions or {})
+                for name, count in entered.items():
+                    merged[name] = merged.get(name, 0) + count
+                result.redactions = dict(sorted(merged.items()))
             model_call_id = record_call(repo, provider, hunt_id=hunt_id, purpose=purpose, request=request,
                                         result=result, limits=budget_gate.budget.limits, session_id=session_id,
                                         owner_token=owner_token, settings=settings)
@@ -969,6 +995,7 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 if context_wrap_sent:
                     return finish("context_full", _deterministic_tool_summary(tool_history, hypothesis_changes),
                                   "context wrap-up did not finish the session")
+                # a spent re-read allowance alone leaves reads open: a text-only reply gets the usual nudge
                 if reads_closed or writes_closed:
                     return finish("capped", _deterministic_tool_summary(tool_history, hypothesis_changes),
                                   "tool-call wrap-up did not finish the session")
@@ -1007,8 +1034,12 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
             for call in allowed_calls:
                 call_seq += 1
                 kind = ("finish" if call.name == "finish_session" else "write" if call.name in WRITE_TOOLS
-                        else "read")
-                if kind == "read" and read_count >= call_limit:
+                        else REREAD_TOOL if call.name == REREAD_TOOL else "read")
+                if kind == REREAD_TOOL and reread_count >= call_limit:
+                    tool_result = {"status": "refused", "errors": [
+                        "re-read limit reached; rely on the stubs and what you recorded, or finish the session"]}
+                    reasons = [reason("$", "reread_call_limit")]
+                elif kind == "read" and read_count >= call_limit:
                     tool_result = {"status": "refused", "errors": [
                         "read limit reached; only the write tools and finish_session are allowed"]}
                     reasons = [reason("$", "tool_call_limit")]
@@ -1019,6 +1050,7 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                     tool_count += 1
                     read_count += kind == "read"
                     write_count += kind == "write"
+                    reread_count += kind == REREAD_TOOL
                     executed = executed or kind != "finish"
                     if call.error:
                         # the provider refused the arguments before any tool ran
@@ -1064,8 +1096,22 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 tool_history.append((_stored_name(call.name, toolbox), status))
                 if call.name == "update_hypothesis" and status == "complete":
                     hypothesis_changes.append(tool_result.get("data") or {})
-                messages.append({"role": "tool", "tool_call_id": call.id,
-                                 "content": json.dumps(tool_result, sort_keys=True, ensure_ascii=False, default=str)})
+                if kind == REREAD_TOOL:
+                    # a re-read page is shown as it is (a page is never over the result cap) and compacted like a
+                    # result; it is not stored again
+                    content = json.dumps(tool_result, sort_keys=True, ensure_ascii=False, default=str)
+                    messages.append({"role": "tool", "tool_call_id": call.id, "content": content})
+                    if status == "complete":
+                        page = tool_result.get("data") or {}
+                        results.track_reread(len(messages) - 1, str(page.get("handle")), int(page.get("page") or 1),
+                                             content)
+                else:
+                    # stored whole under a handle; a result over the cap enters as its envelope and first page
+                    handle, content = results.enter(call_seq, _stored_name(call.name, toolbox), stored_args,
+                                                    tool_result, issued_in(tool_result, call.name,
+                                                                           admission.issued_aliases))
+                    messages.append({"role": "tool", "tool_call_id": call.id, "content": content})
+                    results.track(len(messages) - 1, handle)
                 if call.name == "finish_session" and status == "complete":
                     summary = str((tool_result.get("data") or {}).get("summary") or "Session finished.")
                     end_state = "context_full" if context_wrap_sent else "finished"
@@ -1082,6 +1128,9 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
             if not writes_closed and write_count >= write_limit:
                 writes_closed = True
                 closing.append("write")
+            if not rereads_closed and reread_count >= call_limit:
+                rereads_closed = True
+                closing.append("re-read")
             if closing:
                 # a spent kind closes; the session may still use the other and must then finish
                 writes = ", ".join(sorted(name for name in WRITE_TOOLS if name in toolbox.registry))
@@ -1090,7 +1139,11 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 messages.append({"role": "user", "content": (
                     f"Tool-call limit reached for {' and '.join(closing)} tools in this session. "
                     + ("Only " + left + " remain. Record what you found, then call finish_session with a summary."
-                       if reads_closed else "Call finish_session with a summary when the remaining reads are done."))})
+                       if reads_closed else
+                       f"{REREAD_TOOL} is closed: rely on the stubs and what you recorded. "
+                       if closing == ["re-read"] else "")
+                    + ("" if reads_closed else
+                       "Call finish_session with a summary when the remaining reads are done."))})
                 continue
             if (reads_closed or writes_closed) and finish_tried:
                 if not finish_retried:
@@ -1101,13 +1154,16 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                     continue
                 return finish("capped", _deterministic_tool_summary(tool_history, hypothesis_changes),
                               "wrap_up_not_finished")
-            if (reads_closed or writes_closed) and not executed:
+            if (reads_closed or writes_closed or rereads_closed) and not executed:
                 return finish("capped", _deterministic_tool_summary(tool_history, hypothesis_changes),
                               "tool-call limit reached and the reply used no remaining tool")
     except Exception as exc:
         if is_lease_lost(exc):
             raise
         return finish("failed", f"Controller error: {type(exc).__name__}: {exc}"[:2000], "controller_error")
+    finally:
+        if results is not None:
+            results.close()
 
 
 def _unworked(repo: Repo, hunt_id: str) -> list[str]:
