@@ -100,10 +100,18 @@ def test_registry_exports_a1_tools_with_strict_round_trip_schemas():
     assert set(tools) == {
         "list_findings", "list_coverage", "list_incidents", "get_finding", "get_evidence", "get_incident", "entity_profile",
         "entity_timeline", "auth_activity", "process_tree", "ids_alerts", "follow_link", "search_events",
-        "list_search_fields",
+        "list_search_fields", "query_source",
     }
     for tool in tools.values():
-        _assert_strict_objects(tool.parameters)
+        parameters = tool.parameters
+        if tool.name == "query_source":
+            # the agent's own query and aggregations are free-form objects, validated in the hunt layer against its
+            # allowlists before any source query; every other object stays closed
+            free = {name: parameters["properties"][name] for name in ("query", "aggs")}
+            assert all({"type": "object", "additionalProperties": True} in item["anyOf"] for item in free.values())
+            parameters = {**parameters, "properties": {name: value for name, value in parameters["properties"].items()
+                                                       if name not in free}}
+        _assert_strict_objects(parameters)
     lane_schema = tools["list_findings"].parameters["properties"]["lane"]
     assert {item.get("type") for item in lane_schema["anyOf"]} == {"string", "null"}
     assert lane_schema["default"] is None and tools["list_findings"].parameters["required"] == []

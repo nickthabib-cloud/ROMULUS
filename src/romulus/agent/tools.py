@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import ipaddress
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
@@ -138,6 +138,37 @@ class SearchEventsArgs(_WindowArgs):
     @classmethod
     def _selective(cls, value: list[SearchCondition]) -> list[SearchCondition]:
         return check_search_conditions(value)
+
+
+MAX_QUERY_SIZE = 100
+QUERY_SOURCE_NAME = r"^[A-Za-z0-9_.+:@\-]+$"
+
+
+class QuerySourceArgs(_WindowArgs):
+    """An agent-written query of one hunt source, as the toolbox accepted it (window inside the hunt's). Its shape is
+    checked here; what it may contain is decided in the hunt layer, which refuses anything outside its allowlists
+    before any source query (sources.agent_query)."""
+    source: str = Field(min_length=1, max_length=300, pattern=QUERY_SOURCE_NAME)
+    query: dict[str, Any] | None = None
+    expression: str | None = Field(default=None, min_length=1, max_length=2_000)
+    aggs: dict[str, Any] | None = None
+    sort: list[Any] | None = Field(default=None, min_length=1, max_length=3)
+    size: int = Field(default=20, ge=0, le=MAX_QUERY_SIZE)
+    source_fields: list[str] | None = Field(default=None, min_length=1, max_length=50)
+    # whether the toolbox narrowed the requested window to the hunt's
+    window_clamped: bool = False
+
+    @model_validator(mode="after")
+    def _one_language(self):
+        if self.expression is not None and any(
+                value is not None for value in (self.query, self.aggs, self.sort, self.source_fields)):
+            raise ValueError("an Arkime expression takes no query, aggs, sort or source_fields")
+        return self
+
+
+class QuerySourceRequest(_Strict):
+    tool: Literal["query_source"]
+    arguments: QuerySourceArgs
 
 
 class EntityTimelineRequest(_Strict):

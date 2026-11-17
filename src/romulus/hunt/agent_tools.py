@@ -6,17 +6,20 @@ from math import ceil
 
 from romulus.agent.models import EntityRef, PivotCoverage, PivotResult
 from romulus.agent.toolbox import FOLLOW_LINK_KINDS, Toolbox
-from romulus.agent.tools import SearchEventsRequest
+from romulus.agent.tools import QuerySourceRequest, SearchEventsRequest
 from romulus.config import Settings
 from romulus.detect.registry import bind_windows_site, fresh_direct_pack
 from romulus.evidence.typed import TypedEvent
+from romulus.hunt.agent_query import SourceQueryRunner, query_refusal
 from romulus.hunt.expansion import ExpansionEngine, expansion_windows
 from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkResult
 from romulus.hunt.manifest import inventory_usable
-from romulus.hunt.pivot import PivotExecutor
+from romulus.hunt.pivot import MAX_SEARCH_ENTITIES, PivotExecutor
 from romulus.hunt.publish import mark_hypothesis_relation, publish_match
 from romulus.site import ensure_site_unchanged
+from romulus.sources.agent_query import MAX_QUERY_HITS
 from romulus.sources.models import Window
+from romulus.sources.packets import ArkimeSessionSearch
 from romulus.sources.profile import AGGREGATABLE, LIMITED_KINDS, SHARDS_UNANSWERED
 from romulus.store.db import digest
 from romulus.store.repo import Repo
@@ -32,6 +35,7 @@ _PIVOT_LINK_TYPES = {
     "process_tree": "agent_process_tree",
     "ids_alerts": "agent_ids_alerts",
     "search_events": "agent_search_events",
+    "query_source": "agent_query_source",
 }
 _AGENT_HYPOTHESIS = "agent_hypothesis"
 _EVENT_DIGEST_LIMIT = 50
@@ -111,7 +115,8 @@ class HuntToolExecutor:
     def __init__(self, repo: Repo, hunt_id: str, pivot: PivotExecutor, fetcher: LinkFetcher,
                  hunt_start: datetime, hunt_end: datetime, *, owner_token: str | None = None,
                  packet_sources: tuple[str, ...] = (), uncontracted_targets: tuple[str, ...] = (),
-                 packet_spans: dict[str, tuple[datetime, datetime]] | None = None):
+                 packet_spans: dict[str, tuple[datetime, datetime]] | None = None,
+                 settings: Settings | None = None, arkime_search=None):
         self.repo = repo
         self.hunt_id = hunt_id
         self.pivot = pivot
@@ -127,6 +132,9 @@ class HuntToolExecutor:
         self._followable: dict[str, tuple[str, ...]] = {}
         self._profile_cache: dict[str, dict] | None = None
         self._sources: dict[str, tuple[str, str]] | None = None
+        # the agent's own source queries (query_source): secrets are redacted from what they keep, with these settings
+        self.settings = settings
+        self.queries = SourceQueryRunner(pivot, settings, arkime_search)
 
     def _events(self, ids: list[str]) -> list[TypedEvent]:
         rows = self.repo.citation_events(self.hunt_id, ids)
@@ -244,9 +252,18 @@ class HuntToolExecutor:
             fields.append(item)
         return {"fields": fields, "note": None}
 
-    def search_item_bound(self, request: SearchEventsRequest) -> int:
-        """The most page items one search's result can hold (PivotExecutor.search_item_bound), plus its named
-        unsearched sources."""
+    def query_refusal(self, request: QuerySourceRequest) -> dict | None:
+        """Why the agent's own query cannot be sent (hunt.agent_query.query_refusal), decided without any source
+        query; None when it can."""
+        found = self.source_table().get(request.arguments.source)
+        return query_refusal(request, found[0] if found else None)
+
+    def search_item_bound(self, request) -> int:
+        """The most page items one search's or query's result can hold (PivotExecutor.search_item_bound), plus a
+        search's named unsearched sources."""
+        if isinstance(request, QuerySourceRequest):
+            # its returned rows, the findings they can raise, its listed entities, one coverage cell and its reasons
+            return 2 * MAX_QUERY_HITS + MAX_SEARCH_ENTITIES + 64
         return self.pivot.search_item_bound(request) + len(self.packet_sources) + len(self.uncontracted_targets)
 
     def run(self, session_id: str, anchor_id: str, request, *, anchor_ts: datetime | None) -> PivotResult:
@@ -270,7 +287,16 @@ class HuntToolExecutor:
             link_key["entity"] = request.arguments.entity.model_dump(mode="json")
         if isinstance(request, SearchEventsRequest):
             link_key["search"] = request.arguments.model_dump(mode="json", include={"scope", "conditions"})
-        result = self.pivot.run(session_id, request, anchor_ts=anchor_ts)
+        if isinstance(request, QuerySourceRequest):
+            link_key["query"] = request.arguments.model_dump(mode="json", include={
+                "source", "query", "expression", "aggs", "sort", "size"})
+            kind, target = self.source_table().get(request.arguments.source, (None, None))
+            if kind is None:
+                result = PivotResult(status="unsupported", reasons=["the source is not one of this hunt's sources"])
+            else:
+                result = self.queries.run(session_id, request, kind=kind, target=target)
+        else:
+            result = self.pivot.run(session_id, request, anchor_ts=anchor_ts)
         if isinstance(request, SearchEventsRequest):
             packets = self.packet_sources if request.arguments.scope != "host" else ()
             # a capture whose every packet is known to fall outside the search window is no gap: counted in one
@@ -492,5 +518,6 @@ def build_agent_toolbox(settings: Settings, repo: Repo, hunt_id: str, *, client,
                                  if contracts.get(target) is None}))
     executor = HuntToolExecutor(repo, hunt_id, pivot, fetcher, start, end, owner_token=owner_token,
                                 packet_sources=tuple(packet_targets), uncontracted_targets=uncontracted,
-                                packet_spans=spans)
+                                packet_spans=spans, settings=settings,
+                                arkime_search=ArkimeSessionSearch(settings) if packet_targets else None)
     return Toolbox(repo, hunt_id, executor=executor, session_id=session_id, owner_token=owner_token)

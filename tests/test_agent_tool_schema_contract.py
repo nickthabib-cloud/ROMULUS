@@ -167,6 +167,19 @@ CASES: dict[str, list[tuple[dict, bool]]] = {
         ({"prefix": "a b"}, False), ({"prefix": ""}, False), ({"source": "x/y", "listing": "native_fields"}, False),
         ({"listing": "native_fields", "source": "s" * 301}, False), ({"extra": 1}, False),
     ],
+    "query_source": [
+        (window(source="logs-a", query={"term": {"a": "b"}}), True),
+        (window(source="logs-a", aggs={"t": {"terms": {"field": "a"}}}, size=0, sort=["a"],
+                source_fields=["a.*"], start=WHEN, end=LATER, page=2, cursor="P" + "0" * 20, chunk_index=2), True),
+        (window(source="arkime:sessions-1", expression="ip.src == 10.0.0.1"), True),
+        (window(source="logs-a", query=None, aggs=None, sort=None, source_fields=None), True),
+        (window(source="logs-a", size=101), False), (window(source="logs-a", size=-1), False),
+        (window(source="logs-a", sort=["a", "b", "c", "d"]), False), (window(source="logs-a", sort=[]), False),
+        (window(source="logs/a"), False), (window(), False), ({"source": "logs-a"}, False),
+        (window(source="logs-a", query=[1]), False), (window(source="logs-a", expression="x" * 2001), False),
+        (window(source="logs-a", source_fields=["a"] * 51), False), (window(source="logs-a", extra=1), False),
+        (window(source="logs-a", start="2024-11-18T10:00:00"), False),
+    ],
     "open_hypothesis": [
         ({"statement": "s" * 10}, True),
         ({"statement": "s" * 600, "techniques": ["T1059.001"] * 20, "entities": ["N1"] * 40,
@@ -244,6 +257,11 @@ SCHEMA_CANNOT_STATE = {
     ],
     "list_search_fields": [({"listing": "native_fields"}, "listing native_fields needs a source"),
                            ({"source": "logs-a"}, "source is for listing native_fields only")],
+    "query_source": [
+        (window(source="arkime:s", expression="a == 1", query={"term": {"a": "b"}}),
+         "an Arkime expression takes no query, aggs, sort or source_fields"),
+        (window(source="logs-a", start=LATER, end=WHEN), "start must be before end"),
+    ],
     "finish_session": [({"summary": " " * 25}, "surrounding whitespace is not counted")],
 }
 
