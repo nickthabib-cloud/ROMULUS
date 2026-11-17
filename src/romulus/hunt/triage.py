@@ -84,6 +84,30 @@ def run_triage_in_phase(s: Settings, repo: Repo, hunt_id: str, *, owner_token: s
                  force=False, source=source)
 
 
+def run_cited_triage_in_phase(s: Settings, repo: Repo, hunt_id: str, group_keys: list[tuple], *, owner_token: str,
+                              heartbeat, readiness=None, build: Callable | None = None, provider=None) -> dict:
+    """Extend the phase's triage pass to the groups the assessment's narrative cites without a verdict
+    (`agent.triage.run_cited_triage`), under the same lease, model and budget. Never raises for anything but a lost
+    lease: a failure is the summary, and is recorded."""
+    from romulus.agent.triage import run_cited_triage
+    s = triage_settings(s)
+    if provider is None:
+        readiness = _ready(s, readiness)
+        if not readiness.ready:
+            return {"status": "skipped", "reason": f"provider_not_ready: {readiness.message()}"}
+    try:
+        if provider is None:
+            from romulus.agent.provider import build_provider
+            provider = (build or build_provider)(s, readiness=readiness)
+        return run_cited_triage(s, repo, hunt_id, provider, group_keys, owner_token=owner_token,
+                                heartbeat=heartbeat, **stage_limits(s))
+    except Exception as exc:
+        if is_lease_lost(exc):
+            raise
+        log.exception("AI triage of the narrative's cited groups failed")
+        return {"status": "failed", "reason": f"triage_error: {type(exc).__name__}: {exc}"[:500]}
+
+
 def run_triage(s: Settings, repo: Repo, hunt_id: str, *, provider=None, readiness=None, force: bool = False,
                build: Callable | None = None, model: str | None = None) -> dict:
     """Claim the agent lease, run one triage pass and release the lease. Never raises for a provider, budget or

@@ -39,6 +39,7 @@ from romulus.agent.provider import (
 from romulus.agent.provider.base import PROVIDER_STATE, ToolCall, estimate_tokens, redact_value
 from romulus.agent.refusals import bounded, reason, tool_result_reasons
 from romulus.agent.toolbox import Toolbox
+from romulus.agent.triage import latest_summary
 from romulus.config import Settings, redact_text
 from romulus.hunt.rank import place_late_findings
 from romulus.report.incidents import build_incident_graph
@@ -272,7 +273,12 @@ def _agent_usage(repo: Repo, hunt_id: str) -> dict:
 
 def _triage_record(summary: dict) -> dict:
     """What the phase's stored summary keeps of its triage pass (the pass's full summary is stored on its own)."""
-    return {key: summary[key] for key in ("status", "reason", "pass", "reused", "model") if key in summary}
+    record = {key: summary[key] for key in ("status", "reason", "pass", "reused", "model") if key in summary}
+    if isinstance(summary.get("cited"), dict):
+        record["cited"] = {key: summary["cited"][key] for key in (
+            "status", "reason", "groups", "triaged", "untriaged_cited_skipped", "paragraphs_strength_changed",
+            "regrounded_revision") if key in summary["cited"]}
+    return record
 
 
 def _store_template(repo: Repo, hunt_id: str, reason: str, *, owner_token=None) -> dict:
@@ -1021,6 +1027,47 @@ def _triage_before_assess(repo: Repo, hunt_id: str, triage, budget: AgentBudget,
         budget.exclude_wall(budget.clock() - started)
 
 
+def _triage_cited(settings: Settings, repo: Repo, hunt_id: str, triage, assessment: dict, context,
+                  budget: AgentBudget, heartbeat: Callable[[], None], *, owner_token=None) -> dict:
+    """After the assessment: triage the groups of the Reported findings its narrative cites that the pass left without
+    a verdict (`triage(heartbeat, cited=...)`, on the pass's model and budget, its wall time kept out of the agent's),
+    then ground the stored narrative again with the new verdicts and store it as the next revision. The model's text
+    is unchanged. With no new verdict (a failure, a timeout, a spent budget, nothing to triage) the stored grounding
+    stands as it is: a missing verdict is never benign. Returns what was done, with the reason."""
+    from romulus.agent.assessment import cited_triage_groups, reground_narrative, save_assessment_revision
+    started = budget.clock()
+    try:
+        groups, skipped = cited_triage_groups(repo, hunt_id, assessment["ungrounded"], context,
+                                              settings.agent_triage_cited_max_groups)
+        out = {"groups": len(groups), "untriaged_cited_skipped": skipped}
+        if not groups:
+            return {**out, "status": "skipped",
+                    "reason": "no cited group lacks a verdict" if not skipped else "AGENT_TRIAGE_CITED_MAX_GROUPS is 0"}
+        heartbeat()
+        result = triage(heartbeat, cited=groups)
+        out.update({key: result[key] for key in ("status", "reason", "triaged", "by_assessment") if key in result})
+        if not result.get("triaged"):
+            return out
+        regrounded = triage_context(latest_summary(repo, hunt_id))
+        narrative, checker, changed = reground_narrative(
+            repo, hunt_id, assessment["ungrounded"], assessment["body"]["narrative"], assessment["checker"],
+            regrounded)
+        checker = {**checker, "regrounded_after_cited_triage": 1, "paragraphs_strength_changed": changed,
+                   **({"untriaged_cited_skipped": skipped} if skipped else {})}
+        revision = save_assessment_revision(repo, {
+            "id": _id("aa"), "hunt_id": hunt_id, "source": "agent", "model": assessment["model"],
+            "body": {**assessment["body"], "narrative": narrative}, "checker": checker, "created_at": utcnow()},
+            owner_token=owner_token)
+        return {**out, "regrounded_revision": revision, "paragraphs_strength_changed": changed}
+    except Exception as exc:
+        if is_lease_lost(exc):
+            raise
+        log.exception("AI triage of the narrative's cited groups failed")
+        return {"status": "failed", "reason": f"triage_error: {type(exc).__name__}: {exc}"[:300]}
+    finally:
+        budget.exclude_wall(budget.clock() - started)
+
+
 def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
                     toolbox_factory: Callable[[str], Toolbox], owner_token: str | None = None,
                     clock: Callable[[], float] = monotonic,
@@ -1145,6 +1192,9 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
             assessment_fault = True
             assessment = None
             reasons.append(f"assessment_error:{type(exc).__name__}")
+        if assessment is not None and triage is not None and context.usable:
+            triage_summary = {**triage_summary, "cited": _triage_cited(
+                settings, repo, hunt_id, triage, assessment, context, budget, heartbeat, owner_token=owner_token)}
     if assessment is None:
         assessment_sessions = repo.agent_sessions(hunt_id, purpose="assess")
         assessment_reason = ((assessment_sessions[-1].get("summary") or "") if assessment_sessions else "")

@@ -6,6 +6,7 @@ import re
 import unicodedata
 import uuid
 from collections import Counter
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
@@ -315,10 +316,12 @@ def _non_observed_alias(aliases: AliasBook, alias_row: dict) -> bool:
 
 
 def check_assessment(repo, hunt_id: str, body: dict, *, owner_token=None,
-                     triage: TriageContext | None = None) -> tuple[dict, dict]:
+                     triage: TriageContext | None = None, ungrounded: list | None = None) -> tuple[dict, dict]:
     """Check support, label flagged-only citations, apply the stored bounds, and replace aliases with real IDs.
     Every sentence dropped or trimmed is counted by reason. The narrative's evidence rules read triage verdicts from
-    `triage` (default: the latest published triage pass)."""
+    `triage` (default: the latest published triage pass). Given `ungrounded`, the narrative's checked paragraphs are
+    added to it as they were before the evidence rules, with each sentence's cites by kind, so they can be grounded
+    again (`reground_narrative`)."""
     checked = AssessmentBody.model_validate(body).model_dump(mode="json")
     aliases = AliasBook(repo, hunt_id, owner_token=owner_token)
     evidence = EvidenceStrength(repo, hunt_id, triage if triage is not None
@@ -363,7 +366,7 @@ def check_assessment(repo, hunt_id: str, body: dict, *, owner_token=None,
         checked[section] = capped([value for item in checked[section]
                                    if (value := check(item, section)) is not None], section)
     checked["narrative"] = _check_narrative(checked["narrative"], check, counts, _hunt_window(repo, hunt_id),
-                                            evidence)
+                                            evidence, ungrounded)
     return checked, {key: value for key, value in counts.items() if value}
 
 
@@ -419,7 +422,7 @@ def _phase_tactic(phase: str) -> str | None:
 
 
 def _check_narrative(paragraphs: list[dict], check, counts: dict, window,
-                     evidence: EvidenceStrength) -> list[dict]:
+                     evidence: EvidenceStrength, ungrounded: list | None = None) -> list[dict]:
     """Every narrative sentence goes through the same checks as the other sections (citations, absence claims,
     length, the observed label), and one with a negation word is dropped unless it is an explicit unknown ("it is
     unknown whether ..."), which is labelled uncertain; then a time that is not an RFC 3339 time inside the hunt
@@ -453,10 +456,17 @@ def _check_narrative(paragraphs: list[dict], check, counts: dict, window,
                     "sentences": sentences[:NARRATIVE_SENTENCES[1]]})
     counts["dropped_over_cap"] += max(0, len(out) - NARRATIVE_PARAGRAPHS[1])
     out = out[:NARRATIVE_PARAGRAPHS[1]]
-    # one batched lookup for every cite the kept paragraphs make
-    strengths = evidence.cites(ref for paragraph in out for sentence in paragraph["sentences"]
+    if ungrounded is not None:
+        ungrounded.extend(deepcopy(out))
+    return _ground_narrative(out, evidence, counts)
+
+
+def _ground_narrative(paragraphs: list[dict], evidence: EvidenceStrength, counts: dict) -> list[dict]:
+    """The evidence rules over checked paragraphs (their sentences carrying their cites by kind), with one batched
+    lookup for every cite they make."""
+    strengths = evidence.cites(tuple(ref) for paragraph in paragraphs for sentence in paragraph["sentences"]
                                for ref in sentence[REFS])
-    return [_ground_paragraph(paragraph, strengths, counts) for paragraph in out]
+    return [_ground_paragraph(paragraph, strengths, counts) for paragraph in paragraphs]
 
 
 def _ground_paragraph(paragraph: dict, strengths: dict, counts: dict) -> dict:
@@ -518,6 +528,49 @@ def _ground_paragraph(paragraph: dict, strengths: dict, counts: dict) -> dict:
     out.update(phase=CONTEXT_PHASE, weakly_supported=True, support_reason=reason,
                **({"model_phase": paragraph["phase"]} if paragraph["phase"] else {}))
     return out
+
+
+# The checker counts the evidence rules make; grounding again replaces exactly these.
+GROUNDING_COUNTS = ("downgraded_observed_weak_evidence", "phase_weakly_supported", "weakly_supported_benign_triage",
+                    "labelled_uncertain_benign_triage", "weakly_supported_unknown_support", "model_labelled_context",
+                    "model_context_cites_attack")
+
+
+def cited_triage_groups(repo, hunt_id: str, ungrounded: list[dict], triage: TriageContext,
+                        limit: int) -> tuple[list[tuple], int]:
+    """The triage groups of the Reported findings the narrative cites that the triage pass gave no verdict (an
+    insufficient-evidence verdict is one: the same model would see the same card), at most `limit`, those cited by
+    the most paragraphs first (ties by section, rule and target), and how many more there were. Bounded by the narrative's own
+    caps: its paragraphs, sentences, citations, and the findings read per cited record."""
+    if not triage.usable:
+        return [], 0
+    evidence = EvidenceStrength(repo, hunt_id, triage)
+    strengths = evidence.cites(tuple(ref) for paragraph in ungrounded for sentence in paragraph["sentences"]
+                               for ref in sentence[REFS])
+    cited: Counter = Counter()
+    for paragraph in ungrounded:
+        groups = {finding.group for sentence in paragraph["sentences"] for ref in sentence[REFS]
+                  for finding in strengths[tuple(ref)].findings
+                  if finding.untriaged_reported and finding.group is not None}
+        cited.update(groups)
+    ordered = sorted(cited, key=lambda key: (-cited[key], key))
+    return ordered[:max(0, limit)], max(0, len(ordered) - max(0, limit))
+
+
+def reground_narrative(repo, hunt_id: str, ungrounded: list[dict], narrative: list[dict], checker: dict,
+                       triage: TriageContext) -> tuple[list[dict], dict, int]:
+    """Ground the checked paragraphs again with the verdicts `triage` now reads, exactly as if they had existed when
+    the answer was checked: the model's text, cites and labels are unchanged; only strength, weak flags, reasons and
+    the support mix change. Returns the narrative, the checker with its grounding counts replaced, and how many
+    paragraphs changed strength (became weak, or no longer weak)."""
+    counts = dict.fromkeys(GROUNDING_COUNTS, 0)
+    grounded = _ground_narrative(deepcopy(ungrounded), EvidenceStrength(repo, hunt_id, triage), counts)
+    changed = sum(bool(old.get("weakly_supported")) != bool(new.get("weakly_supported"))
+                  or old.get("support_reason") != new.get("support_reason")
+                  or old.get("context_reason") != new.get("context_reason")
+                  for old, new in zip(narrative, grounded, strict=True))
+    kept = {key: value for key, value in checker.items() if key not in GROUNDING_COUNTS}
+    return grounded, {**kept, **{key: value for key, value in counts.items() if value}}, changed
 
 
 def _report_findings(repo, hunt_id: str) -> list[dict]:
@@ -857,8 +910,9 @@ def run_assessment(settings, repo, hunt_id: str, provider, budget: AgentBudget, 
                 # the model's own words are stored, rendered and reported: never with a configured secret's text
                 parsed = redact_value(parsed, settings)
                 validated = AssessmentBody.model_validate(parsed).model_dump(mode="json")
+                ungrounded: list = []
                 checked, checker = check_assessment(repo, hunt_id, validated, owner_token=owner_token,
-                                                    triage=triage)
+                                                    triage=triage, ungrounded=ungrounded)
                 validation = {"ok": result.ok, "errors": [result.error] if result.error else [], "drops": checker}
             except Exception as exc:  # noqa: BLE001 - the billed call is recorded whatever the check raised
                 failure = exc
@@ -881,15 +935,7 @@ def run_assessment(settings, repo, hunt_id: str, provider, budget: AgentBudget, 
                                         "model_reported": result.model_reported,
                                         **_fallback_provenance(result)},
                               "body": checked, "checker": checker, "created_at": utcnow()}
-            for revision_attempt in range(3):
-                revision = max((row["revision"] for row in repo.agent_assessments(hunt_id)), default=0) + 1
-                try:
-                    repo.save_agent_assessment({**assessment_row, "revision": revision}, owner_token=owner_token)
-                    break
-                except IntegrityError as exc:
-                    conflict = "UNIQUE constraint failed: agent_assessment.hunt_id, agent_assessment.revision"
-                    if conflict not in str(exc.orig) or revision_attempt == 2:
-                        raise
+            revision = save_assessment_revision(repo, assessment_row, owner_token=owner_token)
             summary = "Assessment stored." + (f" Note: {allowance.note}." if allowance.note else "")
             repo.update_agent_session(session_id, hunt_id, {"state": "finished", "summary": summary,
                                                              "tool_calls": 0, "ended_at": utcnow()},
@@ -897,7 +943,9 @@ def run_assessment(settings, repo, hunt_id: str, provider, budget: AgentBudget, 
             return {"session_id": session_id, "model_call_id": call_id, "revision": revision,
                     "body": checked, "checker": checker, "prompt_digests": prompt_digests,
                     "output_allowance": {"max_output_tokens": allowance.max_output_tokens,
-                                         "limit": allowance.limit, "note": allowance.note}}
+                                         "limit": allowance.limit, "note": allowance.note},
+                    # in memory only: the narrative before the evidence rules, to ground it again
+                    "ungrounded": ungrounded, "model": assessment_row["model"]}
         except (ValidationError, ValueError, TypeError) as exc:
             if attempt + 1 >= max_calls:
                 break
@@ -908,6 +956,20 @@ def run_assessment(settings, repo, hunt_id: str, provider, budget: AgentBudget, 
     repo.update_agent_session(session_id, hunt_id, {"state": "failed", "summary": "Assessment schema validation failed.",
                                                      "ended_at": utcnow()}, owner_token=owner_token)
     return None
+
+
+def save_assessment_revision(repo, row: dict, *, owner_token=None) -> int:
+    """Store `row` as the hunt's next assessment revision; return its number."""
+    for attempt in range(3):
+        revision = max((item["revision"] for item in repo.agent_assessments(row["hunt_id"])), default=0) + 1
+        try:
+            repo.save_agent_assessment({**row, "revision": revision}, owner_token=owner_token)
+            return revision
+        except IntegrityError as exc:
+            conflict = "UNIQUE constraint failed: agent_assessment.hunt_id, agent_assessment.revision"
+            if conflict not in str(exc.orig) or attempt == 2:
+                raise
+    raise AssertionError("unreachable")
 
 
 def _fallback_provenance(result) -> dict:
