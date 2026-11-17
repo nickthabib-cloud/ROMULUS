@@ -66,7 +66,8 @@ def test_the_direction_dependent_rules_are_exactly_these():
     assert flagged == AFFECTED | {"win.rdp_external_source", "net.executable_transfer", "net.cleartext_credentials",
                                  "net.outbound_ssh_external", "corr.alert_then_host_execution",
                                  "network.service_catalog", "net.long_inbound_session",
-                                 "net.long_inbound_remote_access"}
+                                 "net.long_inbound_remote_access", "net.remote_shell_fanout",
+                                 "net.smb_rpc_fanout", "net.epm_dynamic_rpc"}
     # each can write a complete negative, which is what the reason protects
     assert all(pb.assures_negative for pb in ALL_PLAYBOOKS if pb.id in AFFECTED)
     assert all(not pb.assures_negative for pb in ALL_PLAYBOOKS if pb.id == "win.rdp_external_source")

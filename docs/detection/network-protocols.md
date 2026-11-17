@@ -101,6 +101,20 @@ Counts are distinct canonical names, not actions. Missing previous names support
 
 Completeness is tracked per client/server/share on disk. A refusal for another group or loss of extra citations does not invalidate retained members. An incomplete group with at least 100 retained names changed to one extension remains high with an explicit lower-bound claim and unresolved ratio; the 80% ratio is asserted only for complete groups. If refusal bookkeeping cannot be retained or safely recovered, all groups become conservatively incomplete. Known positives remain reportable; incomplete below-threshold groups contribute honest limits.
 
+## Observations of traffic the sensor cannot read
+
+SMB 3 encryption, sealed DCE-RPC, WinRM over HTTPS, LDAP with sign-and-seal or TLS, SSH and RDP over TLS hide the operations the protocol rules read. These rules read only Zeek conn and kerberos records (Suricata flow records carry frame bytes and no history, so they are not read):
+
+| Rule | Typed facts | Shape | Lane |
+|---|---|---|---|
+| `net.remote_shell_fanout` | conn: addresses, `destination.port` 22/3389/5985/5986, `tcp.opened_by_orig`, payload bytes both ways | One internal source, at least 4 distinct internal destinations within 10 minutes | lead, high severity |
+| `net.smb_rpc_fanout` | conn: as above, ports 445/139/135 | One internal source, at least 10 distinct internal destinations within 15 minutes | lead, high severity |
+| `net.epm_dynamic_rpc` | conn: as above, port 135, then a port of 1024 or higher that is not a fixed Windows service port and whose Zeek service, if any, is one MS-RPC carries | The high-port connection from the same source to the same host starts 0-30 seconds after the mapper connection; declared domain controllers are not destinations | lead, high severity; one finding per destination |
+| `net.kerberos_service_ticket_fanout` | kerberos: `kerberos.request_type` TGS, `kerberos.service`, `kerberos.client`, source address | At least 10 distinct services (case-folded, realm removed, `krbtgt` and `kadmin` excluded) within 5 minutes per source and client, any ticket encryption type | lead, high severity |
+| `net.ldap_bulk_response` | conn: ports 389/636/3268/3269, `tcp.opened_by_orig`, server payload bytes | One connection on which the server sent at least 5,000,000 payload bytes to a client that is not a declared domain controller | lead, medium severity |
+
+A counted connection is one whose Zeek history begins with the originator's SYN and on which both sides sent payload, so refused attempts, SYN-only probes and silent hosts are never members (`net.horizontal_sweep` counts those). A connection is not a logon, a command or a successful authentication, and the claims say so. Records without the history or the payload counters are counted as unevaluated. A repeat connection of a pair within a minute of a stored one is not stored again by the fan-out rules; their counts are lower bounds. A declared management or directory-sync source is named in the finding and keeps its lane. All five rules are positive-only.
+
 ## Service-name observations
 
 `network.service_catalog` reads typed singular/plural DNS question names, TLS SNI and HTTP Host. Host ports are removed; bare IP hosts do not match. It uses case folding, an ASCII fast path, IDNA for non-ASCII/punycode names and exact or label-boundary suffix matching through a reversed-label trie. DNS syntax is required for consumed suffix labels; opaque labels to their left may contain underscores. Empty labels and overlong names are malformed. At most 1,024 names per record are evaluated, with an explicit partial-membership limit when capped. URI parameters, body text and TXT answers are not name keys.

@@ -23,7 +23,8 @@ tools:
   rules: []
 - name: enum4linux(-ng), smbmap, smbclient, rpcclient, ldapsearch, kerbrute, NetExec/CrackMapExec
   kind: dual-use
-  rules: []
+  rules:
+  - net.smb_rpc_fanout
 - name: frp (fast reverse proxy)
   kind: dual-use
   rules: []
@@ -38,7 +39,9 @@ tools:
   rules: []
 - name: Impacket (secretsdump, psexec/smbexec/wmiexec/atexec, GetUserSPNs, ntlmrelayx)
   kind: dual-use
-  rules: []
+  rules:
+  - net.epm_dynamic_rpc
+  - net.kerberos_service_ticket_fanout
 - name: iodine, dnscat2, dns2tcp
   kind: dual-use
   rules: []
