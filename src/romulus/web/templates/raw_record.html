@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% from 'raw_macros.html' import raw_record_card %}
+{% block title %}Raw record {{ raw.id }} · ROMULUS{% endblock %}
+{% block content %}
+<p><a href="/hunts/{{ hunt_id | urlencode }}">← hunt {{ hunt_id }}</a></p>
+<h1>Raw record, not normalized</h1>
+<p class="warn">{{ raw_label }}. It shows only that a record with this text exists, not that an action happened.</p>
+{{ raw_record_card(hunt_id, raw, true) }}
+{% endblock %}

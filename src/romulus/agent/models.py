@@ -179,4 +179,7 @@ class PivotResult(BaseModel):
     # An agent-written source query's own outcome (hunt.agent_query): its negative, counts and the bounded, redacted
     # preview of its rows and aggregations. Kept with the stored result, never in ordinary dumps.
     query: dict[str, Any] | None = Field(default=None, exclude=True)
+    # A typed search's first matched records no normalizer read ({target, record}), for the hunt layer to keep as raw
+    # records; never in ordinary dumps.
+    unread_records: list[dict[str, Any]] = Field(default_factory=list, exclude=True)
 

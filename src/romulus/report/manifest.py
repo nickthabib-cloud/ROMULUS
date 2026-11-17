@@ -15,6 +15,7 @@ from romulus.decide.policy import LANE_ORDER
 from romulus.detect.metadata import hunt_rule_metadata, is_sigma_id, pinned_rule_ids
 from romulus.detect.netdef import recorded_view
 from romulus.detect.registry import ALL_PLAYBOOKS
+from romulus.evidence.raw_citation import RAW_GATE, RAW_ID_PREFIX, RAW_LABEL_PLURAL, raw_record_view
 from romulus.hunt.publish import subject_event_ids
 from romulus.hunt.rank import PASS_FINAL, rank_summary, rank_unranked
 from romulus.report.incidents import build_incident_graph, incident_narrative
@@ -61,6 +62,76 @@ def _citations(repo: Repo, cand: dict) -> list[dict]:
                           "status": "retained" if r and r["digest"] == ref["digest"] else
                                     "broken: raw copy missing" if not r else "broken: digest mismatch"})
     return cites
+
+
+# how many cited raw records carry their (at most 16 KB) text in the manifest; the rest carry reference and digest
+RAW_TEXT_IN_MANIFEST = 200
+
+
+def _raw_citations(repo: Repo, hunt_id: str, raw_ids: list[str]) -> list[dict]:
+    """A finding's cited raw records (returned rows no normalizer read): each one's label, source reference, time
+    and digest, or marked broken when the hunt no longer keeps it. Their text is in the manifest's raw-record
+    index."""
+    rows = {row["id"]: row for row in repo.agent_raw_records(hunt_id, raw_ids)}
+    return [{**raw_record_view(rows[item], text=False), "status": "retained"} if item in rows
+            else {"id": item, "kind": "raw_record", "status": "broken: raw record not retained"}
+            for item in raw_ids]
+
+
+def _cited_raw_ids(manifest: dict, findings: list[dict]) -> list[str]:
+    """Every raw record the hunt's AI output cites: findings, notes, links, hypotheses, rule requests and the
+    assessment (which keeps cited ids as strings)."""
+    cited: list[str] = [item["id"] for finding in findings for item in finding.get("raw_citations") or []]
+    ai = manifest.get("ai_agent") or {}
+
+    def walk(value):
+        # only cite lists: a raw record is cited as {"kind": "Q" or "raw_record", "id": ...}, or by its id alone in
+        # the assessment; free text that merely starts like an id is never read as a cite
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key == "cites" and isinstance(child, list):
+                    for cite in child:
+                        if isinstance(cite, str) and cite.startswith(RAW_ID_PREFIX):
+                            cited.append(cite)
+                        elif (isinstance(cite, dict) and cite.get("kind") in ("Q", "raw_record")
+                              and isinstance(cite.get("id"), str)):
+                            cited.append(cite["id"])
+                else:
+                    walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    for name in ("agent_links", "agent_notes", "hypotheses", "rule_requests"):
+        walk(ai.get(name))
+    walk((manifest.get("ai_assessment") or {}).get("body"))
+    walk((manifest.get("ai_assessment") or {}).get("narrative"))
+    return list(dict.fromkeys(cited))
+
+
+def _raw_record_index(repo: Repo, hunt_id: str, manifest: dict, findings: list[dict]) -> dict | None:
+    """The raw records the AI output cites, each with its label, source reference, time, digest, provenance and
+    bounded text (untrusted telemetry: renderers escape it), and the hunt's raw-record counts; None when the hunt
+    keeps none and its cap left none unkept, so a hunt without raw records keeps the manifest it had."""
+    stats = repo.agent_raw_record_stats(hunt_id)
+    cited = _cited_raw_ids(manifest, findings)
+    if not cited and not stats["stored"] and not stats["not_stored"]:
+        return None
+    rows = {row["id"]: row for row in repo.agent_raw_records(hunt_id, cited)}
+    kept = [item for item in cited if item in rows]
+    # the first RAW_TEXT_IN_MANIFEST cited records carry their text; the rest their reference and digest, each kept
+    # in the hunt and shown whole on the web
+    shown = [raw_record_view(rows[item], text=index < RAW_TEXT_IN_MANIFEST) for index, item in enumerate(kept)]
+    out = {"label": RAW_LABEL_PLURAL, "stored": stats["stored"],
+           # one per returned row the cap refused, per query: a record two queries returned counts twice
+           "refused_at_cap": stats["not_stored"],
+           "cited": shown, "broken": [item for item in cited if item not in rows]}
+    if len(kept) > RAW_TEXT_IN_MANIFEST:
+        out["text_omitted"] = {"count": len(kept) - RAW_TEXT_IN_MANIFEST,
+                               "note": (f"only the first {RAW_TEXT_IN_MANIFEST} cited raw records carry their text "
+                                        "here; the rest carry their source reference and digest, and their text is "
+                                        "kept in the hunt and shown on its web pages")}
+    return out
 
 
 # Counted with the skip reasons, but about records that were evaluated: reported as coverage notes, never as data
@@ -723,6 +794,7 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
         notes = gates.pop("_notes", [])
         attack = gates.pop('_attack', [])
         gates.pop("aggregate_summary", None)
+        raw_ids = gates.pop(RAW_GATE, None)
         findings.append({
             "id": c["id"], "lane": c["lane"], "severity": c["severity"], "confidence": c["confidence"],
             "priority": c["priority"], "priority_reasons": c["priority_reasons"], "rule_id": c["rule_id"],
@@ -747,6 +819,9 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
             findings[-1]['attack'] = attack
         if c.get("provenance") == "agent":
             findings[-1]["label"] = "Agent finding"
+        if raw_ids:
+            # what the finding rests on beside its typed events: records no normalizer read, cited as text
+            findings[-1]["raw_citations"] = _raw_citations(repo, hunt_id, list(raw_ids))
         if "_fleet_host_count" in gates:
             findings[-1]["fleet_hosts"] = repo.snapshot_candidate_hosts(
                 c["id"], hunt_id, expected_count=gates["_fleet_host_count"],
@@ -832,6 +907,12 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
                       "broken_incident_citations": len(broken_incidents),
                       "broken_incident_event_ids": broken_incidents[:50],
                       "finalizable": broken == 0 and not broken_inv and not broken_incidents}
+    raw_index = _raw_record_index(repo, hunt_id, m, findings)
+    if raw_index is not None:
+        m["raw_records"] = raw_index
+        if raw_index["broken"]:
+            m["integrity"]["broken_raw_citations"] = len(raw_index["broken"])
+            m["integrity"]["finalizable"] = False
     fleet_gaps = sum(not finding["fleet_hosts"]["complete"] for finding in findings if "fleet_hosts" in finding)
     if fleet_gaps:
         m["integrity"]["incomplete_fleet_host_lists"] = fleet_gaps
@@ -1259,8 +1340,17 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
     }
     if "ai_triage" in manifest:
         ai_content["triage"] = manifest["ai_triage"]
+    if "raw_records" in manifest:
+        # raw records exist only as the AI agent's citations
+        ai_content["raw_records"] = manifest["raw_records"]
     canonical["ai"] = canonicalize(ai_content)
     canonical.pop("ai_triage", None)
+    canonical.pop("raw_records", None)
+    if broken_raw := canonical["integrity"].pop("broken_raw_citations", None):
+        # the deterministic floor is unaffected; the AI output's broken raw citations stay named with it
+        canonical["ai"]["integrity"] = {
+            "broken_raw_citations": broken_raw,
+            "reason": "the AI output cites raw records the hunt no longer keeps, so the full report is not finalizable"}
     deterministic_findings = [row for row in repo.candidates(hunt_id)
                               if row.get("provenance", "deterministic") != "agent"]
     deterministic_views = [row for row in manifest["findings"] if row.get("provenance") != "agent"]

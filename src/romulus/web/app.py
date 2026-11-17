@@ -23,6 +23,7 @@ from starlette.concurrency import run_in_threadpool
 
 from romulus.agent.provider import agent_readiness, egress_banners
 from romulus.config import Settings
+from romulus.evidence.raw_citation import RAW_GATE, RAW_LABEL, RAW_LABEL_PLURAL, raw_record_view
 from romulus.hunt.run import open_repo
 from romulus.report.bundle import write_reports
 from romulus.report.manifest import publish_revision
@@ -233,6 +234,9 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         raws = repo.raw_records(raw_ids[:40])
         gates = dict(c["gate_results"])
         notes = gates.pop("_notes", [])
+        # records no normalizer read that an AI finding cites as text: shown apart, labelled, never as typed events
+        raw_cited = list(gates.pop(RAW_GATE, None) or [])
+        raw_records = [raw_record_view(row) for row in repo.agent_raw_records(c["hunt_id"], raw_cited[:20])]
         pred_fields = {p["field"] for p in c["predicate_fields"]}
         fleet_hosts, fleet_next = repo.candidate_hosts(cid, after=host_after)
         from romulus.store import schema as tables
@@ -249,8 +253,19 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
                     fleet_hosts=fleet_hosts, fleet_next=fleet_next, fleet_after=host_after,
                     pred_fields=pred_fields, dispositions=repo.dispositions(cid), statuses=STATUSES,
                     agent_notes=agent_notes, agent_notes_more=notes_more, agent_notes_cursor=notes_cursor,
-                    linked_hypothesis=linked_hypothesis,
+                    linked_hypothesis=linked_hypothesis, raw_records=raw_records,
+                    raw_missing=max(0, len(raw_cited[:20]) - len(raw_records)), raw_more=max(0, len(raw_cited) - 20),
+                    raw_label=RAW_LABEL_PLURAL,
                     pretty=lambda v: json.dumps(v, indent=2, ensure_ascii=False, sort_keys=True, default=str))
+
+    @app.get("/hunts/{hunt_id}/raw-records/{rid}", response_class=HTMLResponse)
+    def raw_record(request: Request, hunt_id: str, rid: str):
+        u = need(request)
+        rows = repo.agent_raw_records(hunt_id, [rid]) if len(rid) <= 64 else []
+        if not rows:
+            raise HTTPException(404)
+        return page(request, "raw_record.html", u, hunt_id=hunt_id, raw=raw_record_view(rows[0]),
+                    raw_label=RAW_LABEL)
 
     @app.post("/findings/{cid}/disposition")
     def disposition(request: Request, cid: str, status: str = Form(...), note: str = Form(""),

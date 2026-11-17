@@ -4,11 +4,13 @@ import re
 from xml.etree.ElementTree import Element, SubElement, tostring
 from zipfile import ZIP_DEFLATED, ZipFile
 
+from romulus.evidence.raw_citation import RAW_LABEL_PLURAL
 from romulus.report.markdown import (
     BANNER,
     NARRATIVE_EMPTY,
     NARRATIVE_NOTE,
     NARRATIVE_TITLE,
+    cite_text,
     is_ranked,
     narrative_context_reason,
     narrative_heading,
@@ -75,6 +77,13 @@ def write(m, path, technical_name):
         else:
             paragraph(f"{finding['rule_id']} — {finding['lane']}", bold=True)
         paragraph(finding["claim"])
+        if raws := finding.get("raw_citations"):
+            # source references only: the record text stays in the technical report, fenced
+            shown = ", ".join(f"{raw.get('target', '')}/{raw.get('native_id', '')}" if raw["status"] == "retained"
+                              else f"{raw['id']} ({raw['status']})" for raw in raws[:5])
+            more = f", and {len(raws) - 5} more" if len(raws) > 5 else ""
+            paragraph(f"Cites {len(raws)} {RAW_LABEL_PLURAL}. Sources: {shown}{more}. Their text is in "
+                      f"{technical_name}.", muted=True)
         if ref := finding.get("fleet_hosts"):
             amount = str(ref["count"]) if ref["complete"] else f"{ref['count']} of {ref['expected_count']}"
             side = {"external_address": "outside", "internal_address": "internal"}.get(
@@ -93,7 +102,7 @@ def write(m, path, technical_name):
         paragraph(assessment.get("header") or "Template narrative.")
 
         def statement(sentence, *, muted=False):
-            cites = ", ".join(str(cite) for cite in sentence.get("cites") or [])
+            cites = ", ".join(cite_text(None, cite) for cite in sentence.get("cites") or [])
             suffix = f" [{cites}]" if cites else ""
             marker = (" Cites only content flagged as possible prompt injection."
                       if sentence.get("suspicious_content") else "")

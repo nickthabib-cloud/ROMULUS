@@ -151,11 +151,40 @@ agent_alias = Table(
     Column("kind", String, nullable=False),
     Column("target_id", String, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
-    CheckConstraint("kind IN ('F', 'I', 'E', 'N', 'L', 'H', 'A')", name="ck_agent_alias_kind"),
+    CheckConstraint("kind IN ('F', 'I', 'E', 'N', 'L', 'H', 'A', 'Q')", name="ck_agent_alias_kind"),
     UniqueConstraint("hunt_id", "alias", name="uq_agent_alias_name"),
     UniqueConstraint("hunt_id", "kind", "target_id", name="uq_agent_alias_target"),
 )
 Index("ix_agent_alias_hunt_kind", agent_alias.c.hunt_id, agent_alias.c.kind)
+
+# A record the agent's own source query returned that no normalizer read, kept as citable text (Q aliases): its source
+# reference, time, cleaned and redacted text (bounded, `text_cut` when cut), the digest of the record as returned,
+# and its provenance. No typed field is extracted from it and no detection rule runs on it. One row per hunt and
+# source record; at most AGENT_MAX_RAW_RECORDS rows per hunt.
+agent_raw_record = Table(
+    "agent_raw_record", metadata,
+    Column("id", String, primary_key=True),
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("target", String, nullable=False),
+    Column("native_id", String, nullable=False),
+    Column("source_kind", String, nullable=False),
+    Column("ts", DateTime(timezone=True)),
+    Column("time_field", String),
+    Column("time_text", String),
+    Column("text", Text, nullable=False),
+    Column("text_cut", Boolean, nullable=False, default=False),
+    Column("text_bytes", Integer, nullable=False),
+    Column("digest", String, nullable=False),
+    Column("session_id", String),
+    Column("task_id", String),
+    Column("query_digest", String, nullable=False),
+    Column("query", Text, nullable=False),
+    Column("suspicious_content", Boolean, nullable=False, default=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("source_kind IN ('index','arkime_session')", name="ck_agent_raw_record_source_kind"),
+    UniqueConstraint("hunt_id", "target", "native_id", name="uq_agent_raw_record_source"),
+)
+Index("ix_agent_raw_record_hunt", agent_raw_record.c.hunt_id, agent_raw_record.c.created_at)
 
 agent_page_plan = Table(
     "agent_page_plan", metadata,
@@ -548,7 +577,7 @@ agent_hypothesis_cite = Table(
     Column("target_kind", String, nullable=False),
     Column("target_id", String, nullable=False),
     CheckConstraint("role IN ('support','contradiction')", name="ck_agent_hypothesis_cite_role"),
-    CheckConstraint("target_kind IN ('finding','evidence','link','agent_link')",
+    CheckConstraint("target_kind IN ('finding','evidence','link','agent_link','raw_record')",
                     name="ck_agent_hypothesis_cite_target_kind"),
     UniqueConstraint("hypothesis_id", "role", "target_kind", "target_id",
                      name="uq_agent_hypothesis_cite"),

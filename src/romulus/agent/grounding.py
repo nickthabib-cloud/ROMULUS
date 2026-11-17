@@ -121,17 +121,22 @@ class FindingStrength:
 
 # A paragraph's support summary counts its distinct cites in these categories, strongest first; a cite falls in the
 # first category any of its findings gives: confirmed, triaged likely or possible attack, Reported without a
-# likely-benign verdict, support unknown (the evidence lookup's cap), triaged likely benign, anything else (a finding
-# neither Reported nor triaged, an AI proposal, a link or hypothesis).
+# likely-benign verdict, support unknown (the evidence lookup's cap), a raw record (observed text: a returned record
+# no normalizer read), triaged likely benign, anything else (a finding neither Reported nor triaged, an AI proposal,
+# a link or hypothesis).
 SUPPORT_CATEGORIES = tuple(SUPPORT_LABELS)
 
 
 @dataclass(frozen=True)
 class CiteStrength:
     """What one cited alias rests on: the reportable deterministic findings behind it, and whether that list is
-    complete."""
+    complete. A raw record (`raw`) rests on no finding: it shows that a record with its text exists. It is never
+    reportable (an observed sentence citing only raw records becomes inferred: a mention is not an action), never
+    strong (citing a text hit cannot lift a paragraph out of Context) and never benign (no verdict was given on
+    it)."""
     findings: tuple[FindingStrength, ...] = ()
     complete: bool = True
+    raw: bool = False
 
     @property
     def reportable(self) -> bool:
@@ -159,6 +164,8 @@ class CiteStrength:
                 return name
         if not self.complete:
             return "unknown"
+        if self.raw:
+            return "raw"
         return "benign" if self.benign else "other"
 
 
@@ -194,7 +201,8 @@ class EvidenceStrength:
 
     def cites(self, refs) -> dict[tuple[str, str], CiteStrength]:
         """Strength of each (alias kind, target id): a finding stands for itself, an evidence record for the
-        reportable deterministic findings that cite it; anything else rests on no finding."""
+        reportable deterministic findings that cite it, a raw record (Q) for observed text only; anything else rests
+        on no finding."""
         refs = list(dict.fromkeys(refs))
         for kind, target in refs:
             if kind == "E" and target not in self._events:
@@ -211,6 +219,8 @@ class EvidenceStrength:
                 ids, complete = self._events[target]
                 out[(kind, target)] = CiteStrength(tuple(strengths[item] for item in ids if item in strengths
                                                          and strengths[item].reportable), complete)
+            elif kind == "Q":
+                out[(kind, target)] = CiteStrength(raw=True)
             else:
                 out[(kind, target)] = CiteStrength()
         return out

@@ -31,9 +31,103 @@ def _anchor(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]+", "-", value)
 
 
+RAW_SECTION_TITLE = "Raw records cited by the AI agent (not normalized)"
+# what the Markdown report shows of each cited raw record's text; the JSON manifest keeps the whole stored text
+RAW_EXCERPT_CHARS = 2_000
+RAW_CITE_LABEL = "raw record, not normalized"
+_RAW_ID_PREFIX = "rr-"
+
+
+def raw_time(raw: dict) -> str:
+    """A raw record's time as shown: UTC when the source's time field held one inside the hunt window, else the
+    field's text marked unparsed (its clock is not known), else not recorded."""
+    if raw.get("time"):
+        return f"{raw['time']} UTC"
+    if raw.get("time_text"):
+        return f"source time text (unparsed): {raw['time_text']}"
+    return "not recorded"
+
+
+def cite_text(kind, target) -> str:
+    """One cited id as shown in a cite list: a raw record says what it is, wherever it is cited."""
+    target = str(target)
+    if kind in ("Q", "raw_record") or (kind is None and target.startswith(_RAW_ID_PREFIX)):
+        return f"{target} ({RAW_CITE_LABEL})"
+    return target
+
+
+def _raw_cites_suffix(cites) -> str:
+    """For a cite list that includes raw records, a suffix naming them as such (empty otherwise)."""
+    raws = [str(cite.get("id")) for cite in cites or []
+            if isinstance(cite, dict) and cite.get("kind") in ("Q", "raw_record")]
+    return f" (cites {RAW_CITE_LABEL}: {', '.join(raws)})" if raws else ""
+
+
+def _raw_citation_table(raws: list[dict]) -> list[str]:
+    """A finding's cited raw records: label and source reference, each linked to its text in the raw-record
+    section."""
+    out = ["**Raw records cited (not normalized)**", "",
+           ("Records no normalizer read: no typed fields were extracted and no detection rule ran on them. Each shows "
+            "only that a record with this text exists, not that an action happened."), "",
+           "| Raw record | Source | Record ID | Time | Digest | Status |", "|---|---|---|---|---|---|"]
+    for raw in raws[:25]:
+        link = f"[{cell(raw['id'])}](#raw-{_anchor(raw['id'])})" if raw["status"] == "retained" else cell(raw["id"])
+        out.append(f"| {link} | {cell(raw.get('target', ''))} | {cell(raw.get('native_id', ''))} | "
+                   f"{cell(raw_time(raw))} | "
+                   f"{cell((raw.get('digest') or '')[:16])}… | {cell(raw['status'])} |")
+    if len(raws) > 25:
+        out.append(f"| … | {len(raws) - 25} more raw records in the JSON manifest | | | | |")
+    return out + [""]
+
+
+def _raw_records_section(m: dict) -> list[str]:
+    """Every raw record the AI output cites, with its label, source reference, time, digest and text excerpt (fenced:
+    telemetry never becomes Markdown or HTML structure), and the hunt's raw-record counts."""
+    index = m.get("raw_records")
+    if not index:
+        return []
+    out = [f"## {RAW_SECTION_TITLE}", "", cell(index["label"]) + ".", "",
+           (f"Kept for this hunt: {index['stored']}. Returned rows the raw-record cap refused: "
+            f"{index['refused_at_cap']}, counted per query (a record two queries returned counts twice); they are "
+            "not citable."), ""]
+    if omitted := index.get("text_omitted"):
+        out += [f"_{cell(omitted['note'])} ({omitted['count']} without text here)._", ""]
+    for raw in index["cited"]:
+        source = "Arkime session" if raw["source_kind"] == "arkime_session" else "Index record"
+        out += [f'<a id="raw-{_anchor(raw["id"])}"></a>', "",
+                f"### Raw record `{cell(raw['id'])}`", "",
+                f"- {source}: {cell(raw['target'])} / {cell(raw['native_id'])}",
+                f"- Time: {cell(raw_time(raw))}",
+                f"- Digest of the record as returned: `{cell(raw['digest'])}`",
+                (f"- Kept from agent session {cell(raw.get('session_id') or 'unknown')}, query "
+                 f"{cell((raw.get('query_digest') or '')[:16])}"),
+                *(["- **Contains text flagged as possible prompt injection.**"] if raw.get("suspicious_content") else []),
+                ""]
+        if "text" not in raw:
+            out += ["_Text not carried in this report (see the note above); its digest identifies it._", ""]
+            continue
+        text = raw.get("text") or ""
+        shown = text[:RAW_EXCERPT_CHARS]
+        notes = []
+        if len(text) > RAW_EXCERPT_CHARS:
+            notes.append(f"excerpt: the first {RAW_EXCERPT_CHARS} of {len(text)} characters; the JSON manifest has "
+                         "the stored text")
+        if raw.get("text_note"):
+            notes.append(raw["text_note"])
+        out += [fence(shown, "json"), ""]
+        if notes:
+            out += [f"_{cell('; '.join(notes))}._", ""]
+        if raw.get("query"):
+            out += ["Query that returned it (redacted):", "", fence(raw["query"], "json"), ""]
+    if index["broken"]:
+        out += [f"Cited raw records no longer kept: {cell(', '.join(index['broken'][:50]))}.", ""]
+    return out
+
+
 def _agent_note_line(note: dict) -> str:
     marker = " **Cites content flagged as possible prompt injection.**" if note.get("suspicious_content") else ""
-    cites = ", ".join(str(cite.get("id")) for cite in note.get("cites") or [] if isinstance(cite, dict))
+    cites = ", ".join(cite_text(cite.get("kind"), cite.get("id")) for cite in note.get("cites") or []
+                      if isinstance(cite, dict))
     suffix = f" (cites: {esc(cites)})" if cites else ""
     return f"- {esc(note['text'])}{suffix}{marker}"
 
@@ -57,10 +151,12 @@ WEAK_NO_REPORTED = "no_reported_finding"
 WEAK_BENIGN = "triaged_likely_benign"
 WEAK_UNKNOWN = "support_unknown"
 WEAK_MODEL_CONTEXT = "model_labelled_context"
+WEAK_RAW_ONLY = "raw_records_only"
 WEAK_REASONS = {WEAK_NO_REPORTED: "no reported finding cited",
                 WEAK_BENIGN: "cited activity was triaged as likely benign",
                 WEAK_UNKNOWN: "support could not be determined (citation cap)",
-                WEAK_MODEL_CONTEXT: "labelled context by the model"}
+                WEAK_MODEL_CONTEXT: "labelled context by the model",
+                WEAK_RAW_ONLY: "cites only raw records, not normalized (text a record contains, not an action)"}
 # A paragraph the model labelled context that cites confirmed or attack-triaged findings: shown as Context, as the
 # model asked, but never muted or weakened, with this reason in plain view.
 MODEL_CONTEXT_ATTACK = "model_context_cites_attack"
@@ -70,6 +166,7 @@ CONTEXT_REASONS = {MODEL_CONTEXT_ATTACK: "labelled context by the model, but it 
 # derives it from stored ranks and triage verdicts only).
 SUPPORT_LABELS = {"confirmed": "confirmed", "attack": "triaged possible or likely attack",
                   "reported": "reported, no benign verdict", "unknown": "unknown (citation cap)",
+                  "raw": "raw record, not normalized (observed text)",
                   "benign": "triaged likely benign", "other": "not reported"}
 SUPPORT_LIMIT = 10_000
 
@@ -139,7 +236,8 @@ def _assessment_section(m: dict) -> list[str]:
     out = ["## AI assessment", "", esc(assessment.get("header") or "Template narrative."), ""]
 
     def sentence(item: dict) -> str:
-        cites = ", ".join(f"`{esc(value)}`" for value in item.get("cites") or [])
+        cites = ", ".join(f"`{esc(value)}`" + (f" ({RAW_CITE_LABEL})" if cite_text(None, value) != str(value) else "")
+                          for value in item.get("cites") or [])
         suffix = f" ({cites})" if cites else ""
         marker = (" **Cites only content flagged as possible prompt injection.**"
                   if item.get("suspicious_content") else "")
@@ -199,7 +297,7 @@ def _hypotheses_section(m: dict) -> list[str]:
                 f"- Entities: {esc(', '.join(hypothesis.get('entity_ids') or []) or 'none')}",
                 f"- Sessions run: {hypothesis.get('sessions_run', 0)}",
                 f"- Open questions: {esc('; '.join(hypothesis.get('questions') or []) or 'none')}",
-                f"- Cites: {esc(', '.join(cite['id'] for cite in hypothesis.get('cites') or []) or 'none')}"]
+                f"- Cites: {esc(', '.join(cite_text(cite.get('kind'), cite['id']) for cite in hypothesis.get('cites') or []) or 'none')}"]
         for note in notes.get(("hypothesis", hid), []):
             out.append("- AI note: " + _agent_note_line(note)[2:])
         out.append("")
@@ -563,7 +661,10 @@ def _render_body(m: dict, banner: str = BANNER) -> str:
         if len(f["citations"]) > 25:
             out.append(f"| … | {len(f['citations']) - 25} more citations in the JSON manifest | | | |")
         out.append("")
+        if f.get("raw_citations"):
+            out += _raw_citation_table(f["raw_citations"])
 
+    out += _raw_records_section(m)
     out += _triage_section(m)
     out += ["## Incidents", "",
             ("Incidents are connected only by observed typed links. Inferred links remain visible hypotheses and "
@@ -623,7 +724,8 @@ def _render_body(m: dict, banner: str = BANNER) -> str:
                 "These proposed relationships are hypotheses; they never join or alter incidents.", "",
                 "| From | To | Relation | Style | Rationale |", "|---|---|---|---|---|"]
         out += [f"| `{esc(link['from'])}` | `{esc(link['to'])}` | {esc(link['relation'])} | "
-                f"Agent hypothesis | {cell(link['rationale'])} |" for link in graph["agent_links"]]
+                f"Agent hypothesis | {cell(link['rationale'])}{cell(_raw_cites_suffix(link.get('cites')))} |"
+                for link in graph["agent_links"]]
         out.append("")
 
     investigations = m.get("investigations") or {

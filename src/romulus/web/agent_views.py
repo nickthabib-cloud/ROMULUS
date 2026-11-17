@@ -13,6 +13,7 @@ from sqlalchemy import func, select, tuple_
 from starlette.concurrency import run_in_threadpool
 
 from romulus.agent.hunt_budget import extended_record
+from romulus.evidence.raw_citation import RAW_ID_PREFIX
 from romulus.report.manifest import (
     NARRATIVE_KINDS,
     NARRATIVE_PARAGRAPHS,
@@ -94,6 +95,12 @@ def resolved_cite(repo, hunt_id, cite):
     else:
         return {"label": "unresolved cite", "url": None}
     if not isinstance(row_id, str) or len(row_id) > 512:
+        return {"label": "unresolved cite", "url": None}
+    if kind in {"Q", "raw_record"} or (kind is None and row_id.startswith(RAW_ID_PREFIX)):
+        # a raw record: text a returned record contains, labelled as such wherever it is cited
+        if repo.agent_raw_records(hunt_id, [row_id]):
+            return {"label": clip(f"raw record {row_id} (not normalized)", 160),
+                    "url": f"/hunts/{quote(hunt_id, safe='')}/raw-records/{quote(row_id, safe='')}"}
         return {"label": "unresolved cite", "url": None}
     with repo.engine.connect() as connection:
         if kind in {None, "F", "finding"}:

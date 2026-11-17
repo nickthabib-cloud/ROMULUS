@@ -295,7 +295,7 @@ def test_get_incident_takes_an_issued_incident_alias_without_list_incidents_firs
     toolbox = Toolbox(toolbox_repo(2), "h1")
     schema = next(tool for tool in toolbox.provider_tools() if tool.name == "get_incident").parameters
     incident = schema["properties"]["incident"]
-    assert incident["pattern"] == "^[FIENL][1-9][0-9]*$" and "incident alias (I...)" in incident["description"]
+    assert incident["pattern"] == "^[FIENLQ][1-9][0-9]*$" and "incident alias (I...)" in incident["description"]
     alias = toolbox.aliases.alias_for("I", toolbox._incident_graph()[0]["incidents"][0]["id"])
 
     detail = toolbox.execute("get_incident", {"incident": alias, "page": 1})

@@ -1021,7 +1021,7 @@ class Repo:
             c.execute(t.candidate.update().where(t.candidate.c.hunt_id == hunt_id).values(agent_hypothesis_id=None))
             for table in (t.agent_tool_call, t.agent_note, t.agent_rule_request, t.agent_link,
                           t.agent_hypothesis_cite, t.agent_hypothesis_event, t.agent_assessment,
-                          t.agent_session, t.agent_hypothesis, t.agent_run):
+                          t.agent_raw_record, t.agent_session, t.agent_hypothesis, t.agent_run):
                 rm(table.name, table.delete().where(table.c.hunt_id == hunt_id))
 
             # The journal is disk-backed and may outgrow a bind list; remove one bounded page at a time.
@@ -3157,7 +3157,7 @@ class Repo:
     def agent_alias_target_hunts(self, kind: str, target_id: str,
                                  *, hunt_id: str | None = None) -> list[str]:
         table = {"F": t.candidate, "E": t.typed_event, "N": t.entity, "L": t.expansion_link,
-                 "H": t.agent_hypothesis, "A": t.agent_link}.get(kind)
+                 "H": t.agent_hypothesis, "A": t.agent_link, "Q": t.agent_raw_record}.get(kind)
         if table is None:
             return []
         with self.engine.connect() as c:
@@ -6139,6 +6139,68 @@ class Repo:
 
     def agent_rule_requests(self, hunt_id: str) -> list[dict]:
         return self._agent_rows(t.agent_rule_request, hunt_id)
+
+    # ---- raw records the agent can cite (returned rows no normalizer read) ---------------------------------------
+    RAW_RECORDS_NOT_STORED = "agent.raw_records_not_stored"
+
+    def save_agent_raw_records(self, hunt_id: str, rows: list[dict], *, max_count: int,
+                               owner_token: str | None = None) -> tuple[list[str], int]:
+        """Keep each row unless its record is already kept for this hunt (that row and its id are reused, unchanged)
+        or the hunt already keeps `max_count` raw records. Returns the ids kept, in row order, and how many rows were
+        not kept at the cap; that count is also recorded for the hunt's report. Counting and inserting share one
+        write transaction, so concurrent sessions never pass the cap."""
+        kept: list[str] = []
+        refused = 0
+        with write_txn(self.engine) as connection:
+            self._fence_lease(connection, hunt_id, owner_token)
+            count = int(connection.execute(select(func.count()).select_from(t.agent_raw_record).where(
+                t.agent_raw_record.c.hunt_id == hunt_id)).scalar_one())
+            now = utcnow()
+            for row in rows:
+                if row["hunt_id"] != hunt_id:
+                    raise ValueError("a raw record must belong to the hunt it is saved for")
+                stored = connection.execute(select(t.agent_raw_record.c.id).where(
+                    t.agent_raw_record.c.hunt_id == hunt_id, t.agent_raw_record.c.target == row["target"],
+                    t.agent_raw_record.c.native_id == row["native_id"])).scalar_one_or_none()
+                if stored is not None:
+                    kept.append(stored)
+                    continue
+                if count >= max_count:
+                    refused += 1
+                    continue
+                connection.execute(t.agent_raw_record.insert().values(**row, created_at=now))
+                count += 1
+                kept.append(row["id"])
+            if refused:
+                connection.execute(t.audit_event.insert().values(
+                    at=now, actor=SYSTEM_ACTOR, action=self.RAW_RECORDS_NOT_STORED, hunt_id=hunt_id,
+                    detail={"not_stored": refused, "cap": max_count,
+                            "task_id": next((row.get("task_id") for row in rows), None)}))
+        return kept, refused
+
+    def agent_raw_records(self, hunt_id: str, ids: list[str]) -> list[dict]:
+        """The hunt's stored raw records among `ids`, in the order asked (unknown ids are left out)."""
+        wanted = list(dict.fromkeys(ids))
+        found: dict[str, dict] = {}
+        with self.engine.connect() as connection:
+            for chunk in _chunks(wanted, ID_CHUNK):
+                for row in connection.execute(select(t.agent_raw_record).where(
+                        t.agent_raw_record.c.hunt_id == hunt_id, t.agent_raw_record.c.id.in_(chunk))).mappings():
+                    found[row["id"]] = dict(row)
+        return [found[item] for item in wanted if item in found]
+
+    def agent_raw_record_stats(self, hunt_id: str) -> dict:
+        """How many raw records the hunt keeps, and how many returned rows its cap left unkept."""
+        with self.engine.connect() as connection:
+            stored = int(connection.execute(select(func.count()).select_from(t.agent_raw_record).where(
+                t.agent_raw_record.c.hunt_id == hunt_id)).scalar_one())
+            not_stored = 0
+            for detail in connection.execute(select(t.audit_event.c.detail).where(
+                    t.audit_event.c.hunt_id == hunt_id,
+                    t.audit_event.c.action == self.RAW_RECORDS_NOT_STORED)).scalars():
+                if isinstance(detail, dict) and isinstance(detail.get("not_stored"), int):
+                    not_stored += detail["not_stored"]
+        return {"stored": stored, "not_stored": not_stored}
 
     def save_agent_assessment(self, row: dict, *, owner_token: str | None = None) -> bool:
         with write_txn(self.engine) as connection:

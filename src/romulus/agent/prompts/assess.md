@@ -28,8 +28,10 @@ theory for the analyst, not a finding.
 - The checker enforces this in code: an `observed` sentence that cites no reportable finding becomes `inferred`; any
   paragraph that cites no confirmed or likely- or possible-attack finding, and no Reported finding without a
   likely-benign verdict, is relabelled Context and shown as weakly supported, whatever its label; a paragraph citing
-  only findings triaged likely benign also has its sentences marked `uncertain`. Every paragraph is shown with a
-  count of what its citations rest on.
+  only findings triaged likely benign also has its sentences marked `uncertain`. A raw record (Q...) is a returned
+  record no normalizer read: it shows only that a record with that text exists, never that an action happened, so a
+  sentence citing only raw records is `inferred` at most and a paragraph citing only raw records is weakly supported.
+  Every paragraph is shown with a count of what its citations rest on.
 - Narrative sentences state what the evidence shows or what is inferred from it, never what did not happen. A
   narrative sentence or phase label with a negation (no, not, never, nothing, none, without, neither, nor, cannot, or a
   contraction such as didn't) is removed. Where the evidence is thin or missing, write an `uncertain` sentence that

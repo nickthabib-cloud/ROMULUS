@@ -85,6 +85,15 @@
 </details>
 {% endfor %}
 
+{% if raw_records or raw_missing or raw_more %}
+{% from 'raw_macros.html' import raw_record_card %}
+<h2>Raw records cited ({{ raw_records | length }}), not normalized</h2>
+<p class="warn">{{ raw_label }}.</p>
+{% for r in raw_records %}{{ raw_record_card(c.hunt_id, r, loop.first) }}{% endfor %}
+{% if raw_missing %}<p class="warn">{{ raw_missing }} cited raw record(s) are no longer kept.</p>{% endif %}
+{% if raw_more %}<p>{{ raw_more }} more cited raw records · <a href="/hunts/{{ c.hunt_id | urlencode }}#reports">Complete report</a></p>{% endif %}
+{% endif %}
+
 <h2>Retained raw records</h2>
 <p class="help">Exact copies retained when the finding was published. Digest and native ID let you re-locate the record in the source.</p>
 {% for r in raws %}
