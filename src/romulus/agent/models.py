@@ -176,4 +176,7 @@ class PivotResult(BaseModel):
     # the special-form re-check refuted (superset rows, never matches).
     zero_caveats: list[str] = Field(default_factory=list)
     discarded: int = 0
+    # An agent-written source query's own outcome (hunt.agent_query): its negative, counts and the bounded, redacted
+    # preview of its rows and aggregations. Kept with the stored result, never in ordinary dumps.
+    query: dict[str, Any] | None = Field(default=None, exclude=True)
 

@@ -35,6 +35,7 @@ from romulus.site import ensure_site_unchanged, load_site_facts
 from romulus.sources.es import ElasticClient
 from romulus.sources.models import Window
 from romulus.sources.network_coverage import check_network_addresses, unknown_coverage
+from romulus.sources.packets import arkime_expression_fields
 from romulus.sources.profile import build_profile
 from romulus.store.db import digest, make_engine, migrate, utcnow
 from romulus.store.repo import AGENT_MODEL_FORCED, Repo, is_lease_lost
@@ -115,9 +116,29 @@ def create_hunt(s: Settings, start: datetime, end: datetime, created_by: str, st
     manifest['sigma_rules'] = SigmaRules(repo).pin()
     hid = new_hunt_id()
     repo.create_hunt(hid, manifest, digest(manifest), created_by)
-    for p in profiles.values():
-        repo.save_profile(hid, p)
+    arkime = arkime_profile_fields(s, [target for target in targets
+                                       if getattr(contracts[target], "time_field", None) == "firstPacket"])
+    for target, p in profiles.items():
+        repo.save_profile(hid, {**p, **arkime[target]} if target in arkime else p)
     return hid
+
+
+def arkime_profile_fields(s: Settings, arkime_targets: list[str], transport=None) -> dict[str, dict]:
+    """What each Arkime session target's stored profile adds: the viewer's expression fields (read once, from the
+    configured viewer, never at the model's request), or a note saying why they are unknown. Nothing when the hunt has
+    no Arkime target. The viewer is the one the packet stage reads for the same targets; a viewer that cannot be read
+    never stops a hunt."""
+    if not arkime_targets:
+        return {}
+    try:
+        fields, problem = arkime_expression_fields(s, transport=transport)
+    except Exception as exc:      # a diagnostic read must never stop a hunt: recorded as unknown
+        log.exception("Arkime field list read failed")
+        fields, problem = [], f"Arkime expression fields unavailable: the read failed ({type(exc).__name__})"
+    extra: dict = {"arkime_fields": fields}
+    if problem:
+        extra["arkime_fields_note"] = problem
+    return {target: extra for target in arkime_targets}
 
 
 def _contracts(s: Settings, repo: Repo, hunt: dict, client: ElasticClient,

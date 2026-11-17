@@ -80,8 +80,9 @@ def test_only_the_two_read_endpoints_are_allowed(method, path):
         pk.check_arkime_endpoint(method, path)
 
 
-def test_allowlist_is_exactly_two_gets():
-    assert pk.ARKIME_ENDPOINTS == {("GET", "/api/sessions/pcap"), ("GET", "/api/sessions")}
+def test_allowlist_is_exactly_three_gets():
+    # the packet download, the session list (the doctor's read and the agent's expression search) and the field list
+    assert pk.ARKIME_ENDPOINTS == {("GET", "/api/sessions/pcap"), ("GET", "/api/sessions"), ("GET", "/api/fields")}
 
 
 @pytest.mark.parametrize("auth,expect", [("basic", "Basic "), ("digest", None)])

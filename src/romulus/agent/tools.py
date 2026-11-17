@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import ipaddress
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
@@ -68,6 +68,9 @@ SELECTIVE_OPS = frozenset({"eq", "in", "prefix", "cidr"})
 MAX_SEARCH_CONDITIONS = 4
 MAX_SEARCH_VALUES = 20
 MAX_SEARCH_VALUE_CHARS = 256
+# The typed field names a search condition can carry: dot-separated ASCII letters, digits and underscores.
+MAX_SEARCH_FIELD_CHARS = 128
+SEARCH_FIELD_PATTERN = r"^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$"
 # A prefix shorter than this selects too much to be a lead (a drive letter, a single path separator)
 MIN_PREFIX_CHARS = 3
 # A network broader than these is most of an address space, not a lead
@@ -78,7 +81,7 @@ class SearchCondition(_Strict):
     """One typed condition of an agent search: a typed field of the target's field contract, an operation and its
     values. Values stay exactly as written (no case folding, no Unicode normalization); the hunt layer parses each
     one by the field's native type and sends it to the source only as a literal query value."""
-    field: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$", description=(
+    field: str = Field(min_length=1, max_length=MAX_SEARCH_FIELD_CHARS, pattern=SEARCH_FIELD_PATTERN, description=(
         "A typed field name: dot-separated letters, digits and underscores, such as destination.port."))
     op: SearchOp = Field(description=(
         "eq, prefix, cidr, gte and lt take one value; in takes up to 20. A prefix is at least 3 characters; a cidr "
@@ -135,6 +138,37 @@ class SearchEventsArgs(_WindowArgs):
     @classmethod
     def _selective(cls, value: list[SearchCondition]) -> list[SearchCondition]:
         return check_search_conditions(value)
+
+
+MAX_QUERY_SIZE = 100
+QUERY_SOURCE_NAME = r"^[A-Za-z0-9_.+:@\-]+$"
+
+
+class QuerySourceArgs(_WindowArgs):
+    """An agent-written query of one hunt source, as the toolbox accepted it (window inside the hunt's). Its shape is
+    checked here; what it may contain is decided in the hunt layer, which refuses anything outside its allowlists
+    before any source query (sources.agent_query)."""
+    source: str = Field(min_length=1, max_length=300, pattern=QUERY_SOURCE_NAME)
+    query: dict[str, Any] | None = None
+    expression: str | None = Field(default=None, min_length=1, max_length=2_000)
+    aggs: dict[str, Any] | None = None
+    sort: list[Any] | None = Field(default=None, min_length=1, max_length=3)
+    size: int = Field(default=20, ge=0, le=MAX_QUERY_SIZE)
+    source_fields: list[str] | None = Field(default=None, min_length=1, max_length=50)
+    # whether the toolbox narrowed the requested window to the hunt's
+    window_clamped: bool = False
+
+    @model_validator(mode="after")
+    def _one_language(self):
+        if self.expression is not None and any(
+                value is not None for value in (self.query, self.aggs, self.sort, self.source_fields)):
+            raise ValueError("an Arkime expression takes no query, aggs, sort or source_fields")
+        return self
+
+
+class QuerySourceRequest(_Strict):
+    tool: Literal["query_source"]
+    arguments: QuerySourceArgs
 
 
 class EntityTimelineRequest(_Strict):

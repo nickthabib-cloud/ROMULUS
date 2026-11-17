@@ -1,25 +1,39 @@
 """Hunt-layer construction and execution boundary for model-facing pivot tools."""
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from math import ceil
 
 from romulus.agent.models import EntityRef, PivotCoverage, PivotResult
 from romulus.agent.toolbox import FOLLOW_LINK_KINDS, Toolbox
-from romulus.agent.tools import SearchEventsRequest
+from romulus.agent.tools import QuerySourceRequest, SearchEventsRequest
 from romulus.config import Settings
 from romulus.detect.registry import bind_windows_site, fresh_direct_pack
 from romulus.evidence.typed import TypedEvent
+from romulus.hunt.agent_query import SourceQueryRunner, query_refusal
 from romulus.hunt.expansion import ExpansionEngine, expansion_windows
 from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkResult
 from romulus.hunt.manifest import inventory_usable
-from romulus.hunt.pivot import PivotExecutor
+from romulus.hunt.pivot import MAX_SEARCH_ENTITIES, PivotExecutor
 from romulus.hunt.publish import mark_hypothesis_relation, publish_match
 from romulus.site import ensure_site_unchanged
+from romulus.sources.agent_query import MAX_QUERY_HITS
 from romulus.sources.models import Window
-from romulus.sources.profile import SHARDS_UNANSWERED
+from romulus.sources.packets import ArkimeSessionSearch
+from romulus.sources.profile import AGGREGATABLE, LIMITED_KINDS, SHARDS_UNANSWERED
 from romulus.store.db import digest
 from romulus.store.repo import Repo
+
+# An Arkime session target's viewer is a source of its own: its name is this prefix and the target's.
+ARKIME_SOURCE_PREFIX = "arkime:"
+KEYWORD_LIKE = frozenset({"keyword", "constant_keyword", "wildcard", "flattened"})
+# What a listing passes to the model from a source's mapping or the viewer's field list: names a mapping can take
+# from telemetry (dynamic mapping), so only strict names of bounded length are shown and the rest only counted.
+LISTED_NAME = re.compile(r"^[A-Za-z0-9_@.\-]{1,256}$")
+LISTED_LABEL = re.compile(r"^[A-Za-z0-9_ .\-]{1,64}$")
+LISTED_SOURCE = re.compile(r"^[A-Za-z0-9_.+:@\-]{1,300}$")
+ANALYZED_TEXT = frozenset({"text", "match_only_text"})
 
 _PIVOT_LINK_TYPES = {
     "entity_timeline": "agent_entity_timeline",
@@ -27,6 +41,7 @@ _PIVOT_LINK_TYPES = {
     "process_tree": "agent_process_tree",
     "ids_alerts": "agent_ids_alerts",
     "search_events": "agent_search_events",
+    "query_source": "agent_query_source",
 }
 _AGENT_HYPOTHESIS = "agent_hypothesis"
 _EVENT_DIGEST_LIMIT = 50
@@ -50,6 +65,16 @@ CALL_SLICE_SHARE = 0.10
 CALL_SLICE_FLOOR = 32
 # out-of-window packet sources named together in one summary line
 _OUTSIDE_NAMES = 5
+
+
+def _label(value, limit: int = 64) -> str | None:
+    """A short descriptive text from a profile (a type, a group, a note), shown only when it is plain."""
+    if not isinstance(value, str):
+        return None
+    if limit > 64:
+        text = " ".join(value.split())[:limit]
+        return text if all(ch.isprintable() for ch in text) else None
+    return value if LISTED_LABEL.fullmatch(value) else None
 
 
 def _utc(value: datetime) -> datetime:
@@ -106,7 +131,8 @@ class HuntToolExecutor:
     def __init__(self, repo: Repo, hunt_id: str, pivot: PivotExecutor, fetcher: LinkFetcher,
                  hunt_start: datetime, hunt_end: datetime, *, owner_token: str | None = None,
                  packet_sources: tuple[str, ...] = (), uncontracted_targets: tuple[str, ...] = (),
-                 packet_spans: dict[str, tuple[datetime, datetime]] | None = None):
+                 packet_spans: dict[str, tuple[datetime, datetime]] | None = None,
+                 settings: Settings | None = None, arkime_search=None):
         self.repo = repo
         self.hunt_id = hunt_id
         self.pivot = pivot
@@ -120,6 +146,12 @@ class HuntToolExecutor:
         # hunt targets with no field contract in this run: no search can read them, whatever its scope
         self.uncontracted_targets = tuple(uncontracted_targets)
         self._followable: dict[str, tuple[str, ...]] = {}
+        self._profile_cache: dict[str, dict] | None = None
+        self._sources: dict[str, tuple[str, str]] | None = None
+        self.sources_not_listed = 0
+        # the agent's own source queries (query_source): secrets are redacted from what they keep, with these settings
+        self.settings = settings
+        self.queries = SourceQueryRunner(pivot, settings, arkime_search)
 
     def _events(self, ids: list[str]) -> list[TypedEvent]:
         rows = self.repo.citation_events(self.hunt_id, ids)
@@ -149,9 +181,124 @@ class HuntToolExecutor:
         target of its scope can evaluate every condition."""
         return self.pivot.search_refusal(request)
 
-    def search_item_bound(self, request: SearchEventsRequest) -> int:
-        """The most page items one search's result can hold (PivotExecutor.search_item_bound), plus its named
-        unsearched sources."""
+    def search_fields(self) -> dict:
+        """The typed fields an agent search can name on this hunt's targets (PivotExecutor.search_vocabulary), how
+        many targets each role has, and how many sources no typed search reads; no source query."""
+        targets = {"host": 0, "network": 0}
+        for contract in self.pivot.contracts.values():
+            if contract is not None:
+                targets["network" if contract.role == "network" else "host"] += 1
+        return {"fields": self.pivot.search_vocabulary(), "targets": targets,
+                "packet_sources": len(self.packet_sources), "uncontracted": len(self.uncontracted_targets)}
+
+    def _profiles(self) -> dict[str, dict]:
+        if self._profile_cache is None:
+            self._profile_cache = self.repo.source_profiles(self.hunt_id)
+        return self._profile_cache
+
+    def source_table(self) -> dict[str, tuple[str, str]]:
+        """Every source the agent can name, by its exact name: (kind, target). Each target with a field contract (an
+        Elasticsearch or OpenSearch index or data stream) is a source of kind index; each Arkime session target's
+        viewer is a source of kind arkime_viewer named arkime:<target>, unless an index already has that name. A name
+        is only ever looked up here, never parsed."""
+        if self._sources is None:
+            table: dict[str, tuple[str, str]] = {}
+            for target, contract in sorted(self.pivot.contracts.items()):
+                if contract is not None:
+                    table[target] = ("index", target)
+            for target, contract in sorted(self.pivot.contracts.items()):
+                if contract is not None and contract.time_field == "firstPacket":
+                    table.setdefault(ARKIME_SOURCE_PREFIX + target, ("arkime_viewer", target))
+            # a name the agent could not write back is not a source it can name: counted, never shown
+            self.sources_not_listed = sum(1 for name in table if not LISTED_SOURCE.fullmatch(name))
+            self._sources = {name: entry for name, entry in table.items() if LISTED_SOURCE.fullmatch(name)}
+        return self._sources
+
+    def search_sources(self) -> list[dict]:
+        """The hunt's sources (source_table) with each one's kind, role, time field and field count. No source
+        query."""
+        out = []
+        for name, (kind, target) in sorted(self.source_table().items()):
+            contract = self.pivot.contracts[target]
+            if kind == "index":
+                out.append({"source": name, "kind": kind, "role": "network" if contract.role == "network" else "host",
+                            "time_field": contract.time_field, "fields": len(self._native_table(target))})
+            else:
+                profile = self._profiles().get(target) or {}
+                out.append({"source": name, "kind": kind, "role": "network", "time_field": contract.time_field,
+                            "fields": len(profile.get("arkime_fields") or [])})
+        return out
+
+    def _native_table(self, target: str) -> dict[str, str]:
+        """A target's native fields and their mapped types: from its profile, else its contract's direct fields."""
+        profile = self._profiles().get(target) or {}
+        types = profile.get("field_types")
+        if isinstance(types, dict) and types:
+            return {str(name): str(kind) for name, kind in types.items()}
+        contract = self.pivot.contracts.get(target)
+        if contract is None:
+            return {}
+        table = contract.linux_fields or contract.fields
+        return {name: spec.type for name, spec in table.items() if tuple(spec.natives or (spec.native,)) == (name,)}
+
+    def native_fields(self, source: str) -> dict | None:
+        """One source's own fields: an index's mapped fields (type, keyword-like or text, indexed, aggregatable,
+        ignore_above), or an Arkime viewer's expression fields as profiled when the hunt started. None for a name
+        that is not one of the hunt's sources. No source query."""
+        found = self.source_table().get(source)
+        if found is None:
+            return None
+        kind, target = found
+        contract = self.pivot.contracts[target]
+        if kind == "arkime_viewer":
+            profile = self._profiles().get(target) or {}
+            fields, hidden = [], 0
+            for item in profile.get("arkime_fields") or []:
+                name = item.get("field") if isinstance(item, dict) else None
+                if not isinstance(name, str) or not LISTED_NAME.fullmatch(name):
+                    hidden += 1
+                    continue
+                fields.append({"field": name, "type": _label(item.get("type")), "group": _label(item.get("group")),
+                               "db_field": item.get("db_field") if isinstance(item.get("db_field"), str)
+                               and LISTED_NAME.fullmatch(item["db_field"]) else None})
+            note = profile.get("arkime_fields_note")
+            if "arkime_fields" not in profile:
+                note = ("the viewer's expression fields were not profiled for this hunt; its expressions still take "
+                        "the viewer's own field names")
+            return {"fields": fields, "note": _label(note, 300), "names_not_listed": hidden}
+        fields, hidden = [], 0
+        for name, mapped in self._native_table(target).items():
+            if not LISTED_NAME.fullmatch(name):
+                hidden += 1
+                continue
+            base, _, qualifier = mapped.partition(":")
+            item = {"field": name, "type": base,
+                    "kind": ("keyword" if base in KEYWORD_LIKE else "text" if base in ANALYZED_TEXT else "other"),
+                    "indexed": qualifier not in ("not_indexed", "doc_values_only"),
+                    "aggregatable": mapped in AGGREGATABLE}
+            if base in LIMITED_KINDS:
+                known, limit = contract.index_limit(name)
+                item["ignore_above"] = limit if known and limit is not None else ("none" if known else "unknown")
+            fields.append(item)
+        return {"fields": fields, "note": None, "names_not_listed": hidden}
+
+    def search_sources_hidden(self) -> int:
+        """How many of the hunt's sources have a name no listing shows (and no query can name)."""
+        self.source_table()
+        return self.sources_not_listed
+
+    def query_refusal(self, request: QuerySourceRequest) -> dict | None:
+        """Why the agent's own query cannot be sent (hunt.agent_query.query_refusal), decided without any source
+        query; None when it can."""
+        found = self.source_table().get(request.arguments.source)
+        return query_refusal(request, found[0] if found else None)
+
+    def search_item_bound(self, request) -> int:
+        """The most page items one search's or query's result can hold (PivotExecutor.search_item_bound), plus a
+        search's named unsearched sources."""
+        if isinstance(request, QuerySourceRequest):
+            # its returned rows, the findings they can raise, its listed entities, one coverage cell and its reasons
+            return 2 * MAX_QUERY_HITS + MAX_SEARCH_ENTITIES + 64
         return self.pivot.search_item_bound(request) + len(self.packet_sources) + len(self.uncontracted_targets)
 
     def run(self, session_id: str, anchor_id: str, request, *, anchor_ts: datetime | None) -> PivotResult:
@@ -175,7 +322,16 @@ class HuntToolExecutor:
             link_key["entity"] = request.arguments.entity.model_dump(mode="json")
         if isinstance(request, SearchEventsRequest):
             link_key["search"] = request.arguments.model_dump(mode="json", include={"scope", "conditions"})
-        result = self.pivot.run(session_id, request, anchor_ts=anchor_ts)
+        if isinstance(request, QuerySourceRequest):
+            link_key["query"] = request.arguments.model_dump(mode="json", include={
+                "source", "query", "expression", "aggs", "sort", "size"})
+            kind, target = self.source_table().get(request.arguments.source, (None, None))
+            if kind is None:
+                result = PivotResult(status="unsupported", reasons=["the source is not one of this hunt's sources"])
+            else:
+                result = self.queries.run(session_id, request, kind=kind, target=target)
+        else:
+            result = self.pivot.run(session_id, request, anchor_ts=anchor_ts)
         if isinstance(request, SearchEventsRequest):
             packets = self.packet_sources if request.arguments.scope != "host" else ()
             # a capture whose every packet is known to fall outside the search window is no gap: counted in one
@@ -397,5 +553,6 @@ def build_agent_toolbox(settings: Settings, repo: Repo, hunt_id: str, *, client,
                                  if contracts.get(target) is None}))
     executor = HuntToolExecutor(repo, hunt_id, pivot, fetcher, start, end, owner_token=owner_token,
                                 packet_sources=tuple(packet_targets), uncontracted_targets=uncontracted,
-                                packet_spans=spans)
+                                packet_spans=spans, settings=settings,
+                                arkime_search=ArkimeSessionSearch(settings) if packet_targets else None)
     return Toolbox(repo, hunt_id, executor=executor, session_id=session_id, owner_token=owner_token)

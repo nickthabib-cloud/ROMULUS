@@ -2,9 +2,12 @@
 
 Read-only and bounded by construction:
 
-- Arkime: only `GET /api/sessions/pcap?ids=...` for validated session ids, at most 20 per request, streamed to a
-  private file with a byte cap. Never an expression export, never a free-text query. The viewer may sit under a
-  base path behind a proxy and use digest or basic authentication; the endpoint allowlist is the same either way.
+- Arkime: packets only by `GET /api/sessions/pcap?ids=...` for validated session ids, at most 20 per request,
+  streamed to a private file with a byte cap; never an expression export. The viewer's field list
+  (`GET /api/fields`) is read once when a hunt is profiled. The AI agent's expression search (`GET /api/sessions`,
+  ArkimeSessionSearch) returns session ids only, for at most a bounded number of sessions in the hunt window; the
+  sessions themselves are then read from the hunt's own session index. The viewer may sit under a base path behind
+  a proxy and use digest or basic authentication; the endpoint allowlist is the same either way.
 - TShark: an argv list (no shell), a path that must resolve inside an allowed directory, a display filter and
   field list chosen from fixed tables in this module (never from telemetry, users or a model), reassembly
   preferences pinned per query so a site's TShark profile cannot change what is seen, a timeout that kills the
@@ -26,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import re
 import shutil
@@ -157,14 +161,123 @@ class TcpStreams:
         return out
 
 
-# The viewer endpoints ROMULUS calls, relative to the viewer's base: the packet download and, from `romulus doctor`,
-# one read of the session list. Both are GETs; nothing else is ever sent.
-ARKIME_ENDPOINTS = frozenset({("GET", "/api/sessions/pcap"), ("GET", "/api/sessions")})
+# The viewer endpoints ROMULUS calls, relative to the viewer's base: the packet download; the session list (one read
+# from `romulus doctor`, and the AI agent's bounded expression search); and the field list, read once when a hunt is
+# profiled. All are GETs; nothing else is ever sent.
+ARKIME_ENDPOINTS = frozenset({("GET", "/api/sessions/pcap"), ("GET", "/api/sessions"), ("GET", "/api/fields")})
+# How many expression fields a profile keeps from the viewer's field list (a stock viewer lists several hundred);
+# past it the list is cut and the profile says so.
+ARKIME_FIELD_LIMIT = 5_000
+ARKIME_FIELD_TEXT = 200
+# An Arkime expression field name: what the viewer's expressions accept as a field (ip.src, http.uri, tls.ja3).
+ARKIME_FIELD_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]{0,127}$")
 
 
 def check_arkime_endpoint(method: str, path: str) -> None:
     if (method.upper(), path) not in ARKIME_ENDPOINTS:
         raise PacketError(f"refused non-allowlisted Arkime request {method.upper()} {path}")
+
+
+@dataclass
+class ArkimeSessionHits:
+    """What one expression search of the viewer returned: the session ids read, how many sessions the viewer says
+    matched (None: it did not say), and why the search failed: the expression itself (query_error, text the model
+    can correct) or the viewer (error)."""
+    ids: list[str] = field(default_factory=list)
+    matched: int | None = None
+    error: str | None = None
+    query_error: str | None = None
+
+
+ARKIME_ERROR_CHARS = 600
+
+
+class ArkimeSessionSearch:
+    """The AI agent's expression search of the viewer: `GET /api/sessions` with the expression, the window as
+    startTime/stopTime (whole seconds that cover it) bounded on the first packet, and at most `length` sessions. The
+    viewer parses the expression and ANDs it with the window; the caller reads the returned sessions from the hunt's
+    own session index, inside the exact window, before anything is kept. One client per search."""
+
+    def __init__(self, s: Settings, transport: httpx.BaseTransport | None = None, timeout: float = 60):
+        self.s, self.transport, self.timeout = s, transport, timeout
+
+    def search(self, expression: str, start, end, length: int) -> ArkimeSessionHits:
+        check_arkime_endpoint("GET", "/api/sessions")
+        params = {"expression": expression, "startTime": str(math.floor(start.timestamp())),
+                  "stopTime": str(math.ceil(end.timestamp())), "bounding": "first", "length": str(int(length)),
+                  "order": "firstPacket:asc"}
+        try:
+            with arkime_client(self.s, transport=self.transport, timeout=self.timeout) as http:
+                response = http.get("/api/sessions", params=params)
+        except httpx.HTTPError as exc:
+            return ArkimeSessionHits(error=f"the viewer could not be read ({type(exc).__name__})")
+        text = response.text[:ARKIME_ERROR_CHARS]
+        if response.status_code == 400:
+            return ArkimeSessionHits(query_error=f"HTTP 400: {text}")
+        if response.status_code != 200:
+            return ArkimeSessionHits(error=f"the viewer answered HTTP {response.status_code}")
+        try:
+            data = response.json()
+        except ValueError:
+            return ArkimeSessionHits(error="the viewer's answer is not JSON")
+        if not isinstance(data, dict):
+            return ArkimeSessionHits(error="the viewer's answer has an unknown shape")
+        for key in ("bsqErr", "error"):
+            if data.get(key):
+                return ArkimeSessionHits(query_error=str(data[key])[:ARKIME_ERROR_CHARS])
+        rows = data.get("data")
+        if not isinstance(rows, list):
+            return ArkimeSessionHits(error="the viewer's answer holds no session list")
+        matched = data.get("recordsFiltered")
+        return ArkimeSessionHits(
+            ids=[str(row.get("id")) if isinstance(row, dict) and row.get("id") is not None else "" for row in rows],
+            matched=matched if isinstance(matched, int) and not isinstance(matched, bool) else None)
+
+
+def arkime_expression_fields(s: Settings, transport: httpx.BaseTransport | None = None,
+                             timeout: float = 30) -> tuple[list[dict], str | None]:
+    """The session fields the viewer's expressions accept, with their types: GET /api/fields?array=true, read when a
+    hunt is profiled (never at the model's request). Each entry keeps the expression name, its type, its group and
+    the database field it reads, each bounded; an entry without a usable expression name is left out. Returns the
+    entries sorted by name, and why the list is unavailable or incomplete (None when it is complete)."""
+    check_arkime_endpoint("GET", "/api/fields")
+    try:
+        with arkime_client(s, transport=transport, timeout=timeout) as http:
+            response = http.get("/api/fields", params={"array": "true"})
+    except httpx.HTTPError as exc:
+        return [], f"Arkime expression fields unavailable: the viewer could not be read ({type(exc).__name__})"
+    if response.status_code != 200:
+        return [], f"Arkime expression fields unavailable: the viewer answered HTTP {response.status_code}"
+    try:
+        data = response.json()
+    except ValueError:
+        return [], "Arkime expression fields unavailable: the viewer's field list is not JSON"
+    if isinstance(data, dict):
+        # without array=true the viewer keys each field by its expression
+        data = [{"exp": key, **value} if isinstance(value, dict) else {"exp": key} for key, value in data.items()]
+    if not isinstance(data, list):
+        return [], "Arkime expression fields unavailable: the viewer's field list has an unknown shape"
+
+    def text(value) -> str | None:
+        return str(value)[:ARKIME_FIELD_TEXT] if isinstance(value, (str, int, float)) and str(value) else None
+
+    fields: dict[str, dict] = {}
+    unusable = 0
+    for item in data:
+        name = item.get("exp") if isinstance(item, dict) else None
+        if not isinstance(name, str) or not ARKIME_FIELD_NAME.fullmatch(name):
+            unusable += 1
+            continue
+        fields.setdefault(name, {"field": name, "type": text(item.get("type")), "group": text(item.get("group")),
+                                 "db_field": text(item.get("dbField"))})
+    ordered = [fields[name] for name in sorted(fields)]
+    problems = []
+    if len(ordered) > ARKIME_FIELD_LIMIT:
+        problems.append(f"Arkime expression fields cut at {ARKIME_FIELD_LIMIT} of {len(ordered)}")
+        ordered = ordered[:ARKIME_FIELD_LIMIT]
+    if unusable:
+        problems.append(f"{unusable} Arkime field entries without a usable expression name were left out")
+    return ordered, "; ".join(problems) or None
 
 
 def arkime_base_url(s: Settings) -> str:
