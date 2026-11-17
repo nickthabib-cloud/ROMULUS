@@ -183,6 +183,9 @@ class Settings(BaseModel):
     agent_max_findings: int = Field(default=200, ge=1, le=10_000)
     agent_max_links: int = Field(default=300, ge=1, le=10_000)
     agent_max_notes: int = Field(default=500, ge=1, le=20_000)
+    # raw records (returned rows no normalizer read) the agent's source queries keep as citable text, per hunt; each
+    # keeps at most 16 KB of text. At the cap further rows are not kept, and the query result and the report say so.
+    agent_max_raw_records: int = Field(default=1_000, ge=0, le=100_000)
     # AI triage order: a separately labelled, promote-only presentation order over a hunt's surfaced findings, run
     # after the agent phase when the agent is enabled, or on demand with `romulus triage`. It never changes lanes,
     # ranks, the Reported set, citations or the deterministic report order. The model sees deterministic group cards
@@ -394,6 +397,7 @@ ENV_MAP = {
     "AGENT_BUDGET_CEILING_MULTIPLIER": "agent_budget_ceiling_multiplier",
     "AGENT_MAX_FINDINGS": "agent_max_findings", "AGENT_MAX_LINKS": "agent_max_links",
     "AGENT_MAX_NOTES": "agent_max_notes",
+    "AGENT_MAX_RAW_RECORDS": "agent_max_raw_records",
     "AGENT_TRIAGE": "agent_triage",
     "AGENT_TRIAGE_MODEL": "agent_triage_model",
     "AGENT_TRIAGE_PROMOTE_PER_LANE": "agent_triage_promote_per_lane",

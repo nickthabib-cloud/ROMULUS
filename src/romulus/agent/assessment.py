@@ -32,6 +32,7 @@ from romulus.agent.refusals import reason, validation_reasons
 from romulus.agent.safety import injection_flags
 from romulus.agent.toolbox import argument_schema
 from romulus.detect.metadata import ATTACK_TACTICS
+from romulus.evidence.raw_citation import RAW_GATE, RAW_LABEL_PLURAL
 from romulus.report.incidents import build_incident_graph
 from romulus.report.manifest import NARRATIVE_PARAGRAPHS, NARRATIVE_SENTENCES, coverage_for_hunt
 from romulus.report.markdown import (
@@ -40,6 +41,7 @@ from romulus.report.markdown import (
     WEAK_BENIGN,
     WEAK_MODEL_CONTEXT,
     WEAK_NO_REPORTED,
+    WEAK_RAW_ONLY,
     WEAK_UNKNOWN,
 )
 from romulus.store.db import digest, utcnow
@@ -269,6 +271,11 @@ def _suspicious_alias(aliases: AliasBook, row: dict, cache: dict[str, bool]) -> 
     key = row["alias"]
     if key in cache:
         return cache[key]
+    if row["kind"] == "Q":
+        # a raw record was checked for instruction-shaped text when it was kept
+        raws = aliases.repo.agent_raw_records(aliases.hunt_id, [row["target_id"]])
+        cache[key] = bool(raws) and bool(raws[0]["suspicious_content"])
+        return cache[key]
     if row["kind"] == "E":
         event_ids = [row["target_id"]]
     elif row["kind"] == "F":
@@ -304,7 +311,8 @@ def _suspicious_alias(aliases: AliasBook, row: dict, cache: dict[str, bool]) -> 
 
 def _non_observed_alias(aliases: AliasBook, alias_row: dict) -> bool:
     kind, target_id = alias_row["kind"], alias_row["target_id"]
-    if kind in {"A", "H"}:
+    # a raw record shows that a record with its text exists, never an observed action
+    if kind in {"A", "H", "Q"}:
         return True
     if kind == "L":
         link = aliases.repo.expansion_link(target_id)
@@ -333,7 +341,8 @@ def check_assessment(repo, hunt_id: str, body: dict, *, owner_token=None,
               "removed_narrative_negation": 0, "labelled_uncertain": 0,
               "downgraded_observed_weak_evidence": 0, "phase_weakly_supported": 0,
               "weakly_supported_benign_triage": 0, "labelled_uncertain_benign_triage": 0,
-              "weakly_supported_unknown_support": 0, "model_labelled_context": 0, "model_context_cites_attack": 0}
+              "weakly_supported_unknown_support": 0, "model_labelled_context": 0, "model_context_cites_attack": 0,
+              "weakly_supported_raw_records_only": 0}
     suspicious_cache: dict[str, bool] = {}
 
     def check(sentence: dict, section: str) -> dict | None:
@@ -480,6 +489,7 @@ def _ground_paragraph(paragraph: dict, strengths: dict, counts: dict) -> dict:
       - every cite rests only on findings triaged likely benign: its sentences also become `uncertain`;
       - a cited evidence record has more findings than the lookup reads: its support could not be determined, and
         unknown support never counts as strong;
+      - every cite is a raw record (a returned record no normalizer read): it shows text, never an action;
       - otherwise: no reported finding is cited;
     - a paragraph the model itself labelled context (`MODEL_CONTEXT`: "Context" alone or followed by a colon, dash or
       space) is context: weakly supported and muted like the above, unless it cites a confirmed or attack-triaged
@@ -521,6 +531,9 @@ def _ground_paragraph(paragraph: dict, strengths: dict, counts: dict) -> dict:
     elif any(item.unknown for item in cites):
         reason = WEAK_UNKNOWN
         counts["weakly_supported_unknown_support"] += 1
+    elif cites and all(item.raw for item in cites):
+        reason = WEAK_RAW_ONLY
+        counts["weakly_supported_raw_records_only"] += 1
     else:
         reason = WEAK_NO_REPORTED
         counts["phase_weakly_supported"] += 1
@@ -533,7 +546,7 @@ def _ground_paragraph(paragraph: dict, strengths: dict, counts: dict) -> dict:
 # The checker counts the evidence rules make; grounding again replaces exactly these.
 GROUNDING_COUNTS = ("downgraded_observed_weak_evidence", "phase_weakly_supported", "weakly_supported_benign_triage",
                     "labelled_uncertain_benign_triage", "weakly_supported_unknown_support", "model_labelled_context",
-                    "model_context_cites_attack")
+                    "model_context_cites_attack", "weakly_supported_raw_records_only")
 
 
 def cited_triage_groups(repo, hunt_id: str, ungrounded: list[dict], triage: TriageContext,
@@ -634,7 +647,8 @@ def _assessment_input(repo, hunt_id: str, token_budget: int, *, owner_token=None
         cards.append({"alias": aliases.alias_for("H", row["id"]), "statement": row["statement"],
                       "status": row["status"], "confidence": row["confidence"], "techniques": row["techniques"],
                       "questions": row["questions"], "cites": [
-                          aliases.alias_for({"finding": "F", "evidence": "E", "link": "L", "agent_link": "A"}[c["target_kind"]],
+                          aliases.alias_for({"finding": "F", "evidence": "E", "link": "L", "agent_link": "A",
+                                             "raw_record": "Q"}[c["target_kind"]],
                                             c["target_id"]) for c in cites]})
     from romulus.report.incidents import build_incident_graph
     graph = build_incident_graph(repo, hunt_id, _report_findings(repo, hunt_id))
@@ -672,7 +686,7 @@ def _assessment_input(repo, hunt_id: str, token_budget: int, *, owner_token=None
         kind_map = {"finding": "F", "entity": "N"}
         cites = []
         for cite in link.get("cites") or []:
-            if isinstance(cite, dict) and cite.get("kind") in {"F", "E", "L", "A", "H"}:
+            if isinstance(cite, dict) and cite.get("kind") in {"F", "E", "L", "A", "H", "Q"}:
                 cites.append(aliases.alias_for(cite["kind"], cite["id"]))
         agent_link_cards.append({
             "alias": aliases.alias_for("A", link["id"]), "relation": link["relation"],
@@ -688,6 +702,10 @@ def _assessment_input(repo, hunt_id: str, token_budget: int, *, owner_token=None
                                "lane": row["lane"], "time": _span_text(_utc_time(row.get("ts"))),
                                "hypothesis": (aliases.alias_for("H", row["agent_hypothesis_id"])
                                               if row.get("agent_hypothesis_id") else None)})
+        if raw_ids := (row.get("gate_results") or {}).get(RAW_GATE):
+            # what it rests on beside typed evidence: text records, never an observed action
+            agent_findings[-1]["raw_records"] = {"aliases": [aliases.alias_for("Q", item) for item in raw_ids],
+                                                 "label": RAW_LABEL_PLURAL}
         listed.append((agent_findings[-1], row["id"]))
     # evidence strength for every listed finding: lane, Reported, confirmed and its group's triage verdict
     strengths = evidence.findings([finding_id for _entry, finding_id in listed])

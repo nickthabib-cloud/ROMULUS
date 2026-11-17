@@ -456,7 +456,7 @@ def _hypothesis_context(repo: Repo, hunt_id: str, hypothesis: dict, summaries: l
     aliases = AliasBook(repo, hunt_id, owner_token=owner_token)
     cites = repo.agent_hypothesis_cites(hypothesis_id=hypothesis["id"])
     mapped_cites = []
-    kind_map = {"finding": "F", "evidence": "E", "link": "L", "agent_link": "A"}
+    kind_map = {"finding": "F", "evidence": "E", "link": "L", "agent_link": "A", "raw_record": "Q"}
     for cite in cites:
         mapped_cites.append({"role": cite["role"], "alias": aliases.alias_for(kind_map[cite["target_kind"]], cite["target_id"])})
     entities = [aliases.alias_for("N", item) for item in hypothesis.get("entity_ids") or []]

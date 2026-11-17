@@ -5,8 +5,9 @@ query for an index, or an Arkime expression for an Arkime viewer. sources.agent_
 builds the body; this module checks the request before any source query (query_refusal), spends the agent's source
 queries under the same caps as its other pivots, reads the source through the existing clients only, keeps every
 returned record a normalizer reads as citable evidence (direct detection runs on them, as on any pivot), and keeps a
-bounded, redacted preview of the rows and aggregations. Zero hits is never an absence; shard failures, timeouts,
-caps and rows past the size are named.
+bounded, redacted preview of the rows and aggregations. A preview row no normalizer reads is kept as a raw record
+(evidence.raw_citation) the agent can cite as text, up to the hunt's raw-record cap; a row the cap leaves unkept is
+named. Zero hits is never an absence; shard failures, timeouts, caps and rows past the size are named.
 """
 from __future__ import annotations
 
@@ -17,10 +18,12 @@ from time import perf_counter
 from romulus.agent.models import PivotCoverage, PivotResult
 from romulus.agent.provider.base import redact_value
 from romulus.agent.refusals import reason as refusal_reason
+from romulus.agent.safety import injection_flags
 from romulus.agent.tools import QuerySourceRequest
 from romulus.config import Settings, redact_text
 from romulus.detect.registry import bind_windows_site, fresh_direct_pack
 from romulus.evidence.normalize import normalize_hits
+from romulus.evidence.raw_citation import build_raw_record, raw_record_view
 from romulus.hunt.pivot import (
     _AGENT_CAP_EXPLAINED,
     MAX_EVENT_SUMMARIES,
@@ -56,6 +59,8 @@ MAX_ROW_BYTES = 2_048
 MAX_STORED_TELEMETRY_BYTES = 65_536
 MAX_ERROR_CHARS = 600
 MAX_REASONS = 20
+# the raw-record cap when no settings are given (Settings.agent_max_raw_records)
+DEFAULT_MAX_RAW_RECORDS = 1_000
 
 
 def _bounded(text: str, limit: int = MAX_ERROR_CHARS) -> str:
@@ -202,7 +207,8 @@ class SourceQueryRunner:
                 "reasons": [f"the source query failed (timed out or the source failed): {source_error}"]},
                 viewer=viewer)
         return self._finish(task_id, target, args, started, response=response, reasons=reasons, viewer=viewer,
-                            case_id=case_id, requested_ids=len(viewer["ids"]) if viewer else None)
+                            case_id=case_id, requested_ids=len(viewer["ids"]) if viewer else None,
+                            request_digest=fingerprint)
 
     def _viewer_ids(self, task_id: str, args) -> tuple[list[str], dict, dict | None]:
         """The session ids the viewer's expression search returns, spending one source query. Arkime's session id
@@ -241,7 +247,7 @@ class SourceQueryRunner:
 
     def _finish(self, task_id: str, target: str, args, started: float, *, response: dict | None,
                 reasons: list[str], viewer: dict | None, case_id: str | None = None,
-                requested_ids: int | None = None) -> PivotResult:
+                requested_ids: int | None = None, request_digest: str = "") -> PivotResult:
         pivot = self.pivot
         contract = pivot.contracts[target]
         reasons = list(reasons)
@@ -276,11 +282,21 @@ class SourceQueryRunner:
         events, skips, errors = normalize_hits(records, surrogate_free=last_response_surrogate_free(), **options)
         skipped = sum(count for count in skips.values() if count)
         if skipped:
-            reasons.append(f"{skipped} returned record(s) no normalizer reads: shown in the preview, not citable")
+            reasons.append(f"{skipped} returned record(s) no normalizer reads: those in the preview are kept as raw "
+                           "records (raw_evidence, Q aliases), citable only as text a record contains")
         if errors:
             reasons.append(f"normalization_errors:{len(errors)}")
         raw_sources = {f"{record['_index']}/{record['_id']}": record["_source"] for record in records}
         pivot._save_selected_events(events, raw_sources, {event.id: task_id for event in events}, [task_id])
+        by_record: dict[str, list[str]] = {}
+        for event in events:
+            for ref in event.raw:
+                by_record.setdefault(f"{ref.target}/{ref.native_id}", []).append(event.id)
+        raw_kept, raw_note = self._keep_raw(records[:MAX_PREVIEW_ROWS], by_record, contract.time_field, args,
+                                            session_id=case_id, task_id=task_id, request_digest=request_digest,
+                                            source_kind="arkime_session" if viewer is not None else "index")
+        if raw_note:
+            reasons.append(raw_note)
         candidate_ids: list[str] = []
         for playbook in bind_windows_site(fresh_direct_pack(), pivot.site_facts):
             for match in playbook.consume(events):
@@ -296,7 +312,7 @@ class SourceQueryRunner:
             entities = {key: entities[key] for key in sorted(entities)[:MAX_SEARCH_ENTITIES]}
         status = "complete" if not reasons else "partial"
         found = bool(records) or bool(total)
-        telemetry, cut = self._telemetry(records, (response or {}).get("aggregations"), unique, args)
+        telemetry, cut = self._telemetry(records, (response or {}).get("aggregations"), by_record, raw_kept, args)
         if cut:
             reasons.append(cut)
             status = "partial"
@@ -308,7 +324,9 @@ class SourceQueryRunner:
         query = {"negative": "matches_found" if found else "unresolved",
                  "statement": None if found else ZERO_STATEMENT,
                  "total": {"value": total, "relation": relation}, "returned": len(records),
-                 "telemetry_json": telemetry}
+                 "telemetry_json": telemetry,
+                 "raw_records": [{"id": item["id"], "index": item["target"], "record_id": item["native_id"],
+                                  "time": item["time"]} for item in raw_kept.values()]}
         if viewer is not None:
             query["viewer"] = {"matched": viewer.get("matched"), "ids_read": len(viewer.get("ids") or [])}
         return PivotResult(
@@ -318,23 +336,53 @@ class SourceQueryRunner:
             coverage=[self._cell(target, args, status, reasons, len(records), total)],
             reasons=sorted(set(reasons)), duration_ms=int((perf_counter() - started) * 1000), query=query)
 
-    def _telemetry(self, records: list[dict], aggregations, events: dict, args) -> tuple[str, str | None]:
+    def _keep_raw(self, preview: list[dict], by_record: dict, time_field: str | None, args, *, session_id,
+                  task_id: str, request_digest: str, source_kind: str) -> tuple[dict[str, dict], str | None]:
+        """Keep the preview rows no normalizer read as raw records, under the hunt's raw-record cap: {"index/_id":
+        {id, target, native_id, time}} for each row kept (a record kept before keeps its row), and a reason naming
+        the rows the cap left unkept."""
+        unread = [record for record in preview if not by_record.get(f"{record['_index']}/{record['_id']}")]
+        if not unread:
+            return {}, None
+        pivot = self.pivot
+        cap = getattr(self.settings, "agent_max_raw_records", DEFAULT_MAX_RAW_RECORDS)
+        query = {key: value for key, value in (("query", args.query), ("expression", args.expression),
+                                               ("aggs", args.aggs)) if value is not None}
+        query_text = self._redact_text(json.dumps(self._redact(query), ensure_ascii=False, sort_keys=True,
+                                                  default=str))
+        rows = [build_raw_record(pivot.hunt_id, record, source_kind=source_kind, time_field=time_field,
+                                 session_id=session_id, task_id=task_id, query_digest=request_digest,
+                                 query_text=query_text, redact=self._redact, flagged=injection_flags)
+                for record in unread]
+        ids, refused = pivot.repo.save_agent_raw_records(pivot.hunt_id, rows, max_count=cap,
+                                                         owner_token=pivot.owner_token)
+        kept = {}
+        for row in pivot.repo.agent_raw_records(pivot.hunt_id, ids):
+            kept[f"{row['target']}/{row['native_id']}"] = {
+                "id": row["id"], "target": row["target"], "native_id": row["native_id"],
+                "time": raw_record_view(row, text=False)["time"]}
+        note = (f"{refused} preview row(s) no normalizer reads were not kept as raw records: the hunt's raw-record "
+                f"cap ({cap}) is reached, so they are not citable" if refused else None)
+        return kept, note
+
+    def _telemetry(self, records: list[dict], aggregations, by_record: dict, raw_kept: dict,
+                   args) -> tuple[str, str | None]:
         """The redacted, bounded JSON text of the rows (at most MAX_PREVIEW_ROWS, each cut to MAX_ROW_BYTES, showing
         the fields the model asked for) and the aggregations (bucket lists cut and counted), at most
-        MAX_STORED_TELEMETRY_BYTES; and why anything was cut."""
-        by_record: dict[str, list[str]] = {}
-        for event in events.values():
-            for ref in event.raw:
-                by_record.setdefault(f"{ref.target}/{ref.native_id}", []).append(event.id)
+        MAX_STORED_TELEMETRY_BYTES; and why anything was cut. A row a normalizer read is citable evidence (its alias
+        is in the result's evidence); one kept as a raw record says so (its alias is in raw_evidence)."""
         rows = []
         for record in records[:MAX_PREVIEW_ROWS]:
             source = record["_source"]
             if args.source_fields:
                 source = _select(source, args.source_fields)
             text = json.dumps(self._redact(source), ensure_ascii=False, sort_keys=True, default=str)
-            # whether a normalizer read this row: its evidence alias is then in the result's evidence
-            row = {"index": record["_index"], "id": record["_id"],
-                   "citable": bool(by_record.get(f"{record['_index']}/{record['_id']}"))}
+            # whether a normalizer read this row: its evidence alias is then in the result's evidence; else whether
+            # it is kept as a raw record, citable as text only (its alias is then in the result's raw_evidence)
+            key = f"{record['_index']}/{record['_id']}"
+            row = {"index": record["_index"], "id": record["_id"], "citable": bool(by_record.get(key))}
+            if not row["citable"]:
+                row["raw_record"] = "kept" if key in raw_kept else "not kept"
             if len(text.encode("utf-8")) > MAX_ROW_BYTES:
                 row["source_text"] = text.encode("utf-8")[:MAX_ROW_BYTES].decode("utf-8", errors="ignore")
                 row["source_cut"] = True
@@ -346,7 +394,7 @@ class SourceQueryRunner:
             beyond = records[MAX_PREVIEW_ROWS:]
             cited = sum(1 for record in beyond if by_record.get(f"{record['_index']}/{record['_id']}"))
             notes.append(f"{len(beyond)} returned row(s) are not in the preview; {cited} of them were normalized and "
-                         f"are in evidence, {len(beyond) - cited} were not and are not citable")
+                         f"are in evidence, {len(beyond) - cited} were not and are not kept or citable")
         bounded, buckets_cut = bound_aggregations(self._redact(aggregations)) if aggregations is not None else (None, 0)
         if buckets_cut:
             notes.append(f"{buckets_cut} aggregation bucket(s) not shown")

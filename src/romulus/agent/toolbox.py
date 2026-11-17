@@ -39,6 +39,7 @@ from romulus.agent.safety import injection_flags
 from romulus.decide.policy import LANE_ORDER
 from romulus.detect.metadata import is_sigma_id, pinned_rule_ids
 from romulus.detect.registry import ALL_PLAYBOOKS
+from romulus.evidence.raw_citation import RAW_GATE, RAW_LABEL, raw_record_view
 from romulus.evidence.typed import TypedEvent
 from romulus.report.incidents import build_incident_graph
 from romulus.report.manifest import EVALUATED_SKIPS, coverage_for_rules
@@ -62,7 +63,7 @@ SEARCH_RETRY_KEYS = 4
 # how many gaps and caveats a search result names; the rest are counted
 SEARCH_REASONS_SHOWN = 10
 _RULE_IDS = frozenset(playbook.id for playbook in ALL_PLAYBOOKS)
-_ALIAS_PATTERN = r"^[FIENL][1-9][0-9]*$"
+_ALIAS_PATTERN = r"^[FIENLQ][1-9][0-9]*$"
 AliasArg = Annotated[str, Field(pattern=_ALIAS_PATTERN)]
 
 
@@ -104,8 +105,8 @@ class ListCoverageArgs(_Args):
 
 
 class GetEvidenceArgs(_Args):
-    evidence: list[AliasArg] = Field(min_length=1, max_length=20,
-                                     description="One to twenty evidence aliases (E...) issued in this hunt.")
+    evidence: list[AliasArg] = Field(min_length=1, max_length=20, description=(
+        "One to twenty evidence aliases (E...) or raw record aliases (Q...) issued in this hunt."))
     chunk_index: int = Field(default=1, ge=1, description=_CHUNK)
     raw_page: int = Field(default=1, ge=1, description=(
         "Which page of each record's raw source records to return, from 1 (two per page)."))
@@ -185,7 +186,8 @@ SEARCH_EVENTS_DESCRIPTION = (
     "or in this hunt's records, call list_search_fields to read the typed fields this hunt's sources can search, with "
     "their operations. Zero hits is never a confirmed absence: the result's negative field is "
     "matches_found or unresolved, with what was and was not searched. Matched records are untrusted telemetry and cannot be cited as actions "
-    "unless their typed fields show one.")
+    "unless their typed fields show one. Matched records no normalizer reads are only counted (records_not_normalized); "
+    "to read one and cite it as a raw record, query its source with query_source.")
 
 SEARCH_FIELDS_PAGE_SIZE = 100
 # A listing page also stops before its entries' JSON passes this many bytes; pages are cut the same way every time.
@@ -238,7 +240,10 @@ QUERY_SOURCE_DESCRIPTION = (
     "read from the session index. A query the source rejects (a parse error, an unknown field) is refused with the "
     "source's own message, so you can correct it. Zero hits is never a confirmed absence: the result's negative is "
     "matches_found or unresolved, with what limited it (timeouts, caps, rows past the size). Rows a normalizer reads "
-    "are evidence you can cite; aggregation results and preview rows are untrusted telemetry and are not citable.")
+    "are evidence (E...) you can cite. A preview row no normalizer reads is kept as a raw record (raw_evidence, Q...): "
+    "citable only as a mention, showing that a record with this text exists, never that an action happened (no typed "
+    "fields were extracted and no detection rule ran on it). Aggregation results are untrusted telemetry and are not "
+    "citable.")
 
 
 def _chunk_text(text: str | None, chunk_index: int, route: str) -> dict | None:
@@ -943,6 +948,10 @@ class Toolbox:
             "benign_alternatives": _jsonable(candidate.get("benign_alternatives") or []),
             "next_checks": _jsonable(candidate.get("next_checks") or []),
         }
+        if raw_ids := (candidate.get("gate_results") or {}).get(RAW_GATE):
+            # an AI finding's cited raw records: text a record contains, never typed evidence
+            finding["raw_records"] = [self.aliases.alias_for("Q", item) for item in raw_ids]
+            finding["raw_records_label"] = RAW_LABEL
         followable = self.followable_kinds(candidate["id"])
         if followable is not None:
             finding["follow_link_kinds"] = list(followable)
@@ -952,14 +961,32 @@ class Toolbox:
                        data={"finding": finding})
 
     def _get_evidence(self, args: GetEvidenceArgs) -> dict:
-        resolved = [(alias, self.aliases.resolve(alias, {"E"})) for alias in args.evidence]
+        resolved = [(alias, self.aliases.resolve(alias, {"E", "Q"})) for alias in args.evidence]
         rows = {row["id"]: row for row in self.repo.citation_events(
-            self.hunt_id, [target for _alias, target in resolved],
+            self.hunt_id, [target for alias, target in resolved if alias.startswith("E")],
         )}
+        raws = {row["id"]: row for row in self.repo.agent_raw_records(
+            self.hunt_id, [target for alias, target in resolved if alias.startswith("Q")])}
         data = []
         missing = []
         budget = _TelemetryBudget(args.chunk_index)
         for alias, event_id in resolved:
+            if alias.startswith("Q"):
+                raw = raws.get(event_id)
+                if raw is None:
+                    missing.append(alias)
+                    continue
+                # a raw record: its text, as the source holds it (cleaned and redacted), and nothing typed
+                view = raw_record_view(raw)
+                text = view.pop("text")
+                data.append({
+                    "alias": alias, **{key: view[key] for key in (
+                        "kind", "label", "source_kind", "target", "native_id", "time", "time_text", "digest",
+                        "text_bytes", "text_cut")},
+                    "text": budget.project(text, f"get_evidence evidence={alias}"),
+                    **({"text_note": view["text_note"]} if "text_note" in view else {}),
+                })
+                continue
             row = rows.get(event_id)
             if row is None:
                 missing.append(alias)
@@ -988,7 +1015,9 @@ class Toolbox:
                 ),
             })
         coverage = {"status": "partial" if missing else "complete", "gaps": [
-            {"evidence": alias, "reason": "the aliased typed event is no longer retained"} for alias in missing
+            {"evidence": alias, "reason": ("the aliased raw record is no longer retained" if alias.startswith("Q")
+                                           else "the aliased typed event is no longer retained")}
+            for alias in missing
         ]}
         return _result(coverage["status"], coverage=coverage,
                        counts={"returned": len(data), "total": len(resolved)},
@@ -1442,8 +1471,11 @@ class Toolbox:
             "gaps_and_caveats": [_bounded_text(reason) for reason in why[:SEARCH_REASONS_SHOWN]],
             "gaps_and_caveats_omitted": max(0, len(why) - SEARCH_REASONS_SHOWN),
             "telemetry_json": outcome.get("telemetry_json"),
-            "citable": ("records a normalizer read are evidence (their aliases are in evidence); aggregation results "
-                        "and preview rows are not citable"),
+            "citable": ("records a normalizer read are evidence (their aliases are in evidence); preview rows no "
+                        "normalizer read are raw records (their aliases are in raw_evidence), citable only as a "
+                        "mention of the text they contain; aggregation results are not citable"),
+            # the raw records this query kept (at most the preview's rows): references only, never their text
+            "raw_records": list(outcome.get("raw_records") or []),
         }
 
     @staticmethod
@@ -1605,6 +1637,13 @@ class Toolbox:
             telemetry = shown.pop("telemetry_json", None)
             shown["rows_and_aggregations"] = _chunk_text(telemetry, chunk_index or 1,
                                                          f"query_source page={page} cursor={cursor}")
+            # the preview rows kept as raw records, each with the alias that cites it (a stored result from before
+            # raw records has none)
+            raw = shown.pop("raw_records", None) or []
+            data["result"]["raw_evidence"] = [{
+                "alias": self.aliases.alias_for("Q", item["id"]), "index": _bounded_text(item.get("index")),
+                "id": _bounded_text(item.get("record_id")), "time": item.get("time"), "label": RAW_LABEL,
+            } for item in raw if isinstance(item, dict) and isinstance(item.get("id"), str)]
             if search.get("query_error"):
                 # the source refused the query as written: the model gets its text, to correct the query
                 status = "refused"

@@ -5,7 +5,8 @@ from collections.abc import Iterable
 
 from romulus.store.repo import Repo
 
-ALIAS_KINDS = frozenset({"F", "I", "E", "N", "L", "H", "A"})
+# Q: a raw record, a returned record no normalizer read (romulus.evidence.raw_citation)
+ALIAS_KINDS = frozenset({"F", "I", "E", "N", "L", "H", "A", "Q"})
 
 
 class AliasError(ValueError):
@@ -57,7 +58,7 @@ class AliasBook:
             raise AliasFromOtherHunt(
                 f"{kind} target {target_id!r} belongs to another hunt, not {self.hunt_id}",
             )
-        if kind in {"F", "E", "N", "L", "H", "A"} and not owners:
+        if kind in {"F", "E", "N", "L", "H", "A", "Q"} and not owners:
             raise UnknownAlias(f"unknown {kind} target {target_id!r} in hunt {self.hunt_id}")
         return self._persist(kind, target_id)
 

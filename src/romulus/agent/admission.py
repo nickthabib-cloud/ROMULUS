@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Annotated, Literal
 
@@ -14,10 +15,11 @@ from romulus.agent.refusals import reason
 from romulus.agent.safety import injection_flags
 from romulus.agent.toolbox import RegisteredTool, Toolbox, _result
 from romulus.catalog.attack import ICS_ATTACK_BUNDLE, ICS_PINNED_JSON_SHA256, load_attack_bundle
+from romulus.evidence.raw_citation import RAW_GATE
 from romulus.evidence.typed import TypedEvent
 from romulus.store.db import digest, utcnow
 
-Alias = Annotated[str, Field(pattern=r"^[FIENLHA][1-9][0-9]*$")]
+Alias = Annotated[str, Field(pattern=r"^[FIENLHAQ][1-9][0-9]*$")]
 ShortText = Annotated[str, Field(min_length=1, max_length=1000)]
 Question = Annotated[str, Field(min_length=1, max_length=300)]
 
@@ -29,7 +31,14 @@ class _Args(BaseModel):
 Technique = Annotated[str, Field(min_length=2, max_length=16)]
 _TECHNIQUES = ("MITRE ATT&CK technique IDs (Enterprise or ICS), such as T1059 or T1059.001; an unknown, revoked or "
                "deprecated ID is refused.")
-_SUPPORT = "Aliases of supporting findings (F...), evidence (E...), expansion links (L...) or agent links (A...)."
+_SUPPORT = ("Aliases of supporting findings (F...), evidence (E...), raw records (Q...: text a record contains, never "
+            "an action), expansion links (L...) or agent links (A...).")
+# what a cited alias kind is stored as in a hypothesis's cites
+_CITE_KINDS = {"F": "finding", "E": "evidence", "L": "link", "A": "agent_link", "Q": "raw_record"}
+RAW_ONLY_NOTE = ("rests only on raw records, not normalized: no typed fields were extracted and no detection rule ran "
+                 "on them; they show that records with this text exist, not that an action happened")
+RAW_ALSO_NOTE = ("also cites raw records, not normalized: they show that records with this text exist, not that an "
+                 "action happened")
 
 
 class OpenHypothesisArgs(_Args):
@@ -52,7 +61,8 @@ class UpdateHypothesisArgs(_Args):
         default=None, description="The new confidence; omit (or null) to keep it.")
     add_support: list[Alias] = Field(default_factory=list, max_length=20, description=_SUPPORT)
     add_contradiction: list[Alias] = Field(default_factory=list, max_length=20, description=(
-        "Aliases of contradicting findings (F...), evidence (E...), expansion links (L...) or agent links (A...)."))
+        "Aliases of contradicting findings (F...), evidence (E...), raw records (Q...), expansion links (L...) or "
+        "agent links (A...)."))
     questions: list[Question] | None = Field(default=None, max_length=8, description=(
         "The full new list of open questions (replaces the old one), each 1 to 300 characters; omit (or null) "
         "to keep them."))
@@ -65,8 +75,10 @@ class ProposeFindingArgs(_Args):
         description="What the cited evidence shows, 10 to 400 characters.")
     claim_kind: Literal["execution", "network", "auth", "file", "account_change", "mention"] = Field(description=(
         "The kind of claim; at least one cited record must be of a family that can show it (mention: a record "
-        "that only names something)."))
-    cites: list[Alias] = Field(min_length=1, max_length=20, description="Evidence aliases (E...) the claim rests on.")
+        "that only names something). Raw records (Q...) show only mention: a claim citing no evidence (E...) must "
+        "be a mention."))
+    cites: list[Alias] = Field(min_length=1, max_length=20, description=(
+        "Evidence aliases (E...) or raw record aliases (Q...) the claim rests on."))
     lane: Literal["urgent", "high", "lead", "context"] = Field(description=(
         "The proposed lane. context is refused; urgent is recorded as high, and a mention claim at most as lead."))
     techniques: list[Technique] = Field(default_factory=list, max_length=20, description=_TECHNIQUES)
@@ -82,7 +94,8 @@ class ProposeLinkArgs(_Args):
     relation: Literal["same_actor", "precedes", "enabled", "lateral_movement", "same_campaign", "related"] = Field(
         description="The proposed relationship, recorded as a hypothesis.")
     cites: list[Alias] = Field(min_length=1, max_length=20, description=(
-        "Aliases of evidence (E...), findings (F...) or expansion links (L...) supporting the link."))
+        "Aliases of evidence (E...), raw records (Q...), findings (F...) or expansion links (L...) supporting the "
+        "link."))
     rationale: Annotated[str, Field(min_length=1, max_length=1000)] = Field(
         description="Why the cited records support the link, 1 to 1000 characters.")
 
@@ -92,14 +105,15 @@ class AddNoteArgs(_Args):
         "The finding (F...), incident (I...), entity (N...), hypothesis (H...) or agent link (A...) alias to annotate."))
     text: Annotated[str, Field(min_length=1, max_length=1000)] = Field(description="The note, 1 to 1000 characters.")
     cites: list[Alias] = Field(default_factory=list, max_length=20, description=(
-        "Aliases of evidence (E...), findings (F...), expansion links (L...), agent links (A...) or hypotheses (H...)."))
+        "Aliases of evidence (E...), raw records (Q...), findings (F...), expansion links (L...), agent links (A...) "
+        "or hypotheses (H...)."))
 
 
 class RequestRuleArgs(_Args):
     pattern_description: Annotated[str, Field(min_length=20, max_length=1000)] = Field(
         description="The detection pattern for an analyst to review, 20 to 1000 characters.")
-    cites: list[Alias] = Field(min_length=1, max_length=20,
-                               description="Evidence (E...) or finding (F...) aliases that show the pattern.")
+    cites: list[Alias] = Field(min_length=1, max_length=20, description=(
+        "Evidence (E...), raw record (Q...) or finding (F...) aliases that show the pattern."))
 
 
 SUMMARY_MAX_CHARS = 2000
@@ -155,6 +169,11 @@ def _id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:20]}"
 
 
+def _aware(moment: datetime) -> datetime:
+    """A stored time in UTC (the store keeps times without an offset as UTC)."""
+    return moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment
+
+
 def _ok(data: dict) -> dict:
     return _result("complete", counts={"returned": 1, "total": 1}, data=data)
 
@@ -197,9 +216,9 @@ def _technique_index() -> dict[str, tuple[object, object]]:
     }
 
 
-_ALIAS_VALUE = re.compile(r"^[FIENLHA][1-9][0-9]*$")
+_ALIAS_VALUE = re.compile(r"^[FIENLHAQ][1-9][0-9]*$")
 # These are producer-owned paths, never arbitrary recursively discovered key names.
-_FINDING_PATHS = ("alias", "evidence.*", "entities.*.alias")
+_FINDING_PATHS = ("alias", "evidence.*", "entities.*.alias", "raw_records.*")
 _INCIDENT_PATHS = ("alias", "members.*", "links.*.alias", "links.*.anchor", "links.*.targets.*")
 _PIVOT_PATHS = ("result.evidence.*", "result.candidates.*", "result.entities.*.alias",
                 "result.event_summaries.*.alias")
@@ -213,7 +232,7 @@ _TOOL_ALIAS_PATHS = {
     "entity_timeline": _PIVOT_PATHS, "auth_activity": _PIVOT_PATHS,
     "process_tree": _PIVOT_PATHS, "ids_alerts": _PIVOT_PATHS, "follow_link": _PIVOT_PATHS,
     "search_events": _PIVOT_PATHS,
-    "query_source": _PIVOT_PATHS,
+    "query_source": _PIVOT_PATHS + ("result.raw_evidence.*.alias",),
     "open_hypothesis": ("hypothesis",), "update_hypothesis": ("hypothesis",),
     "propose_finding": ("finding", "duplicate"), "propose_link": ("link",),
 }
@@ -362,14 +381,23 @@ class AgentAdmission:
         except AliasError as exc:
             raise Refusal(str(exc), "hypothesis", _ALIAS_ERROR_KINDS.get(type(exc).__name__, "alias")) from None
 
-    def _event_cites(self, aliases: list[str]) -> tuple[list[str], list[dict]]:
-        resolved = self._resolve_many(aliases, {"E"}, "cites[]")
-        ids = list(dict.fromkeys(target for _, target in resolved))
-        rows = self.repo.citation_events(self.hunt_id, ids)
+    def _event_cites(self, aliases: list[str]) -> tuple[list[str], list[dict], list[dict]]:
+        """The cited typed events (ids and rows) and raw records (rows), each retained by this hunt."""
+        resolved = self._resolve_many(aliases, {"E", "Q"}, "cites[]")
+        ids = list(dict.fromkeys(target for kind, target in resolved if kind == "E"))
+        raw_ids = list(dict.fromkeys(target for kind, target in resolved if kind == "Q"))
+        rows = self.repo.citation_events(self.hunt_id, ids) if ids else []
         by_id = {row["event"]["id"]: row for row in rows}
         if len(by_id) != len(ids):
             raise Refusal("one or more evidence aliases are not retained by this hunt", "cites[]", "not_retained")
-        return ids, [by_id[item] for item in ids]
+        raws = self.repo.agent_raw_records(self.hunt_id, raw_ids) if raw_ids else []
+        if len(raws) != len(raw_ids):
+            raise Refusal("one or more raw record aliases are not retained by this hunt", "cites[]", "not_retained")
+        return ids, [by_id[item] for item in ids], raws
+
+    def _raw_suspicious(self, raw_ids: list[str]) -> bool:
+        """Whether any cited raw record carries instruction-shaped text (flagged when it was kept)."""
+        return any(row["suspicious_content"] for row in self.repo.agent_raw_records(self.hunt_id, raw_ids))
 
     def _save_note(self, target_kind: str, target_id: str, text: str, cites: list[str], suspicious: bool) -> str:
         if self._count("agent_note") >= self.settings.agent_max_notes:
@@ -410,7 +438,7 @@ class AgentAdmission:
                     return _refused("initial hypothesis limit reached", code="cap")
             techniques = self._check_techniques(args.techniques)
             entities = self._resolve_many(args.entities, {"N"}, "entities[]")
-            supporting = self._resolve_many(args.supporting, {"F", "E", "L", "A"}, "supporting[]")
+            supporting = self._resolve_many(args.supporting, {"F", "E", "L", "A", "Q"}, "supporting[]")
             statement = args.statement.strip()
             support_key = {(kind, target) for kind, target in supporting}
             for existing in self.repo.agent_hypotheses(self.hunt_id):
@@ -419,9 +447,7 @@ class AgentAdmission:
                 existing_support = {(row["target_kind"], row["target_id"])
                                     for row in self.repo.agent_hypothesis_cites(hypothesis_id=existing["id"])
                                     if row["role"] == "support"}
-                mapped_support = {("finding" if kind == "F" else "evidence" if kind == "E" else
-                                   "link" if kind == "L" else "agent_link", target)
-                                  for kind, target in support_key}
+                mapped_support = {(_CITE_KINDS[kind], target) for kind, target in support_key}
                 if mapped_support <= existing_support:
                     alias = self.aliases.alias_for("H", existing["id"])
                     return _ok({"hypothesis": alias, "status": existing["status"], "duplicate": True})
@@ -439,8 +465,7 @@ class AgentAdmission:
                                  "entity_ids": row["entity_ids"], "questions": row["questions"]},
                      "created_at": now}
             cites = [{"hunt_id": self.hunt_id, "hypothesis_id": hypothesis_id, "role": "support",
-                      "target_kind": {"F": "finding", "E": "evidence", "L": "link", "A": "agent_link"}[kind],
-                      "target_id": value} for kind, value in supporting]
+                      "target_kind": _CITE_KINDS[kind], "target_id": value} for kind, value in supporting]
             self.repo.create_agent_hypothesis(row, event, cites,
                                               max_count=self.settings.agent_max_hypotheses,
                                               owner_token=self.owner_token)
@@ -478,8 +503,9 @@ class AgentAdmission:
             current = self.repo.agent_hypothesis(self.hunt_id, hypothesis_id)
             if current is None:
                 raise Refusal("hypothesis is not in this hunt", "hypothesis", "unknown_hypothesis")
-            support = self._resolve_many(args.add_support, {"F", "E", "L", "A"}, "add_support[]")
-            contradiction = self._resolve_many(args.add_contradiction, {"F", "E", "L", "A"}, "add_contradiction[]")
+            support = self._resolve_many(args.add_support, {"F", "E", "L", "A", "Q"}, "add_support[]")
+            contradiction = self._resolve_many(args.add_contradiction, {"F", "E", "L", "A", "Q"},
+                                               "add_contradiction[]")
             existing = self.repo.agent_hypothesis_cites(hypothesis_id=hypothesis_id)
             supports_after = any(row["role"] == "support" for row in existing) or bool(support)
             contradictions_after = any(row["role"] == "contradiction" for row in existing) or bool(contradiction)
@@ -505,14 +531,12 @@ class AgentAdmission:
             for role, values in (("support", support), ("contradiction", contradiction)):
                 for kind, target_id in values:
                     new_cites.append({"hunt_id": self.hunt_id, "hypothesis_id": hypothesis_id, "role": role,
-                                      "target_kind": {"F": "finding", "E": "evidence", "L": "link", "A": "agent_link"}[kind],
-                                      "target_id": target_id})
+                                      "target_kind": _CITE_KINDS[kind], "target_id": target_id})
             if support:
-                payload["add_support"] = [{"kind": {"F": "finding", "E": "evidence", "L": "link", "A": "agent_link"}[kind],
-                                            "id": target} for kind, target in support]
+                payload["add_support"] = [{"kind": _CITE_KINDS[kind], "id": target} for kind, target in support]
             if contradiction:
-                payload["add_contradiction"] = [{"kind": {"F": "finding", "E": "evidence", "L": "link", "A": "agent_link"}[kind],
-                                                  "id": target} for kind, target in contradiction]
+                payload["add_contradiction"] = [{"kind": _CITE_KINDS[kind], "id": target}
+                                                for kind, target in contradiction]
             if support and not contradiction:
                 kind = "support_added"
             elif contradiction and not support:
@@ -535,9 +559,17 @@ class AgentAdmission:
             if self._count("agent_finding") >= self.settings.agent_max_findings:
                 self.limits_hit.add("cap:findings")
                 raise Refusal("agent finding limit reached", "$", "cap")
-            evidence_ids, rows = self._event_cites(args.cites)
+            evidence_ids, rows, raws = self._event_cites(args.cites)
+            raw_ids = [row["id"] for row in raws]
             events = [TypedEvent.model_validate(row["event"]) for row in rows]
-            if not any(supports_claim_kind(event.family, args.claim_kind) for event in events):
+            # A raw record has no typed fields: it shows that a record with its text exists, so it supports only a
+            # mention claim. An action claim needs a cited typed event of a family that can show it.
+            if not events and args.claim_kind != "mention":
+                raise Refusal(f"raw records (Q...) support only a mention claim, not a {args.claim_kind} claim: no "
+                              "typed fields were extracted from them and no detection rule ran on them; cite typed "
+                              "evidence (E...) for an action, or propose a mention", "claim_kind",
+                              "unsupported_by_cites")
+            if events and not any(supports_claim_kind(event.family, args.claim_kind) for event in events):
                 raise Refusal(f"cited event families do not support a {args.claim_kind} claim", "claim_kind",
                               "unsupported_by_cites")
             techniques = self._check_techniques(args.techniques)
@@ -561,6 +593,8 @@ class AgentAdmission:
             if args.claim_kind == "mention" and lane in {"urgent", "high"}:
                 lane = "lead"
                 validation_notes.append("mention claims are capped at lead")
+            if raw_ids:
+                validation_notes.append(RAW_ALSO_NOTE if events else RAW_ONLY_NOTE)
             ranks = {"urgent": 3, "high": 2, "lead": 1}
             eligible_lanes = [value for value, rank in ranks.items() if rank >= ranks[lane]]
             duplicate = None
@@ -577,16 +611,29 @@ class AgentAdmission:
                 text = f"Agent proposal: {args.claim.strip()}"
                 if args.rationale:
                     text += f" Rationale: {args.rationale.strip()}"
-                note_cites = [{"kind": "E", "id": item} for item in evidence_ids]
-                suspicious = any(injection_flags({"event": row["event"]}) for row in rows)
+                note_cites = ([{"kind": "E", "id": item} for item in evidence_ids]
+                              + [{"kind": "Q", "id": item} for item in raw_ids])
+                suspicious = (any(injection_flags({"event": row["event"]}) for row in rows)
+                              or any(row["suspicious_content"] for row in raws))
                 note_id = self._save_note("finding", duplicate["id"], text[:1000], note_cites, suspicious)
                 return _ok({"duplicate": target_alias, "note_id": note_id,
                             "message": "proposal recorded as a note on the existing finding"})
+            # entities and times come from typed fields only; a raw record adds its source time, never an entity
             entity_values = sorted({entity for event in events for entity in event.entities()})
-            timestamps = [event.ts for event in events]
-            candidate_id = "agent-" + digest({"hunt_id": self.hunt_id, "evidence": sorted(citations),
-                                               "claim": args.claim.strip(), "kind": args.claim_kind})[:20]
+            timestamps = [_aware(event.ts) for event in events] + [_aware(row["ts"]) for row in raws
+                                                                   if row["ts"] is not None]
+            identity = {"hunt_id": self.hunt_id, "evidence": sorted(citations), "claim": args.claim.strip(),
+                        "kind": args.claim_kind}
+            group = {"evidence": sorted(citations), "kind": args.claim_kind}
+            if raw_ids:
+                # only a proposal citing raw records names them, so every other finding keeps its id
+                identity["raw_records"] = group["raw_records"] = sorted(raw_ids)
+            candidate_id = "agent-" + digest(identity)[:20]
             rationale = args.rationale.strip()
+            gates = {"_attack": techniques, "_agent_claim_kind": args.claim_kind, "_agent_rationale": rationale,
+                     "_notes": validation_notes}
+            if raw_ids:
+                gates[RAW_GATE] = raw_ids
             candidate = {
                 "id": candidate_id, "hunt_id": self.hunt_id, "rule_id": "agent.finding", "rule_version": "1",
                 "claim": args.claim.strip(), "claim_type": claim_type, "event_ids": evidence_ids,
@@ -594,11 +641,9 @@ class AgentAdmission:
                 "ts": min(timestamps) if timestamps else None, "severity": "high" if lane == "high" else "medium",
                 "confidence": "low", "lane": lane, "priority": 1.0 if lane == "high" else 0.25,
                 "priority_reasons": ["AI-generated proposal; analyst confirmation required"],
-                "gate_results": {"_attack": techniques, "_agent_claim_kind": args.claim_kind,
-                                 "_agent_rationale": rationale,
-                                 "_notes": validation_notes},
+                "gate_results": gates,
                 "benign_alternatives": [], "next_checks": [],
-                "group_key": digest({"evidence": sorted(citations), "kind": args.claim_kind}),
+                "group_key": digest(group),
                 "source_case_id": None, "source_anchor_id": None, "source_link_id": None,
                 "provenance": "agent", "agent_hypothesis_id": hypothesis_id,
             }
@@ -620,7 +665,7 @@ class AgentAdmission:
                 raise Refusal("agent link limit reached", "$", "cap")
             source_kind, source_id = self._resolve_many([args.from_], {"F", "N"}, "from")[0]
             target_kind, target_id = self._resolve_many([args.to], {"F", "N"}, "to")[0]
-            cites = self._resolve_many(args.cites, {"E", "F", "L"}, "cites[]")
+            cites = self._resolve_many(args.cites, {"E", "F", "L", "Q"}, "cites[]")
             hypothesis_id = self.hypothesis_id
             link_id = _id("alink")
             self.repo.save_agent_output("agent_link", {
@@ -642,15 +687,18 @@ class AgentAdmission:
     def add_note(self, args: AddNoteArgs) -> dict:
         try:
             target_kind, target_id = self._resolve_many([args.target], {"F", "I", "N", "H", "A"}, "target")[0]
-            resolved_cites = self._resolve_many(args.cites, {"E", "F", "L", "A", "H"}, "cites[]")
+            resolved_cites = self._resolve_many(args.cites, {"E", "F", "L", "A", "H", "Q"}, "cites[]")
             citations = [{"kind": kind, "id": target} for kind, target in resolved_cites]
             evidence_ids = [target for kind, target in resolved_cites if kind == "E"]
+            raw_ids = [target for kind, target in resolved_cites if kind == "Q"]
             finding_ids = [target for kind, target in resolved_cites if kind == "F"]
             for finding in self.repo.candidates_by_ids(self.hunt_id, finding_ids):
                 evidence_ids.extend(finding.get("event_ids") or [])
+                raw_ids.extend((finding.get("gate_results") or {}).get(RAW_GATE) or [])
             evidence_ids = list(dict.fromkeys(evidence_ids))
             evidence_rows = self.repo.citation_events(self.hunt_id, evidence_ids) if evidence_ids else []
-            suspicious = any(injection_flags({"event": row["event"]}) for row in evidence_rows)
+            suspicious = (any(injection_flags({"event": row["event"]}) for row in evidence_rows)
+                          or (bool(raw_ids) and self._raw_suspicious(list(dict.fromkeys(raw_ids)))))
             note_id = self._save_note({"F": "finding", "I": "incident", "N": "entity", "H": "hypothesis",
                                        "A": "agent_link"}[target_kind], target_id, args.text.strip(),
                                       citations, suspicious)
@@ -664,7 +712,7 @@ class AgentAdmission:
             if self._count("agent_rule_request") >= 50:
                 self.limits_hit.add("cap:rule_requests")
                 raise Refusal("agent rule request limit reached", "$", "cap")
-            resolved = self._resolve_many(args.cites, {"E", "F"}, "cites[]")
+            resolved = self._resolve_many(args.cites, {"E", "F", "Q"}, "cites[]")
             row = {"id": _id("arr"), "hunt_id": self.hunt_id, "session_id": self.session_id,
                    "hypothesis_id": self.hypothesis_id, "pattern_description": args.pattern_description.strip(),
                    "cites": [{"kind": kind, "id": target} for kind, target in resolved], "created_at": utcnow()}
