@@ -532,6 +532,9 @@ def test_aggregation_and_sort_labels_and_fields_named_like_forbidden_keys_are_se
     ("http.uri == /" + "a" * 201 + "/", False),
     ("http.uri == /abc", False),
     ("x" * 2_001, False),
+    ("a == /a\\/b/", True),                                            # an escaped slash stays inside the literal
+    # an escaped backslash ends before the slash, which closes the literal: four literals, two of them too long
+    ("a == /x\\\\/ || b == /" + "a" * 300 + "/ || c == /x\\\\/ || d == /" + "a" * 300 + "/", False),
 ])
 def test_arkime_expression_regexes_are_bounded(expression, ok):
     if ok:

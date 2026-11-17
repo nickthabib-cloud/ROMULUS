@@ -687,8 +687,9 @@ def arkime_regexes(expression: str) -> list[int]:
             continue
         if char == "/" and last in ("==", "!=", "[", ","):
             end = index + 1
-            while end < len(expression) and not (expression[end] == "/" and expression[end - 1] != "\\"):
-                end += 1
+            while end < len(expression) and expression[end] != "/":
+                end += 2 if expression[end] == "\\" else 1        # a backslash escapes the next character only
+            end = min(end, len(expression))
             found.append(end - index - 1 if end < len(expression) else -1)
             index, last = end + 1, "/"
             continue
