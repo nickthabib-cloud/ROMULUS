@@ -365,7 +365,8 @@ def _arkime_hit(sid: str) -> dict:
 
 
 def test_an_arkime_expression_is_run_by_the_viewer_and_its_sessions_read_from_the_index_in_the_window():
-    viewer = FakeViewer(ArkimeSessionHits(ids=["241118-AbCdEfGhIj", "241118-ZzZzZzZzZz", "bad id"], matched=7))
+    # the viewer may prefix an id with a cluster ordinal and @; the index knows the _id after it
+    viewer = FakeViewer(ArkimeSessionHits(ids=["3@241118-AbCdEfGhIj", "241118-ZzZzZzZzZz", "bad id"], matched=7))
     client = QueryES(_response([_arkime_hit("241118-AbCdEfGhIj")]))
     toolbox = _box(client, contracts={"arkime-a": _arkime_contract()}, viewer=viewer, budget=10)
     result = _query(toolbox, source="arkime:arkime-a", expression="ip.dst == 10.0.0.9 && port.dst == 445")

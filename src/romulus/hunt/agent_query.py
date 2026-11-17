@@ -218,7 +218,9 @@ class SourceQueryRunner:
             return [], {}, {"reasons": [f"the viewer refused the expression: {text}"], "query_error": text}
         if found.error is not None:
             return [], {}, {"reasons": [f"the viewer search failed: {_bounded(self._redact_text(found.error))}"]}
-        ids = [item for item in dict.fromkeys(found.ids) if isinstance(item, str) and SESSION_ID.fullmatch(item)]
+        # the viewer can name a session as <n>@<id> (the session's _id after a cluster ordinal); the index knows the _id
+        ids = [item for item in dict.fromkeys(_session_record_id(raw) for raw in found.ids)
+               if item is not None and SESSION_ID.fullmatch(item)]
         reasons = []
         unusable = len(found.ids) - len(ids)
         if unusable:
@@ -341,8 +343,10 @@ class SourceQueryRunner:
             rows.append(row)
         notes = []
         if len(records) > MAX_PREVIEW_ROWS:
-            notes.append(f"{len(records) - MAX_PREVIEW_ROWS} returned row(s) are not in the preview (their "
-                         "normalized records are in evidence)")
+            beyond = records[MAX_PREVIEW_ROWS:]
+            cited = sum(1 for record in beyond if by_record.get(f"{record['_index']}/{record['_id']}"))
+            notes.append(f"{len(beyond)} returned row(s) are not in the preview; {cited} of them were normalized and "
+                         f"are in evidence, {len(beyond) - cited} were not and are not citable")
         bounded, buckets_cut = bound_aggregations(self._redact(aggregations)) if aggregations is not None else (None, 0)
         if buckets_cut:
             notes.append(f"{buckets_cut} aggregation bucket(s) not shown")
@@ -352,6 +356,15 @@ class SourceQueryRunner:
             text = text.encode("utf-8")[:MAX_STORED_TELEMETRY_BYTES].decode("utf-8", errors="ignore")
             notes.append(f"the rows and aggregations were cut at {MAX_STORED_TELEMETRY_BYTES} bytes")
         return text, "; ".join(notes) or None
+
+
+def _session_record_id(raw) -> str | None:
+    """The session record's _id in its index for an id the Arkime viewer returned: the viewer may prefix it with a
+    numeric ordinal and @ (3@241118-AbC… names the record 241118-AbC…)."""
+    if not isinstance(raw, str):
+        return None
+    ordinal, separator, rest = raw.partition("@")
+    return rest if separator and ordinal.isdigit() and rest else raw
 
 
 def _select(source: dict, patterns: list[str]) -> dict:
