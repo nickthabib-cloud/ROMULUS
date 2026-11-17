@@ -189,6 +189,66 @@ def test_resume_keeps_the_counts_and_never_gets_a_fresh_budget(monkeypatch, tmp_
     assert {item["purpose"] for item in details} == {"orient"}
 
 
+def test_spend_audited_without_a_purpose_counts_toward_its_tasks_session_purpose():
+    repo = _repo()
+    _session(repo, "orient-1", "orient")
+    _session(repo, "inv-1", "investigate")
+    repo.upsert_task("t-orient", "h1", "pivot", "orient-1", {}, "t-orient")
+    repo.upsert_task("t-inv", "h1", "pivot", "inv-1", {}, "t-inv")
+    # reservations as an older build recorded them: no session, no purpose
+    for task_id in ("t-orient", "t-orient", "t-inv", None):
+        repo.reserve_agent_source_query("h1", 100, task_id)
+
+    assert repo.agent_purpose_source_queries("h1", "orient") == 2
+    assert repo.agent_purpose_source_queries("h1", "investigate") == 1
+    assert repo.agent_source_queries("h1") == 4
+    share, _ = agent_query_shares(_settings(100), repo, "h1", {"purpose": "orient"})
+    assert share == 18
+
+
+def test_a_reached_cap_is_a_limit_of_the_agent_run_and_reaches_the_assessment_input(tmp_path):
+    from romulus.agent.investigate import run_agent_phase
+    from romulus.agent.provider.base import ToolCall
+    from romulus.agent.toolbox import Toolbox
+    from romulus.config import Settings
+    from romulus.report.markdown import _ai_agent_cell
+    from tests.agent_scripted import ScriptedProvider, response
+
+    repo = Repo(make_engine(tmp_path / "agent.sqlite"))
+    migrate(repo.engine)
+    repo.create_hunt("h1", {"window": {}, "targets": [], "ai_agent": {"requested": True}}, "d", "test")
+    repo.set_hunt_state("h1", "running")
+    repo.set_hunt_state("h1", "completed_within_scope", detection_result="leads_only", stop_reason="scope")
+    repo.save_candidate({
+        "id": "c1", "hunt_id": "h1", "rule_id": "host.test", "rule_version": "1",
+        "claim": "a deterministic process execution finding", "claim_type": "observed_action",
+        "event_ids": [], "context_event_ids": [], "predicate_fields": [],
+        "entities": [["host", "workstation-1", "host"]], "ts": datetime.now(UTC),
+        "severity": "high", "confidence": "high", "lane": "high", "priority": 2.0,
+        "priority_reasons": [], "gate_results": {}, "benign_alternatives": [], "next_checks": [],
+        "group_key": "c1", "source_case_id": None, "source_anchor_id": None, "source_link_id": None,
+    })
+    # a pivot of an earlier session was stopped by its session's share
+    repo.audit("system", "agent.source_query_cap", "h1", {"cap": "agent_session_source_query_share", "limit": 5})
+    finish = [ToolCall("f", "finish_session", {"summary": "The review is complete."}, "{}")]
+    assessment = {"overall": [{"text": "The persisted finding is available for review.", "cites": [],
+                                "kind": "hypothesis"}],
+                  "key_steps": [], "narrative": [], "confidence": {"overall": "low", "reasons": []},
+                  "alternatives": [], "gaps": [], "next_checks": []}
+    provider = ScriptedProvider([response(tool_calls=finish), response(parsed=assessment)])
+
+    result = run_agent_phase(Settings(home=tmp_path), repo, "h1", provider=provider,
+                             toolbox_factory=lambda _session: Toolbox(repo, "h1"), clock=lambda: 0.0)
+
+    assert result.state == "partial"
+    assert "cap:source_queries:agent_session_source_query_share" in result.limits_hit
+    assert "cap:source_queries:agent_session_source_query_share" in repo.agent_run("h1")["reason"]
+    assess_input = provider.requests[-1].prompt_text()
+    assert "investigation_limits" in assess_input and "agent_session_source_query_share" in assess_input
+    cell = _ai_agent_cell({"ai_agent": {"phase": {"status": "partial"}, "limits_hit": result.limits_hit}})
+    assert "budget-limited" in cell
+
+
 def test_the_toolbox_configures_the_session_share_from_its_session_row():
     repo = _repo()
     _session(repo, "orient-1", "orient")
@@ -201,37 +261,89 @@ def test_the_toolbox_configures_the_session_share_from_its_session_row():
 
 # ---- the call slice ------------------------------------------------------------------------------------------------
 
-def test_a_call_slice_ends_the_call_partial_and_names_what_it_did_not_search(monkeypatch):
-    _quiet(monkeypatch)
-    repo = _repo()
-    _session(repo, "inv-1", "investigate")
-    executor = _executor(repo, "inv-1", "investigate", 100, 2)
-    executor.begin_call()
-
-    result = executor.run("inv-1", _auth_request(), anchor_ts=START + timedelta(minutes=5))
-
-    # three auth datasets planned, two queries in the slice: the third is named, never zero hits
-    assert result.status == "partial"
-    assert "agent_call_source_query_slice:2" in result.reasons
-    unsearched = [cell for cell in result.coverage if "agent_call_source_query_slice:2" in cell.reasons]
-    assert len(unsearched) == 1 and unsearched[0].status == "failed" and unsearched[0].unresolved_ranges
-    assert len(result.task_ids) == 2 and len(repo.tasks("h1")) == 2
-    assert repo.agent_source_queries("h1") == 2
-    # the next call has its own slice
-    executor.begin_call()
-    assert executor.run("inv-1", _auth_request(), anchor_ts=START).status != "failed"
-
-
-def test_a_dense_source_keeps_its_capped_records_rather_than_splitting_past_the_slice(monkeypatch):
-    calls = []
-
-    def capped(_client, intent, *_args, **_kwargs):
+def _capped(calls: list):
+    def execute(_client, intent, *_args, **_kwargs):
         calls.append(intent)
         return SearchOutcome(target=intent.target, fingerprint="fp", started_at=START, ended_at=START,
                              completeness=Completeness.partial, reasons=["cap:10<total:500"], total=500,
                              total_relation="eq", returned=0)
+    return execute
 
-    monkeypatch.setattr(pivot_module, "execute", capped)
+
+def test_a_call_slice_and_a_source_share_end_the_call_partial_with_their_own_reasons(monkeypatch):
+    calls = []
+    monkeypatch.setattr(pivot_module, "execute", _capped(calls))
+    repo = _repo()
+    _session(repo, "inv-1", "investigate")
+    executor = _executor(repo, "inv-1", "investigate", 100, 4)
+    executor.begin_call()
+
+    result = executor.run("inv-1", _auth_request(), anchor_ts=START + timedelta(minutes=5))
+
+    # three dense auth datasets share a slice of four: the first two get one query each, the last the two left
+    # (too few to split its window); each keeps its capped records, and each cap says which it is
+    assert len(calls) == 3 and repo.agent_source_queries("h1") == 3
+    assert result.status == "partial"
+    assert "agent_call_source_share:1" in result.reasons
+    assert "agent_call_source_query_slice:4" in result.reasons
+    assert all(cell.status != "complete" and cell.unresolved_ranges for cell in result.coverage)
+    caps = repo.agent_source_query_caps("h1")
+    assert caps == {"agent_call_source_share": 1, "agent_call_source_query_slice": 1}
+    # the next call has its own slice
+    executor.begin_call()
+    _quiet(monkeypatch)
+    assert executor.run("inv-1", _auth_request(), anchor_ts=START).status == "complete"
+
+
+def _network_targets(count: int) -> dict:
+    return {f"net-{n:02d}": _keyword_contract(f"net-{n:02d}") for n in range(count)}
+
+
+def _search_request():
+    return SearchEventsRequest.model_validate({"tool": "search_events", "arguments": {
+        "scope": "network", "conditions": ABSENT, "start": START.isoformat(), "end": END.isoformat()}})
+
+
+def _searched(result) -> set[str]:
+    return {cell.target for cell in result.coverage if cell.status == "complete"}
+
+
+def test_a_call_slice_covers_one_query_for_every_planned_source():
+    contracts = _network_targets(40)
+    repo, client = _hunt(), FakeES({target: [] for target in contracts})
+    executor = PivotExecutor(repo, client, "h1", contracts, source_query_budget=2000, source_query_scope="agent")
+    executor.configure_agent_shares(session_id="as-search", purpose="investigate", session_share=200,
+                                    call_slice=CALL_SLICE_FLOOR)
+
+    result = executor.run("as-search", _search_request(), anchor_ts=START + timedelta(minutes=30))
+
+    assert _searched(result) == set(contracts)
+    assert result.status == "complete" and repo.agent_source_queries("h1") == 40
+
+
+def test_successive_sessions_with_small_shares_reach_every_source_and_name_the_rest():
+    contracts = _network_targets(40)
+    repo, client = _hunt(), FakeES({target: [] for target in contracts})
+    searched: set[str] = set()
+    for number in range(3):
+        executor = PivotExecutor(repo, client, "h1", contracts, source_query_budget=2000,
+                                 source_query_scope="agent")
+        executor.configure_agent_shares(session_id=f"as-{number}", purpose="investigate", session_share=15,
+                                        call_slice=15)
+        result = executor.run(f"as-{number}", _search_request(), anchor_ts=START + timedelta(minutes=30))
+        reached = _searched(result)
+        skipped = {cell.target for cell in result.coverage
+                   if "agent_session_source_query_share:15" in cell.reasons}
+        # each call searches what its share allows and names every other source as not searched
+        assert len(reached) == 15 and skipped == set(contracts) - reached
+        assert result.status == "partial"
+        searched |= reached
+    assert searched == set(contracts)
+
+
+def test_a_dense_source_keeps_its_capped_records_rather_than_splitting_past_the_slice(monkeypatch):
+    calls = []
+    monkeypatch.setattr(pivot_module, "execute", _capped(calls))
     repo = _repo()
     _session(repo, "inv-1", "investigate")
     executor = _executor(repo, "inv-1", "investigate", 100, 3)

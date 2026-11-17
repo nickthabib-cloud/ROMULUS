@@ -701,6 +701,15 @@ def _assessment_input(repo, hunt_id: str, token_budget: int, *, owner_token=None
               "agent_findings": agent_findings,
               "agent_links": agent_link_cards, "incidents": incident_cards,
               "coverage_gaps": dossier.payload.get("scope", {}).get("coverage", {}).get("gaps", [])}
+    caps = getattr(repo, "agent_source_query_caps", None)
+    reached = caps(hunt_id) if caps is not None else {}
+    if reached:
+        # the investigation was budget-limited: what its pivots left unsearched is unknown, never absent
+        output["investigation_limits"] = {
+            "source_query_caps_reached": {kind: f"stopped {count} tool call(s)" for kind, count in sorted(reached.items())},
+            "meaning": ("the investigation's source queries were capped, so some leads were not followed and some "
+                        "sources were not searched; what they hold is unknown"),
+        }
     # Assessment context has an explicit token cap after the system prompt, schema and output reserve.
     # Remove the lowest-lane incident material first, then terminal hypotheses, then the remaining
     # output cards in reverse priority order. Every input-only omission is named; the report stays complete.

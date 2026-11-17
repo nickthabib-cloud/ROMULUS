@@ -578,10 +578,14 @@ MAX_SAMPLE_QUERIES = 4
 AGENT_HUNT_BUDGET = "agent_source_query_budget"
 AGENT_SESSION_SHARE = "agent_session_source_query_share"
 AGENT_CALL_SLICE = "agent_call_source_query_slice"
+# one planned source's part of what its call may still spend (the rest divided by the sources still to search)
+AGENT_SOURCE_SHARE = "agent_call_source_share"
+AGENT_QUERY_CAPS = (AGENT_HUNT_BUDGET, AGENT_SESSION_SHARE, AGENT_CALL_SLICE, AGENT_SOURCE_SHARE)
 _AGENT_CAP_EXPLAINED = {
     AGENT_HUNT_BUDGET: "the hunt's AI-agent source-query budget is spent",
     AGENT_SESSION_SHARE: "this session's share of the hunt's source-query budget is spent",
     AGENT_CALL_SLICE: "this tool call's slice of the session's source queries is spent",
+    AGENT_SOURCE_SHARE: "this source's part of the tool call's source queries is spent",
 }
 
 # A host lookup refused for budget is not an answer: it is retried when budget allows.
@@ -1013,7 +1017,9 @@ class PivotExecutor:
         self.call_slice: int | None = None
         self.session_spent = 0
         self.call_spent = 0
+        self._call_floor = 0
         self._intent_ceiling: int | None = None
+        self._intent_share: int | None = None
         self._caps_recorded: set[str] = set()
         # a Linux shipper's dataset names are inventoried under the logical dataset that reads them
         self.dataset_inventory = {
@@ -1066,12 +1072,38 @@ class PivotExecutor:
     def begin_call(self) -> None:
         """Start one tool call's slice."""
         self.call_spent = 0
+        self._call_floor = 0
         self._intent_ceiling = None
+        self._intent_share = None
         self._caps_recorded = set()
+
+    def _call_limit(self) -> int | None:
+        """The current call's slice: the configured slice, raised to one query for each source the call plans (the
+        session's share and the hunt total still bound it)."""
+        if self.call_slice is None:
+            return None
+        return max(self.call_slice, getattr(self, "_call_floor", 0))
+
+    def _agent_plan_call(self, intents: list[SearchIntent], *, rotate: bool = True) -> list[SearchIntent]:
+        """Before an agent call runs its planned sources: its slice covers one query for each, and when even that
+        cannot be spent (the session's share or the hunt total has less left than there are sources), the sources
+        start at a place set by the hunt's persisted spend, so successive calls (and sessions) reach the ones an
+        earlier call left unsearched. Every source the call does not reach is still named as not searched."""
+        if not self._agent_budgeted() or not intents:
+            return intents
+        self._call_floor = max(getattr(self, "_call_floor", 0), len(intents))
+        available = self.agent_available()
+        if available is None or not 0 < available[0] < len(intents):
+            return intents
+        if not rotate or any(intent.purpose == "expansion:host-witness" for intent in intents):
+            return intents              # a witness probe stops at its first hit: its order is its meaning
+        start = self.source_queries % len(intents)
+        return [*intents[start:], *intents[:start]]
 
     def _agent_cap(self, kind: str) -> str:
         limit = {AGENT_HUNT_BUDGET: self.source_query_budget, AGENT_SESSION_SHARE: self.session_share,
-                 AGENT_CALL_SLICE: self.call_slice}[kind]
+                 AGENT_CALL_SLICE: self._call_limit(),
+                 AGENT_SOURCE_SHARE: getattr(self, "_intent_share", None)}[kind]
         reason = f"{kind}:{limit}"
         if kind not in self._caps_recorded:
             # once per cap and call: the audit says which cap stopped the agent, and where
@@ -1093,7 +1125,7 @@ class PivotExecutor:
         if self.session_share is not None:
             limits.append((self.session_share - self.session_spent, AGENT_SESSION_SHARE))
         if self.call_slice is not None:
-            limits.append((self.call_slice - self.call_spent, AGENT_CALL_SLICE))
+            limits.append((self._call_limit() - self.call_spent, AGENT_CALL_SLICE))
         for left, kind in limits:
             if left <= 0:
                 return 0, self._agent_cap(kind)
@@ -1108,9 +1140,9 @@ class PivotExecutor:
         if self.session_share is not None:
             limits.append((self.session_share - self.session_spent, AGENT_SESSION_SHARE))
         if self.call_slice is not None:
-            limits.append((self.call_slice - self.call_spent, AGENT_CALL_SLICE))
+            limits.append((self._call_limit() - self.call_spent, AGENT_CALL_SLICE))
         if self._intent_ceiling is not None:
-            limits.append((self._intent_ceiling - self.call_spent, AGENT_CALL_SLICE))
+            limits.append((self._intent_ceiling - self.call_spent, AGENT_SOURCE_SHARE))
         left, kind = min(limits, key=lambda item: item[0])
         return max(0, left), kind
 
@@ -1122,7 +1154,8 @@ class PivotExecutor:
             return None
         left, reason = available
         if left > 0:
-            self._intent_ceiling = self.call_spent + max(1, left // max(1, intents_left))
+            self._intent_share = max(1, left // max(1, intents_left))
+            self._intent_ceiling = self.call_spent + self._intent_share
         return left, reason
 
     def _agent_reserve(self, spend_task_id: str | None) -> str | None:
@@ -1131,9 +1164,10 @@ class PivotExecutor:
             return self._agent_cap(AGENT_HUNT_BUDGET)
         if self.session_share is not None and self.session_spent >= self.session_share:
             return self._agent_cap(AGENT_SESSION_SHARE)
-        if ((self.call_slice is not None and self.call_spent >= self.call_slice)
-                or (self._intent_ceiling is not None and self.call_spent >= self._intent_ceiling)):
+        if self.call_slice is not None and self.call_spent >= self._call_limit():
             return self._agent_cap(AGENT_CALL_SLICE)
+        if self._intent_ceiling is not None and self.call_spent >= self._intent_ceiling:
+            return self._agent_cap(AGENT_SOURCE_SHARE)
         reserved = self.repo.reserve_agent_source_query(
             self.hunt_id, self.source_query_budget, spend_task_id, owner_token=self.owner_token,
             session_id=self.session_id, purpose=self.session_purpose,
@@ -1913,6 +1947,8 @@ class PivotExecutor:
         reasons: list[str] = [reason for cell in coverage for reason in cell.reasons]
         successful = 0
         incomplete = bool(coverage)
+        # a dependent join's sources share one row bound in their planned order: they are never rotated
+        intents = self._agent_plan_call(list(intents), rotate=max_total_records is None)
         fetch_query_start = self.source_queries
         fetched_records = 0
         for position, intent in enumerate(intents):
@@ -2411,6 +2447,7 @@ class PivotExecutor:
                     reasons=sorted({reason for cell in planning_coverage for reason in cell.reasons}),
                 )
             return PivotResult(status="unsupported", reasons=["no compatible source contract"])
+        intents = self._agent_plan_call(intents)
         available = self.agent_available()
         if available is not None and available[0] == 0:
             # nothing can be searched: one result naming each planned source, and no task for any of them

@@ -44,7 +44,8 @@ ORIENT_SHARE = 0.20
 # - an investigate session takes the remaining queries divided by the open hypotheses that can still be given a
 #   session (its own included); the assessment reads no source, so nothing is held back for it;
 # - one tool call spends at most this part of its session's share, and never less than the floor (one pivot can fan
-#   out over many indices and time partitions), and never more than the share.
+#   out over many indices and time partitions), and never more than the share; a call's slice is raised to one query
+#   for each source it plans (PivotExecutor._agent_plan_call), within what the session's share has left.
 CALL_SLICE_SHARE = 0.10
 CALL_SLICE_FLOOR = 32
 # out-of-window packet sources named together in one summary line

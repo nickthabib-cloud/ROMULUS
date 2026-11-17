@@ -1621,12 +1621,21 @@ class Repo:
 
     def agent_purpose_source_queries(self, hunt_id: str, purpose: str) -> int:
         """Durable source-call spend of every AI-agent session of one purpose (orient, investigate) in this hunt,
-        across resumes. Spend recorded without a purpose counts toward no purpose."""
+        across resumes. A reservation recorded without its purpose (by an older build) counts toward the purpose of the
+        session whose pivot task it was spent on; one that names no such task counts toward no purpose, and the hunt
+        total still bounds it."""
+        detail = t.audit_event.c.detail
+        session_purpose = select(t.agent_session.c.purpose).select_from(
+            t.task.join(t.agent_session, t.agent_session.c.id == t.task.c.owner),
+        ).where(
+            t.task.c.id == func.json_extract(detail, "$.task_id"), t.task.c.hunt_id == hunt_id,
+        ).limit(1).scalar_subquery()
         with self.engine.connect() as c:
             return int(c.execute(select(func.count()).select_from(t.audit_event).where(
                 t.audit_event.c.hunt_id == hunt_id,
                 t.audit_event.c.action == "agent.source_query",
-                func.json_extract(t.audit_event.c.detail, "$.purpose") == purpose,
+                or_(func.json_extract(detail, "$.purpose") == purpose,
+                    and_(func.json_extract(detail, "$.purpose").is_(None), session_purpose == purpose)),
             )).scalar_one())
 
     def agent_source_query_caps(self, hunt_id: str) -> dict[str, int]:

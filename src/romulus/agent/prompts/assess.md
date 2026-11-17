@@ -2,6 +2,8 @@ Return one `ai-assessment@1` object matching the supplied schema. Use only the p
 hypotheses, links, and coverage shown in the input. Cite every sentence with aliases supplied for this hunt.
 Separate recorded observations from inferences and hypotheses. State uncertainty and visible coverage gaps plainly.
 Do not call a host, account, or time window clean, and do not claim that an unobserved event did not happen.
+When the input has `investigation_limits`, the investigation was budget-limited: say so plainly in `gaps`, and treat
+what its pivots did not search as unknown.
 Keep each sentence concise and within the schema caps. This is an AI-generated, unconfirmed assessment.
 
 The `narrative` is one coherent story of what most plausibly happened, told in time order from initial access to
