@@ -556,11 +556,13 @@ def _ground_paragraph(paragraph: dict, strengths: dict, counts: dict) -> dict:
     elif any(item.strong for item in cites):
         if not _mostly_benign(cites, mix):
             return out
-        counts["context_mostly_benign_support"] += 1
         steps = _attack_steps(cites)
+        if len(steps) > ATTACK_STEPS:
+            # more strong findings than can be listed beside it (a cited record standing for many): kept as written
+            return out
+        counts["context_mostly_benign_support"] += 1
         out = {key: value for key, value in out.items() if key != "tactic"}
-        out.update(phase=CONTEXT_PHASE, context_reason=MOSTLY_BENIGN, attack_steps=steps[:ATTACK_STEPS],
-                   **({"attack_steps_more": len(steps) - ATTACK_STEPS} if len(steps) > ATTACK_STEPS else {}),
+        out.update(phase=CONTEXT_PHASE, context_reason=MOSTLY_BENIGN, attack_steps=steps,
                    **({"model_phase": paragraph["phase"]} if paragraph["phase"] else {}))
         return out
     elif cites and all(item.benign for item in cites):
@@ -597,7 +599,8 @@ def _ground_paragraph(paragraph: dict, strengths: dict, counts: dict) -> dict:
 # perhaps with its companion record"; past that the paragraph describes several attack-associated steps and keeps its
 # label. The benign floor keeps a short paragraph from flipping on one verdict; the two-thirds share means the
 # benign activity outnumbers the strong at least two to one. A split never hides the strong cites: each strong
-# finding is lifted out beside the paragraph, unmuted, with its own lane and verdict.
+# finding is lifted out beside the paragraph, unmuted, with its own lane and verdict; a paragraph whose strong cites
+# stand for more findings than ATTACK_STEPS (a cited evidence record can stand for many) is never split.
 SPLIT_MAX_STRONG = 2
 SPLIT_MIN_BENIGN = 3
 

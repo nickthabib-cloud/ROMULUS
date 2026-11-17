@@ -884,7 +884,7 @@ def test_the_split_rule_at_its_boundaries(mix, split):
     assert _mostly_benign(cites, Counter(item.category for item in cites)) is split
 
 
-def test_an_incomplete_lookup_never_splits_and_lifted_steps_are_bounded_and_counted(monkeypatch):
+def test_an_incomplete_lookup_or_more_strong_findings_than_can_be_listed_never_splits(monkeypatch):
     from collections import Counter
 
     from romulus.agent import assessment
@@ -893,24 +893,38 @@ def test_an_incomplete_lookup_never_splits_and_lifted_steps_are_bounded_and_coun
     # a capped evidence lookup may hide a confirmed finding past what it read
     capped = [*cites[:-1], _cite("benign", complete=False, finding_id="b9")]
     assert not assessment._mostly_benign(capped, Counter(item.category for item in capped))
-    # one evidence record standing for many strong findings: each is lifted once, attack-triaged before Reported,
-    # at most ATTACK_STEPS kept and the rest counted
+    # one evidence record standing for many strong findings: each is lifted once, attack-triaged before Reported
     many = tuple(_cite("reported" if index % 2 else "attack", finding_id=f"s{index:02}").findings[0]
                  for index in range(14))
     record = grounding.CiteStrength(many)
     steps = assessment._attack_steps([record, record, _cite("benign", finding_id="b")])
     assert len(steps) == 14 and [step["support"] for step in steps] == ["attack"] * 7 + ["reported"] * 7
-    paragraph = {"time_span": {"start": IN_WINDOW, "end": IN_WINDOW}, "phase": "Discovery",
-                 "sentences": [{"text": "t", "kind": "observed", assessment.REFS: [("E", "ev")]}]}
-    strengths = {("E", "ev"): record}
+    # more strong findings than can be listed beside it: never split, whatever the cite mix says
     monkeypatch.setattr(assessment, "_mostly_benign", lambda *_args: True)
-    counts = Counter()
-    out = assessment._ground_paragraph(paragraph, strengths, counts)
-    assert len(out["attack_steps"]) == 10 and out["attack_steps_more"] == 4
-    shown = narrative_paragraphs([{**out, "sentences": [{"text": "t", "kind": "observed", "cites": []}]}])[0]
+    for count, split in ((14, False), (10, True)):
+        paragraph = {"time_span": {"start": IN_WINDOW, "end": IN_WINDOW}, "phase": "Discovery",
+                     "sentences": [{"text": "t", "kind": "observed", assessment.REFS: [("E", "ev")]}]}
+        counts = Counter()
+        out = assessment._ground_paragraph(paragraph, {("E", "ev"): grounding.CiteStrength(many[:count])}, counts)
+        assert ("context_reason" in out) is split and counts["context_mostly_benign_support"] == int(split)
+        assert out["phase"] == ("Context" if split else "Discovery")
+        assert len(out.get("attack_steps", [])) == (count if split else 0) and "attack_steps_more" not in out
+    # a stored list past the bound is shown bounded, the rest counted
+    shown = narrative_paragraphs([{"time_span": {}, "phase": "Context", "context_reason": "mostly_benign_support",
+                                   "attack_steps": steps, "sentences": [{"text": "t", "kind": "observed",
+                                                                         "cites": []}]}])[0]
     assert len(shown["attack_steps"]) == 10 and shown["attack_steps_more"] == 4
     assert markdown.narrative_steps_more(shown) == (
-        "4 more attack-associated finding(s) cited here; its citations and support line count them.")
+        "4 more attack-associated step(s) stored with this paragraph could not be shown; read its citations for "
+        "every finding it cites.")
+
+
+def test_a_lifted_step_is_named_by_its_rule_title():
+    from romulus.detect.registry import ALL_PLAYBOOKS
+    playbook = next(item for item in ALL_PLAYBOOKS if getattr(item, "title", None))
+    repo = _reported_rows()
+    titles = grounding.EvidenceStrength(repo, "h1", OFF).rule_titles([playbook.id, "r.unknown", ""])
+    assert titles == {playbook.id: playbook.title, "r.unknown": "r.unknown"}
 
 
 def test_the_manifest_whitelists_the_split_reason_and_bounds_its_steps():

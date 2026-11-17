@@ -172,7 +172,8 @@ CONTEXT_REASONS = {MODEL_CONTEXT_ATTACK: "labelled context by the model, but it 
                                   "attack-associated step it cites is listed with it"}
 # The context reasons shown muted (the paragraph is context; what it lifts out is not).
 MUTED_CONTEXT = (MOSTLY_BENIGN,)
-# Lifted attack-associated steps kept per paragraph; more are counted, never dropped silently.
+# Lifted attack-associated steps per paragraph: a paragraph citing more strong findings is never split, and a
+# stored list past it (or an entry not of the step's shape) is counted where it is shown, never dropped silently.
 ATTACK_STEPS = 10
 ATTACK_STEP_LABEL = "Attack-associated step cited here"
 # A paragraph's support mix: how many of its distinct cites fall in each category, strongest first (the checker
@@ -222,8 +223,8 @@ def narrative_step_text(step: dict) -> str:
 def narrative_steps_more(paragraph: dict) -> str:
     """How many more attack-associated steps the paragraph cites than it lists (empty when none; unescaped)."""
     more = paragraph.get("attack_steps_more")
-    return (f"{more} more attack-associated finding(s) cited here; its citations and support line count them."
-            if isinstance(more, int) and more > 0 else "")
+    return (f"{more} more attack-associated step(s) stored with this paragraph could not be shown; read its "
+            "citations for every finding it cites." if isinstance(more, int) and more > 0 else "")
 
 
 def narrative_label(paragraph: dict) -> str:
