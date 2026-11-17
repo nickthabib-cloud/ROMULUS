@@ -20,9 +20,12 @@ from romulus.hunt.publish import subject_event_ids
 from romulus.hunt.rank import PASS_FINAL, rank_summary, rank_unranked
 from romulus.report.incidents import build_incident_graph, incident_narrative
 from romulus.report.markdown import (
+    ATTACK_STEPS,
     CONTEXT_REASONS,
+    MOSTLY_BENIGN,
     SUPPORT_LABELS,
     SUPPORT_LIMIT,
+    WEAK_MODEL_CONTEXT,
     WEAK_NO_REPORTED,
     WEAK_REASONS,
 )
@@ -1154,7 +1157,8 @@ def narrative_paragraphs(value) -> list[dict]:
             sentences.append({"text": sentence["text"],
                               "kind": sentence.get("kind") if sentence.get("kind") in NARRATIVE_KINDS else "uncertain",
                               "cites": [cite for cite in cites if isinstance(cite, str)],
-                              **({"suspicious_content": True} if sentence.get("suspicious_content") else {})})
+                              **({"suspicious_content": True} if sentence.get("suspicious_content") else {}),
+                              **({"strong_support": True} if sentence.get("strong_support") is True else {})})
         if not sentences:
             continue
         tactic = paragraph.get("tactic")
@@ -1176,9 +1180,36 @@ def narrative_paragraphs(value) -> list[dict]:
                         **({"model_phase": model_phase[:200]} if isinstance(model_phase, str) and model_phase
                            else {})}
                        if not weak and paragraph.get("context_reason") in CONTEXT_REASONS else {}),
+                    **(_attack_steps(paragraph)
+                       if (not weak and paragraph.get("context_reason") == MOSTLY_BENIGN)
+                       or (weak and reason == WEAK_MODEL_CONTEXT) else {}),
                     **({"support": support} if support else {}),
                     "sentences": sentences})
     return out
+
+
+ATTACK_STEP_SUPPORT = ("confirmed", "attack", "reported")
+
+
+def _attack_steps(paragraph: dict) -> dict:
+    """The findings a mostly-benign paragraph, or a weak paragraph the model labelled context, lifts out, in the
+    shape every renderer reads: each a finding id with its rule, title, lane, triage verdict and support category,
+    at most ATTACK_STEPS, and how many more it cited (a step past the bound, or one not of that shape, is counted there, never dropped silently)."""
+    stored = (paragraph.get("attack_steps") if isinstance(paragraph.get("attack_steps"), list) else [])[:SUPPORT_LIMIT]
+    steps = []
+    for step in stored:
+        if (not isinstance(step, dict) or not isinstance(step.get("finding"), str) or not step["finding"]
+                or len(step["finding"]) > 512 or step.get("support") not in ATTACK_STEP_SUPPORT):
+            continue
+        if len(steps) == ATTACK_STEPS:
+            break
+        steps.append({"finding": step["finding"],
+                      **{key: step[key][:300] for key in ("rule_id", "title", "lane", "triage")
+                         if isinstance(step.get(key), str) and step[key]},
+                      "support": step["support"]})
+    more = paragraph.get("attack_steps_more")
+    more = (more if type(more) is int and 0 < more <= SUPPORT_LIMIT else 0) + len(stored) - len(steps)
+    return {**({"attack_steps": steps} if steps else {}), **({"attack_steps_more": more} if more > 0 else {})}
 
 
 def _ai_assessment(repo: Repo, hunt_id: str, *, stored_only: bool = False) -> dict | None:

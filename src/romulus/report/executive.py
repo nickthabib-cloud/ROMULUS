@@ -14,6 +14,10 @@ from romulus.report.markdown import (
     is_ranked,
     narrative_context_reason,
     narrative_heading,
+    narrative_muted,
+    narrative_step_label,
+    narrative_step_text,
+    narrative_steps_more,
     narrative_support,
     narrative_weak_reason,
     outcome_sentence,
@@ -113,13 +117,21 @@ def write(m, path, technical_name):
             paragraph(NARRATIVE_NOTE)
             for number, story in enumerate(assessment["narrative"], 1):
                 weak = narrative_weak_reason(story)
-                paragraph(f"{number}. {narrative_heading(story)}", bold=True, muted=bool(weak))
+                muted = narrative_muted(story)
+                paragraph(f"{number}. {narrative_heading(story)}", bold=True, muted=muted)
                 if weak:
                     paragraph(weak, muted=True)
                 if context := narrative_context_reason(story):
                     paragraph(context)
+                # each finding a context paragraph lifts out: bold and never muted
+                for step in story.get("attack_steps") or []:
+                    paragraph(f"{narrative_step_label(step)}: {narrative_step_text(step)} "
+                              f"(finding {step.get('finding')})", bold=True)
+                if more := narrative_steps_more(story):
+                    paragraph(more, bold=True)
+                # a sentence citing a lifted finding stays in full ink
                 for sentence in story["sentences"]:
-                    statement(sentence, muted=bool(weak))
+                    statement(sentence, muted=muted and not sentence.get("strong_support"))
                 if support := narrative_support(story):
                     paragraph(support, muted=True)
             if not assessment["narrative"]:
