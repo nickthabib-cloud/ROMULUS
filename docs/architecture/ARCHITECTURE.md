@@ -254,6 +254,14 @@ A resume clears the requests made before it claimed the hunt; one made after the
 - It then leaves the hunt partial and its agent interrupted, in one transaction. A sweep that had not finished is marked stopped, so a resume runs it again.
 - Hosts without `/proc` cannot verify a process, so they refuse a force stop.
 
+## Agent working context
+
+`agent/context.py`. An agent session's prompt is kept bounded however much it reads:
+- Every tool result is stored whole for the session (in memory, overflowing to a temporary file), with configured secrets removed, under a handle (`R<n>`). `get_result` re-reads it in pages without a source query.
+- A result larger than one page (at most 10,000 estimated tokens, or 5 % of a smaller context) enters the conversation as its envelope (status, counts, what to read next, the aliases it issued) and its first page.
+- Once the results the model has already been sent, older than the latest four, reach 48,000 estimated tokens, all of them are replaced at once by stubs: the tool, its arguments, status, counts, negative statement, cursor and next chunk, and every alias the result issued (aliases stay issued, so they stay citable). A stub carries no telemetry text and never changes once written. The model's own turns and the results of the tools that record its work are never compacted.
+- Between compactions the conversation only grows at its end, so the provider's prompt cache keeps reading its prefix. The call after a compaction is reserved against the budget as written to the cache.
+
 ## Dependency rules (enforced by `archmap.py --check`)
 
 - `web` and `cli` may import anything below them, but nothing imports `web` or `cli`.

@@ -180,6 +180,11 @@ CASES: dict[str, list[tuple[dict, bool]]] = {
         (window(source="logs-a", source_fields=["a"] * 51), False), (window(source="logs-a", extra=1), False),
         (window(source="logs-a", start="2024-11-18T10:00:00"), False),
     ],
+    "get_result": [
+        ({"handle": "R1"}, True), ({"handle": "R12", "page": 3}, True), ({"handle": "R1", "page": 0}, False),
+        ({"handle": "E1"}, False), ({"handle": "R0"}, False), ({"handle": "R" + "1" * 12}, False), ({}, False),
+        ({"handle": "R1", "extra": 1}, False),
+    ],
     "open_hypothesis": [
         ({"statement": "s" * 10}, True),
         ({"statement": "s" * 600, "techniques": ["T1059.001"] * 20, "entities": ["N1"] * 40,
