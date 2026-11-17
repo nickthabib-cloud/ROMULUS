@@ -27,6 +27,8 @@
           <a role="menuitem" href="/reports/{{ h.id }}/{{ head.latest_report.id }}.json">Report manifest (JSON), r{{ head.latest_report.revision }}</a>
           {% endif %}
           <a role="menuitem" href="{{ url(h.id) }}#reports">All report revisions</a>
+          <div class="sep"></div><div class="label-row">Run</div>
+          <a role="menuitem" href="{{ url(h.id, '/run') }}#controls">{% if head.live %}Stop hunt or agent, add agent budget…{% else %}Agent budget and controls…{% endif %}</a>
           {% if user.r == 'lead' and head.has_agent %}
           <div class="sep"></div><div class="label-row">AI agent</div>
           {% if head.reassess_refusal %}<span class="disabled" title="{{ head.reassess_refusal }}">Re-run assessment (unavailable)</span>

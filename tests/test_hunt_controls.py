@@ -326,7 +326,8 @@ def test_a_stop_after_the_sweep_skips_the_later_stages_and_names_them(tmp_path, 
     monkeypatch.setattr(hunt_run, "run_rank_pass", lambda *_a, **_k: None)
     watch = controls.StopWatch(repo, "h1", ("hunt",), ttl=0)
     packet, baseline, _expansion, stop = hunt_run._stages_after_sweep(s, repo, object(), "h1", None, {}, owner, watch)
-    assert stop["stage"] == "packet stage" and stop["not_run"] == ["packet stage", "baseline stage", "expansion"]
+    assert stop["stage"] == "packet stage"
+    assert stop["not_run"] == ["packet stage", "baseline stage", "expansion", "AI agent"]
     assert packet is None and baseline is None
     text = hunt_run.stopped_text(stop)
     assert "not run: packet stage, baseline stage, expansion, AI agent" in text and "partial" in text

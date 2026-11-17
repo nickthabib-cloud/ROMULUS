@@ -613,6 +613,9 @@ def _stage_status(repo, hunt_id: str, agent: dict) -> str:
             ).group_by(t.agent_hypothesis.c.status).order_by(t.agent_hypothesis.c.status))
             parts.append("hypotheses=" + (",".join(f"{status}:{count}" for status, count in counts) or "none"))
         parts.append(f"agent_findings={repo.agent_cap_count(hunt_id, 'agent_finding')}")
+    stop = repo.latest_stop(hunt_id)
+    if stop is not None and stop["state"] in ("requested", "honored", "forced"):
+        parts.append(f"stop={stop['scope']}:{stop['state']} by {stop['requested_by']}")
     return " ".join(parts)
 
 

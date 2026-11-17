@@ -421,7 +421,7 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
 
 def stopped_text(stopped: dict) -> str:
     """How a stop after the sweep reads in the hunt's stop reason and report."""
-    not_run = [*stopped.get("not_run", []), "AI agent"]
+    not_run = list(stopped.get("not_run", [])) or ["nothing further"]
     return (f"stopped by analyst ({stopped['detail']}) at the {stopped['stage']}: not run: {', '.join(not_run)}; "
             "these results are partial, and resuming the hunt runs what did not run")
 
@@ -437,8 +437,8 @@ def _stopped_in_sweep(repo: Repo, hunt_id: str, sweep, targets: list[str], start
     reason = (f"stopped by analyst ({stop.detail}) during the sweep" + (f" of {current}" if current else "")
               + ": partitions not yet read stay planned and were not evaluated"
               + (f"; sources not started: {', '.join(not_started)}" if not_started else "")
-              + "; no whole-window answer is complete, and the packet, baseline, expansion and AI agent stages did "
-                "not run. Resuming the hunt runs the sweep again")
+              + "; no whole-window answer is complete, and the stages after the sweep (packet, baseline, expansion "
+                "and any AI agent) did not run. Resuming the hunt runs the sweep again")
     summary = {"finished": False, "complete": False, "partial_reasons": [*sweep.partial_reasons, reason],
                "stats": sweep.stats, "stopped": {"detail": stop.detail, "stage": "sweep", "target": current,
                                                  "not_started": not_started}}
@@ -495,6 +495,8 @@ def _stages_after_sweep(s: Settings, repo: Repo, client: ElasticClient, hunt_id:
             stop = {"detail": expansion_summary["stopped"], "stage": "expansion"}
     run_rank_pass(repo, hunt_id, PASS_FINAL, owner_token=owner_token, heartbeat=heartbeat)
     if stop is not None:
+        if ((repo.get_hunt(hunt_id) or {}).get("manifest") or {}).get("ai_agent", {}).get("requested"):
+            not_run.append("AI agent")
         stop["not_run"] = not_run
     return packet_summary, baseline_summary, expansion_summary, stop
 
