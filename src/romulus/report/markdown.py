@@ -279,6 +279,9 @@ def _ai_agent_cell(m: dict) -> str:
     if others:
         text += "; answered by " + ", ".join(f"{r['model_reported']} ({r['calls']} calls, configured {r['model']})"
                                              for r in others)
+    if any(str(item).startswith("cap:source_queries:") for item in ai.get("limits_hit") or []):
+        text += ("; the investigation was budget-limited: source-query caps stopped some of its pivots, so what they "
+                 "did not search is unknown")
     fallbacks = (ai.get("usage") or {}).get("fallbacks") or {}
     if fallbacks.get("note"):
         text += "; " + fallbacks["note"]

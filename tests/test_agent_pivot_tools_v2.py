@@ -531,8 +531,8 @@ def test_agent_source_query_setting_is_loaded_and_injected():
         settings, repo, "h1", client=object(), contracts={}, session_id="session-1",
     )
 
-    assert Settings().agent_max_source_queries == 200
+    assert Settings().agent_max_source_queries == 2000
     assert settings.agent_max_source_queries == 17
     assert toolbox.executor.pivot.source_query_budget == 17
     assert toolbox.executor.pivot.source_query_scope == "agent"
-    assert "AGENT_MAX_SOURCE_QUERIES=200" in Path(".env.example").read_text(encoding="utf-8")
+    assert "AGENT_MAX_SOURCE_QUERIES=2000" in Path(".env.example").read_text(encoding="utf-8")

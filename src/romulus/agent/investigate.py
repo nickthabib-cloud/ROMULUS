@@ -1223,7 +1223,12 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
             reasons.append(f"template_error:{type(exc).__name__}")
         reasons.append(reason)
     limits_hit.update(item for session in all_sessions for item in session.get("limits_hit", []))
-    state = "failed" if assessment_fault else "partial" if limits_hit or reasons or assessment is None else "completed"
+    # each hunt-total or session-share source-query cap a pivot reached (persisted, so a resume keeps it): the
+    # investigation was budget-limited. Per-call caps are routine and counted on the run page only.
+    caps = getattr(repo, "agent_source_query_caps", None)
+    if caps is not None:
+        limits_hit.update(f"cap:source_queries:{kind}" for kind in caps(hunt_id, limiting_only=True))
+    state ="failed" if assessment_fault else "partial" if limits_hit or reasons or assessment is None else "completed"
     if consecutive_outages >= 2 and not assessment_fault:
         state = "partial"
     reason = "; ".join(dict.fromkeys([*sorted(limits_hit), *reasons])) or None

@@ -446,6 +446,12 @@ TRIAGE_FAILED = "hunt.ai_triage_failed"
 AGENT_MODEL_FORCED = "hunt.agent_model_forced"
 # Each secret-guard trip of an agent session: the setting, the part of the reply and the session (never a value).
 SECRET_GUARD_ACTION = "agent.secret_guard_tripped"
+# The AI agent's hunt-total and session-share source-query caps. Reaching either one means some leads could not be
+# followed at all, so they limit the investigation. The per-call slice and per-source caps are routine on dense
+# sources (a later call or a narrower window reads on); they are counted on the run page only.
+AGENT_HUNT_BUDGET_CAP = "agent_source_query_budget"
+AGENT_SESSION_SHARE_CAP = "agent_session_source_query_share"
+AGENT_LIMITING_CAPS = (AGENT_HUNT_BUDGET_CAP, AGENT_SESSION_SHARE_CAP)
 # A secret's setting as the agent's counts name it (an environment name), and how many distinct names are kept.
 SECRET_SETTING_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 SECRET_NAMES_KEPT = 32
@@ -1619,9 +1625,41 @@ class Repo:
                 t.audit_event.c.action == "agent.source_query",
             )).scalar_one())
 
+    def agent_purpose_source_queries(self, hunt_id: str, purpose: str) -> int:
+        """Durable source-call spend of every AI-agent session of one purpose (orient, investigate) in this hunt,
+        across resumes. A reservation recorded without its purpose (by an older build) counts toward the purpose of the
+        session whose pivot task it was spent on; one that names no such task counts toward no purpose, and the hunt
+        total still bounds it."""
+        detail = t.audit_event.c.detail
+        session_purpose = select(t.agent_session.c.purpose).select_from(
+            t.task.join(t.agent_session, t.agent_session.c.id == t.task.c.owner),
+        ).where(
+            t.task.c.id == func.json_extract(detail, "$.task_id"), t.task.c.hunt_id == hunt_id,
+        ).limit(1).scalar_subquery()
+        with self.engine.connect() as c:
+            return int(c.execute(select(func.count()).select_from(t.audit_event).where(
+                t.audit_event.c.hunt_id == hunt_id,
+                t.audit_event.c.action == "agent.source_query",
+                or_(func.json_extract(detail, "$.purpose") == purpose,
+                    and_(func.json_extract(detail, "$.purpose").is_(None), session_purpose == purpose)),
+            )).scalar_one())
+
+    def agent_source_query_caps(self, hunt_id: str, *, limiting_only: bool = False) -> dict[str, int]:
+        """How many AI-agent tool calls each source-query cap (hunt total, session share, call slice, source share)
+        stopped; with `limiting_only`, only the caps that limit the investigation (`AGENT_LIMITING_CAPS`)."""
+        cap = func.json_extract(t.audit_event.c.detail, "$.cap")
+        with self.engine.connect() as c:
+            rows = c.execute(select(cap, func.count()).where(
+                t.audit_event.c.hunt_id == hunt_id, t.audit_event.c.action == "agent.source_query_cap",
+            ).group_by(cap)).all()
+        return {str(kind): int(count) for kind, count in rows
+                if kind and (not limiting_only or kind in AGENT_LIMITING_CAPS)}
+
     def reserve_agent_source_query(self, hunt_id: str, limit: int, task_id: str | None,
-                                   *, owner_token: str | None = None) -> int | None:
-        """Atomically reserve one query under the per-hunt AI-agent cap; return new spend or None."""
+                                   *, owner_token: str | None = None, session_id: str | None = None,
+                                   purpose: str | None = None) -> int | None:
+        """Atomically reserve one query under the per-hunt AI-agent cap; return new spend or None. The reservation
+        names the session and its purpose, so a session's share is derived from persisted spend."""
         with write_txn(self.engine) as c:
             self._fence_agent_lease(c, hunt_id, owner_token)
             used = int(c.execute(select(func.count()).select_from(t.audit_event).where(
@@ -1634,9 +1672,13 @@ class Repo:
                 c.execute(t.task.update().where(
                     t.task.c.id == task_id, t.task.c.hunt_id == hunt_id,
                 ).values(source_queries=t.task.c.source_queries + 1, updated_at=utcnow()))
+            detail = {"task_id": task_id, "ordinal": used + 1, "limit": limit}
+            if session_id is not None:
+                detail["session_id"] = session_id
+            if purpose is not None:
+                detail["purpose"] = purpose
             c.execute(t.audit_event.insert().values(
-                at=utcnow(), actor="system", action="agent.source_query", hunt_id=hunt_id,
-                detail={"task_id": task_id, "ordinal": used + 1, "limit": limit},
+                at=utcnow(), actor="system", action="agent.source_query", hunt_id=hunt_id, detail=detail,
             ))
             return used + 1
 
@@ -5957,6 +5999,13 @@ class Repo:
                                              t.agent_hypothesis.c.sessions_run - 1), else_=0),
                          updated_at=utcnow()))
             return True
+
+    def agent_session(self, hunt_id: str, session_id: str) -> dict | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(select(t.agent_session).where(
+                t.agent_session.c.hunt_id == hunt_id, t.agent_session.c.id == session_id,
+            )).mappings().first()
+            return dict(row) if row else None
 
     def agent_sessions(self, hunt_id: str, *, hypothesis_id: str | None = None,
                        purpose: str | None = None) -> list[dict]:

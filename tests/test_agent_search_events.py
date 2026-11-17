@@ -467,13 +467,15 @@ def test_records_no_normalizer_reads_are_named_not_dropped():
     assert response["data"]["result"]["search"]["negative"] == "unresolved"
 
 
-def test_a_spent_query_budget_is_a_partial_unresolved_search():
+def test_a_spent_query_budget_is_a_failed_unresolved_search_without_tasks():
     repo, client = _hunt(), FakeES({"net-a": []})
     response = _search(_toolbox(repo, {"net-a": _keyword_contract("net-a")}, client, budget=0), DNS)
-    assert response["status"] == "partial"
+    # nothing was searched: failed, with the cap's reason, and never zero hits
+    assert response["status"] == "failed"
     assert response["data"]["result"]["search"]["negative"] == "unresolved"
     assert "agent_source_query_budget:0" in response["data"]["result"]["reasons"]
     assert client.bodies == []
+    assert repo.tasks("h1") == []
 
 
 def test_cap_plus_one_spread_over_the_window_is_resolved_by_partitioning(monkeypatch):
@@ -705,7 +707,8 @@ def test_each_search_spends_the_hunt_source_query_budget():
     first = _search(toolbox, ABSENT)
     second = _search(toolbox, [{"field": "destination.ip", "op": "eq", "values": ["192.0.2.98"]}])
     assert first["status"] == "complete" and first["data"]["result"]["search"]["negative"] == "unresolved"
-    assert second["status"] == "partial"
+    # nothing was left to search: failed, never a confirmed absence
+    assert second["status"] == "failed"
     assert second["data"]["result"]["search"]["negative"] == "unresolved"
     assert repo.agent_source_queries("h1") == 1
 
