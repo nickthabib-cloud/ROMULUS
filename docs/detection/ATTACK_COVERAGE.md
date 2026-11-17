@@ -33,7 +33,7 @@ A technique is covered only by a rule that explicitly declares that ATT&CK id.
 | TA0004 | Privilege Escalation | 45 / 96 | 0 | 44 | 1 | 51 |
 | TA0005 | Stealth | 45 / 151 | 0 | 44 | 1 | 106 |
 | TA0006 | Credential Access | 24 / 68 | 0 | 19 | 5 | 44 |
-| TA0007 | Discovery | 23 / 49 | 2 | 14 | 7 | 26 |
+| TA0007 | Discovery | 22 / 49 | 2 | 13 | 7 | 27 |
 | TA0008 | Lateral Movement | 10 / 23 | 0 | 10 | 0 | 13 |
 | TA0009 | Collection | 3 / 41 | 0 | 1 | 2 | 38 |
 | TA0010 | Exfiltration | 7 / 20 | 2 | 5 | 0 | 13 |
@@ -356,7 +356,7 @@ A technique is covered only by a rule that explicitly declares that ATT&CK id.
 | [`T1135`](https://attack.mitre.org/techniques/T1135/) | Network Share Discovery | — | positive-only | [context.post_access_discovery](#rule-context-post-access-discovery) (context-only)<br>[net.rpc_host_enumeration_fanout](#rule-net-rpc-host-enumeration-fanout) (positive-only)<br>[net.rpc_host_enumeration_slow_fanout](#rule-net-rpc-host-enumeration-slow-fanout) (positive-only)<br>[net.zeek_alert](#rule-net-zeek-alert) (positive-only)<br>[win.new_server_share](#rule-win-new-server-share) (positive-only)<br>[win.share_created](#rule-win-share-created) (positive-only)<br>[win.smb_host_discovery](#rule-win-smb-host-discovery) (positive-only) | net_alert<br>net_socket<br>process_exec<br>registry_change<br>rpc_tx<br>share_change |
 | [`T1201`](https://attack.mitre.org/techniques/T1201/) | Password Policy Discovery | — | context-only | [context.post_access_discovery](#rule-context-post-access-discovery) (context-only) | process_exec |
 | [`T1217`](https://attack.mitre.org/techniques/T1217/) | Browser Information Discovery | — | none | — | — |
-| [`T1482`](https://attack.mitre.org/techniques/T1482/) | Domain Trust Discovery | — | positive-only | [net.ldap_bulk_response](#rule-net-ldap-bulk-response) (positive-only) | net_flow |
+| [`T1482`](https://attack.mitre.org/techniques/T1482/) | Domain Trust Discovery | — | none | — | — |
 | [`T1497`](https://attack.mitre.org/techniques/T1497/) | Virtualization/Sandbox Evasion | [`T1497.001`](https://attack.mitre.org/techniques/T1497/001/) System Checks — not covered<br>[`T1497.002`](https://attack.mitre.org/techniques/T1497/002/) User Activity Based Checks — not covered<br>[`T1497.003`](https://attack.mitre.org/techniques/T1497/003/) Time Based Checks — not covered | none | — | — |
 | [`T1518`](https://attack.mitre.org/techniques/T1518/) | Software Discovery | [`T1518.001`](https://attack.mitre.org/techniques/T1518/001/) Security Software Discovery — not covered<br>[`T1518.002`](https://attack.mitre.org/techniques/T1518/002/) Backup Software Discovery — not covered | context-only | [context.post_access_discovery](#rule-context-post-access-discovery) (context-only) | process_exec |
 | [`T1526`](https://attack.mitre.org/techniques/T1526/) | Cloud Service Discovery | — | none | — | — |
@@ -800,7 +800,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1021.001`](https://attack.mitre.org/techniques/T1021/001/), [`T1021.002`](https://attack.mitre.org/techniques/T1021/002/), [`T1021.003`](https://attack.mitre.org/techniques/T1021/003/), [`T1021.004`](https://attack.mitre.org/techniques/T1021/004/), [`T1021.006`](https://attack.mitre.org/techniques/T1021/006/)
 - Telemetry families: net_flow
-- Required typed fields: destination.ip<br>destination.port<br>network.transport<br>source.ip
+- Required typed fields: conn.history<br>destination.ip<br>destination.port<br>flow.bytes_toclient<br>flow.bytes_toserver<br>network.transport<br>source.ip
 - Behavior: an internal source's answered connection to an internal host's remote-administration service (SSH, RDP, WinRM, SMB, RPC endpoint mapper) that the frozen history never shows from that source
 - Positive-only reason: remote-administration baselines publish positive deviations only: a pair absent from the window is not shown absent from the network
 
@@ -1535,7 +1535,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 ### `net.epm_dynamic_rpc` — An RPC endpoint-mapper connection followed by a high-port connection to the same host
 
 - Version: `1`; status: `active`
-- Kind: `aggregate`; lane: `lead`; severity: `medium`
+- Kind: `aggregate`; lane: `lead`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1021.003`](https://attack.mitre.org/techniques/T1021/003/), [`T1047`](https://attack.mitre.org/techniques/T1047/), [`T1053.005`](https://attack.mitre.org/techniques/T1053/005/), [`T1569.002`](https://attack.mitre.org/techniques/T1569/002/)
 - Telemetry families: net_flow
@@ -1656,7 +1656,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 - Version: `1`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
-- ATT&CK: [`T1018`](https://attack.mitre.org/techniques/T1018/), [`T1069.002`](https://attack.mitre.org/techniques/T1069/002/), [`T1087.002`](https://attack.mitre.org/techniques/T1087/002/), [`T1482`](https://attack.mitre.org/techniques/T1482/)
+- ATT&CK: [`T1018`](https://attack.mitre.org/techniques/T1018/), [`T1069.002`](https://attack.mitre.org/techniques/T1069/002/), [`T1087.002`](https://attack.mitre.org/techniques/T1087/002/)
 - Telemetry families: net_flow
 - Required typed fields: destination.ip<br>destination.port<br>network.transport<br>source.ip
 - Behavior: A directory-service connection returned a bulk volume of data to one client

@@ -28,6 +28,10 @@ UNKNOWN_REASON = "text line in no recognized format: custom.unknown"
 # citations are unchanged (`test_the_text_stack_candidates_moved_only_by_rule_versions`). Evidence epoch 18
 # rehashes the event ids (candidates 75b41997... at epoch 17); the rule cells add the SMB impact and service
 # catalog rules (not applicable here).
+# The connection-level remote-administration, RPC, Kerberos and directory rules and the remote-administration pair
+# baseline add rule cells and tasks (not applicable or unmatched here), rule cards in the manifest, the sixth
+# baseline spec in the snapshot plan and window hours, and the audit that records them; candidates, events,
+# links, citations and the non-baseline semantic projection are unchanged.
 GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a6dadaa59988bdf81e',
  'audit': '187b82e390f110430b5cc85ed691d2c627995a6ff19c1a5b6cb4a1ca87aa375a',
  'baseline_counts': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',

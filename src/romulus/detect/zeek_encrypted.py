@@ -12,7 +12,8 @@ These rules read only those typed facts:
   and silent hosts (the sweeps ``net.horizontal_sweep`` counts) are never members.
 - ``net.epm_dynamic_rpc``: a connection to the RPC endpoint mapper (135/tcp) and, within thirty seconds after it, a
   connection from the same source to the same host on a high port: the client asks the mapper where an interface
-  listens and then binds to it, the shape of DCOM, WMI, remote task scheduling and other MS-RPC over TCP.
+  listens and then binds to it, the shape of DCOM, WMI, remote task scheduling and other MS-RPC over TCP. Declared
+  domain controllers are never destinations, so this shape toward a controller is not judged here.
 - ``net.kerberos_service_ticket_fanout``: TGS exchanges for many distinct services from one source and client,
   whatever the ticket's encryption type (``net.kerberos_rc4_service_fanout`` counts the RC4 ones).
 - ``net.ldap_bulk_response``: one directory-service connection on which the server sent a bulk volume of data to a
@@ -70,13 +71,10 @@ RPC_SERVICES = frozenset({'dce_rpc', 'gssapi', 'ntlm', 'krb', 'krb_tcp'})
 EPM_FOLLOW = timedelta(seconds=30)
 # A member's logon, Group Policy processing and name lookups return kilobytes to tens of kilobytes per LDAP
 # connection. A search result entry with a tool's attribute set is roughly 1-4 KB, so five million bytes on one
-# connection is thousands of directory objects returned to one client: a bulk read of users, groups, computers or
-# trusts, two orders of magnitude above routine member traffic on any size of domain.
+# connection is thousands of directory objects returned to one client: a bulk read of users, groups or computers,
+# far above routine member traffic. A domain with fewer objects than that cannot produce it, and a reader that splits
+# its reads across many connections stays under it on each.
 LDAP_BULK_BYTES = 5_000_000
-# A repeat connection between the same source and destination adds no destination to a fan-out count. One within a
-# minute of a stored connection of the pair is not stored again, which keeps a domain member's many endpoint-mapper
-# and SMB reconnects to its own servers out of the window state; counts stay true lower bounds.
-REPEAT_SECONDS = 60
 
 
 def _networks(rule):
@@ -138,12 +136,12 @@ class _ConnFanout(ZeekWindowRule):
     uses_site_facts = True
     direction_dependent = True
     severity = 'high'
-    distinct = True
+    state_slice = 'routine'
+    distinct, thin_members = True, True
     ports: ClassVar[dict[int, str]] = {}
     span_words = ''
     research: ClassVar[tuple[str, ...]] = (_CONN_DOC,)
     adds = ''
-    RECENT_HOT = HOT_COUNT
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -159,7 +157,8 @@ class _ConnFanout(ZeekWindowRule):
                              'and both sides sending payload. The payload is not read; a connection is not a logon, '
                              'a command or a successful authentication'),
                 'benign_and_cost': '; '.join(cls.benign) + '. One finding per source, revised in place',
-                'query_cost': 'One conn sweep; selected connections are held in the disk-backed window state',
+                'query_cost': ('One conn sweep; selected connections are held in the disk-backed window state, '
+                               'repeats of one source and destination thinned losslessly to about one per window'),
                 'next_pivot': '; '.join(cls.next_checks),
                 'adds': cls.adds,
                 'research_basis': '; '.join(cls.research),
@@ -171,49 +170,43 @@ class _ConnFanout(ZeekWindowRule):
                 'window': f'{cls.threshold} distinct internal destinations within {cls.span_words}',
             }
 
-    def __init__(self):
-        super().__init__()
-        self.recent = KeyedStore(self, 'fanout_recent', self.RECENT_HOT)
-
-    def consume(self, events):
-        try:
-            yield from super().consume(events)
-        finally:
-            self.recent.trim()              # a batch has ended: pairs beyond the hot set go to disk
-
-    def release_state(self):
-        self.recent.clear()
-        super().release_state()
-
-    def select(self, event):
+    def _peers(self, event):
+        """(source, destination) of an opened TCP connection to a counted port, else None; reads typed fields only."""
         if not _conn_record(event) or event.get('network.transport') != 'tcp':
             return None
-        port = _count(event.get('destination.port'))
-        if port not in self.ports:
+        if _count(event.get('destination.port')) not in self.ports:
             return None
         source, destination = _address(event.get('source.ip')), _address(event.get('destination.ip'))
-        if source is None or destination is None or source == destination:
+        return None if source is None or destination is None or source == destination else (source, destination)
+
+    def skipped(self, source, destination):
+        return False
+
+    def live_select(self, event):
+        # Coverage counting happens only for records read live, never for a restored witness.
+        peers = self._peers(event)
+        if peers is not None:
+            answered, decided = _exchange(event)
+            if not decided:
+                _undecided(self, 'conn_exchange', 'Connections to the counted ports without a recorded Zeek history '
+                                                  'or payload byte counts were not judged.')
+                return None
+            if answered:
+                assume_direction(self)
+        return self.select(event)
+
+    def select(self, event):
+        peers = self._peers(event)
+        if peers is None:
             return None
         answered, decided = _exchange(event)
-        if not decided:
-            _undecided(self, 'conn_exchange', 'Connections to the counted ports without a recorded Zeek history or '
-                                              'payload byte counts were not judged.')
+        if not (answered and decided):
             return None
-        if not answered:
-            return None
+        source, destination = peers
         networks = _networks(self)
-        assume_direction(self)
-        if not (networks.is_internal(source) and networks.is_internal(destination)):
+        if not (networks.is_internal(source) and networks.is_internal(destination)) or self.skipped(source,
+                                                                                                     destination):
             return None
-        controllers = getattr(_site(self), 'domain_controller_addresses', ())
-        if controllers and address_member(str(source), controllers) and address_member(str(destination), controllers):
-            return None             # declared controllers replicating and calling each other
-        pair, stamp = (str(source), str(destination)), event.ts.timestamp()
-        stored = self.recent.get(pair)
-        if stored is not None and 0 <= stamp - stored < REPEAT_SECONDS:
-            return None
-        # a refused put only costs the saving: the connection is still counted
-        self.recent.put(pair, stamp if stored is None else max(stored, stamp))
         return (str(source),), str(destination), 'attempt'
 
     def describe(self, event, total_refs, distinct_members, role):
@@ -223,12 +216,16 @@ class _ConnFanout(ZeekWindowRule):
             'A counted connection is one Zeek shows the source opening, with payload from both sides; refused '
             'attempts and SYN-only probes are not counted.',
             'The payload was not read: these are connections, not logons, commands or successful authentication.',
-            'A repeat connection of a pair within a minute of a stored one is not stored again; counts are lower '
-            'bounds.',
+            'Repeat connections of one source and destination are thinned without changing any window\'s distinct '
+            'hosts; the raw-reference count is a lower bound.',
             *_notes_for_source(self, source, _networks(self)),
         ]
+        if not getattr(_site(self), 'domain_controller_addresses', ()):
+            notes.append('domain controller addresses are not declared: connections a member makes to its controllers '
+                         'are counted like any other host')
         return 'lead', (f'Source {source} opened answered {services} connections to at least {distinct_members} '
-                        f'distinct internal hosts within {self.span_words} ({total_refs} raw references).'), tuple(notes)
+                        f'distinct internal hosts within {self.span_words} (at least {total_refs} raw references).'), \
+            tuple(notes)
 
 
 class RemoteShellFanout(_ConnFanout):
@@ -272,6 +269,12 @@ class SmbRpcFanout(_ConnFanout):
             'answered connections, across SMB and the endpoint mapper together, so encrypted SMB 3 and sealed RPC '
             'are counted')
 
+    def skipped(self, source, destination):
+        # declared controllers replicate and call each other over SMB and RPC all day
+        controllers = getattr(_site(self), 'domain_controller_addresses', ())
+        return bool(controllers) and address_member(str(source), controllers) and address_member(str(destination),
+                                                                                                 controllers)
+
 
 class KerberosServiceTicketFanout(ZeekWindowRule):
     id = 'net.kerberos_service_ticket_fanout'
@@ -283,6 +286,8 @@ class KerberosServiceTicketFanout(ZeekWindowRule):
                        'kerberos.cipher', 'auth.encryption_type', 'kerberos.success', 'auth.status')
     uses_site_facts = True
     severity = 'high'
+    state_slice = 'routine'
+    thin_members = True
     # One principal's logon asks for a handful of service tickets (directory, SYSVOL, its file and print servers);
     # Kerberoasting asks for every account with a service name at once. Ten distinct services within five minutes
     # per source and client is the same breadth the Windows ticket-record rule uses, independent of domain size.
@@ -296,15 +301,19 @@ class KerberosServiceTicketFanout(ZeekWindowRule):
     research = (_KRB_DOC, 'ATT&CK Enterprise 20.0 T1558.003',
                 'https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-kile/')
 
+    def live_select(self, event):
+        if (rule_reads(event, self.producers) and str(event.get('kerberos.request_type')).strip().upper() == 'TGS'
+                and _address(event.get('source.ip')) is not None and _service(event.get('kerberos.service')) is None):
+            _undecided(self, 'kerberos_service', 'TGS records without a recorded service name were not judged.')
+            return None
+        return self.select(event)
+
     def select(self, event):
         if not rule_reads(event, self.producers) or str(event.get('kerberos.request_type')).strip().upper() != 'TGS':
             return None
         source = _address(event.get('source.ip'))
         service = _service(event.get('kerberos.service'))
-        if source is None:
-            return None
-        if service is None:
-            _undecided(self, 'kerberos_service', 'TGS records without a recorded service name were not judged.')
+        if source is None or service is None:
             return None
         if service.split('/', 1)[0] in {'krbtgt', 'kadmin'}:
             return None
@@ -318,11 +327,13 @@ class KerberosServiceTicketFanout(ZeekWindowRule):
             'Ticket-granting (krbtgt) referrals and password-change (kadmin) exchanges are not counted.',
             'The exchanges are observed; the claim counts requests and does not state that every ticket was issued.',
             'The ten-in-five-minutes breadth is a review heuristic, not proof of offline cracking.',
+            'Repeat exchanges for one service are thinned without changing any window\'s distinct services; the '
+            'raw-reference count is a lower bound.',
         ]
         if address_member(event.get('source.ip'), getattr(_site(self), 'management_hosts', ())):
             notes.append('declared management source; authorized administration can request many service tickets')
         return 'lead', (f'Source {event.get("source.ip")}{who} had TGS exchanges for at least {distinct_members} '
-                        f'distinct services within five minutes ({total_refs} raw references).'), tuple(notes)
+                        f'distinct services within five minutes (at least {total_refs} raw references).'), tuple(notes)
 
 
 KerberosServiceTicketFanout.card = {
@@ -332,7 +343,8 @@ KerberosServiceTicketFanout.card = {
     'fidelity': ('Aggregate of observed TGS exchanges, keyed by source address and client principal; service names '
                  'are compared case-folded without their realm. Any ticket encryption type'),
     'benign_and_cost': '; '.join(KerberosServiceTicketFanout.benign) + '. One finding per source and client',
-    'query_cost': 'One kerberos sweep; TGS rows held in the disk-backed window state',
+    'query_cost': ('One kerberos sweep; TGS rows held in the disk-backed window state, repeats of one service '
+                   'thinned losslessly to about one per window'),
     'next_pivot': '; '.join(KerberosServiceTicketFanout.next_checks),
     'adds': ('net.kerberos_rc4_service_fanout counts RC4 tickets only; tools that ask for AES tickets, or accounts '
              'that only have AES keys, are counted here'),
@@ -364,6 +376,8 @@ class EpmDynamicRpc(ZeekBehaviorRule):
     id = 'net.epm_dynamic_rpc'
     title = 'An RPC endpoint-mapper connection followed by a high-port connection to the same host'
     version = '1'
+    severity = 'high'
+    state_slice = 'routine'
     families = ('net_flow',)
     required_fields = _CONN_REQUIRED
     uses_site_facts = True
@@ -371,7 +385,8 @@ class EpmDynamicRpc(ZeekBehaviorRule):
     attack = ('T1021.003', 'T1047', 'T1053.005', 'T1569.002')
     benign = ('Domain members calling domain controllers (Netlogon, LSA, SAM); declare the controllers so these are '
               'not reported', 'Certificate enrollment, DFS replication, backup and management consoles calling '
-              'their servers')
+              'their servers', 'A WMI or DCOM management server or scanner polling every client: one finding for '
+              'that source, listing its destinations')
     next_checks = ('Processes started on the destination at this time (WMI provider host, DCOM-activated '
                    'applications, the task scheduler, the service control manager)',
                    'Logons to the destination from the source (network logon type 3)',
@@ -388,6 +403,15 @@ class EpmDynamicRpc(ZeekBehaviorRule):
 
     def consume(self, events):
         return super().consume([event for event in events if _conn_record(event)])
+
+    def _offer_group_example(self, group, event, hit, *, new_host):
+        # the mapper connection is part of the claim: its record is held and staged with the high-port one
+        offered = group.examples.offer(event)
+        for item in hit.context:
+            if group.examples.offer(item):
+                self._pending.append(item)
+                self._fresh.append(group.examples)
+        return offered
 
     def judge(self, event):
         if event.get('network.transport') != 'tcp':
@@ -445,12 +469,12 @@ class EpmDynamicRpc(ZeekBehaviorRule):
                   'high-port connection.']
         text = (f'Endpoint-mapper connection from {source} to {destination} at {mapper.ts.isoformat()} followed '
                 f'{delay:.3f} s later by an answered connection to port {port}')
-        common = (f'Endpoint-mapper connections to {destination} followed within {int(EPM_FOLLOW.total_seconds())} s '
-                  'by an answered high-port connection from the same source; the cited records name each source')
+        common = (f'Endpoint-mapper connections from {source} followed within {int(EPM_FOLLOW.total_seconds())} s '
+                  'by an answered high-port connection to the same host; the cited records name each destination')
         fields = (*_CONN_REQUIRED, 'conn.history', 'tcp.opened_by_orig', 'flow.bytes_toserver', 'flow.bytes_toclient',
                   'network.protocols', 'zeek.uid')
         hit = signal(event, self.id, text, self.attack, fields, lane='lead', severity='high', notes=tuple(notes),
-                     common=common, content=json.dumps([str(destination), 'epm-dynamic']))
+                     common=common, content=json.dumps([str(source), 'epm-dynamic']))
         hit.context = [mapper]
         return [hit]
 
@@ -462,7 +486,7 @@ EpmDynamicRpc.card.update(
     fidelity=('Sequence of two answered connections (the source opened each, both sides sent payload) between the '
               'same pair, the high-port one starting 0-30 s after the mapper one. The payload is not read: the RPC '
               'interface, the operation and any execution are not established'),
-    benign_and_cost='; '.join(EpmDynamicRpc.benign) + '. One finding per destination, listing its sources',
+    benign_and_cost='; '.join(EpmDynamicRpc.benign) + '. One finding per source, listing its destinations',
     adds=('net.rpc_remote_admin_call and net.rpc_coercion_call need Zeek\'s DCE-RPC analyzer to name the operation; '
           'this shape is visible when the calls are sealed or the analyzer did not run'),
     research_basis='; '.join(EpmDynamicRpc.research),
@@ -471,7 +495,11 @@ EpmDynamicRpc.card.update(
     lanes=('Lead: DCOM, WMI and remote task scheduling look the same as management consoles and certificate '
            'enrollment on the wire; declared domain controllers are not destinations; severity high because remote '
            'execution is high impact'),
-    window='the high-port connection starts 0-30 s after the endpoint-mapper connection',
+    window=('the high-port connection starts 0-30 s after the endpoint-mapper connection. Records are paired in '
+            'time order within a batch and across batches read in time order; a high-port connection read in an '
+            'earlier batch than its mapper connection is not paired'),
+    blind_spot=('declared domain controllers are never destinations: DCOM or WMI toward a controller is left to the '
+                'decoded RPC rules and host telemetry'),
 )
 
 
@@ -479,17 +507,19 @@ class LdapBulkResponse(ZeekBehaviorRule):
     id = 'net.ldap_bulk_response'
     title = 'A directory-service connection returned a bulk volume of data to one client'
     version = '1'
+    state_slice = 'routine'
     families = ('net_flow',)
     required_fields = _CONN_REQUIRED
     uses_site_facts = True
-    attack = ('T1087.002', 'T1069.002', 'T1482', 'T1018')
+    # a bulk-read signal: trust enumeration (T1482) is a few small queries and is not distinguished on the wire
+    attack = ('T1087.002', 'T1069.002', 'T1018')
     benign = ('Identity synchronization, provisioning and HR connectors, mail and collaboration servers, and '
               'inventory tools that read the directory in bulk',
               'Administrators exporting the directory')
     next_checks = ('The process on the client that held the connection (directory collectors and snapshot tools)',
                    'Kerberos service-ticket and LDAP query records from the same client',
                    'Whether the client is a declared directory-sync or management host')
-    research = (_CONN_DOC, 'ATT&CK Enterprise 20.0 T1087.002, T1069.002, T1482, T1018',
+    research = (_CONN_DOC, 'ATT&CK Enterprise 20.0 T1087.002, T1069.002, T1018',
                 'https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-adts/',
                 _SERVICE_PORTS_DOC)
 
@@ -548,7 +578,9 @@ LdapBulkResponse.card.update(
               'are not established'),
     benign_and_cost='; '.join(LdapBulkResponse.benign) + '. One finding per client, listing its servers',
     adds=('Zeek\'s ldap logs name searches only when LDAP is unsealed; this volume shape holds for sealed LDAP and '
-          'LDAPS. First-time directory access per client needs a history baseline and is not judged here'),
+          'LDAPS. First-time directory access per client needs a history baseline and is not judged here. A reader '
+          'that splits its reads across many smaller connections, or a domain with too few objects, stays under the '
+          'per-connection volume'),
     research_basis='; '.join(LdapBulkResponse.research),
     retrieval=('The sweep retrieves every conn record of the network targets; directory connections without history '
                'or server byte counts are counted as unevaluated'),

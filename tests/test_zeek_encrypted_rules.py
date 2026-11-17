@@ -155,46 +155,106 @@ def test_missing_ports_are_unevaluated():
     assert matches == [] and rule.missing_required == 6
 
 
-def test_repeat_connections_of_a_pair_within_a_minute_are_stored_once_and_still_counted():
+def _history(rule):
+    return rule.rows.store().db.execute('SELECT COUNT(*) FROM history').fetchone()[0]
+
+
+def test_repeats_of_a_pair_are_stored_about_once_per_window_and_still_counted():
     rows = [conn(n, f'10.2.0.{n % 4 + 1}', 22, ts=n * 0.5) for n in range(400)]       # 4 hosts, 200 s
     rule = RemoteShellFanout()
     rule.site_facts = facts()
     try:
         matches = run(rule, [[event] for event in events(rows, 'plain')])
-        stored = rule.rows.store().db.execute('SELECT COUNT(*) FROM history').fetchone()[0]
+        stored = _history(rule)
     finally:
         rule.release_state()
-    assert lanes(matches) == ['lead'] and stored == 16                                    # one per pair per minute
+    assert lanes(matches) == ['lead'] and stored == 8                 # each pair's first and last connection
+    assert 'lower bound' in ' '.join(matches[0].notes) and 'at least' in matches[0].claim
 
 
-def test_the_repeat_store_spills_to_disk_without_refusals_or_a_different_result():
-    class Tiny(RemoteShellFanout):
-        RECENT_HOT = 2
-    rows = [conn(n, f'10.2.{n % 40}.{n % 7 + 1}', 22, src=f'10.8.0.{n % 30}', ts=n * 3.0) for n in range(600)]
-    rows += shells(5)
+@pytest.mark.parametrize('second', [50.0, 61.0])
+def test_a_member_seen_only_by_a_repeat_late_in_the_window_still_counts(second):
+    rows = [conn(0, '10.2.0.2', 22, ts=0.0), conn(1, '10.2.0.2', 22, ts=second), conn(2, '10.2.0.3', 22, ts=640.0),
+            conn(3, '10.2.0.4', 22, ts=645.0), conn(4, '10.2.0.5', 22, ts=649.0)]
+    matches, rule = evaluate(RemoteShellFanout, rows)
+    assert lanes(matches) == ['lead'] and 'at least 4 distinct' in matches[0].claim
+    assert rule.capped == 0 and not rule.limits
+
+
+class _Unthinned(RemoteShellFanout):
+    thin_members = False
+
+
+class _TinyHot(RemoteShellFanout):
+    thin_hot = 2
+
+
+def _peaks(cls, batches):
+    rule = cls()
+    rule.site_facts = facts()
+    try:
+        matches = run(rule, batches)
+        assert rule.capped == 0 and not rule.limits, (cls, rule.limits)
+        out = sorted((m.proposed_lane, m.aggregate_summary['peak'], m.aggregate_summary['distinct_members'],
+                      m.aggregate_summary['episodes'], m.aggregate_summary['first'], m.aggregate_summary['last'])
+                     for m in matches)
+        return out, _history(rule), (rule.thinned.on_disk if rule.thinned is not None else 0)
+    finally:
+        rule.release_state()
+
+
+def test_thinning_is_lossless_against_the_unthinned_window_and_spills_to_disk():
+    import random
+    generator = random.Random(7)
+    stamp, rows = 0.0, []
+    for n in range(1500):
+        stamp += generator.choice((0.5, 3.0, 40.0, 200.0, 590.0, 610.0, 1300.0))
+        rows.append(conn(n, f'10.2.0.{generator.randrange(1, 9)}', 22, src=f'10.8.0.{generator.randrange(1, 4)}',
+                         ts=stamp))
     observations = events(rows, 'plain')
-    batches = [observations[i:i + 25] for i in range(0, len(observations), 25)]
-    results = []
-    for cls in (RemoteShellFanout, Tiny):
-        rule = cls()
+    batches = [observations[i:i + 50] for i in range(0, len(observations), 50)]
+    exact, unthinned_rows, _ = _peaks(_Unthinned, batches)
+    thinned, thinned_rows, _ = _peaks(RemoteShellFanout, batches)
+    tiny, _rows, on_disk = _peaks(_TinyHot, batches)
+    assert exact and thinned == exact == tiny
+    assert thinned_rows < unthinned_rows and on_disk > 0
+
+
+def test_a_resumed_rule_restores_its_witnesses_without_changing_counts_or_coverage():
+    observations = events([conn(n, f'10.2.0.{n + 1}', 22, ts=n * 10.0) for n in range(8)], 'plain')
+
+    def go(stream, provider=None):
+        rule = RemoteShellFanout()
         rule.site_facts = facts()
+        if provider is not None:
+            rule.published_aggregate = provider
         try:
-            matches = run(rule, batches)
-            assert rule.capped == 0 and not rule.limits, (cls, rule.limits)
-            if cls is Tiny:
-                assert rule.recent.on_disk > 0
-            results.append(sorted((m.proposed_lane, m.claim) for m in matches))
+            return run(rule, [[event] for event in stream]), rule.direction_assumed
         finally:
             rule.release_state()
-    assert results[0] == results[1] and any(ATTACKER in claim for _lane, claim in results[0])
+
+    full, assumed = go(observations)
+    crashed, _ = go(observations[:5])
+    last = crashed[-1]
+    resumed, resumed_assumed = go(observations, lambda _group: {'summary': dict(last.aggregate_summary),
+                                                                'lane': 'lead', 'events': list(last.events)})
+    assert 'at least 8 distinct' in full[-1].claim and 'at least 8 distinct' in resumed[-1].claim
+    assert resumed_assumed == assumed == 8
 
 
-def test_declared_controllers_calling_each_other_are_not_fanout():
+def test_declared_controllers_calling_each_other_are_not_smb_fanout_but_still_remote_shell_fanout():
     controllers = tuple(f'10.0.0.{n}' for n in range(10, 30))
     rows = [conn(n, controllers[n], 445, src=controllers[0], ts=n) for n in range(1, 20)]
     site = facts(domain_controller_addresses=controllers)
     assert evaluate(SmbRpcFanout, rows, site=site)[0] == []
     assert lanes(evaluate(SmbRpcFanout, rows)[0]) == ['lead']
+    shells_between = [conn(n, controllers[n], 22, src=controllers[0], ts=n) for n in range(1, 6)]
+    assert lanes(evaluate(RemoteShellFanout, shells_between, site=site)[0]) == ['lead']
+
+
+def test_undeclared_controllers_are_named_in_the_fanout():
+    [match], _rule = evaluate(SmbRpcFanout, smb(10))
+    assert any('domain controller addresses are not declared' in note for note in match.notes)
 
 
 # ---- SMB / RPC fan-out ---------------------------------------------------------------------------------------------
@@ -281,11 +341,12 @@ def test_undeclared_controllers_are_still_reported_and_say_why_they_may_be_routi
     assert match.proposed_lane == 'lead' and any('not declared' in note for note in match.notes)
 
 
-def test_many_sources_to_one_server_fold_into_one_finding_without_lowering_the_lane():
+def test_one_poller_reaching_many_clients_folds_into_one_finding_without_lowering_the_lane():
     site = facts(domain_controller_addresses=(DC,))
-    rows = [row for n in range(40) for row in epm_pair(n, '10.5.0.30', src=f'10.7.1.{n + 1}', ts=n * 5.0)]
+    rows = [row for n in range(40) for row in epm_pair(n, f'10.5.1.{n + 1}', src='10.7.0.9', ts=n * 5.0)]
     matches, _rule = evaluate(EpmDynamicRpc, rows, site=site)
-    assert lanes(matches) == ['lead'] and '10.5.0.30' in matches[0].claim
+    assert lanes(matches) == ['lead'] and '10.7.0.9' in matches[0].claim
+    assert sum(event.get('destination.port') == 135 for event in matches[0].events) >= 1
 
 
 def test_unanswered_mapper_or_missing_counters_never_pair():
@@ -426,7 +487,7 @@ def test_large_benign_background_stays_quiet_and_one_attacker_inside_it_is_found
     finally:
         rule.release_state()
     if cls is EpmDynamicRpc:
-        assert lanes(matches) == ['lead'] * 12 and all(ATTACKER in m.claim for m in matches)
+        assert lanes(matches) == ['lead'] and ATTACKER in matches[0].claim
     else:
         assert lanes(matches) == ['lead'] and ATTACKER in matches[0].claim
 

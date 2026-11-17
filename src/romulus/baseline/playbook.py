@@ -195,7 +195,7 @@ class AdminPairBaseline(BaselinePlaybook):
     spec = SPEC_BY_ID[id]
     families = spec.families
     datasets = spec.datasets
-    required_fields = ("source.ip", "destination.ip", "destination.port", "network.transport")
+    required_fields = spec.required_fields["net_flow"]
     direction_dependent = True
     attack = ("T1021.001", "T1021.002", "T1021.003", "T1021.004", "T1021.006")
     benign = ("a new server, a re-addressed host or an administrator's first visit to a host",

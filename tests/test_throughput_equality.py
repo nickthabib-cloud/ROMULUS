@@ -178,7 +178,7 @@ from tests import throughput_fixture as tf
 # The hunt-derived writer now decides per (target, spec, hour) from that hour's own window cells, so this hunt, partial
 # for reasons outside the baseline, writes the whole hours whose cells are complete:
 # - baseline_segments, baseline_counts, baseline_scope_hours: 14 hunt-derived segments of the 13:00-15:00 span for the
-#   five specs and targets that allow it (bl.ext_dest is refused: the fixture's internal networks are the default;
+#   specs and targets that allow it (bl.ext_dest and bl.admin_pair are refused: the fixture's internal networks are the default;
 #   the host target's exec-pair cut is refused for its unresolvable cited child); each carries events_basis 2 and
 #   its first_event_hour. Segments of targets that deliver none of a spec's records are empty.
 # - audit: the hunt.baseline_summary segment_writer per-spec reasons name the hours not written ("1 hour(s) not
@@ -385,6 +385,10 @@ from tests import throughput_fixture as tf
 # candidates and baseline; it differs from that stack only in the ranking passes, their audit and the manifest.
 # Evidence epoch 18 rehashes every event id, and Suricata and Arkime records carry their own producer identities:
 # with the evidence version, the Windows producer and the network producers set back, the two new network rules left out of the pack and the network rule versions restored, every table is the earlier one except the manifest's reworded network positive-only reasons and its pack digest.
+# The connection-level remote-administration, RPC, Kerberos and directory rules and the remote-administration pair
+# baseline add rule cells and tasks (not applicable or unmatched here), rule cards in the manifest, the sixth
+# baseline spec in the snapshot plan and window hours, and the audit that records them; candidates, events,
+# links, citations and the non-baseline semantic projection are unchanged.
 GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
  'audit': 'a47a8a17ee37a9a0602a77461806f3ab98d84bb587c19c4e62c6053d6f6af318',
  'baseline_counts': 'be05fabb25336f21341b46eae7d8c2627828f7a7a7e8fdb24f4eb58576099354',

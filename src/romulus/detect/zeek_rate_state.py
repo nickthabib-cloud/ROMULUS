@@ -3,6 +3,14 @@
 Only attempt rows contribute counts. Success rows can strengthen a qualifying
 preceding window. Late rows and later raw-reference additions to an older event
 are retained for finalize replay; they never rewrite the forward window.
+
+A distinct-member rule may thin repeats losslessly (`thin_members`): of one member's
+attempts under one key, history keeps the first, the last, and enough between them
+that consecutive kept attempts are at most one window apart unless no attempt lies
+between them. Every window then holds a kept attempt of exactly the members it holds
+an attempt of, so distinct counts are unchanged; raw-reference totals become lower
+bounds. The latest unkept attempt of each member waits in a disk-backed keyed store
+and is stored when a later attempt needs it, or at finalize, before replay.
 """
 from __future__ import annotations
 
@@ -14,7 +22,7 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import LANES, Match, Playbook, pf
-from romulus.detect.bounded import StateExhausted, register_store
+from romulus.detect.bounded import HOT_COUNT, KeyedStore, StateExhausted, register_store
 from romulus.detect.network_producers import ZEEK_ONLY, rule_reads
 from romulus.evidence.typed import RawRef, TypedEvent
 from romulus.hunt.citations import COMPACT_CITATION_NOTE, compact_event, expand_event
@@ -91,7 +99,8 @@ class _WindowRows:
                 self._restore(spill)
             return spill
         if self.account is None:
-            self.account = self.owner.state_budget().account(self.owner.id + ":zeek_window", strong=True)
+            self.account = self.owner.state_budget().account(
+                self.owner.id + ":zeek_window", strong=getattr(self.owner, "state_slice", "strong") == "strong")
         if not self.room("schema"):
             raise StateExhausted("the Zeek window schema could not be retained")
         spill.cap()
@@ -356,6 +365,44 @@ class _WindowRows:
         self.pending_bytes, self.recovering = 0, False
 
 
+class _ThinOwner:
+    """The held-attempt store's owner: the rule's budget and limits, with a spill database of its own, so the store's
+    writes and commits never touch the window rows' bounded transactions."""
+
+    def __init__(self, rule):
+        self.rule, self._spill = rule, None
+        self.id = rule.id + ":thin"
+        self.state_slice = rule.state_slice
+        self.holds_state = True
+        # the store counts among the rule's live stores
+        self._state_stores = rule.__dict__.setdefault("_state_stores", [])
+        rule.holds_state = True
+
+    @property
+    def budget(self):
+        return self.rule.budget
+
+    def state_budget(self):
+        return self.rule.state_budget()
+
+    def spill(self):
+        if self._spill is None:
+            from romulus.detect.bounded import Spill
+            self._spill = Spill(self.rule.spill_dir, self.rule.state_budget(), owner=self)
+        return self._spill
+
+    def note_limit(self, *args, **kwargs):
+        return self.rule.note_limit(*args, **kwargs)
+
+    def refuse(self, *args, **kwargs):
+        return self.rule.refuse(*args, **kwargs)
+
+    def close(self):
+        if self._spill is not None:
+            self._spill.close()
+            self._spill = None
+
+
 class ZeekWindowRule(Playbook, ABC):
     """Subclass with typed selection, a window threshold and an evidence-supported description.
 
@@ -383,14 +430,78 @@ class ZeekWindowRule(Playbook, ABC):
     # large attempt citation facts. Subclasses declare facts needed by describe.
     success_fields: ClassVar[tuple[str, ...]] = ()
     success_history_noise: ClassVar[bool] = False
+    # Lossless thinning of one member's repeated attempts (distinct-member rules only; see the module notes).
+    thin_members: ClassVar[bool] = False
+    thin_hot: ClassVar[int] = HOT_COUNT     # held attempts kept in memory; the rest live on disk
 
     def __init__(self):
         super().__init__()
         if self.seconds <= 0 or self.threshold < 1:
             raise ValueError("Zeek windows require positive seconds and a threshold of at least one")
+        if self.thin_members and not self.distinct:
+            raise ValueError("only distinct-member windows can thin repeated attempts")
         self.rows = _WindowRows(self)
         self.load = lambda _ids: []
         self._pending_keys = set()
+        # (key, member) -> [last kept time, held time or None, held compact event or None]
+        self._thin_owner = _ThinOwner(self) if self.thin_members else None
+        self.thinned = (KeyedStore(self._thin_owner, "zeek_window_thin", self.thin_hot)
+                        if self.thin_members else None)
+
+    def live_select(self, event: TypedEvent) -> tuple[tuple, str, str] | None:
+        """`select` for a record read live (not a restored witness): the place for coverage counting."""
+        return self.select(event)
+
+    def _thin(self, key, member, event):
+        """The attempts to store now for one live attempt: [], [event], [held], or [held, event]."""
+        state = self.thinned.get((key, member))
+        stamp = event.ts.timestamp()
+        held = None if state is None else state[1]
+        if state is None or stamp < (held if held is not None else state[0]):
+            if state is None:
+                self.thinned.put((key, member), [stamp, None, None])    # refused: only the saving is lost
+            return [event]
+        kept, _held, payload = state
+        if stamp - kept <= self.seconds:
+            if not self.thinned.put((key, member), [kept, stamp, self._hold(event)]):
+                return [event]
+            return []
+        out = []
+        if held is not None:
+            out.append(expand_event(payload))
+            kept = held
+        if stamp - kept > self.seconds or not self.thinned.put((key, member), [kept, stamp, self._hold(event)]):
+            out.append(event)
+            self.thinned.put((key, member), [stamp, None, None])
+        return out
+
+    def _hold(self, event):
+        fields = {*self.required_fields, *self.citation_fields}
+        return compact_event(event.model_copy(update={
+            "fields": {name: fact for name, fact in event.fields.items() if name in fields},
+            "caveats": list(dict.fromkeys([*event.caveats, COMPACT_CITATION_NOTE]))}))
+
+    def _store(self, key, event, member, role):
+        try:
+            stored = self.rows.put(key, event, member, role)
+        except StateExhausted as error:
+            kind = "history" if self.rows.ready else "schema"
+            self.refuse("zeek_window_" + kind, f"Zeek window {kind} retention is incomplete: {error}")
+            return
+        if stored is None:
+            return
+        canonical, weight = stored
+        yield from self._accepted_forward(key, canonical, member, role, weight)
+
+    def _release_held(self):
+        """Store every held attempt before replay, so finalize reads each member's last attempt."""
+        if self.thinned is None:
+            return
+        # Streamed, never listed: finalize runs once, so the store is not updated as it is read.
+        for (key, member), (_kept, held, payload) in self.thinned.items():
+            if held is not None:
+                for _match in self._store(key, expand_event(payload), member, "attempt"):
+                    pass                # replay publishes from the complete history
 
     @abstractmethod
     def select(self, event: TypedEvent) -> tuple[tuple, str, str] | None:
@@ -420,6 +531,8 @@ class ZeekWindowRule(Playbook, ABC):
             yield from self._flush_pending()
         finally:
             self.rows.flush()
+            if self.thinned is not None:
+                self.thinned.trim()         # a batch has ended: held attempts beyond the hot set go to disk
 
     def _flush_pending(self):
         # Only keys touched by the current batch are pending; history stays on disk.
@@ -448,7 +561,7 @@ class ZeekWindowRule(Playbook, ABC):
                 self.missing_required += 1
                 continue
             self.evaluated += 1
-            selection = self.select(event)
+            selection = self.live_select(event)
             if selection is None:
                 continue
             key, member, role = selection
@@ -461,16 +574,9 @@ class ZeekWindowRule(Playbook, ABC):
                 # pairs outcomes across rows (`per_sensor`).
                 key = (producer, *key)
             key = json.dumps(key, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
-            try:
-                stored = self.rows.put(key, event, member, role)
-            except StateExhausted as error:
-                kind = "history" if self.rows.ready else "schema"
-                self.refuse("zeek_window_" + kind, f"Zeek window {kind} retention is incomplete: {error}")
-                continue
-            if stored is None:
-                continue
-            canonical, weight = stored
-            yield from self._accepted_forward(key, canonical, member, role, weight)
+            for item in (self._thin(key, member, event) if self.thinned is not None and role == "attempt"
+                         else [event]):
+                yield from self._store(key, item, member, role)
 
     def _accepted_forward(self, key, event, member, role, weight):
         try:
@@ -868,6 +974,8 @@ class ZeekWindowRule(Playbook, ABC):
             self.rows.flush()
 
     def _finalize(self):
+        self._release_held()
+        self.rows.flush()
         yield from self._flush_pending()
         self._replaying = True
         try:
@@ -910,6 +1018,14 @@ class ZeekWindowRule(Playbook, ABC):
     def retained_events(self):
         return []
 
+    def close_spill(self):
+        if getattr(self, "_thin_owner", None) is not None:
+            self._thin_owner.close()
+        super().close_spill()
+
     def release_state(self):
+        if self.thinned is not None:
+            self.thinned.clear()
+            self._thin_owner.close()
         self.rows.close()
         super().release_state()
