@@ -132,8 +132,9 @@ class SourceQueryRunner:
                            query={"negative": "unresolved", "statement": ZERO_STATEMENT, **(query or {})})
 
     def _search(self, target: str, body: dict) -> tuple[dict | None, str | None, str | None]:
-        """(response, query error, source error): a 4xx answer (other than 408 and 429) is the query's own error,
-        which the model can correct; anything else that fails is a source failure, unresolved."""
+        """(response, query error, source error): a 400 answer is the query's own error, which the model can
+        correct; anything else that fails (authorization, a missing index, a timeout, an overloaded or failed source)
+        is a source failure, unresolved."""
         try:
             return self.pivot.client.search(target, body), None, None
         except WriteAttemptBlocked as exc:
@@ -141,7 +142,7 @@ class SourceQueryRunner:
         except SourceError as exc:
             status = getattr(exc, "status", None)
             text = _bounded(self._redact_text(str(exc)))
-            if isinstance(status, int) and 400 <= status < 500 and status not in (408, 429):
+            if status == 400:
                 return None, text, None
             return None, None, text
 
@@ -322,8 +323,9 @@ class SourceQueryRunner:
             if args.source_fields:
                 source = _select(source, args.source_fields)
             text = json.dumps(self._redact(source), ensure_ascii=False, sort_keys=True, default=str)
+            # whether a normalizer read this row: its evidence alias is then in the result's evidence
             row = {"index": record["_index"], "id": record["_id"],
-                   "event_ids": sorted(set(by_record.get(f"{record['_index']}/{record['_id']}", [])))}
+                   "citable": bool(by_record.get(f"{record['_index']}/{record['_id']}"))}
             if len(text.encode("utf-8")) > MAX_ROW_BYTES:
                 row["source_text"] = text.encode("utf-8")[:MAX_ROW_BYTES].decode("utf-8", errors="ignore")
                 row["source_cut"] = True

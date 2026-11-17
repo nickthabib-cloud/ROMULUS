@@ -1,8 +1,8 @@
 """Strict model-facing read tools over persisted hunt state.
 
-The agent package never constructs source queries. Every argument is an alias,
-registered rule identifier, lane, or page number, and all telemetry is returned
-under the result's ``data`` member.
+The agent package never sends a source query itself. Arguments are aliases, registered rule identifiers, lanes,
+page numbers, typed search conditions, or, for query_source, the agent's own query of one hunt source, which only the
+hunt layer validates against its allowlists and runs. All telemetry is returned under the result's ``data`` member.
 """
 from __future__ import annotations
 

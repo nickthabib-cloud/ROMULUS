@@ -39,6 +39,8 @@ MAX_AGGREGATION_DEPTH = 3
 MAX_TERMS_SIZE = 100
 MAX_SHARD_SIZE = 500
 MAX_TOP_HITS = 10
+# the most documents all top_hits aggregations together can return: a top_hits size times the buckets above it
+MAX_TOP_HIT_DOCUMENTS = 100
 MAX_LIST_ITEMS = 20            # ranges, filters, percents, multi_terms terms, composite sources
 MAX_IDS = 1_000
 MAX_DATE_BUCKETS = 500
@@ -352,8 +354,12 @@ def _sort(value: Any, path: str) -> None:
                 _refuse(f"{where}.order", "bad_shape", "order is asc or desc")
 
 
-def _aggs(node: Any, path: str, depth: int, counter: list[int], window_seconds: float) -> int:
-    """Aggregations at one level; returns the most buckets any one of them can produce along its deepest path."""
+def _aggs(node: Any, path: str, depth: int, counter: list[int], window_seconds: float,
+          above: int = 1, documents: list[int] | None = None) -> int:
+    """Aggregations at one level; returns the most buckets any one of them can produce along its deepest path.
+    `above` is the product of the bucket counts of the aggregations this level sits under; `documents` counts the
+    documents the top_hits aggregations can return in all (each one's size times `above`)."""
+    documents = documents if documents is not None else [0]
     if not isinstance(node, dict) or not node:
         _refuse(path, "bad_shape", "aggregations take an object of named aggregations")
     if depth > MAX_AGGREGATION_DEPTH:
@@ -384,10 +390,17 @@ def _aggs(node: Any, path: str, depth: int, counter: list[int], window_seconds: 
         else:
             body = _keys(body, at, AGGREGATIONS[kind], kind)
             buckets = _agg_body(kind, body, at, window_seconds)
+            if kind == "top_hits":
+                documents[0] += above * buckets
+                if documents[0] > MAX_TOP_HIT_DOCUMENTS:
+                    _refuse(at, "too_many_documents",
+                            f"top_hits can return {documents[0]} documents here; at most {MAX_TOP_HIT_DOCUMENTS} in all")
+                buckets = 1
         if subs:
             if kind in _METRICS:
                 _refuse(f"{where}.{subs[0]}", "bad_shape", f"{kind} takes no sub-aggregations")
-            buckets *= _aggs(agg[subs[0]], f"{where}.{subs[0]}", depth + 1, counter, window_seconds)
+            buckets *= _aggs(agg[subs[0]], f"{where}.{subs[0]}", depth + 1, counter, window_seconds,
+                             above * buckets, documents)
         if buckets > MAX_TOTAL_BUCKETS:
             _refuse(where, "too_many_buckets",
                     f"these aggregations can produce {buckets} buckets; at most {MAX_TOTAL_BUCKETS}")
@@ -476,11 +489,11 @@ def _agg_body(kind: str, body: dict, at: str, window_seconds: float) -> int:
         _field(body, at)
         return 1
     if kind == "top_hits":
-        _int(body.get("size", 3), f"{at}.size", 1, MAX_TOP_HITS)
+        size = _int(body.get("size", 3), f"{at}.size", 1, MAX_TOP_HITS)
         if "sort" in body:
             _sort(body["sort"], f"{at}.sort")
         _shown(body.get("_source"), f"{at}._source")
-        return 1
+        return size
     # the other metrics
     _field(body, at)
     if kind == "cardinality" and "precision_threshold" in body:

@@ -11,6 +11,7 @@ from datetime import timedelta
 import httpx
 import pytest
 
+from romulus.agent.admission import AgentAdmission, collect_issued_aliases, typed_alias_arguments
 from romulus.agent.aliases import AliasBook
 from romulus.agent.toolbox import QUERY_CHUNK_BYTES, Toolbox
 from romulus.config import Settings
@@ -153,6 +154,9 @@ FORBIDDEN_AGGS = [
     {"h": {"histogram": {"field": "destination.port", "interval": 1}}},
     {"r": {"rare_terms": {"field": "a"}}},
     {"x": {"top_hits": {"size": 11}}},
+    {"t": {"terms": {"field": "a", "size": 100}, "aggs": {"u": {"terms": {"field": "b", "size": 100}, "aggs": {
+        "x": {"top_hits": {"size": 10}}}}}}},
+    {"t": {"terms": {"field": "a", "size": 20}, "aggs": {"x": {"top_hits": {"size": 10}}}}},
     {"x": {"top_hits": {"script_fields": {"a": {"script": "1"}}}}},
     {"x": {"top_hits": {"docvalue_fields": ["a"]}}},
     {"bad name": {"value_count": {"field": "a"}}},
@@ -259,7 +263,8 @@ def test_returned_records_are_citable_evidence_and_rows_past_the_size_are_named(
     assert search["negative"] == "matches_found" and search["total"] == {"value": 40, "relation": "eq"}
     assert any("40 records matched; the first 3 were returned" in reason for reason in search["gaps_and_caveats"])
     rows = json.loads(search["rows_and_aggregations"]["text"])["rows"]
-    assert {row["id"] for row in rows} == {hit["_id"] for hit in hits} and all(row["event_ids"] for row in rows)
+    assert {row["id"] for row in rows} == {hit["_id"] for hit in hits} and all(row["citable"] for row in rows)
+    assert "event_ids" not in json.dumps(rows)
 
 
 def test_a_source_error_round_trips_as_refusal_text_and_a_repeat_is_not_sent_again():
@@ -275,6 +280,8 @@ def test_a_source_error_round_trips_as_refusal_text_and_a_repeat_is_not_sent_aga
 
 
 @pytest.mark.parametrize("error", [SourceError("timeout POST /net-a/_search", retryable=True),
+                                   SourceError("HTTP 403 POST /net-a/_search: no read", status=403),
+                                   SourceError("HTTP 404 POST /net-a/_search: no such index", status=404),
                                    SourceError("HTTP 503 POST /net-a/_search: busy", retryable=True, status=503),
                                    SourceError("HTTP 429 POST /net-a/_search: too many", retryable=True, status=429)])
 def test_a_timeout_or_source_failure_is_unresolved_not_a_query_to_correct(error):
@@ -418,3 +425,46 @@ def test_the_query_source_tool_is_loose_and_its_definition_is_fixed_text():
                                                   "size", "source_fields", "start", "end", "page", "cursor",
                                                   "chunk_index"}
     assert _query(toolbox, query=TERM)["status"] in {"unsupported", "refused"}
+
+
+def test_a_small_top_hits_under_one_bucket_level_is_accepted():
+    client = QueryES()
+    result = _query(_box(client), size=0, aggs={"t": {"terms": {"field": "a", "size": 10}, "aggs": {
+        "x": {"top_hits": {"size": 10, "_source": ["a", "b.*"], "sort": [{"@timestamp": "desc"}]}}}}})
+    assert result["status"] == "complete" and len(client.calls) == 1
+
+
+def test_a_finding_citing_query_evidence_is_admitted(tmp_path):
+    repo = _hunt(tmp_path / "admit.sqlite")
+    toolbox = _box(QueryES(_response([_dns("net-a", 1, T + timedelta(minutes=4), "beacon.example")])), repo=repo)
+    admission = AgentAdmission(Settings(home=tmp_path), repo, "h1", SESSION)
+    admission.register(toolbox)
+    anchor = AliasBook(repo, "h1").alias_for("F", "anchor")
+    admission.issue_aliases({"finding": anchor})
+    arguments = {"anchor": anchor, "source": "net-a",
+                 "query": {"wildcard": {"dns.question.name": {"value": "beacon.*"}}}}
+    assert typed_alias_arguments("query_source", arguments) == {anchor}
+    response = toolbox.execute("query_source", arguments)
+    evidence = response["data"]["result"]["evidence"]
+    assert response["status"] == "complete" and len(evidence) == 1
+    assert collect_issued_aliases(response, tool_name="query_source") >= set(evidence)
+    admission.issue_aliases(response, tool_name="query_source")
+    proposed = toolbox.execute("propose_finding", {
+        "claim": "A host resolved a beacon domain found by a query", "claim_kind": "network",
+        "cites": evidence, "lane": "lead"})
+    assert proposed["status"] == "complete", proposed
+    links = [row for row in repo.expansion_links("h1") if row["link_type"] == "agent_query_source"]
+    assert len(links) == 1 and links[0]["strength"] == "agent_hypothesis"
+    assert links[0]["key"]["query"]["source"] == "net-a"
+
+
+def test_the_session_share_bounds_the_agent_queries():
+    client = QueryES()
+    toolbox = _box(client, budget=50)
+    toolbox.executor.pivot.configure_agent_shares(session_id=SESSION, purpose="investigate", session_share=1,
+                                                  call_slice=1)
+    assert _query(toolbox, query=TERM)["status"] == "complete"
+    second = _query(toolbox, query={"term": {"dns.question.name": "other.test"}})
+    assert second["status"] == "failed" and len(client.calls) == 1
+    assert second["data"]["result"]["search"]["negative"] == "unresolved"
+    assert toolbox.repo.agent_source_queries("h1") == 1
