@@ -257,8 +257,9 @@ def _hunt_control(args, s) -> int:
                    "max_cost_usd": args.cost_usd,
                    "max_wall_seconds": int(args.minutes * 60) if args.minutes is not None else None}
         amounts = {key: value for key, value in amounts.items() if value is not None}
+        # the service account may extend any hunt; its totals stay within the ceiling unless --user is a lead
         done = extend_budget(s, repo, args.hunt_id, actor=actor, role=role, profile=args.effort,
-                             amounts=amounts or None)
+                             amounts=amounts or None, control_role="lead")
         print(f"hunt {args.hunt_id}: agent budget extended by {done['extension']['amounts']}; limits now "
               + ", ".join(f"{key}={value}" for key, value in done["limits"].items()))
         if done["running"]:

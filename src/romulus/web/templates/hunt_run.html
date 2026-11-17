@@ -89,7 +89,7 @@
     {% if controls.stop %}<p class="small">Latest stop request: {{ controls.stop.scope }} · {{ controls.stop.state }} · {{ controls.stop_text }}</p>{% endif %}
     {% if controls.running %}
       {% if controls.can_stop_hunt or controls.can_stop_agent %}
-      <p class="help small">A stop takes effect at the run's next safe point (before the next source partition, expansion link, model call or tool call). Everything already found is kept; what did not run is named as not run, and the hunt can be resumed.</p>
+      <p class="help small">A stop takes effect at the run's next safe point: before the sweep's next source or partition, before the next post-sweep stage, before the next expansion link, and in the AI agent before its next model call, read tool call or triage call. The packet, baseline, site-network check and ranking steps finish the step they are in first; if one does not finish within the grace period, a lead can force-stop the hunt. Everything already found is kept; what did not run is named as not run, and the hunt can be resumed.</p>
       <div class="links">
         {% if controls.can_stop_hunt %}<form method="post" action="/hunts/{{ h.id | urlencode }}/stop"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="scope" value="hunt"><button type="submit" class="btn-danger">Stop hunt</button></form>{% endif %}
         {% if controls.can_stop_agent %}<form method="post" action="/hunts/{{ h.id | urlencode }}/stop"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="scope" value="agent"><button type="submit" class="ghost">Stop agent</button></form>{% endif %}

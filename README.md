@@ -137,7 +137,7 @@ After the deterministic hunt, an AI agent will read everything ROMULUS found, fo
 
 The Run tab and `hunt stop` offer **Stop hunt** and **Stop agent**:
 
-- The run checks for a stop before each source partition, expansion link, model call and tool call.
+- The run checks for a stop before each source partition, stage, expansion link, model call, tool call and triage call. The packet, baseline, site-network check and ranking stages finish the step they are in first.
 - It keeps everything it found and records who stopped it and when.
 - The hunt stays partial: the report names what did not run and never presents it as complete.
 - A stopped hunt can be resumed. Resuming runs again a sweep that was stopped part-way, then the stages that did not run.

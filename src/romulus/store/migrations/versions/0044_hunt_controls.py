@@ -42,6 +42,7 @@ def upgrade():
         "hunt_process",
         sa.Column("hunt_id", sa.String(), sa.ForeignKey("hunt.id"), primary_key=True),
         sa.Column("pid", sa.Integer(), nullable=False),
+        sa.Column("pgid", sa.Integer()),
         sa.Column("start_marker", sa.String(), nullable=False),
         sa.Column("host", sa.String(), nullable=False),
         sa.Column("command", sa.String(), nullable=False),

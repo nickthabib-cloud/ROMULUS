@@ -446,6 +446,7 @@ def _stopped_in_sweep(repo: Repo, hunt_id: str, sweep, targets: list[str], start
     counts, result = _detection_result(repo, hunt_id)
     repo.set_hunt_state(hunt_id, "partial", owner_token=owner_token, detection_result=result, stop_reason=reason)
     watch.honor("sweep")
+    repo.honor_open_stops(hunt_id, "sweep")       # an agent stop too: the agent does not run
     return {"hunt_id": hunt_id, "execution_state": "partial", "stats": sweep.stats, "lanes": counts,
             "detection_result": result, "partial_reasons": summary["partial_reasons"], "stopped": summary["stopped"],
             "agent": {"status": "not_run", "stop_reason": reason},
@@ -498,7 +499,44 @@ def _stages_after_sweep(s: Settings, repo: Repo, client: ElasticClient, hunt_id:
         if ((repo.get_hunt(hunt_id) or {}).get("manifest") or {}).get("ai_agent", {}).get("requested"):
             not_run.append("AI agent")
         stop["not_run"] = not_run
+        mark_unrun_stages(repo, hunt_id, "not run: stopped by analyst", not_run=not_run, owner_token=owner_token)
     return packet_summary, baseline_summary, expansion_summary, stop
+
+
+def mark_unrun_stages(repo: Repo, hunt_id: str, reason: str, *, not_run: list[str] | None = None,
+                      owner_token: str | None = None) -> list[str]:
+    """Make every rule a stopped run's skipped stage owns read partial, never "no data in scope" or complete, until a
+    resume runs the stage (its own cells then replace these). `not_run` names the stages; without it, every stage
+    after the sweep whose summary does not say it finished (a force stop's case). Returns the stages marked.
+
+    The baseline stage owns each baseline spec's whole-window cell; the packet stage owns its rules' cells on each
+    Arkime session target (and on every other target, where they do not apply), and the indicator rule's URL and
+    SHA256 cells there."""
+    hunt = repo.get_hunt(hunt_id) or {}
+    manifest = hunt.get("manifest") or {}
+    if not_run is None:
+        not_run = [stage for stage, action in (("packet stage", "hunt.packet_summary"),
+                                               ("baseline stage", "hunt.baseline_summary"))
+                   if not ((repo.latest_audit(hunt_id, action) or {}).get("detail") or {}).get("finished")]
+    marked = []
+    if "baseline stage" in not_run:
+        for item in (manifest.get("baseline") or {}).get("specs") or []:
+            repo.set_rule_cell(hunt_id, item["id"], item["version"], "*", "window", "evaluated_partial", 0, 0,
+                               {"reasons": [f"baseline stage {reason}"]}, owner_token=owner_token)
+        marked.append("baseline stage")
+    if "packet stage" in not_run and manifest.get("window"):
+        from romulus.hunt.packets import mark_not_run
+        from romulus.sources.profile import schema_of
+        window = Window(start=datetime.fromisoformat(manifest["window"]["start"]),
+                        end=datetime.fromisoformat(manifest["window"]["end"]))
+        profiles = repo.source_profiles(hunt_id)
+        targets = list(manifest.get("targets") or [])
+        packet_targets = [target for target in targets
+                          if schema_of((profiles.get(target) or {}).get("field_types") or {}) == "arkime_sessions"]
+        mark_not_run(repo, hunt_id, window, targets, packet_targets, f"packet stage {reason}",
+                     owner_token=owner_token)
+        marked.append("packet stage")
+    return marked
 
 
 def _run_expansion(s: Settings, repo: Repo, client: ElasticClient, hunt: dict, contracts: dict,
@@ -720,6 +758,7 @@ def run_hunt(s: Settings, hunt_id: str, on_candidate=None, expand: bool | None =
             retain_budget_bytes=int(s.baseline_retain_disk_gb * 1e9), stopped=stop,
         )
         watch.honor(stop["stage"])
+        repo.honor_open_stops(hunt_id, stop["stage"])     # an agent stop too: the agent does not run
         return {**result, "ai_agent": {"status": "not_run", "reason": STOPPED_REASON},
                 "agent": {"status": "not_run", "stop_reason": STOPPED_REASON}}
     agent_owner = uuid.uuid4().hex
@@ -913,10 +952,11 @@ def resume_hunt(s: Settings, hunt_id: str, *, force_model: bool = False, continu
                              "whole hunt")
         if hunt["execution_state"] != "partial":
             raise RuntimeError(f"hunt {hunt_id} is {hunt['execution_state']}; only a partial hunt resumes its sweep")
+        before = (repo.latest_stop(hunt_id) or {}).get("id")
         owner = repo.claim_hunt(hunt_id, _lease_seconds(s), resume=True)["lease_owner"]
         if on_claimed is not None:
             on_claimed()
-        repo.clear_stops(hunt_id, actor)
+        repo.clear_stops(hunt_id, actor, up_to_id=before)
         if forced is not None:
             repo.audit("system", AGENT_MODEL_FORCED, hunt_id, forced, owner_token=owner)
         return run_hunt(s, hunt_id, claimed_owner=owner, resweep=True)
@@ -939,13 +979,15 @@ def resume_hunt(s: Settings, hunt_id: str, *, force_model: bool = False, continu
                          "interrupted, or reached a limit that budget was added to afterwards")
     if hunt["execution_state"] == "completed_within_scope" and not agent_only:
         raise ValueError(f"hunt {hunt_id} has no resumable agent phase")
+    before = (repo.latest_stop(hunt_id) or {}).get("id")
     claimed = (repo.claim_agent_lease(hunt_id, _lease_seconds(s)) if agent_only else
                repo.claim_hunt(hunt_id, _lease_seconds(s), resume=True))
     owner_token = claimed["lease_owner"]
     if on_claimed is not None:
         on_claimed()
-    # the analyst asked the hunt to run again: an earlier stop request no longer applies
-    repo.clear_stops(hunt_id, actor)
+    # the analyst asked the hunt to run again: a stop requested before this resume claimed it no longer applies (one
+    # requested after the claim is for this run)
+    repo.clear_stops(hunt_id, actor, up_to_id=before)
     if forced is not None:
         # recorded only now, under the lease: a refused resume switched nothing
         repo.audit("system", AGENT_MODEL_FORCED, hunt_id, forced, owner_token=owner_token)
@@ -1036,6 +1078,7 @@ def resume_hunt(s: Settings, hunt_id: str, *, force_model: bool = False, continu
             retain_budget_bytes=int(s.baseline_retain_disk_gb * 1e9), stopped=stop,
         )
         watch.honor(stop["stage"])
+        repo.honor_open_stops(hunt_id, stop["stage"])     # an agent stop too: the agent does not run
         return {**result, "ai_agent": {"status": "not_run", "reason": STOPPED_REASON},
                 "agent": {"status": "not_run", "stop_reason": STOPPED_REASON}}
     agent_owner = uuid.uuid4().hex

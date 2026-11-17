@@ -340,7 +340,7 @@ def _running(tmp_path, *, marker="boot:100"):
     repo = _repo(tmp_path)
     _hunt(repo, s)
     repo.claim_hunt("h1", 600)
-    repo.record_hunt_process("h1", pid=4242, start_marker=marker, host="node1", command="hunt start")
+    repo.record_hunt_process("h1", pid=4242, start_marker=marker, host="node1", command="hunt start", pgid=4242)
     repo.request_hunt_stop("h1", "hunt", "web:alice", now=utcnow() - timedelta(seconds=120))
     return s, repo
 
@@ -350,7 +350,7 @@ def test_force_stop_never_signals_a_pid_given_to_another_process(tmp_path):
     sent = []
     done = controls.force_stop(s, repo, "h1", actor="web:lead", role="lead", host="node1",
                                identify=lambda pid: ("boot:999", "python -m romulus.cli hunt start"),
-                               send=lambda pid, sig: sent.append((pid, sig)), sleep=lambda _s: None)
+                               send=lambda *call: sent.append(call), sleep=lambda _s: None)
     assert sent == [] and done["signalled"] is False
     # the recorded worker is gone, so the hunt is left resumable all the same
     hunt = repo.get_hunt("h1")
@@ -365,15 +365,15 @@ def test_force_stop_signals_only_a_live_romulus_worker_with_the_recorded_marker(
     alive = {"yes": True}
     sent = []
 
-    def send(pid, sig):
-        sent.append((pid, sig))
+    def send(pid, sig, pgid=None):
+        sent.append((pid, sig, pgid))
         alive["yes"] = False
 
     def identify(pid):
         return ("boot:100", "python -m romulus.cli hunt start") if alive["yes"] else None
     done = controls.force_stop(s, repo, "h1", actor="web:lead", role="lead", host="node1", identify=identify,
                                send=send, sleep=lambda _s: None)
-    assert sent == [(4242, signal.SIGTERM)] and done["changed"] == {"hunt": "partial"}
+    assert sent == [(4242, signal.SIGTERM, 4242)] and done["changed"] == {"hunt": "partial"}
 
     s, repo = _running(tmp_path / "other")
     with pytest.raises(ControlRefused, match="not a ROMULUS process"):
@@ -699,3 +699,283 @@ def test_a_sweep_stopped_part_way_and_run_again_stores_what_one_uninterrupted_sw
         again.run_partition("romulus-host-x", None, [], half, est=2)
     again.finalize()
     assert _sweep_state(stopped) == expected
+
+
+# ------------------------------------------------------------------------------------------- review follow-ups
+ARKIME_FIELDS = {"firstPacket": "date", "lastPacket": "date", "network.community_id": "keyword"}
+
+
+def _real_manifest_hunt(tmp_path, repo, s):
+    """A hunt whose manifest is the real one: the pack, baseline specs and an Arkime session target besides a host
+    target, with their profiles stored."""
+    from romulus.hunt.manifest import build_manifest
+    profiles = {
+        "host-x": {"id": "p-host", "target": "host-x", "kind": "index", "backend_version": "t", "doc_count": 1,
+                   "datasets": {}, "role": "host", "os_family": "linux", "field_types": {"@timestamp": "date"}},
+        "arkime-x": {"id": "p-ark", "target": "arkime-x", "kind": "index", "backend_version": "t", "doc_count": 1,
+                     "datasets": {}, "role": "network", "os_family": "unknown", "field_types": ARKIME_FIELDS},
+    }
+    manifest = build_manifest(s, Window(start=T, end=T + timedelta(hours=1)), {}, "broad", list(profiles), profiles)
+    manifest["ai_agent"] = {"requested": False}
+    repo.create_hunt("h1", manifest, "digest", "cli:web:alice")
+    for profile in profiles.values():
+        repo.save_profile("h1", profile)
+    return manifest
+
+
+def test_rules_of_stages_a_stop_skipped_read_partial_in_coverage_and_the_report(tmp_path, monkeypatch):
+    from romulus.detect.packets import PACKET_PLAYBOOKS
+    from romulus.report import markdown
+    from romulus.report.manifest import build_manifest, coverage_for_hunt
+    s = Settings(home=tmp_path)
+    repo = _repo(tmp_path)
+    manifest = _real_manifest_hunt(tmp_path, repo, s)
+    owner = repo.claim_hunt("h1", 600)["lease_owner"]
+    repo.audit("system", "hunt.sweep_summary", "h1", {"finished": True, "complete": True}, owner_token=owner)
+    repo.request_hunt_stop("h1", "hunt", "web:alice")
+    monkeypatch.setattr(hunt_run, "run_rank_pass", lambda *_a, **_k: None)
+    watch = controls.StopWatch(repo, "h1", ("hunt",), ttl=0)
+    _p, _b, expansion, stop = hunt_run._stages_after_sweep(s, repo, object(), "h1", None, {}, owner, watch)
+    hunt_run._finish(repo, "h1", {"status": "disabled"}, {"finished": True, "complete": True},
+                     expansion_summary=expansion, owner_token=owner, stopped=stop)
+
+    rows = {row["rule_id"]: row for row in coverage_for_hunt(repo, "h1")["rules"]}
+    owned = [item["id"] for item in manifest["baseline"]["specs"]] + [cls.id for cls in PACKET_PLAYBOOKS]
+    for rule_id in owned:
+        claim = rows[rule_id]["search_result"]
+        # partial: "searched in part", or a positive-only rule's claim with its coverage incomplete
+        assert claim.startswith("searched in part") or "coverage incomplete" in claim, (rule_id, claim)
+        assert "no data in scope" not in claim and "searched in full" not in claim
+    report = build_manifest(repo, "h1", "test")
+    report["revision"] = {"number": 1, "id": "h1-r1", "supersedes": None}
+    text = markdown.render(report)
+    assert "no data in scope for this rule" not in "\n".join(
+        line for line in text.splitlines() if any(rule_id in line for rule_id in owned))
+
+
+def test_a_force_stop_after_the_sweep_marks_the_unfinished_stages_too(tmp_path):
+    from romulus.report.manifest import coverage_for_hunt
+    s = Settings(home=tmp_path, hunt_stop_grace_seconds=60)
+    repo = _repo(tmp_path)
+    manifest = _real_manifest_hunt(tmp_path, repo, s)
+    owner = repo.claim_hunt("h1", 600)["lease_owner"]
+    repo.audit("system", "hunt.sweep_summary", "h1", {"finished": True, "complete": True}, owner_token=owner)
+    repo.record_hunt_process("h1", pid=4242, start_marker="boot:100", host="node1", command="hunt start")
+    repo.request_hunt_stop("h1", "hunt", "web:alice", now=utcnow() - timedelta(seconds=120))
+    controls.force_stop(s, repo, "h1", actor="web:lead", role="lead", host="node1", identify=lambda pid: None,
+                        send=lambda *_a: pytest.fail("signalled"), sleep=lambda _s: None)
+    rows = {row["rule_id"]: row for row in coverage_for_hunt(repo, "h1")["rules"]}
+    for item in manifest["baseline"]["specs"]:
+        claim = rows[item["id"]]["search_result"]
+        assert claim.startswith("searched in part") or "coverage incomplete" in claim, (item["id"], claim)
+
+
+def test_two_extensions_at_once_are_held_to_the_ceiling_together(tmp_path, monkeypatch):
+    import threading
+    s = Settings(home=tmp_path)                       # ceiling: 8 x 200 calls
+    repo = _repo(tmp_path)
+    _hunt(repo, s)
+    both = threading.Barrier(2)
+    resolve = hunt_budget.resolve
+
+    def racing(*args, **kwargs):
+        if kwargs.get("extensions") is None:          # the quick check outside the lock: both pass it together
+            both.wait(timeout=10)
+        return resolve(*args, **kwargs)
+    monkeypatch.setattr(controls.hunt_budget, "resolve", racing)
+    outcomes = []
+
+    def extend():
+        try:
+            controls.extend_budget(s, repo, "h1", actor="web:alice", role="analyst", amounts={"max_calls": 900})
+            outcomes.append("added")
+        except ControlRefused as exc:
+            outcomes.append(str(exc))
+    threads = [threading.Thread(target=extend) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert outcomes.count("added") == 1 and any("only a lead" in item for item in outcomes)
+    monkeypatch.setattr(controls.hunt_budget, "resolve", resolve)
+    limits = hunt_budget.resolve(repo, "h1", repo.get_hunt("h1")["manifest"], s)["limits"]
+    assert limits["max_calls"] == s.agent_max_calls + 900 <= hunt_budget.ceiling(s)["max_calls"]
+
+
+def test_a_cost_of_zero_removes_the_sites_cost_budget_so_only_a_lead_may_choose_it(tmp_path):
+    s = Settings(home=tmp_path, agent_max_cost_usd=5.0)
+    with pytest.raises(hunt_budget.BudgetRefused, match="only a lead"):
+        hunt_budget.choose(s, "standard", {"max_cost_usd": 0}, role="analyst", chosen_by="web:a")
+    lead = hunt_budget.choose(s, "standard", {"max_cost_usd": 0}, role="lead", chosen_by="web:l")
+    assert lead["limits"]["max_cost_usd"] == 0 and "max_cost_usd" in lead["above_ceiling"]
+    # where the site sets no cost budget, 0 is the default and anyone may keep it or set one
+    free = Settings(home=tmp_path)
+    assert hunt_budget.choose(free, "standard", role="analyst", chosen_by="web:a")["limits"]["max_cost_usd"] == 0
+    assert hunt_budget.choose(free, "standard", {"max_cost_usd": 3}, role="analyst", chosen_by="web:a")
+    # an uncapped hunt is never given a cost budget by raising it to a profile, and cannot be extended by cost
+    repo = _repo(tmp_path)
+    repo.create_hunt("h1", {"window": WINDOW, "targets": [], "ai_agent": {
+        "requested": True, "budgets": hunt_budget.pinned_block(lead)}}, "d", "cli:web:alice")
+    done = controls.extend_budget(s, repo, "h1", actor="web:lead", role="lead", profile="deep")
+    assert "max_cost_usd" not in done["extension"]["amounts"] and done["limits"]["max_cost_usd"] == 0
+    with pytest.raises(ControlRefused, match="no cost budget"):
+        controls.extend_budget(s, repo, "h1", actor="web:lead", role="lead", amounts={"max_cost_usd": 2})
+
+
+def test_the_command_line_extends_any_hunt_within_the_ceiling_without_a_lead_login(tmp_path, monkeypatch, capsys):
+    from romulus import cli
+    s = Settings(home=tmp_path)
+    repo = _repo(tmp_path)
+    _hunt(repo, s, created_by="cli:web:someone-else")
+    monkeypatch.setattr(cli, "_settings", lambda _args: s)
+    monkeypatch.setattr(hunt_run, "open_repo", lambda _s: repo)
+    monkeypatch.setenv("USER", "operator")
+    assert cli.main(["hunt", "extend", "h1", "--calls", "50", "--no-continue"]) == cli.EXIT_OK
+    row = repo.agent_budget_extensions("h1")[-1]
+    assert row["added_by"] == "cli:operator" and row["role"] == "analyst"
+    too_much = str(hunt_budget.ceiling(s)["max_calls"])
+    assert cli.main(["hunt", "extend", "h1", "--calls", too_much, "--no-continue"]) == cli.EXIT_FAIL
+    assert "only a lead" in capsys.readouterr().err
+
+
+def test_process_identity_reads_the_start_marker_and_command_line_from_proc(tmp_path):
+    root = tmp_path / "proc"
+    (root / "sys" / "kernel" / "random").mkdir(parents=True)
+    (root / "sys" / "kernel" / "random" / "boot_id").write_text("boot-1\n", encoding="ascii")
+    (root / "77").mkdir()
+    # the command name may hold spaces and parentheses: fields are read after the last ")"
+    fields = ["S", "1", "77", "77", "0", "-1", "4194560"] + [str(n) for n in range(10, 22)] + ["123456", "0"]
+    (root / "77" / "stat").write_text("77 (python (x) y) " + " ".join(fields), encoding="ascii")
+    (root / "77" / "cmdline").write_bytes(b"python\0-m\0romulus.cli\0hunt\0start\0")
+    assert controls.process_identity(77, root=root) == ("boot-1:123456", "python -m romulus.cli hunt start")
+    (root / "77" / "stat").write_text("77 (python) Z " + " ".join(fields[1:]), encoding="ascii")
+    assert controls.process_identity(77, root=root) is None          # a zombie has ended
+    assert controls.process_identity(78, root=root) is None          # gone
+
+
+def test_force_stop_reports_a_process_it_may_not_signal(tmp_path):
+    s, repo = _running(tmp_path)
+
+    def denied(*_args):
+        raise PermissionError("operation not permitted")
+    with pytest.raises(ControlRefused, match="may not signal"):
+        controls.force_stop(s, repo, "h1", actor="web:lead", role="lead", host="node1",
+                            identify=lambda pid: ("boot:100", "python -m romulus.cli hunt start"),
+                            send=denied, sleep=lambda _s: None)
+    assert repo.get_hunt("h1")["execution_state"] == "running"
+
+
+def test_force_stop_leaves_a_hunt_a_resume_took_over_as_it_is(tmp_path):
+    _settings, repo = _running(tmp_path)
+    with pytest.raises(ValueError, match="another worker"):
+        repo.end_force_stopped("h1", request_id=repo.latest_stop("h1")["id"], actor="web:lead",
+                               hunt_owner=repo.get_hunt("h1")["lease_owner"], agent_owner=None, pid=9999,
+                               start_marker="boot:1")
+    request = repo.latest_stop("h1")["id"]
+    repo.clear_stops("h1", "cli:x")
+    with pytest.raises(ValueError, match="cleared meanwhile"):
+        repo.end_force_stopped("h1", request_id=request, actor="web:lead",
+                               hunt_owner=repo.get_hunt("h1")["lease_owner"], agent_owner=None, pid=4242,
+                               start_marker="boot:100")
+    assert repo.get_hunt("h1")["execution_state"] == "running"
+
+
+def test_a_resume_clears_only_the_stops_requested_before_it_claimed_the_hunt(tmp_path):
+    s = Settings(home=tmp_path)
+    repo = _repo(tmp_path)
+    _hunt(repo, s)
+    repo.claim_hunt("h1", 600)
+    first = repo.request_hunt_stop("h1", "hunt", "web:alice")
+    repo.honor_stop(first["id"], "sweep")
+    later = repo.request_hunt_stop("h1", "agent", "web:alice")
+    assert repo.clear_stops("h1", "cli:x", up_to_id=first["id"]) == 1
+    assert repo.latest_stop("h1")["id"] == later["id"] and repo.latest_stop("h1")["state"] == "requested"
+
+
+def test_an_open_stop_whose_worker_died_says_so_in_the_banner(tmp_path):
+    from romulus.web.control_routes import stop_banner
+    s = Settings(home=tmp_path)
+    repo = _repo(tmp_path)
+    _hunt(repo, s)
+    repo.claim_hunt("h1", 600)
+    repo.request_hunt_stop("h1", "hunt", "web:alice")
+    assert "stops at its next safe point" in stop_banner(repo, "h1")["text"]
+    with repo.engine.begin() as connection:
+        from romulus.store import schema as t
+        connection.execute(t.hunt.update().where(t.hunt.c.id == "h1").values(lease_until=utcnow() - timedelta(1)))
+    assert "no longer running" in stop_banner(repo, "h1")["text"]
+
+
+def test_a_hunt_stop_reaching_only_the_agent_keeps_complete_detection_complete(tmp_path):
+    from romulus.web.control_routes import stop_banner
+    stop = {"scope": "hunt", "state": "honored", "requested_by": "web:alice", "requested_at": "2026-11-17T10:00",
+            "honored_in": ["agent"], "forced_by": None}
+    text = stop_sentence({"execution_state": "completed_within_scope", "controls": {"stop": stop}})
+    assert "detection results are complete within scope" in text and "These results are partial" not in text
+    s = Settings(home=tmp_path)
+    repo = _repo(tmp_path)
+    _hunt(repo, s)
+    _completed(repo)
+    repo.claim_agent_lease("h1", 600)
+    row = repo.request_hunt_stop("h1", "hunt", "web:alice")
+    repo.honor_stop(row["id"], "agent")
+    assert "detection results are complete within scope" in stop_banner(repo, "h1")["text"]
+
+
+def test_a_stop_through_the_real_run_and_sweep_names_the_unstarted_source_and_a_resume_finishes(
+        tmp_path, monkeypatch):
+    from romulus.hunt import sweep as sweep_module
+    from romulus.sources.models import Completeness, SearchOutcome
+    from tests.test_baseline_sweep import FakeClient, _contract, _exec
+    s = Settings(home=tmp_path)
+    repo = _repo(tmp_path)
+    _hunt(repo, s, targets=("x", "y"), requested=False)
+    _patched_run(monkeypatch, repo)
+    contracts = {"x": _contract("x"), "y": _contract("y")}
+    monkeypatch.setattr(hunt_run, "_contracts", lambda *_a, **_k: contracts)
+    monkeypatch.setattr(hunt_run, "ElasticClient", lambda *_a, **_k: FakeClient())
+    halves = [Window(start=T, end=T + timedelta(minutes=30)), Window(start=T + timedelta(minutes=30),
+                                                                     end=T + timedelta(hours=1))]
+    events = {half.start: [_exec(f"e-{index}", half.start + timedelta(minutes=1))]
+              for index, half in enumerate(halves)}
+    reads = []
+    stop_after_first = {"on": True}
+
+    def execute(_client, intent, _contract):
+        reads.append((intent.target, intent.window.start))
+        if stop_after_first["on"] and len(reads) == 1:
+            repo.request_hunt_stop("h1", "hunt", "web:alice")       # the analyst stops it while x is read
+        records = [{"_index": "fixture", "_id": e.id, "_source": {}} for e in events.get(intent.window.start, [])]
+        now = utcnow()
+        return SearchOutcome(target=intent.target, fingerprint="f", started_at=now, ended_at=now,
+                             completeness=Completeness.complete, total=len(records), total_relation="eq",
+                             returned=len(records), records=records)
+    by_id = {e.id: e for batch in events.values() for e in batch}
+    monkeypatch.setattr(sweep_module, "execute", execute)
+    monkeypatch.setattr(sweep_module, "normalize_hits",
+                        lambda fetched, _boots=None, **_kw: ([by_id[row["_id"]] for row in fetched], {}, []))
+    monkeypatch.setattr(sweep_module, "plan_partitions", lambda *_a, **_k: [(half, 1) for half in halves])
+    monkeypatch.setattr(sweep_module.Sweep, "_window_dataset_counts", lambda *_a, **_k: (None, "fixture"))
+    owner = repo.claim_hunt("h1", 600)["lease_owner"]
+
+    result = hunt_run.run_hunt(s, "h1", claimed_owner=owner)
+    assert result["execution_state"] == "partial"
+    assert [target for target, _ in reads] == ["x"]                    # nothing read after the stop
+    summary = repo.latest_audit("h1", "hunt.sweep_summary")["detail"]
+    assert summary["stopped"]["target"] == "x" and summary["stopped"]["not_started"] == ["y"]
+    assert any(c["target"] == "x" and c["partition"] == halves[1].key() and c["state"] == "planned"
+               for c in repo.rule_cells("h1"))
+    assert repo.latest_stop("h1")["state"] == "honored"
+
+    stop_after_first["on"] = False
+    reads.clear()
+    monkeypatch.setattr(hunt_run, "_site_network_check", lambda *_a, **_k: {"warning": None})
+    monkeypatch.setattr(hunt_run, "_stages_after_sweep", lambda *_a, **_k: ({}, {}, {}, None))
+    monkeypatch.setattr(hunt_run, "run_hunt_segment_writer", lambda *_a, **_k: {})
+    monkeypatch.setattr(hunt_run, "_ai_agent_phase", lambda *_a, **_k: {"status": "skipped"})
+    resumed = hunt_run.resume_hunt(s, "h1", actor="cli:web:alice")
+    assert sorted({target for target, _ in reads}) == ["x", "y"]
+    assert repo.latest_audit("h1", "hunt.sweep_summary")["detail"]["finished"] is True
+    assert resumed["execution_state"] in ("completed_within_scope", "partial")
+    # every partition the stop left planned was read (baseline exec pairs wait for the baseline stage, not run here)
+    assert not [c for c in repo.rule_cells("h1") if c["state"] == "planned" and not c["rule_id"].startswith("bl.")]

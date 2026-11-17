@@ -144,9 +144,15 @@ def check_limits(s: Settings, limits: dict, role: str) -> list[str]:
             raise BudgetRefused(f"{LABELS[key]} must be at least {MINIMUM[key]}")
         if value > hard_maximum(key):
             raise BudgetRefused(f"{LABELS[key]} {value} is above its maximum {hard_maximum(key)}")
-        # a hunt with no cost budget has none to exceed; a cost budget where the site sets none has no ceiling
-        if key == "max_cost_usd" and not top[key]:
-            continue
+        if key == "max_cost_usd":
+            if not top[key]:
+                continue                 # the site sets no cost budget: any cost budget only restricts the agent
+            if not value:
+                # 0 is no cost budget at all: unlimited, so above any ceiling the site sets
+                if role != "lead":
+                    raise BudgetRefused("a cost of 0 removes the cost budget the site sets; only a lead may remove it")
+                above.append(key)
+                continue
         if value > top[key]:
             if role != "lead":
                 raise BudgetRefused(f"{LABELS[key]} {value} is above the site ceiling {top[key]} "
@@ -187,15 +193,16 @@ def _extensions(repo, hunt_id: str) -> list[dict]:
     return list(reader(hunt_id)) if reader is not None else []
 
 
-def resolve(repo, hunt_id: str, manifest: dict, settings: Settings) -> dict:
+def resolve(repo, hunt_id: str, manifest: dict, settings: Settings, *, extensions: list[dict] | None = None) -> dict:
     """The hunt's agent limits: what its manifest pinned (or, for a hunt created before budgets were pinned, what it
     recorded and the current settings for the rest), plus every extension.
 
     Returns {"source", "profile", "base", "added", "limits", "extensions", "from_settings", "triage"}: `source` is
-    "pinned" or "settings"; `from_settings` names the limits read from the current settings."""
+    "pinned" or "settings"; `from_settings` names the limits read from the current settings. `extensions` replaces
+    the stored ones (the rows a write transaction read)."""
     budgets = ((manifest or {}).get("ai_agent") or {}).get("budgets") or {}
     pinned = budgets.get("schema") == BUDGET_SCHEMA
-    extensions = _extensions(repo, hunt_id)
+    extensions = _extensions(repo, hunt_id) if extensions is None else extensions
     if getattr(settings, "_budget_hunt", "") == hunt_id:
         # already resolved for this hunt (hunt_settings): its values are the hunt's limits, extensions included
         limits = standard_limits(settings)
@@ -282,7 +289,9 @@ def extension(s: Settings, current: dict, *, role: str, profile: str | None = No
         raise BudgetRefused("give either amounts to add or a budget profile to raise the limits to")
     if profile is not None:
         target = profile_limits(s, profile)
-        added = {key: _value(key, max(0, target[key] - current[key])) for key in LIMITS}
+        added = {key: _value(key, max(0, target[key] - current[key])) for key in LIMITS
+                 # a hunt with no cost budget (0, unlimited) is never given one by raising it to a profile
+                 if not (key == "max_cost_usd" and not current[key])}
         added = {key: value for key, value in added.items() if value}
         if not added:
             raise BudgetRefused(f"every limit is already at or above the {profile} budget")

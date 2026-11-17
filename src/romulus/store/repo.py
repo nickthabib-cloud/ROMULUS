@@ -1533,7 +1533,9 @@ class Repo:
             c.execute(t.audit_event.insert().values(at=utcnow(), actor=actor, action=f"hunt.{state}", hunt_id=hunt_id,
                                                     detail={k: str(v) for k, v in extra.items()}))
 
-    # A hunt that ends here without a finished sweep can never resume its sweep, so its whole-window cells are final.
+    # A hunt that ends here without a finished sweep has no complete whole-window answer, so its window cells are
+    # narrowed. One an analyst stopped (or force-stopped) during its sweep resumes by running the sweep again, which
+    # writes every window cell anew.
     ENDED_STATES: ClassVar[frozenset[str]] = frozenset({"partial", "failed", "canceled"})
     # Whole-window states that claim the sweep saw everything, and what each becomes when it did not.
     UNFINISHED_WINDOW_STATE: ClassVar[dict[str, str]] = {
@@ -6492,19 +6494,41 @@ class Repo:
                                                                                     "where": where}))
 
     def clear_stops(self, hunt_id: str, actor: str, *, scopes: tuple[str, ...] = ("hunt", "agent"),
-                    now: datetime | None = None) -> int:
-        """A resume or continuation clears the hunt's open stop requests: the analyst asked it to run again."""
+                    up_to_id: int | None = None, now: datetime | None = None) -> int:
+        """A resume or continuation clears the hunt's open stop requests: the analyst asked it to run again. With
+        `up_to_id` (the latest request id read before the resume claimed the hunt) only requests made before the
+        claim are cleared: one made after it is for the resumed run."""
         now = now or utcnow()
         with write_txn(self.engine) as c:
-            cleared = c.execute(t.hunt_stop_request.update().where(
-                t.hunt_stop_request.c.hunt_id == hunt_id,
-                t.hunt_stop_request.c.state.in_(("requested", "honored", "forced")),
-                t.hunt_stop_request.c.scope.in_(scopes),
-            ).values(state="cleared", closed_at=now, closed_by=actor)).rowcount or 0
+            conditions = [t.hunt_stop_request.c.hunt_id == hunt_id,
+                          t.hunt_stop_request.c.state.in_(("requested", "honored", "forced")),
+                          t.hunt_stop_request.c.scope.in_(scopes)]
+            if up_to_id is not None:
+                conditions.append(t.hunt_stop_request.c.id <= up_to_id)
+            cleared = c.execute(t.hunt_stop_request.update().where(*conditions).values(
+                state="cleared", closed_at=now, closed_by=actor)).rowcount or 0
             if cleared:
                 c.execute(t.audit_event.insert().values(at=now, actor=actor, action="hunt.stop_cleared",
                                                         hunt_id=hunt_id, detail={"requests": cleared}))
             return cleared
+
+    def honor_open_stops(self, hunt_id: str, where: str, *, now: datetime | None = None) -> int:
+        """Every open request of the hunt, of either scope, is honoured by a stop that ends the whole run (an agent
+        stop is satisfied too: the agent will not run)."""
+        now = now or utcnow()
+        with write_txn(self.engine) as c:
+            rows = c.execute(select(t.hunt_stop_request).where(
+                t.hunt_stop_request.c.hunt_id == hunt_id, t.hunt_stop_request.c.state == "requested",
+            )).mappings().all()
+            for row in rows:
+                detail = {**(row["detail"] or {}), "honored_in": [where]}
+                c.execute(t.hunt_stop_request.update().where(t.hunt_stop_request.c.id == row["id"]).values(
+                    state="honored", honored_at=now, detail=detail))
+                c.execute(t.audit_event.insert().values(at=now, actor=row["requested_by"], action="hunt.stop_honored",
+                                                        hunt_id=hunt_id, detail={"request": row["id"],
+                                                                                 "scope": row["scope"],
+                                                                                 "where": where}))
+            return len(rows)
 
     def mark_stops_unapplied(self, hunt_id: str, scopes: tuple[str, ...] = ("hunt", "agent"), *,
                              now: datetime | None = None) -> int:
@@ -6516,9 +6540,11 @@ class Repo:
                 t.hunt_stop_request.c.scope.in_(scopes),
             ).values(state="unapplied", closed_at=now, closed_by=SYSTEM_ACTOR)).rowcount or 0
 
-    def record_hunt_process(self, hunt_id: str, *, pid: int, start_marker: str, host: str, command: str) -> None:
+    def record_hunt_process(self, hunt_id: str, *, pid: int, start_marker: str, host: str, command: str,
+                            pgid: int | None = None) -> None:
+        """`pgid`: the process group the worker leads (its children, TShark among them, are in it), else None."""
         with write_txn(self.engine) as c:
-            values = {"pid": pid, "start_marker": start_marker, "host": host, "command": command[:200],
+            values = {"pid": pid, "pgid": pgid, "start_marker": start_marker, "host": host, "command": command[:200],
                       "recorded_at": utcnow(), "ended_at": None}
             c.execute(insert(t.hunt_process).values(hunt_id=hunt_id, **values).on_conflict_do_update(
                 index_elements=["hunt_id"], set_=values))
@@ -6536,7 +6562,8 @@ class Repo:
         return _with_utc(row, ("recorded_at", "ended_at")) if row is not None else None
 
     def end_force_stopped(self, hunt_id: str, *, request_id: int, actor: str, hunt_owner: str | None,
-                          agent_owner: str | None, now: datetime | None = None) -> dict:
+                          agent_owner: str | None, pid: int, start_marker: str,
+                          now: datetime | None = None) -> dict:
         """After a force stop ended the hunt's worker, leave the hunt resumable: in one transaction, provided the leases
         are still the dead worker's, a running hunt ends `partial` (a sweep that had not finished gets a summary that
         says it was stopped, so a resume runs it again) and an agent phase that was running ends `partial` with an
@@ -6546,6 +6573,15 @@ class Repo:
         changed: dict[str, Any] = {}
         with write_txn(self.engine) as c:
             c.execute(t.hunt.update().where(t.hunt.c.id == hunt_id).values(id=t.hunt.c.id))
+            # under the write lock: the worker the force stop ended is still the recorded one, and the request is still
+            # open (a resume that started meanwhile records a new worker and clears the request)
+            process = c.execute(select(t.hunt_process).where(t.hunt_process.c.hunt_id == hunt_id)).mappings().first()
+            if process is None or process["pid"] != pid or process["start_marker"] != start_marker:
+                raise ValueError("another worker took over the hunt meanwhile; it is left as it is")
+            request = c.execute(select(t.hunt_stop_request.c.state).where(
+                t.hunt_stop_request.c.id == request_id)).scalar()
+            if request not in ("requested", "honored"):
+                raise ValueError("the stop request was cleared meanwhile (the hunt was resumed); it is left as it is")
             hunt, run, _, _ = self._live_leases(c, hunt_id, now)
             if hunt["execution_state"] == "running" and hunt["lease_owner"] == hunt_owner:
                 summary = c.execute(select(t.audit_event.c.detail).where(
@@ -6572,21 +6608,30 @@ class Repo:
                     state="partial", reason=reason, ended_at=now, lease_owner=None, lease_until=None,
                     updated_at=now))
                 changed["agent"] = "partial"
-            c.execute(t.hunt_stop_request.update().where(t.hunt_stop_request.c.id == request_id).values(
-                state="forced", honored_at=now, detail={"forced_by": actor, "changed": changed}))
+            c.execute(t.hunt_stop_request.update().where(
+                t.hunt_stop_request.c.id == request_id, t.hunt_stop_request.c.state.in_(("requested", "honored")),
+            ).values(state="forced", honored_at=now, detail={"forced_by": actor, "changed": changed}))
+            c.execute(t.hunt_process.update().where(t.hunt_process.c.hunt_id == hunt_id).values(ended_at=now))
             c.execute(t.audit_event.insert().values(at=now, actor=actor, action="hunt.force_stopped",
                                                     hunt_id=hunt_id, detail={"request": request_id, **changed}))
         return changed
 
     def add_budget_extension(self, hunt_id: str, *, added_by: str, role: str, amounts: dict, profile: str | None,
-                             above_ceiling: list[str], max_extensions: int, now: datetime | None = None) -> dict:
+                             above_ceiling: list[str], max_extensions: int, check=None,
+                             now: datetime | None = None) -> dict:
+        """Record one extension. `check(existing)` runs under the write lock with the hunt's extensions as they are
+        then, and returns the (amounts, above_ceiling) to record or raises ValueError: two extensions made at once are
+        checked against each other, never each against the limits without the other."""
         now = now or utcnow()
         with write_txn(self.engine) as c:
             c.execute(t.hunt.update().where(t.hunt.c.id == hunt_id).values(id=t.hunt.c.id))
             if c.execute(select(t.hunt.c.id).where(t.hunt.c.id == hunt_id)).scalar() is None:
                 raise KeyError(hunt_id)
-            count = c.execute(select(func.count()).select_from(t.hunt_budget_extension).where(
-                t.hunt_budget_extension.c.hunt_id == hunt_id)).scalar_one()
+            existing = [_with_utc(row, ("added_at",)) for row in c.execute(select(t.hunt_budget_extension).where(
+                t.hunt_budget_extension.c.hunt_id == hunt_id).order_by(t.hunt_budget_extension.c.id)).mappings()]
+            if check is not None:
+                amounts, above_ceiling = check(existing)
+            count = len(existing)
             if count >= max_extensions:
                 raise ValueError(f"hunt {hunt_id} already has {count} budget extensions, the most one hunt keeps; "
                                  "add a larger amount in one extension")

@@ -285,9 +285,12 @@ def stop_sentence(m: dict) -> str:
         return (f"An analyst stopped this hunt (requested by {who}) and, when it did not stop in time, "
                 f"{stop.get('forced_by')} force-stopped its worker process. The run was interrupted: its results are "
                 "partial, and what it had not searched is unknown, not absent.")
-    if stop.get("scope") == "agent":
-        return (f"An analyst stopped the AI agent (requested by {who}). Its investigation is partial; the "
-                "deterministic results do not depend on it.")
+    if stop.get("scope") == "agent" or (stop.get("honored_in") or []) == ["agent"]:
+        # an agent stop, or a hunt stop that reached the run only in its agent phase: detection had ended
+        complete = m.get("execution_state") == "completed_within_scope"
+        return (f"An analyst stopped the AI agent (requested by {who}). Its investigation is partial; "
+                + ("the deterministic detection results are complete within scope and do not depend on it."
+                   if complete else "the deterministic results do not depend on it."))
     where = ", ".join(stop.get("honored_in") or []) or "a safe point"
     return (f"An analyst stopped this hunt (requested by {who}; it stopped at: {where}). Everything it found is "
             "reported; what it did not run is named in the stop reason, and what it did not search is unknown, "

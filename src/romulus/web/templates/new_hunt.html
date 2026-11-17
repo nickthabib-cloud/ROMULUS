@@ -28,6 +28,7 @@
       <label>{% if field == 'minutes' %}Wall clock (minutes){% else %}{{ budget.labels[limit] | capitalize }}{% endif %}
         <input name="{{ field }}" inputmode="decimal" autocomplete="off" placeholder="ceiling {% if field == 'minutes' %}{{ (budget.ceiling[limit] / 60) | round | int }}{% else %}{{ budget.ceiling[limit] or 'none' }}{% endif %}"></label>
       {% endfor %}
+      {% if budget.ceiling.max_cost_usd %}<p class="help small">A cost of 0 means no cost budget at all; where this site sets one, only a lead may remove it.</p>{% endif %}
     </details>
     {% for egress in egress_banners %}<p class="warn"><b>Model egress:</b> {{ egress }}</p>{% endfor %}
     <button type="submit">Start hunt</button>

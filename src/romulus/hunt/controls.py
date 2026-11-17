@@ -3,13 +3,17 @@
 Stop. An analyst's stop request is a row in the store (who, when, scope "hunt" or "agent"). The running hunt reads it
 at safe points, through `StopWatch` (one indexed lookup at most every STOP_CHECK_SECONDS): before each sweep partition
 is read, before each expansion link is fetched, between stages, and in the agent before every model call, before every
-read tool call and between rounds. A stopped run ends cleanly, keeps everything it stored, records the request as
-honoured, and leaves the hunt honestly partial and resumable: what it did not run is named, never reported complete.
+read tool call, before every triage call and between rounds. The packet, baseline, site-network and ranking stages
+check only at their boundaries: one that is running finishes its current step first (or is ended by a force stop).
+A stopped run ends cleanly, keeps everything it stored, records the request as
+honoured, and leaves the hunt honestly partial and resumable: what it did not run is named, never reported complete,
+and every rule a skipped stage owns reads partial until a resume runs it (`run.mark_unrun_stages`).
 
 Force stop. When a requested stop has not taken effect within the grace period (ROMULUS_HUNT_STOP_GRACE_SECONDS),
 a force stop ends the hunt's worker process. Every worker records its own pid with a start marker (the kernel's
 process start time and boot id) and its host; a force stop acts only on that recorded process, only on the same
-host, only while the pid still has that start marker and runs ROMULUS, so a pid the system has given to another
+host, only while the pid still has that start marker and runs ROMULUS (and to the process group the worker leads,
+so its children end with it), so a pid the system has given to another
 process is never signalled. The hunt is then left `partial`, its agent `interrupted`, and a resume continues it.
 
 Roles. A lead may stop or extend any hunt; an analyst may stop or extend the hunts they started. Only a lead may force
@@ -103,14 +107,14 @@ class StopWatch:
 
 
 # ---------------------------------------------------------------------------------------------------- processes
-def process_identity(pid: int) -> tuple[str, str] | None:
+def process_identity(pid: int, *, root: Path = Path("/proc")) -> tuple[str, str] | None:
     """(start marker, command line) of a live process on this host; None when it is gone or the host cannot say
     (only Linux's /proc is read). The marker is the boot id and the process's start time in clock ticks, which a
     later process given the same pid never shares."""
-    proc = Path("/proc") / str(int(pid))
+    proc = root / str(int(pid))
     try:
         stat = (proc / "stat").read_text(encoding="ascii", errors="replace")
-        boot = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+        boot = (root / "sys" / "kernel" / "random" / "boot_id").read_text(encoding="ascii").strip()
         cmdline = (proc / "cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", errors="replace").strip()
     except (OSError, ValueError):
         return None
@@ -120,6 +124,22 @@ def process_identity(pid: int) -> tuple[str, str] | None:
     return f"{boot}:{fields[19]}", cmdline
 
 
+def own_group() -> int | None:
+    """The process group this worker leads, or None. A worker the web starts leads its own session. One started from
+    a script (no terminal) is moved into a group of its own, so that signalling the group never reaches the script;
+    one run at a terminal stays in the terminal's job, where Ctrl-C still reaches it, and only its pid is signalled."""
+    getpgid = getattr(os, "getpgid", None)
+    if getpgid is None:
+        return None
+    pid = os.getpid()
+    try:
+        if getpgid(0) != pid and not sys.stdin.isatty():
+            os.setpgid(0, 0)
+        return pid if getpgid(0) == pid else None
+    except (OSError, ValueError):
+        return None
+
+
 def own_marker() -> str:
     identity = process_identity(os.getpid())
     return identity[0] if identity else f"{UNVERIFIABLE}:{os.getpid()}"
@@ -127,10 +147,12 @@ def own_marker() -> str:
 
 @contextmanager
 def worker(repo, hunt_id: str, command: str):
-    """Record this process as the hunt's worker while the block runs."""
+    """Record this process as the hunt's worker while the block runs, with the process group it leads (its
+    children, TShark among them, are in it), so a force stop ends them too."""
     pid, marker = os.getpid(), own_marker()
     try:
-        repo.record_hunt_process(hunt_id, pid=pid, start_marker=marker, host=socket.gethostname(), command=command)
+        repo.record_hunt_process(hunt_id, pid=pid, start_marker=marker, host=socket.gethostname(), command=command,
+                                 pgid=own_group())
     except Exception:  # noqa: BLE001 - without the record a force stop is refused; the hunt still runs
         log.exception("could not record hunt %s's worker process", hunt_id)
     try:
@@ -142,8 +164,11 @@ def worker(repo, hunt_id: str, command: str):
             log.exception("could not record the end of hunt %s's worker process", hunt_id)
 
 
-def _signal(pid: int, sig: int) -> None:
-    os.kill(pid, sig)
+def _signal(pid: int, sig: int, pgid: int | None = None) -> None:
+    if pgid is not None and pgid == pid and hasattr(os, "killpg"):
+        os.killpg(pgid, sig)             # the worker leads its group: its children end with it
+    else:
+        os.kill(pid, sig)
 
 
 def _owner_of(repo, hunt_id: str) -> tuple[str | None, str | None]:
@@ -175,7 +200,7 @@ def request_stop(repo, hunt_id: str, *, scope: str, actor: str, role: str) -> di
 
 def force_stop(s: Settings, repo, hunt_id: str, *, actor: str, role: str, now: datetime | None = None,
                identify: Callable[[int], tuple[str, str] | None] = process_identity,
-               send: Callable[[int, int], None] = _signal, host: str | None = None,
+               send: Callable[..., None] = _signal, host: str | None = None,
                sleep: Callable[[float], None] = time.sleep) -> dict:
     """End the hunt's worker process after a stop request it has not honoured within the grace period, then leave the
     hunt resumable. Raises ControlRefused when this is not allowed or not safe."""
@@ -224,9 +249,12 @@ def force_stop(s: Settings, repo, hunt_id: str, *, actor: str, role: str, now: d
             if gone():
                 break                            # never signal a pid that no longer has the recorded marker
             try:
-                send(pid, sig)
+                send(pid, sig, proc.get("pgid"))
             except ProcessLookupError:
                 break
+            except PermissionError:
+                raise ControlRefused(f"this account may not signal process {pid}; end it as the service account "
+                                     "that runs the hunts") from None
             signalled = True
             deadline = monotonic() + KILL_WAIT_SECONDS
             while not gone() and monotonic() < deadline:
@@ -236,30 +264,47 @@ def force_stop(s: Settings, repo, hunt_id: str, *, actor: str, role: str, now: d
         else:
             raise ControlRefused(f"process {pid} did not end; the hunt is unchanged")
     # otherwise the recorded process is gone already (its pid is free, or another process's): nothing is signalled
-    changed = repo.end_force_stopped(hunt_id, request_id=request["id"], actor=actor, hunt_owner=hunt_owner,
-                                     agent_owner=agent_owner)
+    try:
+        changed = repo.end_force_stopped(hunt_id, request_id=request["id"], actor=actor, hunt_owner=hunt_owner,
+                                         agent_owner=agent_owner, pid=pid, start_marker=marker)
+    except ValueError as exc:
+        raise ControlRefused(str(exc)) from None
+    if changed.get("hunt"):
+        # the stages the ended worker had not finished read partial until a resume runs them
+        from romulus.hunt.run import mark_unrun_stages
+        mark_unrun_stages(repo, hunt_id, f"not run: the hunt was force-stopped by {actor}")
     return {"pid": pid, "signalled": signalled, "changed": changed}
 
 
 # ---------------------------------------------------------------------------------------------------- budgets
 def extend_budget(s: Settings, repo, hunt_id: str, *, actor: str, role: str, profile: str | None = None,
-                  amounts: dict | None = None) -> dict:
-    """Record a budget extension for the hunt's agent: explicit amounts or a raise to a profile. Returns the
-    extension, the new limits, and whether the agent needs a continuation to use it (it is not running now)."""
+                  amounts: dict | None = None, control_role: str | None = None) -> dict:
+    """Record a budget extension for the hunt's agent: explicit amounts or a raise to a profile. `role` holds the new
+    totals to the ceiling; `control_role` (default `role`) decides whether the actor may extend this hunt at all.
+    Returns the extension, the new limits, and whether the agent needs a continuation to use it (it is not running
+    now)."""
     hunt = repo.get_hunt(hunt_id)
     if hunt is None:
         raise KeyError(hunt_id)
-    if not may_control(repo, hunt, actor, role):
+    if not may_control(repo, hunt, actor, control_role or role):
         raise ControlRefused("only a lead or the analyst who started this hunt may extend its agent budget")
     manifest = hunt["manifest"] or {}
     if not (manifest.get("ai_agent") or {}).get("requested"):
         raise ControlRefused("this hunt ran without the AI agent: there is no agent budget to extend")
-    current = hunt_budget.resolve(repo, hunt_id, manifest, s)["limits"]
+    planned: dict = {}
+
+    def check(existing: list[dict]) -> tuple[dict, list[str]]:
+        # under the write lock, against every extension recorded so far (one made at the same time included)
+        current = hunt_budget.resolve(repo, hunt_id, manifest, s, extensions=existing)["limits"]
+        planned.update(hunt_budget.extension(s, current, role=role, profile=profile, amounts=amounts))
+        return planned["amounts"], planned["above_ceiling"]
+
     try:
-        planned = hunt_budget.extension(s, current, role=role, profile=profile, amounts=amounts)
-        row = repo.add_budget_extension(hunt_id, added_by=actor, role=role, amounts=planned["amounts"],
-                                        profile=profile, above_ceiling=planned["above_ceiling"],
-                                        max_extensions=hunt_budget.MAX_EXTENSIONS)
+        # a quick check first, so a refusal needs no write lock; the recorded one is the check under the lock
+        hunt_budget.extension(s, hunt_budget.resolve(repo, hunt_id, manifest, s)["limits"], role=role,
+                              profile=profile, amounts=amounts)
+        row = repo.add_budget_extension(hunt_id, added_by=actor, role=role, amounts={}, profile=profile,
+                                        above_ceiling=[], max_extensions=hunt_budget.MAX_EXTENSIONS, check=check)
     except ValueError as exc:
         raise ControlRefused(str(exc)) from None
     live = repo.run_liveness(hunt_id)

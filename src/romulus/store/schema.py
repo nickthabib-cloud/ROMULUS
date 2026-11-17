@@ -1533,6 +1533,7 @@ hunt_process = Table(
     "hunt_process", metadata,
     Column("hunt_id", String, ForeignKey("hunt.id"), primary_key=True),
     Column("pid", Integer, nullable=False),
+    Column("pgid", Integer),                 # the process group it leads, when it leads one
     Column("start_marker", String, nullable=False),
     Column("host", String, nullable=False),
     Column("command", String, nullable=False),

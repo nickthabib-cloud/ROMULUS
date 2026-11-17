@@ -900,6 +900,25 @@ def _not_applicable(repo, hunt_id: str, window: Window, targets: list[str]) -> N
                                {"reason": "not an Arkime session target: no packets to examine"})
 
 
+def mark_not_run(repo, hunt_id: str, window: Window, targets: list[str], packet_targets: list[str], reason: str,
+                 *, owner_token: str | None = None) -> None:
+    """The cells a packet stage that did not run leaves behind: its rules do not apply on a target that is not an
+    Arkime session index (as the stage itself records), and on each that is, they and the indicator rule's URL and
+    SHA256 matching are unresolved, with `reason`. The stage's own cells replace these when it runs."""
+    _not_applicable(repo, hunt_id, window, [target for target in targets if target not in packet_targets])
+    if not packet_targets:
+        return
+    rules: list = [cls() for cls in PACKET_PLAYBOOKS]
+    indicator = IndicatorMatch()
+    indicator.bind_indicators(repo, (repo.get_hunt(hunt_id) or {}).get("manifest", {}).get("indicator_lists"))
+    if indicator._overlay is not None and {"url", "sha256"} & indicator._overlay.kinds:
+        rules.append(indicator)
+    for target in packet_targets:
+        for rule in rules:
+            repo.set_rule_cell(hunt_id, rule.id, rule.version, f"{PCAP_TARGET}:{target}", window.key(),
+                               "evaluated_partial", 0, 0, {"reasons": [reason]}, owner_token=owner_token)
+
+
 def _run_streams(s: Settings, repo, client, hunt_id: str, window: Window, target: str, contract, work: Path,
                  packets, heartbeat, owner_token: str | None) -> dict:
     """The cleartext-stream pass over one Arkime target: its summary, with the partial reasons to merge."""

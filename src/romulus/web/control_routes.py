@@ -150,14 +150,25 @@ def stop_banner(repo, hunt_id: str) -> dict | None:
     if stop is None or stop["state"] not in ("requested", "honored", "forced"):
         return None
     what = "the AI agent" if stop["scope"] == "agent" else "the hunt"
+    when = f"{stop['requested_at']:%Y-%m-%d %H:%M:%S} UTC"
+    honored_in = (stop.get("detail") or {}).get("honored_in") or []
     if stop["state"] == "requested":
-        text = (f"Stop of {what} requested by {stop['requested_by']} at {stop['requested_at']:%Y-%m-%d %H:%M:%S} "
-                "UTC: it stops at its next safe point.")
+        live = repo.run_liveness(hunt_id)
+        text = (f"Stop of {what} requested by {stop['requested_by']} at {when}: "
+                + ("it stops at its next safe point." if live["hunt"] or live["agent"] else
+                   "requested, but the hunt's worker is no longer running, so nothing is stopping; resume the hunt "
+                   "to run it again (the resume clears the request)."))
+    elif stop["state"] == "honored" and honored_in == ["agent"]:
+        detection = (repo.get_hunt(hunt_id) or {}).get("execution_state")
+        text = (f"The AI agent was stopped by {stop['requested_by']} (requested {when}). "
+                + ("The deterministic detection results are complete within scope; " if
+                   detection == "completed_within_scope" else "")
+                + "the AI agent's investigation is partial: it kept what it stored, and resuming continues it.")
     elif stop["state"] == "honored":
-        where = ", ".join((stop.get("detail") or {}).get("honored_in") or []) or "its next safe point"
-        text = (f"{what[0].upper()}{what[1:]} was stopped by {stop['requested_by']} (requested "
-                f"{stop['requested_at']:%Y-%m-%d %H:%M:%S} UTC; stopped at: {where}). What it found is kept; what it "
-                "did not run is named as not run, and its results are partial. Resuming the hunt continues it.")
+        where = ", ".join(honored_in) or "its next safe point"
+        text = (f"{what[0].upper()}{what[1:]} was stopped by {stop['requested_by']} (requested {when}; stopped at: "
+                f"{where}). What it found is kept; what it did not run is named as not run, and its results are "
+                "partial. Resuming the hunt continues it.")
     else:
         text = (f"The hunt's worker process was force-stopped by {(stop.get('detail') or {}).get('forced_by')} after "
                 f"a stop requested by {stop['requested_by']} at {stop['requested_at']:%Y-%m-%d %H:%M:%S} UTC was not "

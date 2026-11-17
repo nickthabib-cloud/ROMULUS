@@ -237,17 +237,19 @@ build and refuses a mismatch before fetching more records. Older manifests retai
   - before each sweep source and partition;
   - between the post-sweep stages;
   - before each expansion link;
-  - in the agent, before every model call, before every read tool call, while waiting for budget, and between rounds.
+  - in the agent, before every model call, before every read tool call, while waiting for budget, between rounds, and before every triage call.
+
+The packet, baseline, site-network check and ranking stages check only at their boundaries. A stop that arrives while one runs takes effect when its current step ends, or by a force stop.
 
 What happens depends on where the stop arrives:
 - **During the sweep.** The sweep closes its stage and finalizes nothing, since an aggregate over part of the window could report what the rest would contradict. Its summary says it did not finish; the partitions it had not read stay planned; the hunt ends partial; and every whole-window answer is narrowed. A resume runs the sweep again: its writes are idempotent, and aggregates must read every partition.
-- **After the sweep.** The stages that did not run record nothing, and the stop reason names them. Expansion leaves its unfinished anchors pending, so a resume works them.
+- **After the sweep.** The stages that did not run record no summary, and the stop reason names them. Every rule a skipped stage owns reads partial, never "no data in scope" or complete: each baseline spec's whole-window cell, and the packet rules' and the indicator rule's URL and SHA256 cells on each Arkime session target. The stage's own cells replace these when a resume runs it. Expansion leaves its unfinished anchors pending, so a resume works them.
 - **In the agent.** The agent makes no further model call (no triage pass, no assessment), keeps what it stored, and ends partial with `stopped_by_analyst`.
 
-A resume clears the request. A request the run never reached a safe point for is closed as unapplied.
+A resume clears the requests made before it claimed the hunt; one made after the claim is for the resumed run. A request the run never reached a safe point for is closed as unapplied. A hunt stop that reaches the run only in its agent phase stops the agent; detection that completed within scope stays complete.
 
 **Force stop.**
-- Every worker records its pid, a start marker (the kernel's process start time and boot id) and its host.
+- Every worker records its pid, a start marker (the kernel's process start time and boot id), its host and the process group it leads. A worker the web starts leads its own session; one started from a script without a terminal moves into a group of its own; one run at a terminal stays in its job, and only its pid is signalled.
 - After the grace period (`ROMULUS_HUNT_STOP_GRACE_SECONDS`), a lead may force-stop. ROMULUS signals the recorded process only on its own host, only while the pid still has that start marker and runs ROMULUS, and never a reused pid.
 - It then leaves the hunt partial and its agent interrupted, in one transaction. A sweep that had not finished is marked stopped, so a resume runs it again.
 - Hosts without `/proc` cannot verify a process, so they refuse a force stop.
