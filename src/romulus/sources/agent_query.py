@@ -5,12 +5,18 @@ fields it wants shown) for one of the hunt's indices, or an Arkime expression fo
 writes is passed through. This module is the boundary:
 
 - Allowlists, never a denylist alone. A query position takes only the clause types in QUERY_CLAUSES, each with the
-  keys its entry allows; an aggregation takes only the types in AGGREGATIONS, each with its own keys. Every
-  number a cap applies to must be a JSON integer (never a string a cluster would coerce, a float or a boolean).
+  keys its entry allows (a field leaf's options too); an aggregation takes only the types in AGGREGATIONS, each with
+  its own keys. Every number a cap applies to must be a JSON integer (never a string a cluster would coerce, a float
+  or a boolean). Field names and labels (aggregation, filter and composite-source names) must match a strict name
+  pattern; every structural and option key is also checked against FORBIDDEN_KEYS.
+- Lucene's own safety limits stay in force: no query may raise the regex determinization limit, an expansion count
+  is capped, a rewrite is constant-score only, and a regular expression, wildcard or regex-bearing query string is
+  at most MAX_REGEX_CHARS long. Their cost is paid while the query is built on each node, before any timeout. An
+  Arkime expression holds at most MAX_ARKIME_REGEXES regular expressions of at most MAX_ARKIME_REGEX_CHARS each.
 - Nothing that runs code, reads another index or reads outside the query is accepted anywhere: scripts of every
   kind, runtime mappings, percolation, wrapped (encoded) queries, terms lookups, more-like-this, indexed shapes,
   inference clauses, global/children/parent aggregations, significant-terms background counts and empty-bucket
-  term lists (`min_doc_count: 0`). FORBIDDEN_KEYS is refused at any depth as a second line.
+  term lists (`min_doc_count: 0`).
 - The body is built here, from validated parts only: the model's query becomes one `bool.filter` clause beside the
   hunt window's range on the source's time field, so it can only narrow what the source holds in the window. Size,
   timeout, terminate_after and track_total_hits are fixed caps, and aggregations are bounded by their own sizes and
@@ -52,6 +58,15 @@ QUERY_TIMEOUT = "10s"
 TERMINATE_AFTER = 1_000_000
 TRACK_TOTAL_HITS = 10_000
 MAX_EXPRESSION_CHARS = 2_000
+# A regular expression, wildcard pattern or regex-bearing query string: its automaton is built on each data node while
+# the query is parsed, before the search timeout applies.
+MAX_REGEX_CHARS = 1_000
+# The most terms a fuzzy, prefix-phrase or fuzzy match may expand to (Elasticsearch's default is 50).
+MAX_EXPANSIONS = 100
+# The rewrites a multi-term query may use: constant-score forms, which never build a scoring clause per term.
+CONSTANT_REWRITES = frozenset({"constant_score", "constant_score_blended", "constant_score_boolean"})
+MAX_ARKIME_REGEXES = 2
+MAX_ARKIME_REGEX_CHARS = 200
 MAX_BUCKETS_SHOWN = 100
 
 # Refused at any depth, whatever position they are in: code, other indices, encoded bodies, search features that are
@@ -92,32 +107,46 @@ def _refuse(path: str, code: str, message: str):
 
 # ---- generic shape -----------------------------------------------------------------------------------------------
 
-def _shape(value: Any, path: str, depth: int, counter: list[int]) -> None:
-    """Depth, node count, key and text length, and the forbidden keys, at every level."""
-    counter[0] += 1
-    if counter[0] > MAX_QUERY_NODES:
-        _refuse(path, "too_large", f"the query has more than {MAX_QUERY_NODES} parts")
-    if depth > MAX_QUERY_DEPTH:
-        _refuse(path, "too_deep", f"the query nests deeper than {MAX_QUERY_DEPTH} levels")
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if not isinstance(key, str) or not key or len(key) > MAX_KEY_CHARS:
-                _refuse(path, "bad_key", f"a key must be a string of 1 to {MAX_KEY_CHARS} characters")
-            if key in FORBIDDEN_KEYS or key.lower() in FORBIDDEN_KEYS:
-                _refuse(f"{path}.{key}", "forbidden_construct",
-                        f"{key} is not accepted: it runs code, reads outside this source and window, or is not a "
-                        "read of this source's records")
-            _shape(child, f"{path}.{key}", depth + 1, counter)
-    elif isinstance(value, list):
-        for index, child in enumerate(value):
-            _shape(child, f"{path}[{index}]", depth + 1, counter)
-    elif isinstance(value, str):
-        if len(value) > MAX_TEXT_CHARS:
-            _refuse(path, "text_too_long", f"a text value is longer than {MAX_TEXT_CHARS} characters")
-        if any(ord(ch) < 0x20 and ch not in "\t\n\r" for ch in value):
-            _refuse(path, "control_character", "a text value holds a control character")
-    elif not isinstance(value, _SCALAR):
-        _refuse(path, "bad_value", "values must be JSON objects, arrays, strings, numbers, booleans or null")
+def _shape(value: Any, path: str) -> None:
+    """Depth, node count, key and text length, at every level. Iterative, so a value nested past any depth is refused
+    here and never reaches a recursive step (serialization, the structural checks)."""
+    nodes = 0
+    stack = [(value, path, 0)]
+    while stack:
+        node, where, depth = stack.pop()
+        nodes += 1
+        if nodes > MAX_QUERY_NODES:
+            _refuse(where, "too_large", f"the query has more than {MAX_QUERY_NODES} parts")
+        if depth > MAX_QUERY_DEPTH:
+            _refuse(where, "too_deep", f"the query nests deeper than {MAX_QUERY_DEPTH} levels")
+        if isinstance(node, dict):
+            for key, child in node.items():
+                if not isinstance(key, str) or not key or len(key) > MAX_KEY_CHARS:
+                    _refuse(where, "bad_key", f"a key must be a string of 1 to {MAX_KEY_CHARS} characters")
+                stack.append((child, f"{where}.{key}", depth + 1))
+        elif isinstance(node, list):
+            stack.extend((child, f"{where}[{index}]", depth + 1) for index, child in enumerate(node))
+        elif isinstance(node, str):
+            if len(node) > MAX_TEXT_CHARS:
+                _refuse(where, "text_too_long", f"a text value is longer than {MAX_TEXT_CHARS} characters")
+            if any(ord(ch) < 0x20 and ch not in "\t\n\r" for ch in node):
+                _refuse(where, "control_character", "a text value holds a control character")
+        elif not isinstance(node, _SCALAR):
+            _refuse(where, "bad_value", "values must be JSON objects, arrays, strings, numbers, booleans or null")
+
+
+def _forbid(key: str, path: str) -> None:
+    """A structural or option key is never one of FORBIDDEN_KEYS (field names and labels are checked by pattern)."""
+    if key in FORBIDDEN_KEYS or key.lower() in FORBIDDEN_KEYS:
+        _refuse(f"{path}.{key}", "forbidden_construct",
+                f"{key} is not accepted: it runs code, reads outside this source and window, or is not a read of "
+                "this source's records")
+
+
+def _field_name(name: Any, path: str) -> str:
+    if not isinstance(name, str) or not _NAME.fullmatch(name):
+        _refuse(path, "bad_field", "a field name is 1 to 256 letters, digits, _, @, . or -")
+    return name
 
 
 def _int(value: Any, path: str, low: int, high: int) -> int:
@@ -138,6 +167,8 @@ def _one(node: Any, path: str, what: str) -> tuple[str, Any]:
 def _keys(body: Any, path: str, allowed: frozenset[str], what: str) -> dict:
     if not isinstance(body, dict):
         _refuse(path, "bad_shape", f"{what} must be an object")
+    for key in body:
+        _forbid(key, path)
     extra = sorted(set(body) - allowed)
     if extra:
         _refuse(f"{path}.{extra[0]}", "key_not_allowed",
@@ -165,7 +196,7 @@ _OPTION_LEAVES = {
     "query_string": frozenset({"query", "default_field", "fields", "default_operator", "analyzer",
                                "allow_leading_wildcard", "analyze_wildcard", "lenient", "minimum_should_match",
                                "phrase_slop", "fuzziness", "time_zone", "type", "quote_field_suffix",
-                               "auto_generate_synonyms_phrase_query", "max_determinized_states", "rewrite",
+                               "auto_generate_synonyms_phrase_query", "rewrite",
                                "fuzzy_max_expansions", "fuzzy_prefix_length", "fuzzy_transpositions",
                                "enable_position_increments", "tie_breaker", *_LEAF_OPTIONS}),
     "simple_query_string": frozenset({"query", "fields", "default_operator", "analyzer", "flags",
@@ -183,6 +214,45 @@ _COMPOUND = {
                                                                     *_LEAF_OPTIONS})},
 }
 QUERY_CLAUSES = frozenset({*_FIELD_LEAVES, *_OPTION_LEAVES, *_COMPOUND})
+# The options each field leaf takes, as {clause: {field: {options}}}. `max_determinized_states` is never accepted (the
+# cluster's own limit applies), and the expansion and rewrite options are bounded (_option_limits).
+_FIELD_LEAF_OPTIONS = {
+    "term": frozenset({"value", "case_insensitive", *_LEAF_OPTIONS}),
+    "prefix": frozenset({"value", "rewrite", "case_insensitive", *_LEAF_OPTIONS}),
+    "wildcard": frozenset({"value", "wildcard", "rewrite", "case_insensitive", *_LEAF_OPTIONS}),
+    "regexp": frozenset({"value", "flags", "case_insensitive", "rewrite", *_LEAF_OPTIONS}),
+    "fuzzy": frozenset({"value", "fuzziness", "max_expansions", "prefix_length", "transpositions", "rewrite",
+                        *_LEAF_OPTIONS}),
+    "range": frozenset({"gt", "gte", "lt", "lte", "format", "relation", "time_zone", *_LEAF_OPTIONS}),
+    "match": frozenset({"query", "analyzer", "auto_generate_synonyms_phrase_query", "fuzziness", "max_expansions",
+                        "prefix_length", "fuzzy_transpositions", "fuzzy_rewrite", "lenient", "operator",
+                        "minimum_should_match", "zero_terms_query", *_LEAF_OPTIONS}),
+    "match_phrase": frozenset({"query", "analyzer", "slop", "zero_terms_query", *_LEAF_OPTIONS}),
+    "match_phrase_prefix": frozenset({"query", "analyzer", "max_expansions", "slop", "zero_terms_query",
+                                      *_LEAF_OPTIONS}),
+    "match_bool_prefix": frozenset({"query", "analyzer", "operator", "minimum_should_match", "fuzziness",
+                                    "prefix_length", "max_expansions", "fuzzy_transpositions", "fuzzy_rewrite",
+                                    *_LEAF_OPTIONS}),
+}
+# The leaves whose value is compiled to an automaton: its pattern is bounded.
+_PATTERN_LEAVES = frozenset({"regexp", "wildcard"})
+_PATTERN_VALUE_KEYS = ("value", "wildcard")
+
+
+def _option_limits(body: dict, path: str) -> None:
+    """The bounded options any clause may carry: expansion counts and constant-score rewrites."""
+    for key in ("max_expansions", "fuzzy_max_expansions"):
+        if key in body:
+            _int(body[key], f"{path}.{key}", 1, MAX_EXPANSIONS)
+    for key in ("rewrite", "fuzzy_rewrite"):
+        if key in body and body[key] not in CONSTANT_REWRITES:
+            _refuse(f"{path}.{key}", "rewrite_not_allowed",
+                    f"{key} takes a constant-score form only: {', '.join(sorted(CONSTANT_REWRITES))}")
+
+
+def _pattern_text(value: Any, path: str, what: str) -> None:
+    if isinstance(value, str) and len(value) > MAX_REGEX_CHARS:
+        _refuse(path, "pattern_too_long", f"{what} is longer than {MAX_REGEX_CHARS} characters")
 
 
 def _scalars(body: dict, keys, path: str) -> None:
@@ -195,6 +265,7 @@ def _query(node: Any, path: str) -> None:
     """One query position: a clause from QUERY_CLAUSES, recursively."""
     clause, body = _one(node, path, "a query")
     where = f"{path}.{clause}"
+    _forbid(clause, path)
     if clause not in QUERY_CLAUSES:
         _refuse(where, "clause_not_allowed",
                 f"{clause} is not an accepted query clause; accepted: {', '.join(sorted(QUERY_CLAUSES))}")
@@ -227,8 +298,14 @@ def _query(node: Any, path: str) -> None:
             values = body.get("values")
             if not isinstance(values, list) or len(values) > MAX_IDS or not all(isinstance(v, str) for v in values):
                 _refuse(f"{where}.values", "bad_shape", f"ids takes a list of at most {MAX_IDS} id strings")
-        if clause == "exists" and not isinstance(body.get("field"), str):
-            _refuse(f"{where}.field", "bad_shape", "exists takes one field name")
+        if clause == "exists":
+            _field_name(body.get("field"), f"{where}.field")
+        if clause == "query_string" and "default_field" in body:
+            _field_name(str(body["default_field"]).split("^", 1)[0].replace("*", "x"), f"{where}.default_field")
+        if clause in ("query_string", "simple_query_string") and "/" in str(body.get("query", "")):
+            # a query string's /regex/ is compiled like a regexp query
+            _pattern_text(body.get("query"), f"{where}.query", "a query string holding a regular expression")
+        _option_limits(body, where)
         for key in ("fields",):
             if key in body and (not isinstance(body[key], list)
                                 or not all(isinstance(v, str) and _PATTERN.fullmatch(v.split("^", 1)[0])
@@ -242,7 +319,7 @@ def _query(node: Any, path: str) -> None:
     fields = [key for key in body if key not in _LEAF_OPTIONS]
     if len(fields) != 1:
         _refuse(where, "bad_shape", f"{clause} names exactly one field")
-    field = fields[0]
+    field = _field_name(fields[0], f"{where}.{fields[0]}")
     value = body[field]
     if clause == "terms":
         # a list of values only: an object here is a terms lookup, which reads another index
@@ -250,12 +327,19 @@ def _query(node: Any, path: str) -> None:
             _refuse(f"{where}.{field}", "terms_lookup",
                     f"terms takes a list of at most {MAX_IDS} values; a lookup from another index is not accepted")
     elif isinstance(value, dict):
-        if not all(isinstance(v, (*_SCALAR, list)) for v in value.values()):
-            _refuse(f"{where}.{field}", "bad_shape", f"the options of {clause} are single values")
-        if any(isinstance(v, list) and not all(isinstance(x, _SCALAR) for x in v) for v in value.values()):
-            _refuse(f"{where}.{field}", "bad_shape", f"the options of {clause} are single values")
+        options = _keys(value, f"{where}.{field}", _FIELD_LEAF_OPTIONS[clause], f"{clause} on a field")
+        _scalars(options, options.keys(), f"{where}.{field}")
+        _option_limits(options, f"{where}.{field}")
+        if clause in _PATTERN_LEAVES:
+            for key in _PATTERN_VALUE_KEYS:
+                _pattern_text(options.get(key), f"{where}.{field}.{key}", f"a {clause} pattern")
     elif not isinstance(value, _SCALAR):
         _refuse(f"{where}.{field}", "bad_shape", f"{clause} takes a value or an object of options")
+    elif clause in _PATTERN_LEAVES:
+        _pattern_text(value, f"{where}.{field}", f"a {clause} pattern")
+    for key in body:
+        if key != field:
+            _forbid(key, where)
     _scalars(body, _LEAF_OPTIONS, where)
 
 
@@ -379,6 +463,7 @@ def _aggs(node: Any, path: str, depth: int, counter: list[int], window_seconds: 
         if len(kinds) != 1 or len(subs) > 1:
             _refuse(where, "bad_shape", "an aggregation names one type, with at most one aggs object")
         kind = kinds[0]
+        _forbid(kind, where)
         if kind not in AGGREGATIONS:
             _refuse(f"{where}.{kind}", "aggregation_not_allowed",
                     f"{kind} is not an accepted aggregation; accepted: {', '.join(sorted(AGGREGATIONS))}")
@@ -423,6 +508,8 @@ def _agg_body(kind: str, body: dict, at: str, window_seconds: float) -> int:
                         isinstance(value, list) and len(value) <= MAX_IDS
                         and all(isinstance(v, (str, int, float)) for v in value))):
                     _refuse(f"{at}.{key}", "bad_shape", f"{key} takes a pattern or a list of values")
+                # a string include or exclude is a regular expression
+                _pattern_text(value, f"{at}.{key}", f"a terms {key} pattern")
         else:
             terms = body.get("terms")
             if not isinstance(terms, list) or not 1 < len(terms) <= 4:
@@ -453,7 +540,8 @@ def _agg_body(kind: str, body: dict, at: str, window_seconds: float) -> int:
                 _interval_seconds(options, f"{at}.sources[{index}].{name}.{kind_name}")
         if "after" in body:
             after = body["after"]
-            if not isinstance(after, dict) or not all(isinstance(v, _SCALAR) for v in after.values()):
+            if not isinstance(after, dict) or not all(isinstance(v, _SCALAR) for v in after.values()) or not all(
+                    _AGG_NAME.fullmatch(key) for key in after):
                 _refuse(f"{at}.after", "bad_shape", "after takes the after_key a previous page returned")
         return size
     if kind == "filters":
@@ -534,15 +622,16 @@ def validate_es_query(query: dict | None, aggs: dict | None, sort: list | None, 
                       shown_fields: list | None, *, window_seconds: float) -> None:
     """Refuse (QueryRefused) anything outside what an agent query may hold; return when every part is accepted."""
     parts = {"query": query, "aggs": aggs, "sort": sort, "source_fields": shown_fields}
+    # depth, size and text first and without recursion: nothing below (serialization included) meets a deep value
+    for name, value in parts.items():
+        if value is not None:
+            _shape(value, name)
     try:
         encoded = json.dumps(parts, ensure_ascii=False, allow_nan=False)
     except (TypeError, ValueError):
         _refuse("$", "bad_value", "the query must be plain JSON")
     if len(encoded.encode("utf-8")) > MAX_QUERY_BYTES:
         _refuse("$", "too_large", f"the query, aggregations and sort exceed {MAX_QUERY_BYTES} bytes together")
-    for name, value in parts.items():
-        if value is not None:
-            _shape(value, name, 0, [0])
     if query is not None:
         _query(query, "query")
     if aggs is not None:
@@ -562,7 +651,55 @@ def validate_expression(expression: Any) -> str:
         _refuse("expression", "bad_expression", f"an expression is 1 to {MAX_EXPRESSION_CHARS} characters")
     if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in expression):
         _refuse("expression", "control_character", "an expression holds no control characters")
+    regexes = arkime_regexes(expression)
+    if len(regexes) > MAX_ARKIME_REGEXES:
+        _refuse("expression", "too_many_regexes",
+                f"an expression holds at most {MAX_ARKIME_REGEXES} regular expressions (/.../); it holds "
+                f"{len(regexes)}")
+    for length in regexes:
+        if length < 0:
+            _refuse("expression", "unclosed_regex", "a regular expression (/.../) in the expression is not closed")
+        if length > MAX_ARKIME_REGEX_CHARS:
+            _refuse("expression", "pattern_too_long",
+                    f"a regular expression in the expression is longer than {MAX_ARKIME_REGEX_CHARS} characters")
     return expression
+
+
+def arkime_regexes(expression: str) -> list[int]:
+    """The length of each regular expression literal (/.../) in an Arkime expression, -1 for one never closed. A
+    literal starts with a / that follows an operator (== or !=), a list opening or a list comma, outside a quoted
+    string; a / elsewhere (an address's /24, inside "a/b") is not one."""
+    found: list[int] = []
+    index, quoted, last = 0, False, ""
+    while index < len(expression):
+        char = expression[index]
+        if quoted:
+            if char == "\\":
+                index += 2
+                continue
+            if char == '"':
+                quoted = False
+            index += 1
+            continue
+        if char == '"':
+            quoted, last = True, '"'
+            index += 1
+            continue
+        if char == "/" and last in ("==", "!=", "[", ","):
+            end = index + 1
+            while end < len(expression) and not (expression[end] == "/" and expression[end - 1] != "\\"):
+                end += 1
+            found.append(end - index - 1 if end < len(expression) else -1)
+            index, last = end + 1, "/"
+            continue
+        if char in "=!" and expression[index + 1:index + 2] == "=":
+            last = char + "="
+            index += 2
+            continue
+        if not char.isspace():
+            last = char if char in "[," else "x"
+        index += 1
+    return found
 
 
 def es_body(query: dict | None, aggs: dict | None, sort: list | None, size: int, *, window_clause: dict,
@@ -577,6 +714,29 @@ def es_body(query: dict | None, aggs: dict | None, sort: list | None, size: int,
     if aggs is not None:
         body["aggs"] = aggs
     return body
+
+
+def aggregation_caveats(value: Any, limit: int = 10) -> list[str]:
+    """Each terms-like result that is a top N with other values left out (sum_other_doc_count above 0) or whose
+    counts may be off (doc_count_error_upper_bound above 0), named by its aggregation path; at most `limit`, the rest
+    counted."""
+    out: list[str] = []
+    stack = [(value, "aggs")]
+    while stack:
+        node, path = stack.pop()
+        if isinstance(node, dict):
+            other = node.get("sum_other_doc_count")
+            error = node.get("doc_count_error_upper_bound")
+            if isinstance(other, int) and not isinstance(other, bool) and other > 0:
+                out.append(f"{path}: top {len(node.get('buckets') or [])} shown; other values exist "
+                           f"({other} records in values not shown)")
+            if isinstance(error, int) and not isinstance(error, bool) and error > 0:
+                out.append(f"{path}: bucket counts may be low by up to {error} (shard-level top lists)")
+            stack.extend((child, f"{path}.{key}") for key, child in node.items() if isinstance(child, (dict, list)))
+        elif isinstance(node, list):
+            stack.extend((child, f"{path}[{index}]") for index, child in enumerate(node))
+    out = sorted(out)
+    return out[:limit] + ([f"{len(out) - limit} more aggregation caveats"] if len(out) > limit else [])
 
 
 def bound_aggregations(value: Any) -> tuple[Any, int]:

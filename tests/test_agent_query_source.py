@@ -468,3 +468,112 @@ def test_the_session_share_bounds_the_agent_queries():
     assert second["status"] == "failed" and len(client.calls) == 1
     assert second["data"]["result"]["search"]["negative"] == "unresolved"
     assert toolbox.repo.agent_source_queries("h1") == 1
+
+
+# ---- Lucene's safety limits stay in force ----------------------------------------------------------------------
+
+LIMIT_PROBES = [
+    {"regexp": {"process.name": {"value": "a.*", "max_determinized_states": 1_000_000_000}}},
+    {"query_string": {"query": "/a.*/", "max_determinized_states": 1_000_000_000}},
+    {"fuzzy": {"user.name": {"value": "admin", "max_expansions": 1_000_000}}},
+    {"query_string": {"query": "admin~", "fuzzy_max_expansions": 1_000}},
+    {"match": {"user.name": {"query": "admin", "fuzziness": "AUTO", "max_expansions": 101}}},
+    {"prefix": {"user.name": {"value": "adm", "rewrite": "scoring_boolean"}}},
+    {"wildcard": {"user.name": {"value": "*adm*", "rewrite": "top_terms_1000"}}},
+    {"match": {"user.name": {"query": "x", "fuzzy_rewrite": "scoring_boolean"}}},
+    {"regexp": {"process.name": "a" * 1_001}},
+    {"regexp": {"process.name": {"value": "a" * 1_001}}},
+    {"wildcard": {"process.name": {"wildcard": "*" * 1_001}}},
+    {"query_string": {"query": "/" + "a" * 1_000 + "/"}},
+    {"term": {"user.name": {"value": "x", "unknown_option": 1}}},
+    {"term": {"a b": "x"}},
+]
+
+
+@pytest.mark.parametrize("query", LIMIT_PROBES, ids=range(len(LIMIT_PROBES)))
+def test_a_query_that_lifts_a_lucene_safety_limit_is_refused_and_never_sent(query):
+    client = QueryES()
+    result = _query(_box(client), query=query)
+    assert result["status"] == "refused", result
+    assert client.calls == []
+
+
+def test_a_long_terms_include_pattern_is_refused():
+    client = QueryES()
+    result = _query(_box(client), size=0, aggs={"t": {"terms": {"field": "a", "include": "a" * 1_001}}})
+    assert result["status"] == "refused" and client.calls == []
+
+
+@pytest.mark.parametrize("query", [
+    {"query_string": {"query": "*mimikatz*", "allow_leading_wildcard": True, "default_field": "process.command_line"}},
+    {"regexp": {"process.name": {"value": "pow.*sh", "flags": "ALL", "rewrite": "constant_score"}}},
+    {"fuzzy": {"user.name": {"value": "admin", "max_expansions": 100}}},
+    {"term": {"rule": "x"}}, {"term": {"parent": {"value": "x"}}}, {"exists": {"field": "profile"}},
+])
+def test_ordinary_queries_and_fields_named_like_forbidden_keys_are_sent(query):
+    client = QueryES()
+    result = _query(_box(client), query=query)
+    assert result["status"] == "complete", result
+    assert client.calls[0][1]["query"]["bool"]["filter"][1] == query
+
+
+def test_aggregation_and_sort_labels_and_fields_named_like_forbidden_keys_are_sent():
+    client = QueryES()
+    aggs = {"profile": {"terms": {"field": "parent", "size": 5}}, "rule": {"cardinality": {"field": "rule"}}}
+    result = _query(_box(client), size=1, aggs=aggs, sort=[{"rule": "asc"}])
+    assert result["status"] == "complete", result
+    assert client.calls[0][1]["aggs"] == aggs
+
+
+@pytest.mark.parametrize("expression, ok", [
+    ('ip.src == 10.0.0.0/8 && http.uri == "/a/b/c"', True),
+    ("http.uri == /ad.*min/ && host.http == /evil/", True),
+    ("http.uri == [/a/, /b/, /c/]", False),
+    ("http.uri == /" + "a" * 201 + "/", False),
+    ("http.uri == /abc", False),
+    ("x" * 2_001, False),
+])
+def test_arkime_expression_regexes_are_bounded(expression, ok):
+    if ok:
+        assert aq.validate_expression(expression) == expression
+    else:
+        with pytest.raises(aq.QueryRefused):
+            aq.validate_expression(expression)
+
+
+def test_an_arkime_expression_past_its_regex_bounds_is_refused_before_the_viewer():
+    viewer = FakeViewer(ArkimeSessionHits(ids=[], matched=0))
+    toolbox = _box(QueryES(), contracts={"arkime-a": _arkime_contract()}, viewer=viewer)
+    result = _query(toolbox, source="arkime:arkime-a", expression="http.uri == [/a/, /b/, /c/]")
+    assert result["status"] == "refused" and "regular expressions" in result["data"]["error"]["message"]
+    assert viewer.calls == []
+
+
+# ---- what limits an answer is named ----------------------------------------------------------------------------
+
+def test_a_top_n_with_other_values_is_not_read_as_complete():
+    aggregations = {"top": {"doc_count_error_upper_bound": 3, "sum_other_doc_count": 812,
+                            "buckets": [{"key": "a", "doc_count": 5}]}}
+    result = _query(_box(QueryES(_response([], total=900, aggregations=aggregations))), size=0,
+                    aggs={"top": {"terms": {"field": "user.name", "size": 1}}})
+    reasons = " ".join(result["data"]["result"]["search"]["gaps_and_caveats"])
+    assert result["status"] == "partial"
+    assert "aggs.top: top 1 shown; other values exist (812" in reasons and "may be low by up to 3" in reasons
+
+
+def test_a_source_temporal_gap_is_named_on_every_query():
+    contract = _keyword_contract("net-a").model_copy(update={"temporal_gaps": ("query clock gap: test",)})
+    result = _query(_box(QueryES(), contracts={"net-a": contract}), query=TERM)
+    assert result["status"] == "partial"
+    assert "query clock gap: test" in result["data"]["result"]["search"]["gaps_and_caveats"]
+
+
+@pytest.mark.parametrize("depth", [30, 3_000])
+def test_a_deeply_nested_query_is_refused_never_a_handler_failure(depth):
+    client = QueryES()
+    result = _query(_box(client), query=_nest(TERM, depth))
+    assert result["status"] == "refused", result["status"]
+    if depth == 30:
+        assert result["data"]["error"]["code"] == "query_refused"
+        assert "too_deep" in json.dumps(result["data"]["error"]["reasons"])
+    assert client.calls == []

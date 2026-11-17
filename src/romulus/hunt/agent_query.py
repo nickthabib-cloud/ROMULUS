@@ -35,6 +35,7 @@ from romulus.hunt.publish import publish_match
 from romulus.sources.agent_query import (
     MAX_QUERY_HITS,
     QueryRefused,
+    aggregation_caveats,
     bound_aggregations,
     es_body,
     validate_es_query,
@@ -260,6 +261,12 @@ class SourceQueryRunner:
         if total is not None and total > len(records) and args.size > 0:
             reasons.append(f"{total}{'+' if relation != 'eq' else ''} records matched; the first {len(records)} "
                            "were returned (size)")
+        if response is not None and response.get("aggregations") is not None:
+            # a top N with other values left out is not the whole answer
+            reasons.extend(aggregation_caveats(response["aggregations"]))
+        if response is not None and contract.temporal_gaps:
+            # what the source's own clock or query time cannot show, as every pivot on this source names it
+            reasons.extend(contract.temporal_gaps)
         if requested_ids is not None and len(records) < requested_ids:
             reasons.append(f"{requested_ids - len(records)} viewer session(s) are not records of this source in the "
                            "window: not shown")

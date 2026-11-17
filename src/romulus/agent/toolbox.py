@@ -188,6 +188,8 @@ SEARCH_EVENTS_DESCRIPTION = (
     "unless their typed fields show one.")
 
 SEARCH_FIELDS_PAGE_SIZE = 100
+# A listing page also stops before its entries' JSON passes this many bytes; pages are cut the same way every time.
+SEARCH_FIELDS_PAGE_BYTES = 24_000
 # how many name groups (the next dotted label after the prefix) a listing longer than one page names; the rest are
 # counted
 SEARCH_FIELD_GROUPS = 50
@@ -224,11 +226,15 @@ QUERY_SOURCE_DESCRIPTION = (
     "stats, extended_stats, percentiles, top_hits; a terms size is at most 100, min_doc_count at least 1, a date "
     "histogram at most 500 buckets over the window, and at most 10,000 buckets in all), sort (at most 3 field keys), "
     "size (rows returned, 0 to 100, default 20) and source_fields (the fields to show from each row; every row is "
-    "still read whole). Every number is a JSON integer. Scripts, runtime fields, lookups from other indices, "
+    "still read whole). Every number is a JSON integer. Field names are letters, digits, _, @, . and -. A regexp or "
+    "wildcard pattern, a terms include or exclude, or a query string holding a /regex/ is at most 1,000 characters; "
+    "max_expansions is at most 100; rewrite is a constant_score form; max_determinized_states is not accepted. "
+    "Scripts, runtime fields, lookups from other indices, "
     "percolation, encoded queries and anything that reads outside the query are refused. ROMULUS adds the window: "
     "your query is ANDed with the hunt window on the source's time field (a start or end outside the hunt window is "
     "clamped to it), so it can only narrow what the source holds. An arkime: source takes expression, an Arkime "
-    "viewer expression (the fields from list_search_fields listing=native_fields), and returns at most 100 sessions, "
+    "viewer expression (the fields from list_search_fields listing=native_fields; at most 2 /regex/ literals of at "
+    "most 200 characters each), and returns at most 100 sessions, "
     "read from the session index. A query the source rejects (a parse error, an unknown field) is refused with the "
     "source's own message, so you can correct it. Zero hits is never a confirmed absence: the result's negative is "
     "matches_found or unresolved, with what limited it (timeouts, caps, rows past the size). Rows a normalizer reads "
@@ -1721,6 +1727,13 @@ class Toolbox:
             size=args.size, source_fields=args.source_fields, start=start, end=end,
             window_clamped=(start, end) != (asked_start, asked_end),
         ))
+        if args.cursor is None:
+            # refused before anything else reads the query (its stored identity included): a query nested past the
+            # boundary's depth is refused, never serialized
+            refuse = getattr(self.executor, "query_refusal", None)
+            refusal = refuse(request) if refuse is not None else None
+            if refusal is not None:
+                return _result("refused", data={"error": refusal})
         return self._run_pivot(anchor, request, page=args.page, cursor=args.cursor, chunk_index=args.chunk_index)
 
     def _list_search_fields(self, args: ListSearchFieldsArgs) -> dict:
@@ -1748,6 +1761,10 @@ class Toolbox:
             entries = [item for item in provide()
                        if item.get("role") in roles and (args.prefix is None or item["source"].startswith(args.prefix))]
             header["scope"] = args.scope
+            hidden = getattr(self.executor, "search_sources_hidden", None)
+            if hidden is not None and hidden():
+                header["names_not_listed"] = hidden()
+                header["names_not_listed_why"] = "source names outside the accepted name pattern are counted, not shown"
         else:
             native = provide(args.source)
             if native is None:
@@ -1758,6 +1775,11 @@ class Toolbox:
             entries = [item for item in native["fields"]
                        if args.prefix is None or item["field"].startswith(args.prefix)]
             header.update(source=args.source, note=native.get("note"))
+            if native.get("names_not_listed"):
+                header["names_not_listed"] = int(native["names_not_listed"])
+                header["names_not_listed_why"] = ("field names outside the accepted name pattern (letters, digits, _, "
+                                                  "@, . and -, at most 256 characters) are counted, not shown; they "
+                                                  "can still be read in a record's own fields")
         key = "source" if args.listing == "sources" else "field"
         return self._listing_page(entries, key=key, header=header, args=args)
 
@@ -1787,13 +1809,24 @@ class Toolbox:
         (at most SEARCH_FIELD_GROUPS groups, the rest counted), so a prefix can narrow it."""
         entries = sorted(entries, key=lambda item: item[key])
         total = len(entries)
-        pages = max(1, -(-total // SEARCH_FIELDS_PAGE_SIZE))
+        # pages of at most SEARCH_FIELDS_PAGE_SIZE entries and SEARCH_FIELDS_PAGE_BYTES of JSON, cut in order
+        bounds, size = [0], 0
+        for index, item in enumerate(entries):
+            # the entry and its separator in the page's list
+            length = len(json.dumps(item, ensure_ascii=False, sort_keys=True).encode("utf-8")) + 2
+            if index > bounds[-1] and (index - bounds[-1] >= SEARCH_FIELDS_PAGE_SIZE
+                                       or size + length > SEARCH_FIELDS_PAGE_BYTES):
+                bounds.append(index)
+                size = 0
+            size += length
+        bounds.append(total)
+        pages = max(1, len(bounds) - 1)
         if args.page > pages:
             return _result("refused", data={"error": {
                 "code": "page_out_of_range",
                 "message": f"this listing has {total} entries on {pages} page(s)",
                 "reasons": [refusal_reason("page", "out_of_range")]}})
-        shown = entries[(args.page - 1) * SEARCH_FIELDS_PAGE_SIZE:args.page * SEARCH_FIELDS_PAGE_SIZE]
+        shown = entries[bounds[args.page - 1]:bounds[args.page]] if total else []
         data = {**header, "entries": shown, "page": args.page, "pages": pages, "total": total}
         if pages > 1:
             start = len(args.prefix or "")

@@ -1,6 +1,7 @@
 """Hunt-layer construction and execution boundary for model-facing pivot tools."""
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from math import ceil
 
@@ -27,6 +28,11 @@ from romulus.store.repo import Repo
 # An Arkime session target's viewer is a source of its own: its name is this prefix and the target's.
 ARKIME_SOURCE_PREFIX = "arkime:"
 KEYWORD_LIKE = frozenset({"keyword", "constant_keyword", "wildcard", "flattened"})
+# What a listing passes to the model from a source's mapping or the viewer's field list: names a mapping can take
+# from telemetry (dynamic mapping), so only strict names of bounded length are shown and the rest only counted.
+LISTED_NAME = re.compile(r"^[A-Za-z0-9_@.\-]{1,256}$")
+LISTED_LABEL = re.compile(r"^[A-Za-z0-9_ .\-]{1,64}$")
+LISTED_SOURCE = re.compile(r"^[A-Za-z0-9_.+:@\-]{1,300}$")
 ANALYZED_TEXT = frozenset({"text", "match_only_text"})
 
 _PIVOT_LINK_TYPES = {
@@ -59,6 +65,16 @@ CALL_SLICE_SHARE = 0.10
 CALL_SLICE_FLOOR = 32
 # out-of-window packet sources named together in one summary line
 _OUTSIDE_NAMES = 5
+
+
+def _label(value, limit: int = 64) -> str | None:
+    """A short descriptive text from a profile (a type, a group, a note), shown only when it is plain."""
+    if not isinstance(value, str):
+        return None
+    if limit > 64:
+        text = " ".join(value.split())[:limit]
+        return text if all(ch.isprintable() for ch in text) else None
+    return value if LISTED_LABEL.fullmatch(value) else None
 
 
 def _utc(value: datetime) -> datetime:
@@ -132,6 +148,7 @@ class HuntToolExecutor:
         self._followable: dict[str, tuple[str, ...]] = {}
         self._profile_cache: dict[str, dict] | None = None
         self._sources: dict[str, tuple[str, str]] | None = None
+        self.sources_not_listed = 0
         # the agent's own source queries (query_source): secrets are redacted from what they keep, with these settings
         self.settings = settings
         self.queries = SourceQueryRunner(pivot, settings, arkime_search)
@@ -192,7 +209,9 @@ class HuntToolExecutor:
             for target, contract in sorted(self.pivot.contracts.items()):
                 if contract is not None and contract.time_field == "firstPacket":
                     table.setdefault(ARKIME_SOURCE_PREFIX + target, ("arkime_viewer", target))
-            self._sources = table
+            # a name the agent could not write back is not a source it can name: counted, never shown
+            self.sources_not_listed = sum(1 for name in table if not LISTED_SOURCE.fullmatch(name))
+            self._sources = {name: entry for name, entry in table.items() if LISTED_SOURCE.fullmatch(name)}
         return self._sources
 
     def search_sources(self) -> list[dict]:
@@ -233,14 +252,25 @@ class HuntToolExecutor:
         contract = self.pivot.contracts[target]
         if kind == "arkime_viewer":
             profile = self._profiles().get(target) or {}
-            fields = [dict(item) for item in profile.get("arkime_fields") or [] if isinstance(item, dict)]
+            fields, hidden = [], 0
+            for item in profile.get("arkime_fields") or []:
+                name = item.get("field") if isinstance(item, dict) else None
+                if not isinstance(name, str) or not LISTED_NAME.fullmatch(name):
+                    hidden += 1
+                    continue
+                fields.append({"field": name, "type": _label(item.get("type")), "group": _label(item.get("group")),
+                               "db_field": item.get("db_field") if isinstance(item.get("db_field"), str)
+                               and LISTED_NAME.fullmatch(item["db_field"]) else None})
             note = profile.get("arkime_fields_note")
             if "arkime_fields" not in profile:
                 note = ("the viewer's expression fields were not profiled for this hunt; its expressions still take "
                         "the viewer's own field names")
-            return {"fields": fields, "note": note}
-        fields = []
+            return {"fields": fields, "note": _label(note, 300), "names_not_listed": hidden}
+        fields, hidden = [], 0
         for name, mapped in self._native_table(target).items():
+            if not LISTED_NAME.fullmatch(name):
+                hidden += 1
+                continue
             base, _, qualifier = mapped.partition(":")
             item = {"field": name, "type": base,
                     "kind": ("keyword" if base in KEYWORD_LIKE else "text" if base in ANALYZED_TEXT else "other"),
@@ -250,7 +280,12 @@ class HuntToolExecutor:
                 known, limit = contract.index_limit(name)
                 item["ignore_above"] = limit if known and limit is not None else ("none" if known else "unknown")
             fields.append(item)
-        return {"fields": fields, "note": None}
+        return {"fields": fields, "note": None, "names_not_listed": hidden}
+
+    def search_sources_hidden(self) -> int:
+        """How many of the hunt's sources have a name no listing shows (and no query can name)."""
+        self.source_table()
+        return self.sources_not_listed
 
     def query_refusal(self, request: QuerySourceRequest) -> dict | None:
         """Why the agent's own query cannot be sent (hunt.agent_query.query_refusal), decided without any source
