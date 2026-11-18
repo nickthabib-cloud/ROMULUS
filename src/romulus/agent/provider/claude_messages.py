@@ -671,7 +671,8 @@ def without_thinking(message: dict) -> dict:
 
 def thinking_rejected(result: ChatResult) -> bool:
     """Whether the API refused the request for a replayed thinking block bound to a different conversation."""
-    return result.status == "error" and THINKING_BINDING_REFUSAL in (result.error or "")
+    error = result.error or ""
+    return result.status == "error" and error.startswith("HTTP 400") and THINKING_BINDING_REFUSAL in error
 
 
 # ---- the adapter ---------------------------------------------------------------------------------------------
