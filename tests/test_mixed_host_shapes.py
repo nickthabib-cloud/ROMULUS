@@ -171,8 +171,12 @@ def test_adding_text_keeps_windows_class_inventory_and_coverage_identical(tmp_pa
     pure, _c, pure_cells, profile, contract = _run_mixed(tmp_path / 'pure', rows[:2])
     assert contract.linux_text_mixed is False and 'linux_text' not in profile.model_dump()
     assert pure['windows_inventory'] == mixed['windows_inventory']
+    from tests.throughput_fixture import _strip
+
     def windows_cells(cells):
-        return [{name: cell[name] for name in ('target', 'partition', 'state', 'matched', 'evaluated', 'detail')}
+        # measured wall times differ on every run; everything else must match
+        return [_strip({name: cell[name] for name in ('target', 'partition', 'state', 'matched', 'evaluated',
+                                                      'detail')})
                 for cell in cells if cell['rule_id'] == 'win.certutil_download_decode']
     assert windows_cells(pure_cells) == windows_cells(mixed_cells)
 

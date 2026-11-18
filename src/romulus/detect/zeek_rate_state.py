@@ -443,6 +443,7 @@ class ZeekWindowRule(Playbook, ABC):
         self.rows = _WindowRows(self)
         self.load = lambda _ids: []
         self._pending_keys = set()
+        self.selected_rows = 0          # live records select() kept (a cost counter on the rule's coverage cells)
         # (key, member) -> [last kept time, held time or None, held compact event or None]
         self._thin_owner = _ThinOwner(self) if self.thin_members else None
         self.thinned = (KeyedStore(self._thin_owner, "zeek_window_thin", self.thin_hot)
@@ -564,6 +565,7 @@ class ZeekWindowRule(Playbook, ABC):
             selection = self.live_select(event)
             if selection is None:
                 continue
+            self.selected_rows += 1
             key, member, role = selection
             if not isinstance(key, tuple) or not isinstance(member, str) or role not in {"attempt", "success"}:
                 raise ValueError("Zeek select must return a tuple key, text member and attempt|success role")

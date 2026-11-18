@@ -389,6 +389,8 @@ from tests import throughput_fixture as tf
 # baseline add rule cells and tasks (not applicable or unmatched here), rule cards in the manifest, the sixth
 # baseline spec in the snapshot plan and window hours, and the audit that records them; candidates, events,
 # links, citations and the non-baseline semantic projection are unchanged.
+# Every coverage cell then gains the rule's cost (records offered and rows selected; wall times are volatile): only
+# rule-cell digests move.
 GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
  'audit': 'a47a8a17ee37a9a0602a77461806f3ab98d84bb587c19c4e62c6053d6f6af318',
  'baseline_counts': 'be05fabb25336f21341b46eae7d8c2627828f7a7a7e8fdb24f4eb58576099354',
@@ -409,7 +411,7 @@ GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe55
  'links': 'a4a267240e42c0155c746d50994b0cde06b4e77d95e1af4ced1fa53279046505',
  'manifest': 'd6d90944df59bcef786e30c4c030bcba5f63f5c35de2c39eba6ed0682afee4c4',
  'raw': '04715be9c0dfa35e600d0f40ea09e9f738acb76e67eac64551cc380cc93de5f1',
- 'rule_cells': '2f841ab607838e71c057da4271d0195a07bf84f28eed412a89b7590e3ee1de0e',
+ 'rule_cells': 'e2dad7d7704bef089060ca184ee714a228033d3a90c3e212855f995c783c603d',
  'stats': 'be588e34e14e570c11a47fc9b3953e564d8f6026d909d9ae7f9c7ef561c99c5a',
  'tasks': '1e1eeb69d05da151bec8f6dff43c1863a4eb43a288f84c1ba35168311b303360'}
 # The rule-estimate stack's digests (expansion seeded by the urgent and high lanes, as before evidence ranking;
@@ -434,7 +436,7 @@ GOLDEN_STACK_BY_RULE_ESTIMATE = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e
  'links': 'a4a267240e42c0155c746d50994b0cde06b4e77d95e1af4ced1fa53279046505',
  'manifest': 'f184b53aa1c64e235efa8bb100875278a984cf6131534095746a3a5850a7b750',
  'raw': '04715be9c0dfa35e600d0f40ea09e9f738acb76e67eac64551cc380cc93de5f1',
- 'rule_cells': '2f841ab607838e71c057da4271d0195a07bf84f28eed412a89b7590e3ee1de0e',
+ 'rule_cells': 'e2dad7d7704bef089060ca184ee714a228033d3a90c3e212855f995c783c603d',
  'stats': 'be588e34e14e570c11a47fc9b3953e564d8f6026d909d9ae7f9c7ef561c99c5a',
  'tasks': '1e1eeb69d05da151bec8f6dff43c1863a4eb43a288f84c1ba35168311b303360'}
 GOLDEN_CANDIDATES_BY_RULE_ESTIMATE = GOLDEN_STACK_BY_RULE_ESTIMATE['candidates']
@@ -459,9 +461,9 @@ GOLDEN_NON_BASELINE_SEMANTICS_BY_RULE_ESTIMATE = {'candidates': {'all_fields': '
                 'severity': 'd8fb260b8a62f9175181cdba1356bfbd3dab9167f0965c5e7586e2202c62bcc3',
                 'source_presence': '31f6a55e225e04f5da96ef7f565969408d500a329be1bf37e463188763a5af16',
                 'ts': 'bfc0e0328d7a2b9fb224bc2791da7a13f533d4b8f03819ad9f65e7609fac08e0'},
- 'rule_cells': {'all_fields': 'c46444154f2f1460caf64308c006fc8fb1d4a73252c18db6fdff82baa13e788d',
+ 'rule_cells': {'all_fields': 'fd47750b11ba87d61ed3de346203b8eef2c038289a64c5f6e5b382ccdcba86fd',
                 'count': 18891,
-                'detail': '460a061b687a349e74b80705e6ebe94bb77382b2d38696befcdae22b36dc9d9e',
+                'detail': '88b4e548e3f068d5312c5d89f5479c817a1ad6f847acb90fd6826792a71a4da5',
                 'evaluated': '8f618898f4430969244c9ef380688ef8c8a3b8a5d9a20b9a4bfacdeb689ea226',
                 'matched': 'c0d0a463349dda3556e00ae040ffe2aa4bab497c7078fd477ea47f59db15bb70',
                 'partition': '3c5e76bffe70e2045dc95e95f9e38322813243920ce5ce949e231638a0d00db4',
@@ -493,9 +495,9 @@ GOLDEN_NON_BASELINE_SEMANTICS = {'candidates': {'all_fields': '70043795630282295
                 'severity': 'd8fb260b8a62f9175181cdba1356bfbd3dab9167f0965c5e7586e2202c62bcc3',
                 'source_presence': '31f6a55e225e04f5da96ef7f565969408d500a329be1bf37e463188763a5af16',
                 'ts': 'bfc0e0328d7a2b9fb224bc2791da7a13f533d4b8f03819ad9f65e7609fac08e0'},
- 'rule_cells': {'all_fields': 'c46444154f2f1460caf64308c006fc8fb1d4a73252c18db6fdff82baa13e788d',
+ 'rule_cells': {'all_fields': 'fd47750b11ba87d61ed3de346203b8eef2c038289a64c5f6e5b382ccdcba86fd',
                 'count': 18891,
-                'detail': '460a061b687a349e74b80705e6ebe94bb77382b2d38696befcdae22b36dc9d9e',
+                'detail': '88b4e548e3f068d5312c5d89f5479c817a1ad6f847acb90fd6826792a71a4da5',
                 'evaluated': '8f618898f4430969244c9ef380688ef8c8a3b8a5d9a20b9a4bfacdeb689ea226',
                 'matched': 'c0d0a463349dda3556e00ae040ffe2aa4bab497c7078fd477ea47f59db15bb70',
                 'partition': '3c5e76bffe70e2045dc95e95f9e38322813243920ce5ce949e231638a0d00db4',

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import time
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -428,6 +429,8 @@ class Sweep:
         self.boots = BootIntervals()
         # rule id -> why the rule failed: it is not evaluated again in this hunt, and every later cell says so
         self.failed_rules: dict[str, str] = {}
+        # per rule: [consume wall ms, records offered, rows selected or None]; one entry per rule of the pack
+        self._rule_timing: dict[str, list] = {}
         self.stats = {"partitions": 0, "records": 0, "events": 0, "candidates": 0, "skips": {}, "errors": 0,
                       "boot": {"recorded": 0, "from_interval": 0, "unknown": 0}}
 
@@ -2683,6 +2686,8 @@ class Sweep:
                     except Exception as exc:  # noqa: BLE001 - the rule's own code; publishing is not guarded here
                         rule_errors.append(exc)
 
+                before_selected = getattr(pb, "selected_rows", None)
+                began = time.perf_counter()
                 try:
                     self._record_playbook_batch(pb, consume_matches(), raw_sources, tid, staged, held, released)
                 except Exception as exc:
@@ -2691,6 +2696,7 @@ class Sweep:
                     raise
                 finally:
                     pb.bind_raw({})
+                timing = self._time_rule(pb, began, len(scoped_events), before_selected)
                 if rule_errors:
                     raise rule_errors[0]
                 evaluated = pb.evaluated - before_eval
@@ -2734,7 +2740,7 @@ class Sweep:
                     reasons.append(error_reason)
                 if missing:
                     reasons.append(f"missing_required={missing}: records lacked a field this rule needs")
-                detail = {"missing_required": missing, "reasons": reasons}
+                detail = {"missing_required": missing, "reasons": reasons, "timing": timing}
                 if 'ics_tx' in pb.families and (selection := getattr(self, '_ics_selection', {}).get(target)):
                     reasons.extend(selection.reasons)
                     detail['ics_retrieval_filtered'] = selection.selected
@@ -3139,6 +3145,31 @@ class Sweep:
                 event.caveats.append(COMPACT_CITATION_NOTE)
         return sources
 
+    def _time_rule(self, pb, began: float, records: int, before_selected) -> dict:
+        """One partition's cost for a rule: its wall time (consume and publish), the records offered to it and, for
+        rules that select rows into kept state, the rows selected. Totals per rule are kept for its window cell."""
+        wall_ms = round((time.perf_counter() - began) * 1000)
+        selected = getattr(pb, "selected_rows", None)
+        selected = None if selected is None or before_selected is None else selected - before_selected
+        total = self._rule_timing.setdefault(pb.id, [0, 0, None])
+        total[0] += wall_ms
+        total[1] += records
+        if selected is not None:
+            total[2] = (total[2] or 0) + selected
+        timing = {"wall_ms": wall_ms, "records": records}
+        if selected is not None:
+            timing["selected"] = selected
+        return timing
+
+    def _rule_totals(self, pb, finalize_began: float) -> dict:
+        """A rule's whole-hunt cost on its window cell: consume and finalize wall time, records and selections."""
+        consume_ms, records, selected = self._rule_timing.get(pb.id, [0, 0, None])
+        totals = {"consume_wall_ms": consume_ms,
+                  "finalize_wall_ms": round((time.perf_counter() - finalize_began) * 1000), "records": records}
+        if selected is not None:
+            totals["selected"] = selected
+        return totals
+
     def finalize(self):
         self.heartbeat()
         self.budget.finalizing = True           # finalize re-reads kept state: only the free-space reserve applies
@@ -3156,6 +3187,7 @@ class Sweep:
                 pb.bind_loader(stage.load)
                 pb.heartbeat = self.heartbeat
             finalized_matches = 0
+            finalize_began = time.perf_counter()
             if pb.id not in self.failed_rules:
                 # Only the rule's own code is guarded. Publishing (the store, citation reads from the source) is
                 # outside the guard, so its failures end the sweep and are never recorded as the rule's defect.
@@ -3216,7 +3248,7 @@ class Sweep:
             if any(DIRECTION_ASSUMED_REASON in ((c["detail"] or {}).get("reasons") or []) for c in cells):
                 reasons.append(DIRECTION_ASSUMED_REASON)
             reasons += limits + pb.coverage_notes()
-            detail = {'reasons': reasons}
+            detail = {'reasons': reasons, 'timing': self._rule_totals(pb, finalize_began)}
             if pb.id.startswith('sigma.'):
                 detail = bounded_details(detail)
             self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, "*", "window", state,
