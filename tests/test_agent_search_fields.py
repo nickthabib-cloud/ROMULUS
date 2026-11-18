@@ -28,6 +28,7 @@ from tests.test_agent_search_events import (
     _hunt,
     _keyword_contract,
     _request,
+    _search,
     _toolbox,
     _windows_contract_and_record,
 )
@@ -238,6 +239,139 @@ def test_without_a_hunt_layer_the_listing_is_unsupported_and_arguments_are_valid
     assert refused["status"] == "refused" and refused["data"]["error"]["code"] == "invalid_arguments"
 
 
+# ---- which names go to which tool --------------------------------------------------------------------------------
+
+def test_each_listing_says_which_tool_takes_its_names():
+    repo = _hunt()
+    toolbox = _toolbox(repo, {"net-a": _keyword_contract("net-a")}, FakeES())
+    typed = _typed(toolbox)["data"]["names_are_for"]
+    sources = _typed(toolbox, listing="sources")["data"]["names_are_for"]
+    native = _typed(toolbox, listing="native_fields", source="net-a")["data"]["names_are_for"]
+    assert typed.startswith("search_events:") and "query_source" in typed
+    assert sources.startswith("query_source (its source argument)")
+    assert native.startswith("query_source on this source only") and "search_events refuses" in native
+    # fixed text: the same labels in another hunt with other sources
+    other = _toolbox(_hunt(), {"net-z": _mixed_contract("net-z")}, FakeES())
+    assert _typed(other)["data"]["names_are_for"] == typed
+    assert _typed(other, listing="native_fields", source="net-z")["data"]["names_are_for"] == native
+
+
+def _native_hunt():
+    """A Windows host source whose own field winlog.event_data.SubjectUserName is read into the typed user.name, and
+    an Arkime viewer whose expression field ip.dst no contract types."""
+    spec = FieldSpec(native="winlog.event_data.SubjectUserName", type="keyword", ops=["eq", "in", "exists", "missing"],
+                     aggregatable=True)
+    windows = FieldContract(target="win-a", role="host", os_family="windows", fields={
+        "@timestamp": FieldSpec(native="@timestamp", type="date", ops=["gte", "lt"], aggregatable=True),
+        "event.code": FieldSpec(native="event.code", type="keyword", ops=["eq", "in"], aggregatable=True),
+        "user.name": spec})
+    arkime = contract_from_types("arkime_sessions3-1", {"firstPacket": "date", "lastPacket": "date",
+                                                        "network.community_id": "keyword", "source.ip": "ip"},
+                                 role="network")
+    assert arkime.time_field == "firstPacket"
+    repo = _hunt()
+    repo.save_profile("h1", {"id": "p1", "target": "win-a", "kind": "es", "field_types": {
+        "@timestamp": "date", "event.code": "keyword", "winlog.event_data.SubjectUserName": "keyword",
+        "winlog.event_data.LogonType": "keyword"}})
+    repo.save_profile("h1", {"id": "p2", "target": "arkime_sessions3-1", "kind": "es",
+                             "field_types": {"firstPacket": "date"},
+                             "arkime_fields": [{"field": "ip.dst", "type": "ip", "group": "general",
+                                                "db_field": "destination.ip"}]})
+    return _toolbox(repo, {"win-a": windows, "arkime_sessions3-1": arkime}, FakeES())
+
+
+def test_a_native_field_in_search_events_is_refused_pointing_to_query_source_and_its_typed_equivalent():
+    toolbox = _native_hunt()
+    response = _search(toolbox, [{"field": "winlog.event_data.SubjectUserName", "op": "eq", "values": ["bob"]}],
+                       scope="host")
+    error = response["data"]["error"]
+    assert response["status"] == "refused" and error["code"] == "search_unsupported"
+    assert error["reasons"] == ["conditions[].field: unsupported_field", "conditions[].field: native_field"]
+    condition = error["conditions"][0]
+    assert condition["standing"] == "native_field" and condition["native_field_of"] == ["win-a"]
+    assert condition["typed_equivalents"] == ["user.name"]
+    assert "query_source" in condition["guidance"] and "typed_equivalents" in condition["guidance"]
+    # a native field no typed field reads: query_source only
+    response = _search(toolbox, [{"field": "winlog.event_data.LogonType", "op": "eq", "values": ["3"]}],
+                       scope="all")
+    condition = response["data"]["error"]["conditions"][0]
+    assert condition["native_field_of"] == ["win-a"] and "typed_equivalents" not in condition
+    assert "typed_equivalents" not in condition["guidance"]
+    # an Arkime viewer's expression field names the viewer source
+    response = _search(toolbox, [{"field": "ip.dst", "op": "eq", "values": ["10.0.0.5"]}], scope="network")
+    condition = response["data"]["error"]["conditions"][0]
+    assert condition["standing"] == "native_field"
+    assert condition["native_field_of"] == ["arkime:arkime_sessions3-1"]
+    # a name no source has is not called native
+    response = _search(toolbox, [{"field": "no.such.field", "op": "eq", "values": ["x"]}], scope="all")
+    error = response["data"]["error"]
+    assert error["conditions"][0]["standing"] == "not_a_typed_field"
+    assert "native_field_of" not in error["conditions"][0]
+    assert error["reasons"] == ["conditions[].field: unsupported_field"]
+
+
+def test_a_refused_typed_field_says_whether_the_scope_or_the_combination_is_the_problem():
+    repo = _hunt()
+    dns = contract_from_types("net-a", {"@timestamp": "date", "dns.question.name": "keyword"}, role="network")
+    web = contract_from_types("net-b", {"@timestamp": "date", "url.domain": "keyword"}, role="network")
+    host = _keyword_contract("host-a", role="host", **{"process.name": "keyword"})
+    toolbox = _toolbox(repo, {"net-a": dns, "net-b": web, "host-a": host}, FakeES())
+    outside = _search(toolbox, [{"field": "process.name", "op": "eq", "values": ["cmd.exe"]}], scope="network")
+    condition = outside["data"]["error"]["conditions"][0]
+    assert condition["standing"] == "typed_outside_scope" and condition["typed_in_scopes"] == ["host"]
+    assert "scope host" in condition["guidance"]
+    apart = _search(toolbox, [{"field": "dns.question.name", "op": "eq", "values": ["a.test"]},
+                              {"field": "url.domain", "op": "eq", "values": ["a.test"]}], scope="network")
+    error = apart["data"]["error"]
+    assert apart["status"] == "refused" and error["code"] == "search_unsupported"
+    standings = {item["field"]: item for item in error["conditions"]}
+    assert set(standings) == {"dns.question.name", "url.domain"}
+    for item in standings.values():
+        assert item["standing"] == "typed_field_refused_here" and item["typed_sources_in_scope"] == 1
+        assert "separate searches" in item["guidance"]
+
+
+def test_a_condition_on_the_time_field_is_told_to_set_the_window_not_to_use_query_source():
+    toolbox = _native_hunt()
+    response = _search(toolbox, [{"field": "firstPacket", "op": "gte", "values": ["2024-11-18T14:00:00Z"]},
+                                 {"field": "source.ip", "op": "eq", "values": ["10.0.0.5"]}], scope="network")
+    error = response["data"]["error"]
+    condition = next(item for item in error["conditions"] if item["field"] == "firstPacket")
+    assert condition["standing"] == "time_field" and "start and end" in condition["guidance"]
+    assert "native_field_of" not in condition and "conditions[].field: native_field" not in error["reasons"]
+
+
+def test_an_unknown_key_is_refused_naming_the_keys_each_object_takes():
+    from romulus.agent.toolbox import ListSearchFieldsArgs, SearchEventsToolArgs
+
+    toolbox = _native_hunt()
+    anchor = AliasBook(toolbox.repo, "h1").alias_for("F", "anchor")
+    top = toolbox.execute("search_events", {"anchor": anchor, "scope": "host", "source": "win-a", "conditions": [
+        {"field": "user.name", "op": "eq", "values": ["bob"]}]})
+    error = top["data"]["error"]
+    assert top["status"] == "refused" and error["code"] == "invalid_arguments"
+    assert "*: extra_forbidden" in error["reasons"]
+    assert error["allowed_keys"] == {"$": sorted(SearchEventsToolArgs.model_fields)}
+    assert "allowed_keys" in error["message"]
+    nested = toolbox.execute("search_events", {"anchor": anchor, "scope": "host", "conditions": [
+        {"field": "user.name", "op": "eq", "value": "bob", "values": ["bob"]}]})
+    assert nested["data"]["error"]["allowed_keys"] == {"conditions[]": ["field", "op", "values"]}
+    listing = toolbox.execute("list_search_fields", {"listing": "typed_fields", "field": "user.name"})
+    assert listing["data"]["error"]["allowed_keys"] == {"$": sorted(ListSearchFieldsArgs.model_fields)}
+    # an error that is not an unknown key gets no allowed_keys
+    plain = toolbox.execute("list_search_fields", {"listing": "everything"})
+    assert "allowed_keys" not in plain["data"]["error"]
+
+
+def test_a_field_name_no_condition_can_carry_points_to_query_source():
+    toolbox = _native_hunt()
+    anchor = AliasBook(toolbox.repo, "h1").alias_for("F", "anchor")
+    response = toolbox.execute("search_events", {"anchor": anchor, "scope": "host", "conditions": [
+        {"field": "zeek.dns.@proc", "op": "eq", "values": ["x"]}]})
+    error = response["data"]["error"]
+    assert error["code"] == "invalid_arguments" and "query_source" in error["guidance"]
+
+
 # ---- caching -----------------------------------------------------------------------------------------------------
 
 def _definitions(toolbox: Toolbox, tmp_path, session: str) -> str:
@@ -254,7 +388,9 @@ def test_tool_definitions_are_byte_identical_across_sessions_and_hunts(tmp_path)
     wide = contract_from_types("net-z", {"@timestamp": "date", **names}, role="network")
     other_hunt = _definitions(_toolbox(_hunt(), {"net-z": wide}, FakeES()), tmp_path, SESSION)
     without_executor = _definitions(Toolbox(repo, "h1"), tmp_path, SESSION)
-    assert one == two == other_hunt == without_executor
+    with_native_profiles = _definitions(_native_hunt(), tmp_path, SESSION)
+    assert one == two == other_hunt == without_executor == with_native_profiles
+    assert "names_are_for" in one and "winlog.event_data" not in with_native_profiles
     assert "list_search_fields" in one and "ns1.f1" not in one
 
 

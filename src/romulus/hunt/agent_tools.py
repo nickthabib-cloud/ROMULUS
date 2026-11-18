@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from math import ceil
 
 from romulus.agent.models import EntityRef, PivotCoverage, PivotResult
+from romulus.agent.refusals import reason as refusal_reason
 from romulus.agent.toolbox import FOLLOW_LINK_KINDS, Toolbox
 from romulus.agent.tools import QuerySourceRequest, SearchEventsRequest
 from romulus.config import Settings
@@ -15,7 +16,7 @@ from romulus.hunt.agent_query import SourceQueryRunner, query_refusal
 from romulus.hunt.expansion import ExpansionEngine, expansion_windows
 from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkResult
 from romulus.hunt.manifest import inventory_usable
-from romulus.hunt.pivot import MAX_SEARCH_ENTITIES, PivotExecutor
+from romulus.hunt.pivot import MAX_SEARCH_ENTITIES, PivotExecutor, search_ops
 from romulus.hunt.publish import mark_hypothesis_relation, publish_match
 from romulus.site import ensure_site_unchanged
 from romulus.sources.agent_query import MAX_QUERY_HITS
@@ -34,6 +35,9 @@ LISTED_NAME = re.compile(r"^[A-Za-z0-9_@.\-]{1,256}$")
 LISTED_LABEL = re.compile(r"^[A-Za-z0-9_ .\-]{1,64}$")
 LISTED_SOURCE = re.compile(r"^[A-Za-z0-9_.+:@\-]{1,300}$")
 ANALYZED_TEXT = frozenset({"text", "match_only_text"})
+# A search_events refusal for a source's own field names at most this many of the sources that have it (the rest
+# counted) and of the typed fields read from it.
+NATIVE_HINT_NAMES = 10
 
 _PIVOT_LINK_TYPES = {
     "entity_timeline": "agent_entity_timeline",
@@ -178,8 +182,62 @@ class HuntToolExecutor:
 
     def search_refusal(self, request: SearchEventsRequest) -> dict | None:
         """Why an agent search cannot run on this hunt's sources, decided without any source query; None when some
-        target of its scope can evaluate every condition."""
-        return self.pivot.search_refusal(request)
+        target of its scope can evaluate every condition. A refused condition whose field is no typed field but is one
+        of the hunt's sources' own fields names those sources (for query_source) and any typed field read from it."""
+        refusal = self.pivot.search_refusal(request)
+        if refusal is None or refusal.get("code") != "search_unsupported":
+            return refusal
+        native = False
+        for entry in refusal.get("conditions") or []:
+            if entry.get("standing") != "not_a_typed_field":
+                continue
+            sources = self._sources_with_native_field(entry["field"])
+            if not sources:
+                continue
+            native = True
+            typed = self._typed_fields_reading(entry["field"])
+            entry["standing"] = "native_field"
+            entry["native_field_of"] = sources[:NATIVE_HINT_NAMES]
+            if len(sources) > NATIVE_HINT_NAMES:
+                entry["native_sources_omitted"] = len(sources) - NATIVE_HINT_NAMES
+            if typed:
+                entry["typed_equivalents"] = typed[:NATIVE_HINT_NAMES]
+            entry["guidance"] = (
+                "this is a source's own (native) field, not a typed field, and search_events takes only typed fields: "
+                "ask query_source on a source named in native_field_of"
+                + (", or search_events on a typed field in typed_equivalents, which is read from it" if typed else ""))
+        if native:
+            refusal = {**refusal, "reasons": [*refusal.get("reasons", []),
+                                              refusal_reason("conditions[].field", "native_field")]}
+        return refusal
+
+    def _sources_with_native_field(self, name: str) -> list[str]:
+        """The hunt's listed sources that have `name` among their own fields (listing native_fields), sorted."""
+        found = []
+        for source, (kind, target) in sorted(self.source_table().items()):
+            if kind == "index":
+                if name in self._native_table(target):
+                    found.append(source)
+            elif any(isinstance(item, dict) and item.get("field") == name
+                     for item in (self._profiles().get(target) or {}).get("arkime_fields") or []):
+                found.append(source)
+        return found
+
+    def _typed_fields_reading(self, native: str) -> list[str]:
+        """The searchable typed fields some contract reads from this native field, sorted."""
+        found: set[str] = set()
+        for contract in self.pivot.contracts.values():
+            if contract is None:
+                continue
+            for family, table in ((None, contract.fields), ("linux", contract.linux_fields)):
+                for name, spec in table.items():
+                    if name in found or name == native:
+                        continue
+                    sources = {native_name for variant in (spec, *spec.alternatives)
+                               for native_name in (variant.native, *variant.natives, *variant.exact)}
+                    if native in sources and search_ops(contract, name, os_family=family):
+                        found.add(name)
+        return sorted(found)
 
     def search_fields(self) -> dict:
         """The typed fields an agent search can name on this hunt's targets (PivotExecutor.search_vocabulary), how
