@@ -403,6 +403,9 @@ class EpmDynamicRpc(ZeekBehaviorRule):
         # [count, the first DESTINATIONS_NAMED destinations, whether a refused write made the count a lower bound]
         self.destination_pairs = KeyedStore(self, 'epm_destination_pairs', HOT_COUNT)
         self.destinations = KeyedStore(self, 'epm_destinations', HOT_COUNT)
+        # set once any source's count could not be retained: a later count for that source restarts below its truth
+        # while its pair records stand, so every count this rule states is then a lower bound
+        self.destination_state_lost = False
 
     def _owned_stores(self):
         return [*super()._owned_stores(), self.legs, self.destination_pairs, self.destinations]
@@ -421,6 +424,7 @@ class EpmDynamicRpc(ZeekBehaviorRule):
                 self.note_limit('epm_destinations', 'A distinct-destination record could not be retained; the '
                                                     'destination count of its source is a lower bound.')
             if not self.destinations.put(shape, state):
+                self.destination_state_lost = True
                 self.note_limit('epm_destinations', "A source's destination count could not be retained; its "
                                                     'finding states the count it last held.')
         return group
@@ -432,6 +436,7 @@ class EpmDynamicRpc(ZeekBehaviorRule):
         if state is None:
             return match
         count, named, capped = state
+        capped = capped or self.destination_state_lost
         listed = ', '.join(named) + (f', and {count - len(named)} more' if count > len(named) else '')
         prefix = f'{group.common}: '
         rest = match.claim[len(prefix):] if match.claim.startswith(prefix) else match.claim
