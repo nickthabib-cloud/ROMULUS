@@ -394,12 +394,50 @@ class EpmDynamicRpc(ZeekBehaviorRule):
     research = (_CONN_DOC, _EPM_DOC, _DCOM_DOC, _RPC_PORTS_DOC,
                 'ATT&CK Enterprise 20.0 T1021.003, T1047 (Network Traffic: Network Connection Creation)')
 
+    DESTINATIONS_NAMED = 10
+
     def __init__(self):
         super().__init__()
         self.legs = KeyedStore(self, 'epm_legs', HOT_COUNT)
+        # exact distinct destinations per source finding: (shape, destination) presence, and per shape
+        # [count, the first DESTINATIONS_NAMED destinations, whether a refused write made the count a lower bound]
+        self.destination_pairs = KeyedStore(self, 'epm_destination_pairs', HOT_COUNT)
+        self.destinations = KeyedStore(self, 'epm_destinations', HOT_COUNT)
 
     def _owned_stores(self):
-        return [*super()._owned_stores(), self.legs]
+        return [*super()._owned_stores(), self.legs, self.destination_pairs, self.destinations]
+
+    def _note_group(self, shape, hit, event, *, new_host, link_host=True):
+        group = super()._note_group(shape, hit, event, new_host=new_host, link_host=link_host)
+        destination = str(_address(event.get('destination.ip')) or event.get('destination.ip'))
+        if self.destination_pairs.get((shape, destination)) is None:
+            state = self.destinations.get(shape) or [0, [], False]
+            if self.destination_pairs.put((shape, destination), 1):
+                state[0] += 1
+                if len(state[1]) < self.DESTINATIONS_NAMED:
+                    state[1].append(destination)
+            else:
+                state[2] = True
+                self.note_limit('epm_destinations', 'A distinct-destination record could not be retained; the '
+                                                    'destination count of its source is a lower bound.')
+            if not self.destinations.put(shape, state):
+                self.note_limit('epm_destinations', "A source's destination count could not be retained; its "
+                                                    'finding states the count it last held.')
+        return group
+
+    def _network_claim(self, match, group):
+        match = super()._network_claim(match, group)
+        shape = (match.group_key or '').rsplit('|', 1)[-1]
+        state = self.destinations.peek(shape)
+        if state is None:
+            return match
+        count, named, capped = state
+        listed = ', '.join(named) + (f', and {count - len(named)} more' if count > len(named) else '')
+        prefix = f'{group.common}: '
+        rest = match.claim[len(prefix):] if match.claim.startswith(prefix) else match.claim
+        match.claim = (f'{prefix}{"at least " if capped else ""}{count} distinct destination'
+                       f'{"s" if count != 1 else ""} ({listed}); {rest} The cited records are examples.')
+        return match
 
     def consume(self, events):
         return super().consume([event for event in events if _conn_record(event)])
@@ -470,7 +508,7 @@ class EpmDynamicRpc(ZeekBehaviorRule):
         text = (f'Endpoint-mapper connection from {source} to {destination} at {mapper.ts.isoformat()} followed '
                 f'{delay:.3f} s later by an answered connection to port {port}')
         common = (f'Endpoint-mapper connections from {source} followed within {int(EPM_FOLLOW.total_seconds())} s '
-                  'by an answered high-port connection to the same host; the cited records name each destination')
+                  'by an answered high-port connection to the same host')
         fields = (*_CONN_REQUIRED, 'conn.history', 'tcp.opened_by_orig', 'flow.bytes_toserver', 'flow.bytes_toclient',
                   'network.protocols', 'zeek.uid')
         hit = signal(event, self.id, text, self.attack, fields, lane='lead', severity='high', notes=tuple(notes),

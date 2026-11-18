@@ -860,7 +860,10 @@ class ZeekWindowRule(Playbook, ABC):
         metric = 'distinct members' if self.distinct else 'attempt references'
         display_episodes = summary.get('continuity_episodes', summary['episodes'])
         qualifier = ' reconstructed' if 'continuity_episodes' in summary else ''
-        claim += (f" Across {display_episodes}{qualifier} qualifying episode{'s' if display_episodes != 1 else ''}; "
+        # thinned repeats are fewer evaluation points: separate episodes can read as one, never the reverse
+        bound = 'at least ' if self.thin_members else ''
+        claim += (f" Across {bound}{display_episodes}{qualifier} qualifying episode"
+                  f"{'s' if display_episodes != 1 else ''}; "
                   f"peak {body['peak']} {metric} in one window.")
         if 'continuity_episodes' in summary:
             notes = (*notes, f'The last completed retained-history continuity reconstruction has {summary["continuity_episodes"]} continuous episode(s), connecting previously observed windows. The historical published bound of {summary["episodes"]} episode observations is preserved.')
@@ -889,7 +892,10 @@ class ZeekWindowRule(Playbook, ABC):
             notes = (*notes, 'A recorded success lacks an account identity; no named successful account was established.')
         iso = lambda stamp: datetime.fromtimestamp(stamp, UTC).isoformat()
         summaries = [f"First qualifying window: {iso(body['first']-self.seconds)} through {iso(body['first'])}.",
-                     f"Last qualifying window: {iso(body['last']-self.seconds)} through {iso(body['last'])}.",
+                     (f"Last qualifying window: {iso(body['last']-self.seconds)} through at least "
+                      f"{iso(body['last'])}; with repeats thinned, the last episode can continue past it."
+                      if self.thin_members else
+                      f"Last qualifying window: {iso(body['last']-self.seconds)} through {iso(body['last'])}."),
                      f"Peak qualifying window: {iso(body['peak_ts']-self.seconds)} through {iso(body['peak_ts'])}."]
         lane = LANES[min(previous, body['lane'])]
         sampled = list({event.id:event for event in samples}.values())

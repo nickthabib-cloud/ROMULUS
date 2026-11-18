@@ -347,6 +347,14 @@ def test_one_poller_reaching_many_clients_folds_into_one_finding_without_lowerin
     matches, _rule = evaluate(EpmDynamicRpc, rows, site=site)
     assert lanes(matches) == ['lead'] and '10.7.0.9' in matches[0].claim
     assert sum(event.get('destination.port') == 135 for event in matches[0].events) >= 1
+    claim = matches[0].claim
+    assert '40 distinct destinations' in claim and 'and 30 more' in claim and 'examples' in claim
+    assert '10.5.1.1,' in claim and '10.5.1.40' not in claim
+    # repeats to the same hosts add raw references, never destinations
+    again = rows + [row for n in range(40) for row in epm_pair(100 + n, f'10.5.1.{n + 1}', src='10.7.0.9',
+                                                               ts=400.0 + n * 5.0)]
+    [match], _rule = evaluate(EpmDynamicRpc, again, site=site)
+    assert '40 distinct destinations' in match.claim
 
 
 def test_unanswered_mapper_or_missing_counters_never_pair():
