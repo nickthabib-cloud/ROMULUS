@@ -528,6 +528,69 @@ def test_configured_external_destination_is_evaluated_against_resolved_history()
     assert len(repo.candidates("h1")) == 1
 
 
+def _admin_pair_history(repo, spec, begin):
+    repo.save_baseline_segment({
+        "id": "admin-history", "site": "site", "target": "host-index", "spec_id": spec.id,
+        "spec_version": spec.version, "key_version": spec.key_version, "normalizer": "fixture@1",
+        "start": begin, "end": START, "bucket": "day", "origin": "lookback",
+        "source_hunt_id": None, "built_by_hunt_id": None, "exclusion_digest": "none",
+        "network_digest": "fixture",
+        "excluded_keys": [], "hunted": 0, "events_total": 48, "status": "active", "created_at": START,
+    }, [{
+        "segment_id": "admin-history", "scope_kind": "internal_ip", "scope": "internal_ip:10.0.0.5",
+        "key_id": "known-pair", "key_digest": "known-pair-digest",
+        "key": {"kind": "admin_service", "dest_ip": "10.0.0.9", "service": "smb"},
+        "bucket": begin + timedelta(days=day), "count": 24,
+        "first_ts": begin + timedelta(days=day), "last_ts": begin + timedelta(days=day, hours=23),
+    } for day in range(2)], [{
+        "segment_id": "admin-history", "scope_kind": "internal_ip", "scope": "internal_ip:10.0.0.5",
+        "hour": begin + timedelta(hours=hour), "events": 1,
+    } for hour in range(48)])
+
+
+def _admin_pair_observation(repo, spec, key_id, destination):
+    event = TypedEvent(
+        id=f"conn-{key_id}", family="net_flow", ts=START, host="sensor", outcome=Outcome.unknown,
+        fields={"source.ip": fv("10.0.0.5", "fixture:source.ip"),
+                "destination.ip": fv(destination, "fixture:destination.ip"),
+                "destination.port": fv(445, "fixture:destination.port")},
+        raw=[RawRef(target="host-index", native_id=f"conn-{key_id}")], normalizer="fixture@1",
+    )
+    row = _observation(event, key_id=key_id, key_digest=f"{key_id}-digest", path=destination)
+    row.update(spec_id=spec.id, spec_version=spec.version, scope_kind="internal_ip",
+               scope="internal_ip:10.0.0.5", key={"kind": "admin_service", "dest_ip": destination, "service": "smb"})
+    repo.save_evidence("h1", [event], {event.raw[0].key: {"message": event.id}}, None)
+    repo.upsert_baseline_observation(row)
+
+
+def test_a_first_remote_administration_pair_is_a_lead_and_a_known_one_is_not():
+    spec = SPEC_BY_ID["bl.admin_pair"]
+    repo = _repo(spec_ids=(spec.id,), configured=True)
+    _admin_pair_history(repo, spec, START - timedelta(hours=48))
+    _admin_pair_observation(repo, spec, "known-pair", "10.0.0.9")
+    _admin_pair_observation(repo, spec, "new-pair", "10.0.0.77")
+
+    summary = run_baseline_stage(repo, "h1", WINDOW, source=EmptyHistory())
+
+    verdicts = {row["key_id"]: row["verdict"] for row in repo.baseline_observations("h1")}
+    assert verdicts == {"known-pair": "common", "new-pair": "first_seen"}
+    assert summary["status"] == "complete"
+    [candidate] = repo.candidates("h1")
+    assert candidate["lane"] == "lead" and "10.0.0.77" in candidate["claim"] and "10.0.0.9" not in candidate["claim"]
+
+
+def test_an_unconfigured_site_leaves_remote_administration_pairs_unresolved():
+    spec = SPEC_BY_ID["bl.admin_pair"]
+    repo = _repo(spec_ids=(spec.id,), configured=False)
+    _admin_pair_observation(repo, spec, "new-pair", "10.0.0.77")
+
+    run_baseline_stage(repo, "h1", WINDOW, source=EmptyHistory())
+
+    stored = next(repo.baseline_observations("h1"))
+    assert stored["verdict"] == "unresolved" and "connections between internal hosts" in stored["reason"]
+    assert repo.candidates("h1") == []
+
+
 def test_stage_resume_reuses_the_frozen_snapshot_and_is_idempotent():
     repo = _repo()
     _resolved_history(repo)
@@ -654,7 +717,7 @@ def test_hunt_manifest_records_the_frozen_baseline_plan_and_network_definition()
     assert baseline["history_days"] == 7 and baseline["min_live_hours"] == 48
     assert baseline["budget"] == {"queries": 200, "records": 5_000_000, "seconds": 1800}
     assert {item["id"] for item in baseline["specs"]} == {
-        "bl.ssh_tuple", "bl.exec_path", "bl.exec_pair", "bl.cmd_shape", "bl.ext_dest",
+        "bl.ssh_tuple", "bl.exec_path", "bl.exec_pair", "bl.cmd_shape", "bl.ext_dest", "bl.admin_pair",
         "bl.svc_exec_rate", "vpn.login_from_new_source_ip_for_user",
     }
     assert baseline["thresholds"]["rate"] == {"min_count": 5.0, "k": 3.0, "z": 4.0}

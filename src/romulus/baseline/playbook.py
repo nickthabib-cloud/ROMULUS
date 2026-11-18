@@ -186,6 +186,38 @@ class ExternalDestinationBaseline(BaselinePlaybook):
     direction_dependent = True
 
 
+class AdminPairBaseline(BaselinePlaybook):
+    """An internal source's first answered connection to an internal host's SSH, RDP, WinRM, SMB or RPC endpoint-mapper
+    service against the frozen history: lateral movement to a host the source never administered. Encrypted sessions
+    are judged alike, since only the connection is read."""
+    id = "bl.admin_pair"
+    title = "Remote-administration connection baseline"
+    spec = SPEC_BY_ID[id]
+    families = spec.families
+    datasets = spec.datasets
+    required_fields = spec.required_fields["net_flow"]
+    direction_dependent = True
+    attack = ("T1021.001", "T1021.002", "T1021.003", "T1021.004", "T1021.006")
+    benign = ("a new server, a re-addressed host or an administrator's first visit to a host",
+              "DHCP reassigning a source address that the history knew as another machine")
+    next_checks = ("logons to the destination from the source at this time",
+                   "processes started on the destination by the remote-administration service",
+                   "other first-seen pairs from the same source in the window")
+    assures_negative = False
+    positive_only_reason = ("remote-administration baselines publish positive deviations only: a pair absent from "
+                            "the window is not shown absent from the network")
+    card: ClassVar[dict] = {
+        "behavior": "an internal source's answered connection to an internal host's remote-administration service "
+                    "(SSH, RDP, WinRM, SMB, RPC endpoint mapper) that the frozen history never shows from that source",
+        "telemetry": "Zeek conn records: source.ip, destination.ip, destination.port, network.transport, "
+                     "conn.history, payload byte counters",
+        "fidelity": "Historical prevalence baseline per source address with peer prevalence of the destination and "
+                    "service; a deviation, not proof of malicious activity",
+        "lanes": "lead, info severity, as every baseline deviation; unresolved without configured internal networks "
+                 "or sufficient history",
+    }
+
+
 class ServiceExecRateBaseline(BaselinePlaybook):
     id = "bl.svc_exec_rate"
     title = "Service-account execution rate baseline"
@@ -203,5 +235,6 @@ BASELINE_PLAYBOOKS = [
     ExecPairBaseline,
     CommandShapeBaseline,
     ExternalDestinationBaseline,
+    AdminPairBaseline,
     ServiceExecRateBaseline,
 ]

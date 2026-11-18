@@ -57,7 +57,7 @@ def _ctx(table: PidTable | None = None, service_accounts: frozenset[str] | None 
 def test_registry_has_the_accepted_specs_and_metadata():
     assert [spec.id for spec in BASELINE_SPECS] == [
         "bl.ssh_tuple", "vpn.login_from_new_source_ip_for_user",
-        "bl.exec_path", "bl.exec_pair", "bl.cmd_shape", "bl.ext_dest", "bl.svc_exec_rate",
+        "bl.exec_path", "bl.exec_pair", "bl.cmd_shape", "bl.ext_dest", "bl.admin_pair", "bl.svc_exec_rate",
     ]
     assert SPEC_BY_ID["bl.ssh_tuple"].families == ("auth",)
     assert SPEC_BY_ID["bl.exec_path"].scope == ("host", "account")
@@ -71,13 +71,15 @@ def test_registry_has_the_accepted_specs_and_metadata():
     assert {spec.id: spec.measure for spec in BASELINE_SPECS} == {
         "bl.ssh_tuple": "presence", "vpn.login_from_new_source_ip_for_user": "presence",
         "bl.exec_path": "prevalence", "bl.exec_pair": "prevalence",
-        "bl.cmd_shape": "prevalence", "bl.ext_dest": "prevalence", "bl.svc_exec_rate": "rate",
+        "bl.cmd_shape": "prevalence", "bl.ext_dest": "prevalence", "bl.admin_pair": "prevalence",
+        "bl.svc_exec_rate": "rate",
     }
     # The fourth external-destination key version also distinguishes v1 answer-name recovery from v2/v3 records.
     assert {spec.id: (spec.version, spec.key_version) for spec in BASELINE_SPECS} == {
         "bl.ssh_tuple": ("1", "1"), "vpn.login_from_new_source_ip_for_user": ("1", "1"),
         "bl.exec_path": ("1", "1"), "bl.exec_pair": ("2", "2"),
-        "bl.cmd_shape": ("4", "4"), "bl.ext_dest": ("4", "4"), "bl.svc_exec_rate": ("1", "2"),
+        "bl.cmd_shape": ("4", "4"), "bl.ext_dest": ("4", "4"), "bl.admin_pair": ("1", "1"),
+        "bl.svc_exec_rate": ("1", "2"),
     }
 
 
@@ -794,6 +796,7 @@ _COMPLETE = {
     ("bl.exec_pair", "process_exec"): (Outcome.success, {"process.ppid": 100, "process.executable": "/bin/sh"}),
     ("bl.cmd_shape", "process_exec"): (Outcome.success, {"process.executable": "/bin/sh", "process.argv": ["sh"]}),
     ("bl.ext_dest", "net_flow"): (Outcome.unknown, {"source.ip": "10.0.0.4", "destination.ip": "192.0.2.1"}),
+    ("bl.admin_pair", "net_flow"): (Outcome.unknown, {"source.ip": "10.0.0.4", "destination.ip": "10.0.0.9", "destination.port": 445, "network.transport": "tcp", "conn.history": "ShADadFf", "tcp.opened_by_orig": True, "flow.bytes_toserver": 900, "flow.bytes_toclient": 2400}),
     ("bl.ext_dest", "net_session"): (Outcome.unknown, {"source.ip": "10.0.0.4", "destination.ip": "192.0.2.1"}),
     ("bl.ext_dest", "tls_session"): (Outcome.unknown, {"source.ip": "10.0.0.4", "destination.ip": "192.0.2.1"}),
     ("bl.ext_dest", "dns_query"): (Outcome.unknown, {
