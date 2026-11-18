@@ -3796,6 +3796,33 @@ class Repo:
         with self.engine.connect() as c:
             return [_with_utc(item, _SEGMENT_TIMES) for item in c.execute(query).mappings()]
 
+    def baseline_catchup(self, site: str) -> dict[tuple[str, str, str], dict]:
+        """Every recorded catch-up of the site's baseline spec identities, keyed (spec, version, key version)."""
+        c = t.baseline_catchup.c
+        with self.engine.connect() as connection:
+            rows = connection.execute(select(t.baseline_catchup).where(c.site == site)).mappings()
+            return {(row["spec_id"], row["spec_version"], row["key_version"]): _with_utc(row, ("since", "cleared"))
+                    for row in rows}
+
+    def enter_baseline_catchup(self, site: str, identity: tuple[str, str, str], since: datetime) -> None:
+        """Record that a spec identity started catching up; an identity already recorded keeps its record."""
+        spec_id, spec_version, key_version = identity
+        with write_txn(self.engine) as connection:
+            connection.execute(insert(t.baseline_catchup).values(
+                site=site, spec_id=spec_id, spec_version=spec_version, key_version=key_version,
+                since=_utc(since, "catch-up start"), cleared=None,
+            ).on_conflict_do_nothing())
+
+    def clear_baseline_catchup(self, site: str, identity: tuple[str, str, str], at: datetime) -> None:
+        """The identity has built its full lookback once: it is cleared for good."""
+        spec_id, spec_version, key_version = identity
+        c = t.baseline_catchup.c
+        with write_txn(self.engine) as connection:
+            connection.execute(t.baseline_catchup.update().where(
+                c.site == site, c.spec_id == spec_id, c.spec_version == spec_version, c.key_version == key_version,
+                c.cleared.is_(None),
+            ).values(cleared=_utc(at, "catch-up clear")))
+
     def baseline_segment_covers(self, *, site: str, target: str, spec_id: str, spec_version: str,
                                 key_version: str, start: datetime, end: datetime,
                                 network_digest: str | None = None) -> bool:

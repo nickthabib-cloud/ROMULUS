@@ -1,5 +1,6 @@
 """Cited-key exclusions outlive their hunt: baseline segments built from history stay site knowledge after the hunt
-that cited the keys is deleted, so the keys it cited stay out of that history."""
+that cited the keys is deleted, so the keys it cited stay out of that history. Baseline spec identities catching up
+on their history are recorded per site."""
 import sqlalchemy as sa
 from alembic import op
 
@@ -62,7 +63,18 @@ def _rebuild(*, foreign_key):
 
 def upgrade() -> None:
     _rebuild(foreign_key=False)
+    op.create_table(
+        "baseline_catchup",
+        sa.Column("site", sa.String(), nullable=False),
+        sa.Column("spec_id", sa.String(), nullable=False),
+        sa.Column("spec_version", sa.String(), nullable=False),
+        sa.Column("key_version", sa.String(), nullable=False),
+        sa.Column("since", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("cleared", sa.DateTime(timezone=True)),
+        sa.PrimaryKeyConstraint("site", "spec_id", "spec_version", "key_version", name="pk_baseline_catchup"),
+    )
 
 
 def downgrade() -> None:
+    op.drop_table("baseline_catchup")
     _rebuild(foreign_key=True)

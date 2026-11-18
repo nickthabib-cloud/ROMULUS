@@ -286,20 +286,34 @@ class LookbackWriter:
             for spec in applicable[target]:
                 if spec not in missing:
                     stored[(target, _identity(spec))] = stored.get((target, _identity(spec)), 0) + 1
-        # A spec with no stored hour of this interval on any target it applies to (newly added or re-versioned)
-        # backfills, while another spec has stored some: the specs that have history keep the shared, newest-first
-        # pass exactly as without the new one, old gaps included. With nothing stored yet no spec backfills, and
-        # the fill is the plain newest-first one. Exec pairs never backfill: their children resolve against the
-        # parent carry, which only the shared pass feeds in order (so a new exec-pair version catches up on the
-        # shared budget).
+        # A spec identity catching up on its history (a recorded catch-up, see Repo.baseline_catchup) backfills:
+        # hours it alone needs are read under the backfill allowance after the shared pass, so specs with history
+        # keep the shared, newest-first pass exactly as without it, old gaps included, for every hunt until the
+        # newcomer has built its full lookback once. An identity enters when a fill finds it with no stored hour of
+        # the interval while another spec has some (with nothing stored yet no spec does, and the fill is the plain
+        # newest-first one); it leaves, for good, once it holds the oldest hour of a fill on every target it applies
+        # to. A version or key-version bump is a new identity, and enters again. Exec pairs never backfill: their
+        # children resolve against the parent carry, which only the shared pass feeds in order (so a new exec-pair
+        # version catches up on the shared budget).
         has_history: dict[tuple[str, str, str], bool] = {}
         for spec in self.specs:
             places = [target for target in ordered_targets if spec in applicable[target]]
             if places:
                 has_history[_identity(spec)] = any(stored.get((target, _identity(spec)), 0) for target in places)
         anyone = any(has_history.values())
-        backfilling = {target: {_identity(spec) for spec in applicable[target]
-                                if anyone and not has_history[_identity(spec)] and spec.id != "bl.exec_pair"}
+        recorded = self.repo.baseline_catchup(self.site)
+        catching_up: set[tuple[str, str, str]] = set()
+        for spec in self.specs:
+            identity = _identity(spec)
+            if identity not in has_history or spec.id == "bl.exec_pair":
+                continue
+            record = recorded.get(identity)
+            if record is None and anyone and not has_history[identity]:
+                self.repo.enter_baseline_catchup(self.site, identity, self.now())
+                catching_up.add(identity)
+            elif record is not None and record["cleared"] is None:
+                catching_up.add(identity)
+        backfilling = {target: {_identity(spec) for spec in applicable[target] if _identity(spec) in catching_up}
                        for target in ordered_targets}
         shared = _Spend(self.budget, begun, "lookback query or wall-clock budget exhausted")
         backfill = _Spend(self.backfill_budget, begun, (
@@ -502,6 +516,18 @@ class LookbackWriter:
         for target, hour_start, hour_end, missing in deferred_items:
             read_hour(target, hour_start, hour_end, missing, False, backfill, target not in shared_targets)
         queries, records = shared.queries + backfill.queries, shared.records + backfill.records
+        # A catch-up ends once the identity has built its full lookback once: it holds the fill's oldest hour on
+        # every target it applies to, and no hour of it was left unread for budget (an hour read early because an
+        # established spec needed it does not end it).
+        oldest = end - worked * _HOUR
+        unread = {spec_id for gap in (*gaps, *omitted) if gap.state == "omitted_budget" for spec_id in gap.spec_ids}
+        for spec in self.specs:
+            identity = _identity(spec)
+            if identity not in catching_up or spec.id in unread:
+                continue
+            places = [target for target in ordered_targets if spec in applicable[target]]
+            if places and all(self._covered(target, spec, oldest, oldest + _HOUR) for target in places):
+                self.repo.clear_baseline_catchup(self.site, identity, self.now())
         # Every hour the budget allowed has fed the carry: resolve the waiting children and write their hours.
         for cell in self.repo.baseline_history_cells(hunt_id):
             spec = next((item for item in self.specs if item.id == cell["spec_id"]), None)
