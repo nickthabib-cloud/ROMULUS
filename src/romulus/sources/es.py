@@ -266,7 +266,8 @@ def _scan_body(obj: Any) -> None:
 
 
 class ElasticClient:
-    def __init__(self, settings: Settings, transport: httpx.BaseTransport | None = None):
+    def __init__(self, settings: Settings, transport: httpx.BaseTransport | None = None,
+                 timeout: httpx.Timeout | float = 60.0):
         self.settings = settings
         auth = None
         headers = {"Content-Type": "application/json"}
@@ -281,7 +282,7 @@ class ElasticClient:
         if settings.es_ca_cert:
             verify = settings.es_ca_cert
         self._http = httpx.Client(base_url=settings.es_url.rstrip("/"), auth=auth, headers=headers,
-                                  verify=verify, timeout=60.0, transport=transport)
+                                  verify=verify, timeout=timeout, transport=transport)
         self.flavor = settings.es_flavor
         self._version: str | None = None
         self.backend: Backend | None = None

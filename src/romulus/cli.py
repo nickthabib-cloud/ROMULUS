@@ -26,6 +26,16 @@ def _settings(args):
     return with_agent_model(load_settings(_env_file(args)), getattr(args, "agent_model", None))
 
 
+def _positive_seconds(value: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError:
+        seconds = 0.0
+    if not 0 < seconds <= 86_400:
+        raise argparse.ArgumentTypeError("a number of seconds above 0 and at most 86400")
+    return seconds
+
+
 def cmd_doctor(args) -> int:
     from romulus.doctor import run_all
     env = _env_file(args)
@@ -34,13 +44,15 @@ def cmd_doctor(args) -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return EXIT_USAGE
-    checks = run_all(s, env)
+    def show(c) -> None:
+        mark = {"ok": "OK  ", "warn": "WARN", "fail": "FAIL"}[c.status]
+        print(f"[{mark}] {c.name:32} {c.detail}", flush=True)
+
+    # each line is printed as its check finishes, so a slow check is visible while it runs
+    checks = run_all(s, env, check_seconds=getattr(args, "check_timeout", None),
+                     on_check=None if args.json else show)
     if args.json:
         print(json.dumps([c.__dict__ for c in checks], indent=2))
-    else:
-        for c in checks:
-            mark = {"ok": "OK  ", "warn": "WARN", "fail": "FAIL"}[c.status]
-            print(f"[{mark}] {c.name:32} {c.detail}")
     return EXIT_FAIL if any(c.status == "fail" for c in checks) else EXIT_OK
 
 
@@ -640,6 +652,9 @@ def main(argv: list[str] | None = None) -> int:
                   "the hunt records the model it used)")
     dop = sub.add_parser("doctor", help="check sources, privileges, model endpoint, tools and storage")
     dop.add_argument("--agent-model", help=model_help)
+    dop.add_argument("--check-timeout", type=_positive_seconds, metavar="SECONDS",
+                     help="the deadline of every check, in seconds (default: each check's own, 60 to 400 s); a check "
+                          "that overruns is reported as timed out and the others still run")
     hp = sub.add_parser("hunt", help="create/run hunts and show status")
     hp.add_argument("action", choices=["start", "resume", "status", "stop", "extend"])
     hp.add_argument("hunt_id", nargs="?")

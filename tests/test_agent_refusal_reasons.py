@@ -140,6 +140,25 @@ def test_refused_calls_record_reasons_on_their_rows_audit_and_logs_without_value
     assert "overall: list_type" in retry and SENTINEL not in retry
 
 
+def test_arguments_the_provider_refused_for_an_unknown_key_are_answered_with_the_allowed_keys(tmp_path):
+    from romulus.agent.toolbox import ListSearchFieldsArgs
+
+    repo = _hunt(tmp_path)
+    refused = [ToolCall("a", "list_search_fields", None, '{"listing": "typed_fields", "field": "user.name"}',
+                        error="arguments do not match the tool's schema: *: unexpected_property",
+                        problems=("*: unexpected_property",))]
+    finish = [ToolCall("f", "finish_session", {"summary": "The evidence review is complete."}, "{}")]
+    invalid = response(parsed={"overall": "x"})
+    provider = ScriptedProvider([response(tool_calls=refused), *[response(tool_calls=finish)] * 3, invalid, invalid])
+    run_agent_phase(Settings(home=tmp_path), repo, "h1", provider=provider,
+                    toolbox_factory=lambda session: Toolbox(repo, "h1", session_id=session), clock=lambda: 0.0)
+    # the orient session's second request carries the refused call's result
+    sent = json.dumps(provider.requests[1].messages, default=str)
+    assert "allowed_keys" in sent
+    expected = json.dumps({"$": sorted(ListSearchFieldsArgs.model_fields)})
+    assert expected in sent or expected.replace('"', '\\"') in sent
+
+
 def test_an_assessment_check_that_fails_still_records_the_billed_call(tmp_path, monkeypatch):
     from romulus.agent import assessment
     from romulus.agent.provider import AgentBudget, BudgetLimits
@@ -180,3 +199,16 @@ def test_the_web_panel_shows_refusal_counts_by_tool_and_reason_without_values(se
     assert "<td>finish_session</td><td><code>summary: string_too_short</code></td><td>2</td>" in body
     assert "<td>open_hypothesis</td><td><code>*: extra_forbidden</code></td><td>1</td>" in body
     assert SENTINEL not in body
+
+
+def test_allowed_keys_name_the_keys_the_model_sends_including_aliases():
+    from pydantic import ValidationError
+
+    from romulus.agent.admission import ProposeLinkArgs
+    from romulus.agent.toolbox import _allowed_keys
+    try:
+        ProposeLinkArgs.model_validate({"from": "F1", "to": "F2", "relation": "related", "bogus": 1})
+    except ValidationError as error:
+        allowed = _allowed_keys(ProposeLinkArgs, error.errors(include_url=False, include_input=False))
+    assert allowed["$"] == sorted(ProposeLinkArgs.model_json_schema(by_alias=True)["properties"])
+    assert "from" in allowed["$"] and "from_" not in allowed["$"]

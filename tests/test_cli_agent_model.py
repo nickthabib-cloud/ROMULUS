@@ -54,7 +54,7 @@ def test_a_malformed_model_id_is_a_usage_error(tmp_path, capsys):
 
 def test_doctor_checks_the_overriding_model(tmp_path, monkeypatch):
     seen = []
-    monkeypatch.setattr("romulus.doctor.run_all", lambda s, _env: seen.append(s.agent_model) or [])
+    monkeypatch.setattr("romulus.doctor.run_all", lambda s, _env, **_kw: seen.append(s.agent_model) or [])
     env = tmp_path / ".env"
     env.write_text(ENV, encoding="utf-8")
     assert cli.main(["--env-file", str(env), "doctor", "--agent-model", "override-model"]) == cli.EXIT_OK

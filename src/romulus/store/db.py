@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import sqlite3
 import threading
 import time
 from contextlib import ExitStack, contextmanager
@@ -13,6 +14,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import Engine, create_engine, event, text
+from sqlalchemy import exc as sa_exc
+from sqlalchemy.pool import NullPool
 
 from romulus.store.schema import metadata
 
@@ -315,6 +318,60 @@ def read_snapshot(engine: Engine):
             connection.rollback()
 
 
-def integrity_check(engine: Engine) -> str:
+class IntegrityCheckTimeout(TimeoutError):
+    """The integrity check was stopped at its deadline: the store's integrity was not verified."""
+
+
+# How many SQLite virtual-machine steps run between two looks at an integrity check's deadline.
+INTEGRITY_DEADLINE_STEPS = 10_000
+# The most problem lines an integrity check reports (SQLite lists one per problem it finds).
+INTEGRITY_REPORT_LINES = 20
+
+
+def integrity_check(engine: Engine, seconds: float | None = None) -> str:
+    """`PRAGMA integrity_check`: "ok", or its first problem lines joined by "; ". With `seconds`, the check is
+    interrupted at that deadline (its read transaction ends with it) and IntegrityCheckTimeout is raised."""
     with engine.connect() as conn:
-        return conn.execute(text("PRAGMA integrity_check")).scalar_one()
+        raw = conn.connection.driver_connection
+        deadline = None if seconds is None else time.monotonic() + seconds
+        if deadline is not None:
+            raw.set_progress_handler(lambda: time.monotonic() > deadline, INTEGRITY_DEADLINE_STEPS)
+        try:
+            rows = conn.execute(text(f"PRAGMA integrity_check({INTEGRITY_REPORT_LINES})")).fetchall()
+        except sa_exc.OperationalError as error:
+            if deadline is not None and time.monotonic() > deadline:
+                raise IntegrityCheckTimeout(f"integrity check interrupted after {seconds:g} s") from error
+            raise
+        finally:
+            if deadline is not None:
+                raw.set_progress_handler(None, 0)
+    lines = [str(row[0]) for row in rows]
+    return "ok" if lines == ["ok"] else "; ".join(lines) or "no result"
+
+
+def make_read_only_engine(db_path: Path | str, *, busy_timeout_ms: int = 5_000) -> Engine:
+    """An engine for diagnostics that never writes: each connection opens the file read-only (`mode=ro`), sets no
+    journal mode, runs no migration, and waits at most `busy_timeout_ms` for another process's lock. Opening a
+    missing file raises (nothing is created)."""
+    path = Path(db_path).resolve()
+    uri = path.as_uri() + "?mode=ro"
+
+    def connect():
+        connection = sqlite3.connect(uri, uri=True, timeout=busy_timeout_ms / 1000, check_same_thread=False)
+        connection.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
+        return connection
+
+    return create_engine(f"sqlite:///{path}", creator=connect, future=True, poolclass=NullPool)
+
+
+def schema_heads(engine: Engine) -> tuple[set[str], set[str]]:
+    """(the store's recorded migration heads, the heads this build's migrations end at), read without writing."""
+    from alembic.config import Config
+    from alembic.migration import MigrationContext
+    from alembic.script import ScriptDirectory
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(Path(__file__).resolve().parent / "migrations"))
+    with engine.connect() as conn:
+        current = set(MigrationContext.configure(conn).get_current_heads())
+    return current, set(ScriptDirectory.from_config(cfg).get_heads())

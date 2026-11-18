@@ -607,6 +607,19 @@ def _cited_findings(repo: Repo, hypothesis_id: str) -> int:
                 if row["target_kind"] == "finding"})
 
 
+def _provider_refused_keys(toolbox: Toolbox, call) -> dict[str, list[str]]:
+    """When the provider refused a call's arguments for a key the tool does not take (unexpected_property), the keys
+    each object holding one takes, from the tool's own argument model; empty otherwise."""
+    if not any(str(problem).endswith(": unexpected_property") for problem in call.problems or ()):
+        return {}
+    keys_of = getattr(toolbox, "allowed_keys", None)
+    try:
+        arguments = json.loads(call.raw_arguments or "")
+    except (ValueError, TypeError):
+        return {}
+    return keys_of(call.name, arguments) if keys_of is not None else {}
+
+
 def _overlong_field(name: str, arguments, reasons) -> str | None:
     """The free-text field a write or finish_session call was refused for alone, by its length (None otherwise)."""
     field = CUTTABLE_TEXT.get(name, (None, None))[0]
@@ -1079,6 +1092,9 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                         # the provider refused the arguments before any tool ran
                         tool_result = {"status": "refused", "errors": [call.error]}
                         reasons = bounded(call.problems) or [reason("$", "invalid_arguments")]
+                        allowed = _provider_refused_keys(toolbox, call)
+                        if allowed:
+                            tool_result["allowed_keys"] = allowed
                     else:
                         heartbeat()
                         stopped = budget_gate.stopped()

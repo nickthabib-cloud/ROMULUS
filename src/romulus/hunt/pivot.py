@@ -1646,8 +1646,36 @@ class PivotExecutor:
             self._vocabulary = search_vocabulary(self.contracts)
         return self._vocabulary
 
-    @staticmethod
-    def _search_refusal(request: SearchEventsRequest, targets: list[FieldContract],
+    def _field_standing(self, field_name: str, targets: list[FieldContract], scope: str) -> dict:
+        """Why a refused condition's field could not be searched, as a fixed `standing` and its guidance: a source's
+        time field (the window bounds it), a typed field some source in scope takes (so another condition, the op or
+        a value is what no source takes), a typed field only sources outside the scope take, or no typed field of
+        this hunt at all."""
+        def takes(contract: FieldContract) -> bool:
+            return any(search_ops(contract, field_name, os_family=family) for family in (None, "linux"))
+
+        if any(contract.time_field == field_name for contract in targets):
+            return {"standing": "time_field", "typed_sources_in_scope": 0, "guidance": (
+                "this is a source's time field: set the search's start and end instead of a condition on it")}
+        in_scope = sum(1 for contract in targets if takes(contract))
+        if in_scope:
+            return {"standing": "typed_field_refused_here", "typed_sources_in_scope": in_scope, "guidance": (
+                f"{in_scope} source(s) in scope take this typed field, but none takes every condition with its op and "
+                "values: each target's problem says why; change the op or value, or split the conditions into "
+                "separate searches")}
+        elsewhere = sorted({"network" if _is_network(contract.target, contract) else "host"
+                            for contract in self.contracts.values()
+                            if contract is not None and not _scoped(contract, scope) and takes(contract)})
+        if elsewhere:
+            return {"standing": "typed_outside_scope", "typed_sources_in_scope": 0, "typed_in_scopes": elsewhere,
+                    "guidance": (f"only {' and '.join(elsewhere)} sources take this typed field: search with scope "
+                                 f"{elsewhere[0] if len(elsewhere) == 1 else 'all'}")}
+        return {"standing": "not_a_typed_field", "typed_sources_in_scope": 0, "guidance": (
+            "no source of this hunt takes this name as a typed field: search_events takes only typed fields "
+            "(similar_fields, or list_search_fields listing=typed_fields); a source's own field is searched with "
+            "query_source on that source (list_search_fields listing=native_fields)")}
+
+    def _search_refusal(self, request: SearchEventsRequest, targets: list[FieldContract],
                         skipped: list[tuple[str, str, str | None]]) -> dict:
         scope = request.arguments.scope
         if not targets:
@@ -1662,13 +1690,15 @@ class PivotExecutor:
                 continue
             similar, count = _similar_fields(targets, condition.field)
             conditions.append({"field": condition.field, "op": condition.op, "similar_fields": similar,
-                               "searchable_field_count": count})
+                               "searchable_field_count": count,
+                               **self._field_standing(condition.field, targets, scope)})
         problems = [{"target": target, "problem": _text(problem)} for target, problem, _field in skipped]
         return {
             "code": "search_unsupported",
             "message": (f"no {scope} source can evaluate every condition, so nothing was searched; each target's "
-                        "problem is listed, and similar_fields names searchable typed fields that resemble each "
-                        "condition's field, with the operations each takes; list_search_fields lists them all"),
+                        "problem is listed, each refused condition's standing and guidance say why its field could "
+                        "not be searched, and similar_fields names searchable typed fields that resemble it, with "
+                        "the operations each takes; list_search_fields listing=typed_fields lists them all"),
             "reasons": [refusal_reason("conditions[].field", "unsupported_field") if failing
                         else refusal_reason("conditions", "not_compilable")],
             "conditions": conditions,
