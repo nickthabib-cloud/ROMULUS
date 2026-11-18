@@ -1255,7 +1255,8 @@ baseline_window_retention = Table(
 # row so a later overlapping hunt can invalidate an older segment without retaining candidate event bodies.
 baseline_hunt_exclusion = Table(
     "baseline_hunt_exclusion", metadata,
-    Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+    # no key to hunt: the cited keys stay excluded from site history after their hunt is deleted
+    Column("hunt_id", String, nullable=False),
     Column("site", String, nullable=False),
     Column("target", String, nullable=False),
     Column("spec_id", String, nullable=False),

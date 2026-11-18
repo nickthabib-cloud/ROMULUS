@@ -1049,10 +1049,19 @@ class Repo:
                 t.baseline_observation.c.hunt_id == hunt_id,
             ))
             rm("baseline_snapshots", t.baseline_snapshot.delete().where(t.baseline_snapshot.c.hunt_id == hunt_id))
-            rm("baseline_segments_revoked", t.baseline_segment.update().where(or_(
-                t.baseline_segment.c.source_hunt_id == hunt_id,
-                t.baseline_segment.c.built_by_hunt_id == hunt_id,
-            )).values(status="revoked"))
+            # Baseline segments are site history counted from the source, not this hunt's data: the ones it built or
+            # derived from its window stay active for every later hunt (their ids are content-derived, and other
+            # hunts' snapshots name them), and the hunt id on them remains as provenance. Its cited-key exclusion
+            # ledger stays too, so the segments' exclusion digests stay current. Only a segment it was still
+            # building is unfinished work of this hunt alone, and is revoked.
+            rm("baseline_segments_revoked", t.baseline_segment.update().where(
+                t.baseline_segment.c.built_by_hunt_id == hunt_id, t.baseline_segment.c.status == "building",
+            ).values(status="revoked"))
+            counts["baseline_segments_kept"] = c.execute(
+                select(func.count()).select_from(t.baseline_segment).where(or_(
+                    t.baseline_segment.c.source_hunt_id == hunt_id,
+                    t.baseline_segment.c.built_by_hunt_id == hunt_id,
+                ), t.baseline_segment.c.status != "revoked")).scalar_one()
             rm("finding_ranks", t.finding_rank.delete().where(t.finding_rank.c.hunt_id == hunt_id))
             rm("ai_triage_groups", t.ai_triage_group.delete().where(t.ai_triage_group.c.hunt_id == hunt_id))
             rm("entity_ranks", t.entity_rank.delete().where(t.entity_rank.c.hunt_id == hunt_id))
