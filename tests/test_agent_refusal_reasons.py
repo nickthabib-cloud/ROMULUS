@@ -199,3 +199,16 @@ def test_the_web_panel_shows_refusal_counts_by_tool_and_reason_without_values(se
     assert "<td>finish_session</td><td><code>summary: string_too_short</code></td><td>2</td>" in body
     assert "<td>open_hypothesis</td><td><code>*: extra_forbidden</code></td><td>1</td>" in body
     assert SENTINEL not in body
+
+
+def test_allowed_keys_name_the_keys_the_model_sends_including_aliases():
+    from pydantic import ValidationError
+
+    from romulus.agent.admission import ProposeLinkArgs
+    from romulus.agent.toolbox import _allowed_keys
+    try:
+        ProposeLinkArgs.model_validate({"from": "F1", "to": "F2", "relation": "related", "bogus": 1})
+    except ValidationError as error:
+        allowed = _allowed_keys(ProposeLinkArgs, error.errors(include_url=False, include_input=False))
+    assert allowed["$"] == sorted(ProposeLinkArgs.model_json_schema(by_alias=True)["properties"])
+    assert "from" in allowed["$"] and "from_" not in allowed["$"]

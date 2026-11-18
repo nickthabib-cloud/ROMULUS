@@ -203,7 +203,8 @@ class HuntToolExecutor:
             if typed:
                 entry["typed_equivalents"] = typed[:NATIVE_HINT_NAMES]
             entry["guidance"] = (
-                "this is a source's own (native) field, not a typed field, and search_events takes only typed fields: "
+                "this is a source's own (native) field, and no source of this hunt can search it as a typed field; "
+                "search_events takes only typed fields: "
                 "ask query_source on a source named in native_field_of"
                 + (", or search_events on a typed field in typed_equivalents, which is read from it" if typed else ""))
         if native:

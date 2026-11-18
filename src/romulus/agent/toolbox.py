@@ -295,7 +295,8 @@ def _allowed_keys(model: type[BaseModel], errors: list[dict]) -> dict[str, list[
             if current is None:
                 break
         if current is not None:
-            out[field_path(loc[:-1])] = sorted(current.model_fields)
+            # the keys the model sends: a field's alias where it has one (`from` for `from_`), as the schema shows them
+            out[field_path(loc[:-1])] = sorted(field.alias or name for name, field in current.model_fields.items())
     return out
 
 

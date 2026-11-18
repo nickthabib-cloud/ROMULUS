@@ -599,6 +599,11 @@ def _store_unreadable(name: str, path: Path, error: Exception) -> Check:
     if any(word in text.lower() for word in ("locked", "busy")):
         return Check(name, "warn", f"{path}: another process held a lock for more than "
                                    f"{DB_BUSY_TIMEOUT_MS / 1000:g} s ({text}); not verified")
+    if any(word in text.lower() for word in ("unable to open", "readonly", "read-only")):
+        # a read-only open of a WAL store needs its -wal/-shm side files; a user who cannot create them in the store's
+        # folder (no process has the store open) cannot read it here, which says nothing about the store itself
+        return Check(name, "warn", f"{path}: could not be opened read-only by this user ({text}); not verified. "
+                                   "Run doctor as the store's owner, or while the web or a hunt has the store open")
     return Check(name, "fail", f"{path}: cannot be read: {text}")
 
 
