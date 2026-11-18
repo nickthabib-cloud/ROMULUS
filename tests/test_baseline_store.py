@@ -405,7 +405,7 @@ def test_migration_head_leaves_stored_candidates_about_every_record_they_cite(tm
     engine = make_engine(tmp_path / "candidate-context.db")
     with engine.begin() as connection:
         cfg = _alembic_config(connection)
-        assert ScriptDirectory.from_config(cfg).get_heads() == ["0045"]
+        assert ScriptDirectory.from_config(cfg).get_heads() == ["0046"]
         command.upgrade(cfg, "0016")
         connection.exec_driver_sql(
             "INSERT INTO hunt (id, created_at, created_by, manifest, manifest_digest, execution_state) "
@@ -572,30 +572,79 @@ def test_observation_upsert_uses_full_window_key_and_keeps_every_key():
     assert rows[0]["window_count"] == 2 and rows[0]["candidate_id"] == "candidate-1"
 
 
-def test_delete_hunt_drops_its_snapshot_and_observations_and_revokes_derived_segments():
+def test_delete_hunt_drops_its_snapshot_and_observations_and_keeps_the_site_history_it_built():
     repo = _repo()
     for hunt_id in ("h1", "h2"):
         repo.create_hunt(hunt_id, {}, "d", "test")
         repo.set_hunt_state(hunt_id, "canceled")
     for row in (
-        _segment("seg-source", source_hunt_id="h1"),
+        _segment("seg-source", source_hunt_id="h1", origin="hunt"),
         _segment("seg-built", built_by_hunt_id="h1"),
         _segment("seg-other", built_by_hunt_id="h2"),
     ):
         repo.save_baseline_segment(row, [], [])
+    # an unfinished build of the deleted hunt is its own unfinished work
+    assert repo.begin_baseline_segment(_segment("seg-building", built_by_hunt_id="h1", status="building",
+                                                start=T0 + timedelta(hours=1), end=T0 + timedelta(hours=2))) \
+        == "begun"
+    repo.replace_baseline_hunt_exclusions("h1", site="site-a", start=T0, end=T0 + timedelta(hours=1),
+                                          exclusions={("host-index", "bl.exec_path"): {"cited-key"}},
+                                          spec_versions={"bl.exec_path": ("1", "1")})
     for hunt_id in ("h1", "h2"):
         repo.save_baseline_snapshot(_snapshot(
-            hunt_id, digest=f"snap-{hunt_id}", segment_ids=["seg-other"],
+            hunt_id, digest=f"snap-{hunt_id}", segment_ids=["seg-other", "seg-built", "seg-source"],
         ))
         repo.upsert_baseline_observation(_observation(hunt_id))
 
     counts = repo.delete_hunt("h1", actor="test")
 
     assert counts["baseline_snapshots"] == 1 and counts["baseline_observations"] == 1
+    assert counts["baseline_segments_revoked"] == 1 and counts["baseline_segments_kept"] == 2
     assert repo.baseline_snapshot("h1") is None and list(repo.baseline_observations("h1")) == []
     status = {row["id"]: row["status"] for row in repo.baseline_segments()}
-    assert status == {"seg-built": "revoked", "seg-other": "active", "seg-source": "revoked"}
+    assert status == {"seg-built": "active", "seg-other": "active", "seg-source": "active",
+                      "seg-building": "revoked"}
+    # the later hunt's snapshot still names and verifies its segments, and a new fill finds the hour covered
     assert repo.baseline_snapshot("h2")["digest"] == "snap-h2"
+    assert repo.baseline_segment_covers(site="site-a", target="host-index", spec_id="bl.exec_path",
+                                        spec_version="1", key_version="1", start=T0, end=T0 + timedelta(hours=1))
+    # the deleted hunt's cited keys stay excluded: the kept segments' exclusion digests stay current
+    assert repo.baseline_exclusion_keys(site="site-a", target="host-index", spec_id="bl.exec_path",
+                                        spec_version="1", key_version="1", start=T0,
+                                        end=T0 + timedelta(hours=1)) == ["cited-key"]
+    # a kept segment is never pruned as revoked history
+    assert repo.prune_baseline_segment("seg-built") is False
+
+
+def test_deleting_old_hunts_keeps_the_history_a_new_hunt_snapshots_and_reads(tmp_path):
+    from romulus.baseline.lookback import LookbackBudget, LookbackWriter
+    from romulus.baseline.spec import SPEC_BY_ID
+    from romulus.store.db import compact
+    from tests.test_baseline_lookback import START, FakeHistory, _event
+
+    engine = make_engine(str(tmp_path / "romulus.db"))         # a file database: the delete route compacts it
+    migrate(engine)
+    repo = Repo(engine)
+    spec = SPEC_BY_ID["bl.exec_path"]
+    events = [_event(n, START - timedelta(hours=n % 6, minutes=5)) for n in range(60)]     # ten in each hour
+    for hunt_id in ("old", "new"):
+        repo.create_hunt(hunt_id, {}, "d", "test")
+    built = LookbackWriter(repo, FakeHistory(events), site="site", specs=[spec], normalizer="fixture@1",
+                           budget=LookbackBudget(queries=100, records=1000, seconds=60), now=lambda: START).fill(
+        hunt_id="old", targets=["host"], start=START - timedelta(hours=6), end=START)
+    assert built.complete == 6
+    repo.set_hunt_state("old", "canceled")
+    repo.delete_hunt("old", actor="test")
+    compact(repo.engine)
+
+    source = FakeHistory(events)
+    again = LookbackWriter(repo, source, site="site", specs=[spec], normalizer="fixture@1",
+                           budget=LookbackBudget(queries=100, records=1000, seconds=60), now=lambda: START).fill(
+        hunt_id="new", targets=["host"], start=START - timedelta(hours=6), end=START)
+    # every hour is still stored: nothing is read again, and the kept rows hold the counts
+    assert source.plans == [] and again.gaps == () and again.records == 0
+    active = repo.baseline_segments(spec_id=spec.id, statuses=["active"])
+    assert len(active) == 6 and sum(row["events_total"] for row in active) == 60
 
 
 def test_baseline_listings_are_deterministically_sorted():

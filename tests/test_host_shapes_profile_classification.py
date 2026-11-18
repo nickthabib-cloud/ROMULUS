@@ -8,6 +8,7 @@ import pytest
 from romulus.errors import SourceError
 from romulus.sources.profile import build_profile, contract_from_types
 from tests.test_host_shapes_profile import mapping
+from tests.throughput_fixture import _strip
 
 
 class MarkerClient:
@@ -170,7 +171,9 @@ def test_shared_template_and_unassessed_windows_rows_do_not_change_real_zeek_cel
             assert not runner.stats.get('windows_inventory')
             assert runner.stats['errors'] == 0
             assert not any('collection not attested' in str(cell['detail']) for cell in repo.rule_cells('h1'))
-            snapshots.append([{name: cell[name] for name in ('rule_id', 'partition', 'state', 'matched', 'evaluated', 'detail')}
+            # measured wall times differ on every run; everything else must match
+            snapshots.append([_strip({name: cell[name] for name in ('rule_id', 'partition', 'state', 'matched',
+                                                                    'evaluated', 'detail')})
                               for cell in repo.rule_cells('h1')])
             if count:
                 assert runner.stats['skips']['Windows event records on a network target: not evaluated'] == count

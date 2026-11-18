@@ -115,5 +115,17 @@ def test_the_encrypted_traffic_rules_publish_through_the_sweep_with_resolvable_s
                 assert event['raw_ids'] and len(repo.raw_records(event['raw_ids'])) == len(event['raw_ids'])
             if candidate['rule_id'] == 'net.epm_dynamic_rpc':
                 assert len(events) == 2, events
+        # every coverage cell carries the rule's bounded cost: wall time, records offered, and rows selected where
+        # the rule keeps selected rows; the window cell sums the partitions and adds the finalize time
+        cells = repo.rule_cells('h1', set(expected) | {'net.port_scan'})
+        partition_cells = [cell for cell in cells if cell['target'] != '*']
+        assert partition_cells and all(set(cell['detail']['timing']) <= {'wall_ms', 'records', 'selected'}
+                                       and cell['detail']['timing']['wall_ms'] >= 0 for cell in partition_cells)
+        fanout = [cell for cell in partition_cells if cell['rule_id'] == 'net.smb_rpc_fanout']
+        assert sum(cell['detail']['timing']['records'] for cell in fanout) == len(early) + len(second)
+        assert sum(cell['detail']['timing']['selected'] for cell in fanout) == 11       # ten SMB, one mapper
+        [window] = [cell for cell in cells if cell['rule_id'] == 'net.smb_rpc_fanout' and cell['target'] == '*']
+        assert set(window['detail']['timing']) == {'consume_wall_ms', 'finalize_wall_ms', 'records', 'selected'}
+        assert window['detail']['timing']['selected'] == 11
     finally:
         hunt.close_stage()

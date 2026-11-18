@@ -16,7 +16,7 @@ from romulus.baseline import (
     PendingResolver,
 )
 from romulus.baseline.count import KeyCounter
-from romulus.baseline.lookback import LookbackBudget, LookbackWriter, segment_content_id
+from romulus.baseline.lookback import LookbackBudget, LookbackWriter, _identity, segment_content_id
 from romulus.baseline.spec import SPEC_BY_ID, Pending
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.store.db import make_engine, migrate
@@ -1187,3 +1187,201 @@ def test_a_fill_interrupted_before_resolution_resolves_the_staged_hour_on_resume
                       if row["start"] == START - timedelta(hours=1))
     assert [row["count"] for row in repo.baseline_counts(child_hour["id"])] == [1]
     assert cells("build") == []
+
+
+# ---- a spec with no stored history never costs the others theirs ----------------------------------------------------
+
+def _new_spec():
+    from dataclasses import replace
+    return replace(SPEC, id="bl.exec_path_added")          # an added spec: no stored hour of its own
+
+
+def _two_spec_writer(repo, source, *, queries, backfill_queries):
+    return LookbackWriter(
+        repo, source, site="site", specs=[SPEC, _new_spec()], normalizer="fixture@1",
+        budget=LookbackBudget(queries=queries, records=1000, seconds=60),
+        backfill_budget=LookbackBudget(queries=backfill_queries, records=1000, seconds=60),
+        now=lambda: START,
+    )
+
+
+def _history_with_old_data():
+    # the newest 24 hours are empty and already stored for the established spec; the older 24 hours hold its records
+    # and are not stored yet (the shape of a site whose recent hours are quiet)
+    repo = _repo()
+    events = [_event(n, START - timedelta(hours=24 + n % 24, minutes=5)) for n in range(240)]
+    _writer(repo, FakeHistory(events)).fill(hunt_id="earlier", targets=["host"],
+                                            start=START - timedelta(hours=24), end=START)
+    return repo, events
+
+
+def _covered_hours(repo, spec):
+    return sum(1 for row in repo.baseline_segments(spec_id=spec.id, statuses=["active"])
+               if row["spec_version"] == spec.version)
+
+
+def test_adding_a_spec_keeps_the_established_specs_reads_within_their_budget():
+    new = _new_spec()
+    alone_repo, events = _history_with_old_data()
+    alone_source = FakeHistory(events)
+    alone = _writer(alone_repo, alone_source, queries=48).fill(
+        hunt_id="h", targets=["host"], start=START - timedelta(hours=48), end=START)
+
+    repo, events = _history_with_old_data()
+    source = FakeHistory(events)
+    both = _two_spec_writer(repo, source, queries=48, backfill_queries=10).fill(
+        hunt_id="h", targets=["host"], start=START - timedelta(hours=48), end=START)
+
+    # the established spec reads exactly the hours it reads alone, with the same records, and finishes its history
+    assert source.plans[:len(alone_source.plans)] == alone_source.plans
+    assert both.records - both.backfill_records == alone.records == 240
+    assert _covered_hours(repo, SPEC) == 48 and _covered_hours(alone_repo, SPEC) == 48
+    assert not [gap for gap in both.gaps if SPEC.id in gap.spec_ids]
+    # the new spec rode along on the 24 hours read anyway and backfilled quiet hours under its own allowance
+    assert both.backfill_queries == 10 and _covered_hours(repo, new) == 24 + 5
+    unread = [gap for gap in both.gaps if gap.state == "omitted_budget"]
+    assert len(unread) == 19
+    assert all(gap.spec_ids == (new.id,) and "backfill budget exhausted" in gap.reason for gap in unread)
+
+
+def test_an_added_spec_alone_on_its_own_target_does_not_take_the_shared_budget_from_another_target():
+    new = _new_spec()
+    repo, events = _history_with_old_data()
+    source = FakeHistory(events)
+    writer = LookbackWriter(
+        repo, source, site="site", specs=[SPEC, new], normalizer="fixture@1",
+        budget=LookbackBudget(queries=48, records=1000, seconds=60),
+        backfill_budget=LookbackBudget(queries=10, records=1000, seconds=60),
+        applicable_specs={"host": {SPEC.id}, "net": {new.id}}, now=lambda: START,
+    )
+    result = writer.fill(hunt_id="h", targets=["host", "net"], start=START - timedelta(hours=48), end=START)
+    assert _covered_hours(repo, SPEC) == 48
+    assert not [gap for gap in result.gaps if gap.target == "host"]
+    assert {gap.target for gap in result.gaps} == {"net"} and result.backfill_queries == 10
+
+
+def test_the_backfilling_spec_heals_over_later_hunts_without_rereading_the_others():
+    new = _new_spec()
+    repo, events = _history_with_old_data()
+    hunts = []
+    for number in range(8):
+        source = FakeHistory(events)
+        result = _two_spec_writer(repo, source, queries=48, backfill_queries=10).fill(
+            hunt_id=f"h{number}", targets=["host"], start=START - timedelta(hours=48), end=START)
+        hunts.append(result)
+        if not result.gaps:
+            break
+    assert [_covered_hours(repo, SPEC), _covered_hours(repo, new)] == [48, 48]
+    # the new spec stays in catch-up until it has built its full lookback: each later hunt spends only the backfill
+    # allowance on it, 5 quiet hours (a plan and a fetch each) per hunt, so the 19 left heal by the fifth hunt
+    assert len(hunts) == 5 and hunts[-1].gaps == ()
+    assert all(result.queries == result.backfill_queries <= 10 for result in hunts[1:])
+    [record] = repo.baseline_catchup("site").values()
+    assert record["spec_id"] == new.id and record["cleared"] is not None
+
+
+def _demotion_setup():
+    from dataclasses import replace
+    established, new = replace(SPEC, id="bl.est_net"), replace(SPEC, id="bl.new_net")
+    applicable = {"host": {SPEC.id}, "net": {established.id, new.id}}
+    events = [_event(n, START - timedelta(hours=n % 48, minutes=5)) for n in range(480)]
+
+    def writer(repo, specs, queries, backfill_queries):
+        return LookbackWriter(
+            repo, FakeHistory(events), site="site", specs=specs, normalizer="fixture@1",
+            budget=LookbackBudget(queries=queries, records=100_000, seconds=600),
+            backfill_budget=LookbackBudget(queries=backfill_queries, records=100_000, seconds=600),
+            applicable_specs={target: ids & {spec.id for spec in specs} for target, ids in applicable.items()},
+            now=lambda: START)
+
+    repo = _repo()
+    writer(repo, [SPEC], 1000, 1000).fill(hunt_id="p1", targets=["host"], start=START - timedelta(hours=48),
+                                          end=START)
+    # the established spec on the network target holds 47 of 48 hours: its oldest hour is a gap
+    writer(repo, [established], 1000, 1000).fill(hunt_id="p2", targets=["net"], start=START - timedelta(hours=47),
+                                                 end=START)
+    return repo, writer, established, new
+
+
+def test_an_established_spec_with_an_old_gap_reads_it_on_the_shared_budget_with_a_new_spec_present():
+    repo, writer, established, new = _demotion_setup()
+    result = writer(repo, [SPEC, established, new], 48, 10).fill(
+        hunt_id="h", targets=["host", "net"], start=START - timedelta(hours=48), end=START)
+    assert not [gap for gap in result.gaps if established.id in gap.spec_ids]
+    assert _covered_hours(repo, established) == 48
+    assert all(gap.spec_ids == (new.id,) and "backfill" in gap.reason for gap in result.gaps)
+
+
+def test_without_a_new_spec_the_established_specs_never_use_the_backfill_pass():
+    repo, writer, established, _new = _demotion_setup()
+    result = writer(repo, [SPEC, established], 48, 10).fill(
+        hunt_id="h", targets=["host", "net"], start=START - timedelta(hours=48), end=START)
+    assert result.backfill_queries == 0 and result.backfill_records == 0 and result.gaps == ()
+    assert _covered_hours(repo, established) == 48
+
+
+# ---- the catch-up state: entered once, held across hunts, cleared for good at the frontier -------------------------
+
+def _fill(writer, repo, specs, queries, backfill_queries, hunt_id):
+    return writer(repo, specs, queries, backfill_queries).fill(
+        hunt_id=hunt_id, targets=["host", "net"], start=START - timedelta(hours=48), end=START)
+
+
+def test_a_new_spec_holding_some_history_still_leaves_old_gaps_to_the_shared_pass():
+    repo, writer, established, new = _demotion_setup()
+    # the first hunt with the new spec: it enters catch-up and its allowance stores one hour (a plan and a fetch)
+    first = _fill(writer, repo, [SPEC, new], 20, 2, "h1")
+    assert first.backfill_queries == 2 and _covered_hours(repo, new) == 1
+    # later hunts: the new spec holds an hour, but stays in catch-up, so the established spec's old gap is read on the
+    # shared budget before the newcomer's 47 gaps can take it
+    second = _fill(writer, repo, [SPEC, established, new], 20, 2, "h2")
+    assert not [gap for gap in second.gaps if established.id in gap.spec_ids]
+    assert _covered_hours(repo, established) == 48
+    assert second.queries - second.backfill_queries == 2 and second.backfill_queries == 2
+    [record] = repo.baseline_catchup("site").values()
+    assert record["spec_id"] == new.id and record["cleared"] is None
+
+
+def test_catch_up_ends_at_the_frontier_and_stays_cleared():
+    repo, writer, established, new = _demotion_setup()
+    partial = _fill(writer, repo, [SPEC, established, new], 100, 40, "h1")     # 20 of the newcomer's 48 hours
+    assert repo.baseline_catchup("site")[_identity(new)]["cleared"] is None and partial.gaps
+    done = _fill(writer, repo, [SPEC, established, new], 100, 100, "h2")       # reaches the oldest hour
+    assert done.gaps == () and _covered_hours(repo, new) == 48
+    cleared = repo.baseline_catchup("site")[_identity(new)]["cleared"]
+    assert cleared is not None
+    # its history later lost (revoked) does not put it back in catch-up: it reads on the shared budget
+    for row in repo.baseline_segments(spec_id=new.id):
+        repo.set_baseline_segment_status(row["id"], "revoked")
+    again = _fill(writer, repo, [SPEC, established, new], 100, 100, "h3")
+    assert again.backfill_queries == 0 and _covered_hours(repo, new) == 48
+    assert repo.baseline_catchup("site")[_identity(new)]["cleared"] == cleared
+
+
+def test_a_version_bump_enters_catch_up_again_as_a_new_identity():
+    from dataclasses import replace
+    repo, writer, established, new = _demotion_setup()
+    _fill(writer, repo, [SPEC, established, new], 1000, 1000, "h1")
+    assert repo.baseline_catchup("site")[_identity(new)]["cleared"] is not None
+    bumped = replace(new, version="2")
+    result = _fill(writer, repo, [SPEC, established, bumped], 1000, 4, "h2")
+    record = repo.baseline_catchup("site")[_identity(bumped)]
+    assert record["cleared"] is None and result.backfill_queries == 4
+
+
+def test_a_new_exec_pair_version_never_enters_catch_up():
+    from dataclasses import replace
+    repo, writer, established, _new = _demotion_setup()
+    pair = replace(SPEC, id="bl.exec_pair", version="7")       # its records need no parent here: only the id matters
+    result = _fill(writer, repo, [SPEC, established, pair], 20, 10, "h1")
+    assert repo.baseline_catchup("site") == {} and result.backfill_queries == 0
+
+
+def test_hunt_deletion_leaves_the_catch_up_state_untouched():
+    repo, writer, established, new = _demotion_setup()
+    repo.create_hunt("h1", {}, "d", "test")
+    _fill(writer, repo, [SPEC, established, new], 20, 2, "h1")
+    before = repo.baseline_catchup("site")
+    repo.set_hunt_state("h1", "canceled")
+    repo.delete_hunt("h1", actor="test")
+    assert repo.baseline_catchup("site") == before and before

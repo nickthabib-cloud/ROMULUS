@@ -660,8 +660,10 @@ def _two_partition_source(monkeypatch):
 def _sweep_state(repo):
     candidates = sorted((c["id"], c["rule_id"], c["lane"], tuple(c["event_ids"]), c["claim"])
                         for c in repo.candidates("h1"))
+    from tests.throughput_fixture import _strip
+    # measured wall times differ on every run; everything else must match
     cells = sorted((c["rule_id"], c["target"], c["partition"], c["state"], c["matched"], c["evaluated"],
-                    repr(c["detail"])) for c in repo.rule_cells("h1"))
+                    repr(_strip(c["detail"]))) for c in repo.rule_cells("h1"))
     with repo.engine.connect() as connection:
         from romulus.store import schema as t
         tasks = sorted((row.id, row.state) for row in connection.execute(

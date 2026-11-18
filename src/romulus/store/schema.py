@@ -1251,11 +1251,26 @@ baseline_window_retention = Table(
     CheckConstraint("bytes >= 0", name="ck_baseline_window_retention_bytes"),
 )
 
+# A baseline spec identity catching up on its history at a site: entered by the lookback when the identity had no
+# stored hour while another spec had some, and cleared, for good, once it has built its full lookback once. While
+# uncleared, hours only it needs are read under the backfill allowance. Site state: no hunt owns it.
+baseline_catchup = Table(
+    "baseline_catchup", metadata,
+    Column("site", String, nullable=False),
+    Column("spec_id", String, nullable=False),
+    Column("spec_version", String, nullable=False),
+    Column("key_version", String, nullable=False),
+    Column("since", DateTime(timezone=True), nullable=False),
+    Column("cleared", DateTime(timezone=True)),
+    PrimaryKeyConstraint("site", "spec_id", "spec_version", "key_version", name="pk_baseline_catchup"),
+)
+
 # Durable cited-key facts used to derive each segment's exclusion set. The hunt window is retained on every
 # row so a later overlapping hunt can invalidate an older segment without retaining candidate event bodies.
 baseline_hunt_exclusion = Table(
     "baseline_hunt_exclusion", metadata,
-    Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+    # no key to hunt: the cited keys stay excluded from site history after their hunt is deleted
+    Column("hunt_id", String, nullable=False),
     Column("site", String, nullable=False),
     Column("target", String, nullable=False),
     Column("spec_id", String, nullable=False),

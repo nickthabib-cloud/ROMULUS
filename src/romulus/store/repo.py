@@ -1049,10 +1049,19 @@ class Repo:
                 t.baseline_observation.c.hunt_id == hunt_id,
             ))
             rm("baseline_snapshots", t.baseline_snapshot.delete().where(t.baseline_snapshot.c.hunt_id == hunt_id))
-            rm("baseline_segments_revoked", t.baseline_segment.update().where(or_(
-                t.baseline_segment.c.source_hunt_id == hunt_id,
-                t.baseline_segment.c.built_by_hunt_id == hunt_id,
-            )).values(status="revoked"))
+            # Baseline segments are site history counted from the source, not this hunt's data: the ones it built or
+            # derived from its window stay active for every later hunt (their ids are content-derived, and other
+            # hunts' snapshots name them), and the hunt id on them remains as provenance. Its cited-key exclusion
+            # ledger stays too, so the segments' exclusion digests stay current. Only a segment it was still
+            # building is unfinished work of this hunt alone, and is revoked.
+            rm("baseline_segments_revoked", t.baseline_segment.update().where(
+                t.baseline_segment.c.built_by_hunt_id == hunt_id, t.baseline_segment.c.status == "building",
+            ).values(status="revoked"))
+            counts["baseline_segments_kept"] = c.execute(
+                select(func.count()).select_from(t.baseline_segment).where(or_(
+                    t.baseline_segment.c.source_hunt_id == hunt_id,
+                    t.baseline_segment.c.built_by_hunt_id == hunt_id,
+                ), t.baseline_segment.c.status != "revoked")).scalar_one()
             rm("finding_ranks", t.finding_rank.delete().where(t.finding_rank.c.hunt_id == hunt_id))
             rm("ai_triage_groups", t.ai_triage_group.delete().where(t.ai_triage_group.c.hunt_id == hunt_id))
             rm("entity_ranks", t.entity_rank.delete().where(t.entity_rank.c.hunt_id == hunt_id))
@@ -3786,6 +3795,33 @@ class Repo:
             query = query.where(s.network_digest == network_digest)
         with self.engine.connect() as c:
             return [_with_utc(item, _SEGMENT_TIMES) for item in c.execute(query).mappings()]
+
+    def baseline_catchup(self, site: str) -> dict[tuple[str, str, str], dict]:
+        """Every recorded catch-up of the site's baseline spec identities, keyed (spec, version, key version)."""
+        c = t.baseline_catchup.c
+        with self.engine.connect() as connection:
+            rows = connection.execute(select(t.baseline_catchup).where(c.site == site)).mappings()
+            return {(row["spec_id"], row["spec_version"], row["key_version"]): _with_utc(row, ("since", "cleared"))
+                    for row in rows}
+
+    def enter_baseline_catchup(self, site: str, identity: tuple[str, str, str], since: datetime) -> None:
+        """Record that a spec identity started catching up; an identity already recorded keeps its record."""
+        spec_id, spec_version, key_version = identity
+        with write_txn(self.engine) as connection:
+            connection.execute(insert(t.baseline_catchup).values(
+                site=site, spec_id=spec_id, spec_version=spec_version, key_version=key_version,
+                since=_utc(since, "catch-up start"), cleared=None,
+            ).on_conflict_do_nothing())
+
+    def clear_baseline_catchup(self, site: str, identity: tuple[str, str, str], at: datetime) -> None:
+        """The identity has built its full lookback once: it is cleared for good."""
+        spec_id, spec_version, key_version = identity
+        c = t.baseline_catchup.c
+        with write_txn(self.engine) as connection:
+            connection.execute(t.baseline_catchup.update().where(
+                c.site == site, c.spec_id == spec_id, c.spec_version == spec_version, c.key_version == key_version,
+                c.cleared.is_(None),
+            ).values(cleared=_utc(at, "catch-up clear")))
 
     def baseline_segment_covers(self, *, site: str, target: str, spec_id: str, spec_version: str,
                                 key_version: str, start: datetime, end: datetime,
