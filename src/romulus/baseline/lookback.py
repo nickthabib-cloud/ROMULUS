@@ -7,7 +7,6 @@ import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
-from fractions import Fraction
 from typing import Literal
 
 from romulus.baseline.carry import (
@@ -287,20 +286,20 @@ class LookbackWriter:
             for spec in applicable[target]:
                 if spec not in missing:
                     stored[(target, _identity(spec))] = stored.get((target, _identity(spec)), 0) + 1
-        # A spec that has stored a smaller share of this interval's target-hours than the best-stored spec (one
-        # newly added or re-versioned, and still catching up) backfills; the best-stored specs lead. Shares, not
-        # counts, because specs apply to different targets, and the budget is shared by every target. Exec pairs
-        # never backfill: their children resolve against the parent carry, which only the shared, newest-first pass
-        # feeds in order. With nothing stored yet every spec leads, and the fill is the plain newest-first one.
-        share: dict[tuple[str, str, str], Fraction] = {}
+        # A spec with no stored hour of this interval on any target it applies to (newly added or re-versioned)
+        # backfills, while another spec has stored some: the specs that have history keep the shared, newest-first
+        # pass exactly as without the new one, old gaps included. With nothing stored yet no spec backfills, and
+        # the fill is the plain newest-first one. Exec pairs never backfill: their children resolve against the
+        # parent carry, which only the shared pass feeds in order (so a new exec-pair version catches up on the
+        # shared budget).
+        has_history: dict[tuple[str, str, str], bool] = {}
         for spec in self.specs:
             places = [target for target in ordered_targets if spec in applicable[target]]
             if places:
-                share[_identity(spec)] = Fraction(sum(stored.get((target, _identity(spec)), 0) for target in places),
-                                                  max(1, len(places) * worked))
-        lead = max(share.values(), default=Fraction(0))
+                has_history[_identity(spec)] = any(stored.get((target, _identity(spec)), 0) for target in places)
+        anyone = any(has_history.values())
         backfilling = {target: {_identity(spec) for spec in applicable[target]
-                                if share[_identity(spec)] < lead and spec.id != "bl.exec_pair"}
+                                if anyone and not has_history[_identity(spec)] and spec.id != "bl.exec_pair"}
                        for target in ordered_targets}
         shared = _Spend(self.budget, begun, "lookback query or wall-clock budget exhausted")
         backfill = _Spend(self.backfill_budget, begun, (
