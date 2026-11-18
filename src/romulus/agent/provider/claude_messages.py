@@ -640,6 +640,41 @@ def instance_problems(value, schema: dict, root: dict | None = None, path: str =
     return problems
 
 
+# ---- signed thinking in replayed turns -------------------------------------------------------------------------
+
+# The API binds each thinking block's signature to the conversation it was produced in (system, tools and every
+# earlier message) and refuses a replayed block whose earlier conversation changed: "Invalid `signature` in `thinking`
+# block. The block is bound to a different conversation." Removing thinking blocks as a run from the end of the
+# history (or all of them) is accepted; a turn keeps its text and tool calls.
+THINKING_BLOCKS = frozenset({"thinking", "redacted_thinking"})
+THINKING_BINDING_REFUSAL = "bound to a different conversation"
+# The text a turn that held only thinking keeps, so it is never an empty assistant turn (which the API refuses).
+NO_VISIBLE_REPLY = "(no visible reply)"
+
+
+def without_thinking(message: dict) -> dict:
+    """The assistant turn without the thinking blocks its provider state replays (the same message when it holds
+    none). Its text and tool calls stay, so the replay check still matches them."""
+    state = message.get(PROVIDER_STATE)
+    blocks = state.get("content") if isinstance(state, dict) else None
+    if not isinstance(blocks, list):
+        return message
+    kept = [block for block in blocks if not (isinstance(block, dict) and block.get("type") in THINKING_BLOCKS)]
+    if len(kept) == len(blocks):
+        return message
+    out = {**message, PROVIDER_STATE: {**state, "content": kept}}
+    if not kept:
+        out[PROVIDER_STATE]["content"] = [{"type": "text", "text": NO_VISIBLE_REPLY}]
+        out["content"] = NO_VISIBLE_REPLY
+    return out
+
+
+def thinking_rejected(result: ChatResult) -> bool:
+    """Whether the API refused the request for a replayed thinking block bound to a different conversation."""
+    error = result.error or ""
+    return result.status == "error" and error.startswith("HTTP 400") and THINKING_BINDING_REFUSAL in error
+
+
 # ---- the adapter ---------------------------------------------------------------------------------------------
 
 class ClaudeMessagesProvider(ChatProvider):
@@ -685,6 +720,13 @@ class ClaudeMessagesProvider(ChatProvider):
 
     def __repr__(self) -> str:
         return f"<ClaudeMessagesProvider {self.model} at {self.decision.host}>"
+
+    # ---- signed thinking in replayed turns ------------------------------------------------------------------
+    def without_reasoning(self, message: dict) -> dict:
+        return without_thinking(message)
+
+    def reasoning_rejected(self, result: ChatResult) -> bool:
+        return thinking_rejected(result)
 
     # ---- sizes ----------------------------------------------------------------------------------------------
     def output_limit(self, request: ChatRequest) -> int:

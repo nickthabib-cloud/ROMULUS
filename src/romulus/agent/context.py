@@ -25,6 +25,7 @@ import hashlib
 import json
 import re
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from romulus.agent.admission import collect_issued_aliases
@@ -94,6 +95,22 @@ def compact_threshold(context_tokens: int) -> int:
     if not context_tokens:
         return COMPACT_AFTER_TOKENS
     return max(1, min(COMPACT_AFTER_TOKENS, int(context_tokens * COMPACT_CONTEXT_SHARE)))
+
+
+def strip_reasoning(messages: list[dict], start: int, without_reasoning: Callable[[dict], dict]) -> int:
+    """Replace, in `messages`, every model turn from `start` on with its form without signed reasoning
+    (`without_reasoning`, the adapter's strip); returns how many turns changed. A turn already without reasoning is
+    left as it is, so the strip can be repeated and always sends the same history."""
+    changed = 0
+    for index in range(max(0, start), len(messages)):
+        message = messages[index]
+        if message.get("role") != "assistant":
+            continue
+        stripped = without_reasoning(message)
+        if stripped is not message and stripped != message:
+            messages[index] = stripped
+            changed += 1
+    return changed
 
 
 def session_tag(session_id: str) -> str:
@@ -183,6 +200,8 @@ class SessionResults:
         self.pending_redactions: dict[str, int] = {}
         self.compactions = 0
         self.stubbed = 0
+        # model turns whose signed reasoning a compaction removed (they keep their text and tool calls)
+        self.reasoning_stripped = 0
 
     def close(self) -> None:
         self.store.close()
@@ -265,10 +284,18 @@ class SessionResults:
                 "next": f"get_result handle={handle} page={page + 1}" if page < entry.pages else None}
 
     # ---- compaction -------------------------------------------------------------------------------------------
-    def compact(self, messages: list[dict]) -> int:
+    def compact(self, messages: list[dict], without_reasoning: Callable[[dict], dict] | None = None) -> int:
         """Stub, in `messages`, every full tool result the model has been sent that is older than the latest
         KEEP_FULL_RESULTS, once those add up to COMPACT_AFTER_TOKENS; returns how many were stubbed (0: unchanged).
-        Only tool messages' content changes: the model's turns, their provider state and every tool_call_id stay."""
+
+        A compaction is the session's one declared edit of what it already sent. The model's turns, their text, tool
+        calls and every tool_call_id stay. Their signed reasoning stays only where it is still valid: a provider that
+        binds reasoning to the conversation it was produced in (Anthropic's preserved thinking) rejects a replayed
+        reasoning block whose earlier conversation changed. So every model turn after the first stubbed result goes
+        out from then on without its reasoning (`without_reasoning(message)`, the adapter's own strip). That removes
+        a trailing run of reasoning blocks, which the provider accepts; the turns before the edit keep theirs, and the
+        turns produced after the compaction keep theirs until the next compaction. The strip is made in `messages`,
+        so every later request sends the same history."""
         last_assistant = max((i for i, m in enumerate(messages) if m.get("role") == "assistant"), default=-1)
         # the full results a stub would replace: the results of the tools that record the session's work, and
         # results too short to gain from a stub, stay as they are and are not counted among the kept ones
@@ -288,6 +315,9 @@ class SessionResults:
                 raise ValueError(f"message {slot.index} is not a tool result")
             messages[slot.index] = {**message, "content": slot.stub}
             slot.stubbed = True
+        if without_reasoning is not None:
+            self.reasoning_stripped += strip_reasoning(messages, min(slot.index for slot in candidates),
+                                                       without_reasoning)
         self.compactions += 1
         self.stubbed += len(candidates)
         return len(candidates)
