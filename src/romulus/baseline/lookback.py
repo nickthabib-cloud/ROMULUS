@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
+from fractions import Fraction
 from typing import Literal
 
 from romulus.baseline.carry import (
@@ -68,6 +69,19 @@ class LookbackResult:
     # kept carry hours removed after the fill: past the retention horizon, and the oldest over the disk budget
     carry_hours_pruned: int = 0
     carry_hours_trimmed: int = 0
+    # of `queries` and `records`: those spent backfilling specs with no stored hour in the interval
+    backfill_queries: int = 0
+    backfill_records: int = 0
+
+
+@dataclass
+class _Spend:
+    """One budget's running spend within a fill."""
+    budget: LookbackBudget
+    begun: float
+    exhausted: str
+    queries: int = 0
+    records: int = 0
 
 
 # Carry input is kept for the longest configured lookback plus this margin, measured back from a target's newest kept
@@ -129,6 +143,7 @@ class LookbackWriter:
 
     def __init__(self, repo: Repo, source: HistorySource, *, site: str,
                  specs: list[BaselineSpec], normalizer: str, budget: LookbackBudget,
+                 backfill_budget: LookbackBudget | None = None,
                  context: KeyContext | None = None,
                  parent_carry: CarryInStore | None = None,
                  network_digest: str | None = None,
@@ -143,6 +158,9 @@ class LookbackWriter:
         self.carry_budget_bytes = carry_budget_bytes
         self.specs = tuple(sorted(specs, key=lambda item: item.id))
         self.normalizer, self.budget = normalizer, budget
+        # Specs with no stored hour in a fill's interval (a newly added spec, or a new spec version) read only the
+        # hours no other spec needs under this separate allowance, so adding one never costs the others' history.
+        self.backfill_budget = backfill_budget or budget
         self.context, self.clock = context or KeyContext(), clock
         self.parent_carry = parent_carry
         self.network_digest = network_digest
@@ -235,7 +253,7 @@ class LookbackWriter:
         # Hours staged by an interrupted fill hold no segment, so this fill reads them again.
         self.repo.clear_baseline_history_stage(hunt_id)
         begun = self.clock()
-        queries = records = complete = 0
+        complete = 0
         longest = 0.0
         gaps: list[HistoryGap] = []
         # (target, hour) -> how many of its specs wait for post-fill resolution before the hour is complete
@@ -254,67 +272,81 @@ class LookbackWriter:
             for target in ordered_targets
         ] if worked < hours else []
         # One newest hour from every target before moving older: round-robin without target starvation.
-        work = (
+        work = [
             (target, end - offset * _HOUR, end - (offset - 1) * _HOUR)
             for offset in range(1, worked + 1) for target in ordered_targets
-        )
+        ]
+        applicable = {target: tuple(spec for spec in self.specs if self.applicable_specs is None
+                                    or spec.id in self.applicable_specs.get(target, set()))
+                      for target in ordered_targets}
+        missing_of: list[tuple[BaselineSpec, ...]] = []
+        stored: dict[tuple[str, tuple[str, str, str]], int] = {}
         for target, hour_start, hour_end in work:
-            missing = tuple(
-                spec for spec in self.specs
-                if (self.applicable_specs is None
-                    or spec.id in self.applicable_specs.get(target, set()))
-                and not self._covered(target, spec, hour_start, hour_end)
-            )
-            keeps_carry = self._keeps_carry(target)
-            if not missing:
-                if not keeps_carry:
-                    continue
-                # Every spec's segments cover the hour, but its execs still belong to the parent carry, or a
-                # parent exec'd before it could never be vouched for. The hour's persisted carry input feeds the
-                # carry exactly as reading it would; an hour without one is read again for the carry alone.
-                stored = load_carry_hour(self.repo, site=self.site, target=target, hour=hour_start,
-                                         normalizer=self.normalizer)
-                if stored is not None:
-                    carry = self.parent_carry.for_target(target, horizon=end)
-                    if carry.replay_hour(stored):
-                        carry.mark_observed(hour_start, hour_end)
-                    continue
+            missing = tuple(spec for spec in applicable[target] if not self._covered(target, spec, hour_start, hour_end))
+            missing_of.append(missing)
+            for spec in applicable[target]:
+                if spec not in missing:
+                    stored[(target, _identity(spec))] = stored.get((target, _identity(spec)), 0) + 1
+        # A spec that has stored a smaller share of this interval's target-hours than the best-stored spec (one
+        # newly added or re-versioned, and still catching up) backfills; the best-stored specs lead. Shares, not
+        # counts, because specs apply to different targets, and the budget is shared by every target. Exec pairs
+        # never backfill: their children resolve against the parent carry, which only the shared, newest-first pass
+        # feeds in order. With nothing stored yet every spec leads, and the fill is the plain newest-first one.
+        share: dict[tuple[str, str, str], Fraction] = {}
+        for spec in self.specs:
+            places = [target for target in ordered_targets if spec in applicable[target]]
+            if places:
+                share[_identity(spec)] = Fraction(sum(stored.get((target, _identity(spec)), 0) for target in places),
+                                                  max(1, len(places) * worked))
+        lead = max(share.values(), default=Fraction(0))
+        backfilling = {target: {_identity(spec) for spec in applicable[target]
+                                if share[_identity(spec)] < lead and spec.id != "bl.exec_pair"}
+                       for target in ordered_targets}
+        shared = _Spend(self.budget, begun, "lookback query or wall-clock budget exhausted")
+        backfill = _Spend(self.backfill_budget, begun, (
+            "lookback backfill budget exhausted (specs with no stored history in this interval read the hours no "
+            "other spec needs under their own allowance)"))
+        deferred_items: list[tuple[str, datetime, datetime, tuple[BaselineSpec, ...]]] = []
+        shared_targets: set[str] = set()
 
-            def gap(state: str, reason: str, target=target, hour_start=hour_start, hour_end=hour_end,
-                    missing=missing) -> None:
+        def read_hour(target, hour_start, hour_end, missing, keeps_carry, spend: _Spend, feed_carry: bool) -> None:
+            nonlocal complete, longest
+
+            def gap(state: str, reason: str) -> None:
                 # An hour read for the carry alone leaves no spec's history short; it only stays unobserved.
                 if missing:
                     gaps.append(HistoryGap(target, hour_start, hour_end, state, reason,
                                            tuple(spec.id for spec in missing)))
 
-            if self.clock() - begun >= self.budget.seconds or queries >= self.budget.queries:
-                gap("omitted_budget", "lookback query or wall-clock budget exhausted")
-                continue
+            budget = spend.budget
+            if self.clock() - spend.begun >= budget.seconds or spend.queries >= budget.queries:
+                gap("omitted_budget", spend.exhausted)
+                return
             try:
                 planned = self.source.plan(
-                    target, hour_start, hour_end, query_budget=self.budget.queries - queries,
+                    target, hour_start, hour_end, query_budget=budget.queries - spend.queries,
                 )
-                queries += planned.query_count
+                spend.queries += planned.query_count
             except Exception as error:  # noqa: BLE001 - source failure is a coverage fact
-                queries = min(self.budget.queries, queries + 1)
+                spend.queries = min(budget.queries, spend.queries + 1)
                 gap("failed", f"partition planning failed: {error}"[:300])
-                continue
+                return
             if planned.completeness != "complete":
                 gap(planned.completeness if planned.completeness in {"failed", "omitted_budget"} else "partial",
                     "; ".join(planned.reasons) or planned.completeness)
-                continue
+                return
             if len(planned.partitions) > MAX_PARTITIONS_PER_HOUR:
                 gap("omitted_budget", f"history partition cap {MAX_PARTITIONS_PER_HOUR} exceeded")
-                continue
-            if self.clock() - begun >= self.budget.seconds:
+                return
+            if self.clock() - spend.begun >= budget.seconds:
                 gap("omitted_budget", "lookback wall-clock budget exhausted")
-                continue
+                return
             counters = {spec.id: KeyCounter("pending", spec, span=(hour_start, hour_end)) for spec in missing}
             scopes = {spec.id: spec_records(spec) for spec in missing}
             # The horizon is the end of the history being filled: a child resolves only while observation runs
             # unbroken from its parent's exec through every later history hour.
             carry = (self.parent_carry.for_target(target, horizon=end)
-                     if self.parent_carry is not None else None)
+                     if self.parent_carry is not None and feed_carry else None)
             carry_input = CarryHourBuilder((hour_start, hour_end)) if carry is not None else None
             hour_parents = HourParents()
             hour_context = KeyContext(
@@ -325,24 +357,24 @@ class LookbackWriter:
             )
             failure: tuple[str, str] | None = None
             for partition in planned.partitions:
-                if self.clock() - begun >= self.budget.seconds or queries >= self.budget.queries:
-                    failure = ("omitted_budget", "lookback query or wall-clock budget exhausted")
+                if self.clock() - spend.begun >= budget.seconds or spend.queries >= budget.queries:
+                    failure = ("omitted_budget", spend.exhausted)
                     break
-                if records + partition.expected_records > self.budget.records:
+                if spend.records + partition.expected_records > budget.records:
                     failure = ("omitted_budget", "lookback record budget exhausted")
                     break
                 try:
                     fetched = self.source.fetch(
-                        partition, record_budget=self.budget.records - records,
-                        query_budget=self.budget.queries - queries,
-                        deadline=begun + self.budget.seconds,
+                        partition, record_budget=budget.records - spend.records,
+                        query_budget=budget.queries - spend.queries,
+                        deadline=spend.begun + budget.seconds,
                     )
-                    queries += fetched.query_count
+                    spend.queries += fetched.query_count
                 except Exception as error:  # noqa: BLE001 - adapter error is a coverage fact
                     failure = ("failed", f"partition fetch failed: {error}"[:300])
                     break
-                records += fetched.record_count
-                if self.clock() - begun >= self.budget.seconds:
+                spend.records += fetched.record_count
+                if self.clock() - spend.begun >= budget.seconds:
                     failure = ("omitted_budget", "lookback wall-clock budget exhausted")
                     break
                 if fetched.completeness != "complete":
@@ -372,7 +404,7 @@ class LookbackWriter:
                 # An incomplete hour feeds the carry nothing and never joins its observed ledger, so no parent
                 # continuity runs through it; its records are reread by a later hunt.
                 gap(failure[0], failure[1])
-                continue
+                return
             # Every partition of the hour was fetched completely: its carry input is kept beside its segments and
             # fed to the carry, and the hour joins the continuity ledger before its children are resolved against
             # it. Failed, partial and budget-omitted hours never do, and so break parent continuity; neither does an
@@ -385,7 +417,7 @@ class LookbackWriter:
                 if carry.replay_hour(hour_input):
                     carry.mark_observed(hour_start, hour_end)
             if not missing:
-                continue
+                return
             # Children whose parent is not in their own hour wait for the whole fill: their parent may sit in an
             # older hour that newest-first filling has not read yet. Their hour is staged compactly and becomes a
             # segment only after every older hour has fed the carry.
@@ -434,6 +466,43 @@ class LookbackWriter:
                     waiting[(target, hour_start)] = len(deferred)
                 else:
                     complete += 1
+
+        # The shared pass: newest-first, exactly the hours the established specs need (plus the carry), as it would
+        # be without any backfilling spec. A backfilling spec rides along on every hour this pass reads anyway.
+        for (target, hour_start, hour_end), missing in zip(work, missing_of, strict=True):
+            keeps_carry = self._keeps_carry(target)
+            if keeps_carry:
+                shared_targets.add(target)          # its carry is fed, or replayed, in this pass only
+            established = tuple(spec for spec in missing if _identity(spec) not in backfilling[target])
+            if not established:
+                if keeps_carry:
+                    # Every established spec's segments cover the hour, but its execs still belong to the parent
+                    # carry, or a parent exec'd before it could never be vouched for. The hour's persisted carry
+                    # input feeds the carry exactly as reading it would; an hour without one is read again for the
+                    # carry, and the backfilling specs ride along.
+                    stored = load_carry_hour(self.repo, site=self.site, target=target, hour=hour_start,
+                                             normalizer=self.normalizer)
+                    if stored is not None:
+                        carry = self.parent_carry.for_target(target, horizon=end)
+                        if carry.replay_hour(stored):
+                            carry.mark_observed(hour_start, hour_end)
+                        if missing:
+                            deferred_items.append((target, hour_start, hour_end, missing))
+                        continue
+                elif missing:
+                    deferred_items.append((target, hour_start, hour_end, missing))
+                    continue
+                else:
+                    continue
+            shared_targets.add(target)
+            read_hour(target, hour_start, hour_end, missing, keeps_carry, shared, True)
+        # The backfill pass: the hours only backfilling specs still need, newest first, under their own allowance.
+        # The carry is fed in newest-first order only: a target the shared pass read (or replayed) already fed it
+        # there, so its backfilled hours do not; a target read in this pass alone feeds it here, in order.
+        backfill.begun = self.clock()
+        for target, hour_start, hour_end, missing in deferred_items:
+            read_hour(target, hour_start, hour_end, missing, False, backfill, target not in shared_targets)
+        queries, records = shared.queries + backfill.queries, shared.records + backfill.records
         # Every hour the budget allowed has fed the carry: resolve the waiting children and write their hours.
         for cell in self.repo.baseline_history_cells(hunt_id):
             spec = next((item for item in self.specs if item.id == cell["spec_id"]), None)
@@ -474,7 +543,8 @@ class LookbackWriter:
                     complete += 1
         self._fill_end = end
         pruned, trimmed = self._bound_carry(ordered_targets, end - start)
-        return LookbackResult(complete, (*gaps, *omitted), queries, records, longest, pruned, trimmed)
+        return LookbackResult(complete, (*gaps, *omitted), queries, records, longest, pruned, trimmed,
+                              backfill.queries, backfill.records)
 
     def _bound_carry(self, targets: tuple[str, ...], span: timedelta) -> tuple[int, int]:
         """Hold kept carry input to the retention horizon and the disk budget, after this fill has replayed what it
@@ -500,6 +570,11 @@ class LookbackWriter:
                 )[0]
         trimmed = self.repo.trim_baseline_carry(self.carry_budget_bytes)[0]
         return pruned, trimmed
+
+
+def _identity(spec: BaselineSpec) -> tuple[str, str, str]:
+    """A spec's identity in the store: a new version of a spec has no stored hour of its own."""
+    return spec.id, spec.version, spec.key_version
 
 
 def _count_row(body: dict) -> dict:

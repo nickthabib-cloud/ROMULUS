@@ -1187,3 +1187,92 @@ def test_a_fill_interrupted_before_resolution_resolves_the_staged_hour_on_resume
                       if row["start"] == START - timedelta(hours=1))
     assert [row["count"] for row in repo.baseline_counts(child_hour["id"])] == [1]
     assert cells("build") == []
+
+
+# ---- a spec with no stored history never costs the others theirs ----------------------------------------------------
+
+def _new_spec():
+    from dataclasses import replace
+    return replace(SPEC, id="bl.exec_path_added")          # an added spec: no stored hour of its own
+
+
+def _two_spec_writer(repo, source, *, queries, backfill_queries):
+    return LookbackWriter(
+        repo, source, site="site", specs=[SPEC, _new_spec()], normalizer="fixture@1",
+        budget=LookbackBudget(queries=queries, records=1000, seconds=60),
+        backfill_budget=LookbackBudget(queries=backfill_queries, records=1000, seconds=60),
+        now=lambda: START,
+    )
+
+
+def _history_with_old_data():
+    # the newest 24 hours are empty and already stored for the established spec; the older 24 hours hold its records
+    # and are not stored yet (the shape of a site whose recent hours are quiet)
+    repo = _repo()
+    events = [_event(n, START - timedelta(hours=24 + n % 24, minutes=5)) for n in range(240)]
+    _writer(repo, FakeHistory(events)).fill(hunt_id="earlier", targets=["host"],
+                                            start=START - timedelta(hours=24), end=START)
+    return repo, events
+
+
+def _covered_hours(repo, spec):
+    return sum(1 for row in repo.baseline_segments(spec_id=spec.id, statuses=["active"])
+               if row["spec_version"] == spec.version)
+
+
+def test_adding_a_spec_keeps_the_established_specs_reads_within_their_budget():
+    new = _new_spec()
+    alone_repo, events = _history_with_old_data()
+    alone_source = FakeHistory(events)
+    alone = _writer(alone_repo, alone_source, queries=48).fill(
+        hunt_id="h", targets=["host"], start=START - timedelta(hours=48), end=START)
+
+    repo, events = _history_with_old_data()
+    source = FakeHistory(events)
+    both = _two_spec_writer(repo, source, queries=48, backfill_queries=10).fill(
+        hunt_id="h", targets=["host"], start=START - timedelta(hours=48), end=START)
+
+    # the established spec reads exactly the hours it reads alone, with the same records, and finishes its history
+    assert source.plans[:len(alone_source.plans)] == alone_source.plans
+    assert both.records - both.backfill_records == alone.records == 240
+    assert _covered_hours(repo, SPEC) == 48 and _covered_hours(alone_repo, SPEC) == 48
+    assert not [gap for gap in both.gaps if SPEC.id in gap.spec_ids]
+    # the new spec rode along on the 24 hours read anyway and backfilled quiet hours under its own allowance
+    assert both.backfill_queries == 10 and _covered_hours(repo, new) == 24 + 5
+    unread = [gap for gap in both.gaps if gap.state == "omitted_budget"]
+    assert len(unread) == 19
+    assert all(gap.spec_ids == (new.id,) and "backfill budget exhausted" in gap.reason for gap in unread)
+
+
+def test_an_added_spec_alone_on_its_own_target_does_not_take_the_shared_budget_from_another_target():
+    new = _new_spec()
+    repo, events = _history_with_old_data()
+    source = FakeHistory(events)
+    writer = LookbackWriter(
+        repo, source, site="site", specs=[SPEC, new], normalizer="fixture@1",
+        budget=LookbackBudget(queries=48, records=1000, seconds=60),
+        backfill_budget=LookbackBudget(queries=10, records=1000, seconds=60),
+        applicable_specs={"host": {SPEC.id}, "net": {new.id}}, now=lambda: START,
+    )
+    result = writer.fill(hunt_id="h", targets=["host", "net"], start=START - timedelta(hours=48), end=START)
+    assert _covered_hours(repo, SPEC) == 48
+    assert not [gap for gap in result.gaps if gap.target == "host"]
+    assert {gap.target for gap in result.gaps} == {"net"} and result.backfill_queries == 10
+
+
+def test_the_backfilling_spec_heals_over_later_hunts_without_rereading_the_others():
+    new = _new_spec()
+    repo, events = _history_with_old_data()
+    hunts = []
+    for number in range(8):
+        source = FakeHistory(events)
+        result = _two_spec_writer(repo, source, queries=48, backfill_queries=10).fill(
+            hunt_id=f"h{number}", targets=["host"], start=START - timedelta(hours=48), end=START)
+        hunts.append(result)
+        if not result.gaps:
+            break
+    assert [_covered_hours(repo, SPEC), _covered_hours(repo, new)] == [48, 48]
+    # each later hunt spends only the backfill allowance, on the new spec's missing hours
+    assert all(result.queries == result.backfill_queries <= 10 for result in hunts[1:])
+    # 19 quiet hours left after the first hunt, 5 per hunt (a plan and a fetch each): healed by the fifth hunt
+    assert len(hunts) == 5 and hunts[-1].gaps == ()

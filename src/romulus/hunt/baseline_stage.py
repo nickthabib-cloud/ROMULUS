@@ -879,6 +879,13 @@ def run_baseline_stage(repo: Repo, hunt_id: str, window: Window, *, client=None,
                 queries=int(budget.get("queries", 200)), records=int(budget.get("records", 5_000_000)),
                 seconds=float(budget.get("seconds", 1800)),
             ),
+            # A spec with no stored history in the interval (newly added or re-versioned) reads the hours no other
+            # spec needs under an allowance of its own, the same size unless the manifest sets it.
+            backfill_budget=LookbackBudget(
+                queries=int(budget.get("backfill_queries", budget.get("queries", 200))),
+                records=int(budget.get("backfill_records", budget.get("records", 5_000_000))),
+                seconds=float(budget.get("backfill_seconds", budget.get("seconds", 1800))),
+            ),
             context=KeyContext(is_internal=netdef.current().is_internal),
             parent_carry=CarryInStore(repo, hunt_id),
             network_digest=network_record.get("digest") if networks_configured else None,
@@ -894,10 +901,11 @@ def run_baseline_stage(repo: Repo, hunt_id: str, window: Window, *, client=None,
             repo.update_task(task_id, "failed", error=str(exc)[:300], attempt=True,
                              owner_token=owner_token)
             raise
-        repo.update_task(task_id, "executed", outcome={
-            "complete": result.complete, "gaps": len(result.gaps),
-            "queries": result.queries, "records": result.records,
-        }, owner_token=owner_token)
+        outcome = {"complete": result.complete, "gaps": len(result.gaps),
+                   "queries": result.queries, "records": result.records}
+        if result.backfill_queries or result.backfill_records:
+            outcome.update(backfill_queries=result.backfill_queries, backfill_records=result.backfill_records)
+        repo.update_task(task_id, "executed", outcome=outcome, owner_token=owner_token)
     resolve_window_exec_pairs(repo, hunt_id, window)
     if snapshot is None:
         snapshot = SnapshotPlanner(repo).freeze(
@@ -945,7 +953,9 @@ def run_baseline_stage(repo: Repo, hunt_id: str, window: Window, *, client=None,
         "lookback": {"complete": result.complete, "gaps": len(result.gaps),
                      "queries": result.queries, "records": result.records,
                      "carry_hours_pruned": result.carry_hours_pruned,
-                     "carry_hours_trimmed": result.carry_hours_trimmed},
+                     "carry_hours_trimmed": result.carry_hours_trimmed,
+                     **({"backfill_queries": result.backfill_queries, "backfill_records": result.backfill_records}
+                        if result.backfill_queries or result.backfill_records else {})},
     }
     # Hunt execution consumes `stage_failed`; the established baseline task outcome remains result-shaped so
     # this coverage truth does not perturb unrelated scheduler/task goldens.
