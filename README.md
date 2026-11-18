@@ -75,7 +75,7 @@ venv/bin/romulus --env-file "$ROMULUS_HOME/.env" hunt start --start 2026-01-01T1
 venv/bin/romulus --env-file "$ROMULUS_HOME/.env" report <hunt-id>
 ```
 
-`doctor` checks connectivity, that the account is read-only, the configured indices, TShark, the PCAP paths and storage, and tells you what to fix.
+`doctor` checks connectivity, that the account is read-only, the configured indices, TShark, the PCAP paths and storage, and tells you what to fix. Each check has its own deadline (60 to 400 s; `--check-timeout SECONDS` sets one for all). A check that overruns is reported as timed out, a failure for a source, TShark or a model endpoint and a warning otherwise, and the other checks still run. The storage checks open the database read-only: `doctor` never migrates or writes it.
 
 To use the browser UI:
 
