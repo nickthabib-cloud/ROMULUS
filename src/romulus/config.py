@@ -1,9 +1,12 @@
 """Load runtime configuration from the environment / .env with secret redaction."""
 from __future__ import annotations
 
+import functools
 import json
+import math
 import os
 import re
+from collections.abc import Collection
 from pathlib import Path
 from typing import Literal
 
@@ -463,9 +466,97 @@ def secret_settings(settings: Settings) -> list[tuple[str, str]]:
 
 def short_secrets(settings: Settings) -> list[str]:
     """The environment names of configured secrets shorter than MIN_SECRET_LENGTH (never their values or lengths).
-    Text that short also turns up in ordinary words, so redacting it distorts prompts and reports, and below 4
-    characters it is not redacted at all."""
+    Text that short is often an ordinary word, so redacting it distorts prompts and reports, and below 4 characters
+    it is not redacted at all."""
     return sorted(name for name, value in secret_settings(settings) if len(value) < MIN_SECRET_LENGTH)
+
+
+# A configured secret is weak when any of these measures holds. Doctor's secrets.strength warning, redaction and the
+# AI agent's secret guard all use this one rule.
+# - It is shorter than MIN_SECRET_LENGTH (doctor's secrets.length warning reports those).
+# - It is under WEAK_SINGLE_CLASS_BELOW characters and uses one character class: all letters (either case), all
+#   digits, or all other characters. Ordinary words are all letters. A longer single-class value is left to the
+#   entropy measure, since a long random string of letters is strong.
+# - Its estimated entropy, its length times the Shannon entropy of its own character distribution, is under
+#   WEAK_ENTROPY_BITS. The estimate is at most length x log2(length), so any value under about 12 characters scores
+#   below the threshold (such a value is weak whatever its characters); a 32-character random key scores about 150.
+# - It occurs as a whole word, in any case, in the product's own source or templates: public text the agent's secret
+#   guard would also match.
+# No wordlist is bundled with the product, so dictionary words are found by the second and last measures.
+#
+# A weak secret's text is redacted only where it stands as a word of its own (see redact_counted): ordinary text that
+# holds it inside a longer word is left as it is. A strong secret's text is redacted wherever it appears.
+WEAK_ENTROPY_BITS = 40.0
+WEAK_SINGLE_CLASS_BELOW = 32
+SOURCE_SUFFIXES = frozenset({".py", ".html", ".md", ".js", ".css", ".mako", ".txt", ".json", ".yml", ".yaml",
+                             ".toml", ".sql", ".j2"})
+SOURCE_FILE_MAX_BYTES = 8 * 2**20
+_WORD = "A-Za-z0-9_"
+_PACKAGE_ROOT = Path(__file__).resolve().parent
+
+
+def _entropy_bits(value: str) -> float:
+    counts: dict[str, int] = {}
+    for ch in value:
+        counts[ch] = counts.get(ch, 0) + 1
+    n = len(value)
+    return -n * sum(c / n * math.log2(c / n) for c in counts.values())
+
+
+def _single_class(value: str) -> bool:
+    classes = {"letter" if ch.isalpha() else "digit" if ch.isdigit() else "other" for ch in value}
+    return len(classes) == 1
+
+
+def _source_words(values: list[str], root: Path) -> set[str]:
+    """The values that occur as a whole word (any case) in the text files under `root`. Each file is read once."""
+    pending = {value: re.compile(rf"(?<![{_WORD}]){re.escape(value)}(?![{_WORD}])", re.IGNORECASE)
+               for value in values}
+    found: set[str] = set()
+    for path in sorted(root.rglob("*")):
+        if not pending:
+            break
+        try:
+            if path.suffix.lower() not in SOURCE_SUFFIXES or not path.is_file() \
+                    or path.stat().st_size > SOURCE_FILE_MAX_BYTES:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        lowered = text.lower()
+        for value, pattern in list(pending.items()):
+            if value.lower() in lowered and pattern.search(text):
+                found.add(value)
+                del pending[value]
+    return found
+
+
+def _classify(secrets: tuple[tuple[str, str], ...], root: Path) -> frozenset[str]:
+    weak = {name for name, value in secrets
+            if len(value) < MIN_SECRET_LENGTH
+            or (len(value) < WEAK_SINGLE_CLASS_BELOW and _single_class(value))
+            or _entropy_bits(value) < WEAK_ENTROPY_BITS}
+    rest = [value for name, value in secrets if name not in weak]
+    if rest:
+        in_source = _source_words(rest, root)
+        weak |= {name for name, value in secrets if value in in_source}
+    return frozenset(weak)
+
+
+@functools.lru_cache(maxsize=16)
+def _classify_in_package(secrets: tuple[tuple[str, str], ...]) -> frozenset[str]:
+    # the package's own text does not change while the process runs, so each set of secrets is judged once
+    return _classify(secrets, _PACKAGE_ROOT)
+
+
+def weak_secret_names(settings: Settings, source_root: Path | None = None) -> frozenset[str]:
+    """The environment names of the configured secrets that are weak (the measures above), judged against the text
+    files under `source_root`, by default the product's own package (judged once per process). Names only: never a
+    value, which measure fired, or a length."""
+    secrets = tuple(secret_settings(settings))
+    if not secrets:
+        return frozenset()
+    return _classify_in_package(secrets) if source_root is None else _classify(secrets, source_root)
 
 
 # how JSON encoders that escape HTML-significant characters write them (lower- and upper-case hex)
@@ -486,18 +577,29 @@ def redact_text(text: str, settings: Settings) -> str:
     return redact_counted(text, settings, None)
 
 
-def redact_counted(text: str, settings: Settings, counts: dict[str, int] | None) -> str:
+def redact_counted(text: str, settings: Settings, counts: dict[str, int] | None,
+                   only: Collection[str] | None = None) -> str:
     """`redact_text`, adding to `counts` how many replacements each secret's setting (by environment name) needed.
-    The counts carry names and numbers only: never a value or the text around it."""
-    for name, secret in secret_settings(settings):
-        if len(secret) < 4:
+    The counts carry names and numbers only: never a value or the text around it. A strong secret's text is replaced
+    wherever it appears; a weak secret's (weak_secret_names) only where it stands as a word of its own, so a longer
+    word that merely contains it is left as it is. `only`, when given, limits the redaction to those settings."""
+    weak: frozenset[str] | None = None
+    # longest first: a secret whose text holds a shorter one's is replaced whole before the shorter one is looked for
+    for name, secret in sorted(secret_settings(settings), key=lambda item: -len(item[1])):
+        if len(secret) < 4 or (only is not None and name not in only):
             continue
         replaced = 0
         for form in sorted(_secret_forms(secret), key=len, reverse=True):
-            found = text.count(form)
-            if found:
-                replaced += found
+            if form not in text:
+                continue
+            if weak is None:
+                weak = weak_secret_names(settings)
+            if name in weak:
+                text, found = word_pattern(form).subn("<redacted>", text)
+            else:
+                found = text.count(form)
                 text = text.replace(form, "<redacted>")
+            replaced += found
         if len(secret) >= MASKED_SECRET_MIN_LENGTH and "****" in text:
             # Key characters only, bounded and delimited: never spans punctuation or starts inside a word,
             # and stays linear on long runs.
@@ -508,3 +610,25 @@ def redact_counted(text: str, settings: Settings, counts: dict[str, int] | None)
         if replaced and counts is not None:
             counts[name] = counts.get(name, 0) + replaced
     return text
+
+
+# A letter (any script): the one thing that makes a weak secret's text part of a longer word.
+_LETTER = r"[^\W\d_]"
+
+
+@functools.lru_cache(maxsize=64)
+def word_pattern(form: str) -> re.Pattern:
+    """`form` as a word of its own, case-sensitive: at an end where it has a letter, the text beside it must not be
+    a letter, so "set" is not found in "settings". Digits, underscores and punctuation beside it still match, so a
+    weak value glued to a number or an identifier is redacted rather than kept."""
+    head = rf"(?<!{_LETTER})" if form[:1].isalpha() else ""
+    tail = rf"(?!{_LETTER})" if form[-1:].isalpha() else ""
+    return re.compile(head + re.escape(form) + tail)
+
+
+def secret_in(text: str, value: str, weak: bool) -> bool:
+    """Whether `text` holds a secret's `value` the way redaction matches it: anywhere for a strong secret, as a word
+    of its own for a weak one."""
+    if value not in text:
+        return False
+    return not weak or word_pattern(value).search(text) is not None

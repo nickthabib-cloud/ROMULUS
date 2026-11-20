@@ -47,13 +47,13 @@ from romulus.agent.provider.egress import (
 from romulus.agent.provider.fallbacks import refusal_fallback_on
 from romulus.config import Settings, redact_text
 from romulus.store.db import digest
-from romulus.store.repo import SECRET_GUARD_ACTION
+from romulus.store.repo import SECRET_GUARD_ACTION, WEAK_SECRET_ACTION
 
 ANTHROPIC_EXTRA_HINT = "the anthropic provider needs its optional SDK: install romulus[anthropic]"
 ANTHROPIC_MODULES = ("anthropic", "httpx2")
 
 __all__ = [
-    "EGRESS_SWITCH_VALUE", "PROVIDER_STATE", "SECRET_GUARD_ACTION", "AgentBudget", "AgentNotReady", "AgentReadiness",
+    "EGRESS_SWITCH_VALUE", "PROVIDER_STATE", "SECRET_GUARD_ACTION", "WEAK_SECRET_ACTION", "AgentBudget", "AgentNotReady", "AgentReadiness",
     "AgentStopped",
     "BudgetExhausted", "BudgetLimits", "ChatProvider", "ChatRequest", "ChatResult", "HistoryError",
     "ProviderUnavailable", "SecretGuardTripped", "Tool", "ToolCall", "Usage", "agent_readiness", "build_provider",
@@ -203,7 +203,9 @@ def record_call(repo, provider: ChatProvider, *, hunt_id: str, purpose: str, req
                 owner_token: str | None = None, settings: Settings | None = None) -> str:
     """Store one model call: prompt digest, provider and model (requested and reported), parameters, the raw
     response, finish reason, validation, usage and an estimated cost. Every configured secret's text is removed
-    from what is stored, using `settings` (else the provider's own)."""
+    from what is stored, using `settings` (else the provider's own). A weak secret's text the reply held was
+    replaced when it arrived (ChatResult.reply_redactions): its replacements are counted with the others, and each
+    setting gets an audit row naming it, the call and the session (never a value)."""
     call_id = call_id or "mc-" + uuid.uuid4().hex[:20]
     charge = charge_of(result)
     described = provider.describe()
@@ -225,16 +227,19 @@ def record_call(repo, provider: ChatProvider, *, hunt_id: str, purpose: str, req
         validation = {"ok": result.ok, "errors": [result.error] if result.error else []}
     details, raw = dict(result.details), result.raw
     settings = settings if settings is not None else getattr(provider, "s", None)
+    written: dict[str, int] = {}
     if isinstance(settings, Settings):
         # the model's own words, and anything quoting them (an error, a refusal, a provider's details), are stored
         # as the raw response is: with any configured secret's text removed and the replacements counted
-        written: dict[str, int] = {}
         parsed = redact_value(parsed, settings, written)
         validation, details = redact_value(validation, settings), redact_value(details, settings)
         raw = redact_text(raw, settings)
-        if written:
-            # replacements in the model's own answer, by setting (numbers only)
-            options["output_redactions"] = dict(sorted(written.items()))
+    # a weak secret's text was replaced in the reply when it arrived: counted with the replacements made here
+    for name, count in (result.reply_redactions or {}).items():
+        written[name] = written.get(name, 0) + count
+    if written:
+        # replacements in the model's own answer, by setting (numbers only)
+        options["output_redactions"] = dict(sorted(written.items()))
     if details:
         options["provider_details"] = details
     if result.redactions:
@@ -260,6 +265,10 @@ def record_call(repo, provider: ChatProvider, *, hunt_id: str, purpose: str, req
         "finish_reason": result.finish_reason or None,
         "cost_usd_est": limits.charge_cost(charge) if limits.priced else None,
     }, owner_token=owner_token)
+    for name, count in sorted((result.reply_redactions or {}).items()):
+        repo.audit("system", WEAK_SECRET_ACTION, hunt_id, {
+            "setting": name, "replacements": count, "model_call_id": call_id, "session_id": session_id,
+            "purpose": purpose}, owner_token=owner_token)
     return call_id
 
 
