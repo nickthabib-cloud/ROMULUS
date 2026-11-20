@@ -514,3 +514,14 @@ def test_record_call_merges_reply_redactions_and_audits_them_by_name(tmp_path):
         {"setting": "ARKIME_PASSWORD", "replacements": 2, "model_call_id": call_id, "session_id": None,
          "purpose": "investigate"}]
     engine.dispose()
+
+
+def test_a_masked_key_echo_glued_to_another_secret_is_still_redacted():
+    from romulus.config import Settings, redact_counted
+    key = "sk-" + "A1b2C3d4E5f6G7h8J9k0L1m2N3p4Q5r6"
+    settings = Settings(agent_api_key=key, es_password="Spr1ng#24x")
+    echo = key[:3] + "ABC****" + key[-4:]
+    counts: dict[str, int] = {}
+    out = redact_counted(f"x {echo}Spr1ng#24x y", settings, counts)
+    assert "Spr1ng#24x" not in out and "****" not in out and key[-4:] not in out
+    assert out == "x <redacted><redacted> y"

@@ -583,23 +583,27 @@ def redact_counted(text: str, settings: Settings, counts: dict[str, int] | None,
     """`redact_text`, adding to `counts` how many replacements each secret's setting (by environment name) needed.
     The counts carry names and numbers only: never a value or the text around it. Every secret's text is replaced
     wherever it appears, weak or strong. `only`, when given, limits the redaction to those settings."""
+    chosen = [(name, secret) for name, secret in secret_settings(settings)
+              if len(secret) >= 4 and (only is None or name in only)]
+    replaced: dict[str, int] = {}
     # longest first: a secret whose text holds a shorter one's is replaced whole before the shorter one is looked for
-    for name, secret in sorted(secret_settings(settings), key=lambda item: -len(item[1])):
-        if len(secret) < 4 or (only is not None and name not in only):
-            continue
-        replaced = 0
+    for name, secret in sorted(chosen, key=lambda item: -len(item[1])):
         for form in sorted(_secret_forms(secret), key=len, reverse=True):
             found = text.count(form)
             if found:
-                replaced += found
+                replaced[name] = replaced.get(name, 0) + found
                 text = text.replace(form, "<redacted>")
+    # Masked echoes only after every exact value is gone, so a value glued to an echo cannot shield it.
+    for name, secret in chosen:
         if len(secret) >= MASKED_SECRET_MIN_LENGTH and "****" in text:
             # Key characters only, bounded and delimited: never spans punctuation or starts inside a word,
             # and stays linear on long runs.
             masked = (r"(?<![A-Za-z0-9_-])" + re.escape(secret[:3]) + r"[A-Za-z0-9_-]{0,64}\*{4,64}"
                       r"[A-Za-z0-9_-]{0,16}?" + re.escape(secret[-4:]) + r"(?![A-Za-z0-9_-])")
             text, found = re.subn(masked, "<redacted>", text)
-            replaced += found
-        if replaced and counts is not None:
-            counts[name] = counts.get(name, 0) + replaced
+            if found:
+                replaced[name] = replaced.get(name, 0) + found
+    if counts is not None:
+        for name, found in replaced.items():
+            counts[name] = counts.get(name, 0) + found
     return text
