@@ -120,6 +120,11 @@ def _integers(text: str, label: str) -> list[int]:
     return values
 
 
+# The list boxes on the page, in the order `parse_form` reads them.
+_LIST_KEYS = ("domain_controllers", "directory_sync_accounts", "internal_networks", "external_networks",
+              *_OPTIONAL_ROLE_LABELS)
+
+
 def parse_form(form) -> dict:
     """The document a submitted form describes. Raises ValueError for a form the page itself could not have
     produced (wrong counts, unknown settings); every other check is the site validator's."""
@@ -178,14 +183,23 @@ def parse_form(form) -> dict:
         document["directory_sync_accounts_declared"] = True
     if groups:
         document["collection"] = groups
-    for key in ("domain_controllers", "directory_sync_accounts", "internal_networks", "external_networks",
-                *_OPTIONAL_ROLE_LABELS):
+    for key in _LIST_KEYS:
         values = _lines(form.get(key, ""))
         if values:
             document[key] = values
         elif (key == "directory_sync_accounts" or key in _OPTIONAL_ROLE_LABELS) and form.get(key + "_declared") == "1":
             document[key] = []
     return document
+
+
+# Every top-level key `parse_form` writes. Any other key in the site file (mail domains, approved remote access, the
+# Zeek policy, ...) is not on the page, so a save carries it over from the file the page was loaded from.
+PAGE_KEYS = frozenset({"schema", "collection", "directory_sync_accounts_declared", *_LIST_KEYS})
+
+
+def with_unedited(current: dict, document: dict) -> dict:
+    """`document` (what the page submitted) plus every key of the current file that the page does not edit."""
+    return {**{key: value for key, value in current.items() if key not in PAGE_KEYS}, **document}
 
 
 def describe_change(before: dict, after: dict) -> list[str]:

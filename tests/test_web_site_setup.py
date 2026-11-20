@@ -377,3 +377,57 @@ def test_a_stopped_hunt_cannot_resume_after_the_page_changes_the_file(site):
     assert lead.post("/site", data=_post(form), follow_redirects=False).status_code == 303
     with pytest.raises(SiteChangedError, match="changed since the hunt was created"):
         ensure_site_unchanged(settings.home, recorded)
+
+
+UNEDITED = ("mail_domains: [mail.example.test]\napproved_remote_access: [example.test]\n"
+            "zeek:\n  plain_sources:\n    wire:\n      sensor: synthetic\n")
+
+
+def test_a_page_save_keeps_the_keys_the_page_does_not_edit(site):
+    settings, _repo, login = site
+    _write(settings.home, VALID + UNEDITED)
+    before = load_site_facts(settings.home)
+    assert {"mail_domains", "approved_remote_access", "zeek"} <= set(before.content)
+    lead = login("lead1")
+    page = lead.get("/site").text
+    form = _form_from_view(before.content, csrf=_csrf(page), digest=_digest(page), domain_controllers="DC02.EXAMPLE.TEST")
+
+    assert lead.post("/site", data=_post(form), follow_redirects=False).status_code == 303
+
+    after = load_site_facts(settings.home)
+    assert after.content["domain_controllers"] == ["dc02.example.test"]
+    for key in ("mail_domains", "approved_remote_access", "zeek"):
+        assert after.content[key] == before.content[key]
+
+
+def test_an_unchanged_save_with_unedited_keys_writes_nothing(site):
+    settings, _repo, login = site
+    _write(settings.home, VALID + UNEDITED)
+    before = load_site_facts(settings.home)
+    lead = login("lead1")
+    page = lead.get("/site").text
+    response = lead.post("/site", data=_post(_form_from_view(before.content, csrf=_csrf(page), digest=_digest(page))))
+    assert response.status_code in (200, 303)
+    assert load_site_facts(settings.home).digest == before.digest
+    assert not (settings.home / COLLECTION_PATH).with_name("collection.yaml.prev").exists()
+
+
+def test_a_stale_page_with_unedited_keys_is_still_refused(site):
+    settings, _repo, login = site
+    _write(settings.home, VALID + UNEDITED)
+    lead = login("lead1")
+    page = lead.get("/site").text
+    form = _form_from_view(load_site_facts(settings.home).content, csrf=_csrf(page), digest=_digest(page))
+    _write(settings.home, VALID + UNEDITED.replace("mail.example.test", "mx.example.test"))
+
+    assert lead.post("/site", data=_post(form), follow_redirects=False).status_code == 409
+    assert load_site_facts(settings.home).content["mail_domains"] == ["mx.example.test"]
+
+
+def test_page_keys_are_exactly_what_the_form_writes():
+    written = set(site_form.parse_form(FormData([
+        ("group_count", "1"), ("g0.hosts", "all"), ("directory_sync_accounts_declared", "1"),
+        *[(key, "x.example.test") for key in ("domain_controllers", "directory_sync_accounts")],
+        ("internal_networks", "10.0.0.0/8"), ("external_networks", "10.9.0.0/16"),
+        *[(key, "10.0.0.1") for key in site_form._OPTIONAL_ROLE_LABELS]])))
+    assert written == site_form.PAGE_KEYS
