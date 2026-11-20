@@ -390,6 +390,14 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
             content = site_form.parse_form(form)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
+        try:
+            current = load_site_facts(s.home)
+        except SiteValidationError:
+            current = None  # the save below reports the invalid file
+        if current is not None and current.present and current.digest == digest:
+            # The page edits only some of the file; keep the rest. A file changed since the page was loaded is
+            # refused by the save's digest check, so nothing newer is merged here.
+            content = site_form.with_unedited(current.content, content)
         if (content.get("internal_networks") or content.get("external_networks")) and (
                 s.internal_networks or s.external_networks):
             # Saving would leave the networks set in two places, which every new hunt then refuses.

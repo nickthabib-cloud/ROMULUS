@@ -188,6 +188,17 @@ def parse_form(form) -> dict:
     return document
 
 
+# Every top-level key `parse_form` writes. Any other key in the site file (mail domains, approved remote access, the
+# Zeek policy, ...) is not on the page, so a save carries it over from the file the page was loaded from.
+PAGE_KEYS = frozenset({"schema", "collection", "directory_sync_accounts_declared", "domain_controllers",
+                       "directory_sync_accounts", "internal_networks", "external_networks", *_OPTIONAL_ROLE_LABELS})
+
+
+def with_unedited(current: dict, document: dict) -> dict:
+    """`document` (what the page submitted) plus every key of the current file that the page does not edit."""
+    return {**{key: value for key, value in current.items() if key not in PAGE_KEYS}, **document}
+
+
 def describe_change(before: dict, after: dict) -> list[str]:
     """The top-level parts that changed, for the audit record and the confirmation line."""
     keys = ("collection", "domain_controllers", "directory_sync_accounts", "internal_networks", "external_networks",
