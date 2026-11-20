@@ -614,14 +614,19 @@ def redact_counted(text: str, settings: Settings, counts: dict[str, int] | None,
 
 # A letter (any script): the one thing that makes a weak secret's text part of a longer word.
 _LETTER = r"[^\W\d_]"
+# What may stand before a weak secret's text: no letter, or a letter that ends an escape in serialised text (a JSON
+# escape such as \n or <, percent-encoding such as %3D), which separates words rather than joining them.
+_HEAD = (rf"(?:(?<!{_LETTER})|(?<=\\[bfnrt])|(?<=\\u[0-9A-Fa-f]{{4}})|(?<=\\x[0-9A-Fa-f]{{2}})"
+         r"|(?<=%[0-9A-Fa-f]{2}))")
 
 
 @functools.lru_cache(maxsize=64)
 def word_pattern(form: str) -> re.Pattern:
     """`form` as a word of its own, case-sensitive: at an end where it has a letter, the text beside it must not be
-    a letter, so "set" is not found in "settings". Digits, underscores and punctuation beside it still match, so a
-    weak value glued to a number or an identifier is redacted rather than kept."""
-    head = rf"(?<!{_LETTER})" if form[:1].isalpha() else ""
+    a letter, so "set" is not found in "settings". A letter that ends an escape in serialised text (\\n, \\u003c,
+    %3D) does not join words, so the value after one still matches. Digits, underscores and punctuation beside it
+    match too, so a weak value glued to a number or an identifier is redacted rather than kept."""
+    head = _HEAD if form[:1].isalpha() else ""
     tail = rf"(?!{_LETTER})" if form[-1:].isalpha() else ""
     return re.compile(head + re.escape(form) + tail)
 

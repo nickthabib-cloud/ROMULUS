@@ -5,7 +5,6 @@ counted by setting and audited by name. A strong secret's text in a reply still 
 weak value is scanned for, as a word, in every stored row, request, log line, page and report."""
 import json
 import logging
-import re
 
 import pytest
 
@@ -31,13 +30,13 @@ from tests.test_secret_guard import SENTINEL, _every_stored_value, _repo
 # made-up fixture values: a dictionary-like word (one character class) and a longer word that holds it
 WEAK = "marmalade"
 LONGER = "marmalades"
-AS_WORD = re.compile(r"(?<![^\W\d_])" + WEAK + r"(?![^\W\d_])")
 SIGNATURE = "EqQBCkgIBhABGAIiQL+signature/A=="
 setup = test_web_agent_a6.setup
 
 
 def _no_weak_word(*texts: str) -> bool:
-    return not any(AS_WORD.search(text) for text in texts)
+    """No text holds the weak value anywhere except inside the longer word the tests keep on purpose."""
+    return not any(WEAK in text.replace(LONGER, "") for text in texts)
 
 
 # ---- the classification ----------------------------------------------------------------------------------------
@@ -85,6 +84,11 @@ def test_a_weak_secret_is_matched_only_as_a_word_of_its_own_and_a_strong_one_any
         '<redacted>; marmalades; unmarmalade; pw_<redacted>; <redacted>42; (<redacted>); MARMALADE; '
         '{"v": "<redacted>"}; x<redacted>y')
     assert counts == {"ARKIME_PASSWORD": 5, "ES_PASSWORD": 1}
+    # a letter that ends an escape in serialised text separates words: the value after it is still redacted
+    escaped = [json.dumps({"m": f"line\n{WEAK}\t{WEAK}"}), f"pw%3D{WEAK}", f"\\u003c{WEAK}\\u003e", f"\\x3d{WEAK}"]
+    assert [redact_text(item, s) for item in escaped] == [
+        json.dumps({"m": "line\n<redacted>\t<redacted>"}), "pw%3D<redacted>", "\\u003c<redacted>\\u003e",
+        "\\x3d<redacted>"]
 
 
 def test_a_strong_secret_holding_the_weak_word_is_replaced_whole():
@@ -413,4 +417,37 @@ def test_record_call_merges_reply_redactions_and_audits_them_by_name(tmp_path):
     assert [row["detail"] for row in repo.audit_trail("h1", WEAK_SECRET_ACTION)[0]] == [
         {"setting": "ARKIME_PASSWORD", "replacements": 2, "model_call_id": call_id, "session_id": None,
          "purpose": "investigate"}]
+    engine.dispose()
+
+
+def test_a_weak_secret_after_a_newline_never_reaches_the_db_or_the_next_request(tmp_path, caplog):
+    pytest.importorskip("anthropic")
+    from tests.test_agent_provider_claude import (
+        TOOL,
+        Endpoint,
+        claude_settings,
+        provider,
+        reply,
+        text,
+        tool_use,
+    )
+    caplog.set_level(logging.DEBUG)
+    engine, repo = _repo(tmp_path, "newline")
+    settings = claude_settings(arkime_password=WEAK)
+    endpoint = Endpoint(reply([_thinking("x"), text(f"Line one.\n{WEAK} again."), tool_use()], stop="tool_use"),
+                        reply([text("ok")]))
+    p, _ = provider(settings, endpoint)
+    limits = BudgetLimits.from_settings(settings)
+    first = ChatRequest([{"role": "user", "content": "go"}], tools=[TOOL])
+    result = p.chat(first)
+    assert result.content == "Line one.\n<redacted> again." and result.reply_redactions == {"ARKIME_PASSWORD": 1}
+    record_call(repo, p, hunt_id="h1", purpose="investigate", request=first, result=result, limits=limits)
+    # a tool result whose serialised text holds the value right after an escaped newline
+    second = ChatRequest([*first.messages, result.assistant_message(),
+                          {"role": "tool", "tool_call_id": "toolu_01", "content": json.dumps({"row": f"a\n{WEAK}"})}],
+                         tools=[TOOL])
+    result = p.chat(second)
+    assert result.ok and result.redactions == {"ARKIME_PASSWORD": 1}
+    record_call(repo, p, hunt_id="h1", purpose="investigate", request=second, result=result, limits=limits)
+    assert _no_weak_word(_every_stored_value(engine), caplog.text, endpoint.calls[1].content.decode())
     engine.dispose()
