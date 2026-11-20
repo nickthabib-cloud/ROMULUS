@@ -8,14 +8,20 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from collections.abc import Callable, Collection
+from dataclasses import dataclass, field, replace
 from typing import TypeVar
 
 import httpx
 
 from romulus.agent.provider.egress import EgressDecision
-from romulus.config import Settings, redact_counted, redact_text
+from romulus.config import (
+    Settings,
+    redact_counted,
+    redact_text,
+    secret_settings,
+    weak_secret_names,
+)
 
 CHARS_PER_TOKEN = 3.2          # conservative for English + JSON + log text
 TRUNCATION_MARGIN = 32
@@ -55,10 +61,11 @@ SECRET_GUARD_PARTS = ("text", "thinking", "tool_input_streamed", "tool_input_par
 
 
 class SecretGuardTripped(HistoryError):
-    """A replayed assistant turn holds the text of a configured secret. The turn is signed provider state, so it
-    can be neither redacted nor sent: the session it belongs to cannot continue. `trips` names, for each match,
-    the secret's setting (its environment name) and the part of the turn it was found in; it never holds the
-    value or any text around it. Nothing was sent."""
+    """A replayed assistant turn holds the text of a configured secret: a strong one, unless the turn did not come
+    from this port, since a reply has every weak secret's text replaced when it arrives. The turn is signed provider
+    state, so it can be neither redacted nor sent: the session it belongs to cannot continue. `trips` names, for
+    each match, the secret's setting (its environment name) and the part of the turn it was found in; it never
+    holds the value or any text around it. Nothing was sent."""
 
     def __init__(self, message_index: int, trips: list[tuple[str, str]]):
         self.message_index = message_index
@@ -69,9 +76,16 @@ class SecretGuardTripped(HistoryError):
                          "it is never sent")
 
 
-def secret_trips(parts: list[tuple[str, str]], secrets: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """(setting, part) for every secret value found in a (part, text) list: names only."""
-    return [(name, part) for name, value in secrets for part, text in parts if text and value in text]
+def secret_trips(parts: list[tuple[str, str]], secrets: list[tuple[str, str]],
+                 weak: Collection[str] = ()) -> list[tuple[str, str]]:
+    """(setting, part) for every secret value found in a (part, text) list, wherever its text appears: names only. A
+    reply has every weak secret's text (its setting in `weak`) replaced when it arrives (ChatProvider.chat) unless it
+    also holds a strong secret's, so a weak secret is found here only beside a strong one's or in a turn that did not
+    come from this port. Where a strong secret is found, only the strong ones are named, since they are what end the
+    session."""
+    found = [(name, part) for name, value in secrets for part, text in parts if text and value in text]
+    strong = [trip for trip in found if trip[0] not in weak]
+    return strong or found
 
 
 class TransientFailure(Exception):
@@ -196,6 +210,9 @@ class ChatResult:
     # secret replacements outgoing redaction made in the text this call added to its conversation, by setting
     # (environment name): numbers only (see redact_messages)
     redactions: dict = field(default_factory=dict)
+    # replacements of a weak secret's text in this reply itself, made when it arrived, by setting: numbers only (see
+    # ChatProvider.chat)
+    reply_redactions: dict = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -255,6 +272,48 @@ def redact_messages(messages: list[dict], settings: Settings, counts: dict[str, 
         out.append({k: v if k == PROVIDER_STATE else clean(v, tally) for k, v in m.items()} if isinstance(m, dict)
                    else clean(m, tally))
     return out
+
+
+def _strings(value) -> list[str]:
+    """Every string in a JSON-like value, keys included, at any depth."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for k, v in value.items() for s in (*_strings(k), *_strings(v))]
+    if isinstance(value, list | tuple):
+        return [s for v in value for s in _strings(v)]
+    return []
+
+
+def _scrub_json(value, scrub: Callable[[str], str]):
+    """Copy of a JSON-like value with `scrub` applied to every string, keys included, at any depth."""
+    if isinstance(value, str):
+        return scrub(value)
+    if isinstance(value, list):
+        return [_scrub_json(v, scrub) for v in value]
+    if isinstance(value, dict):
+        return {scrub(k) if isinstance(k, str) else k: _scrub_json(v, scrub) for k, v in value.items()}
+    return value
+
+
+def _scrub_call(call: ToolCall, scrub: Callable[..., str]) -> ToolCall:
+    """The tool call with `scrub` applied to its name and arguments, counted once. Parsed arguments are scrubbed as
+    values and written out again as the raw arguments, so the two still agree; arguments that did not parse are
+    scrubbed as text. A name keeps a tool name's characters ("redacted" in place of the marker), so the turn still
+    replays; no tool has that name, so the call is refused as an unknown tool."""
+    name = scrub(call.name).replace("<redacted>", "redacted")
+    if call.arguments is None:
+        arguments, raw = None, scrub(call.raw_arguments)
+    else:
+        arguments = _scrub_json(call.arguments, scrub)
+        if arguments != call.arguments:
+            raw = json.dumps(arguments)
+        else:
+            # the raw text can hold the secret where the parsed value does not (a repeated key): written out again
+            raw = call.raw_arguments if scrub(call.raw_arguments) == call.raw_arguments else json.dumps(arguments)
+    if name == call.name and arguments == call.arguments and raw == call.raw_arguments:
+        return call
+    return replace(call, name=name, arguments=arguments, raw_arguments=raw)
 
 
 def parse_tool_arguments(call_id: str, name: str, raw) -> ToolCall:
@@ -361,7 +420,55 @@ class ChatProvider:
         if result.error:
             # an error can quote the model (a refusal's words, a tool name it made up): it is stored and shown
             result.error = redact_text(result.error, self.s)
+        return self._without_weak_secrets(result)
+
+    # ---- weak secrets in replies ----------------------------------------------------------------------------------
+    def _without_weak_secrets(self, result: ChatResult) -> ChatResult:
+        """`result` with every weak configured secret's text (config.weak_secret_names) replaced by the redaction
+        marker wherever it appears, as all redaction does: in the reply's text, its parsed answer, its tool calls'
+        names and arguments, and the provider state its turn is replayed from (`_scrub_reply_state`). This happens before
+        the reply is validated, run, stored, shown or appended to its conversation, so the session goes on and its
+        turn never carries the text onward. `reply_redactions` counts the replacements by setting.
+
+        A reply that also holds a strong secret's text is left as it is: its turn then ends the session at the secret
+        guard, as any strong secret's does, and everything taken from it is redacted where it is run or stored."""
+        secrets = secret_settings(self.s)
+        if not secrets:
+            return result
+        weak = weak_secret_names(self.s)
+        if not weak:
+            return result
+        texts = _strings([result.content, result.parsed, [call.as_dict() for call in result.tool_calls],
+                          result.provider_state])
+        if any(name not in weak and value in text for name, value in secrets for text in texts):
+            return result
+        counts: dict[str, int] = {}
+
+        def scrub(text: str, counted: bool = True) -> str:
+            return redact_counted(text, self.s, counts if counted else None, only=weak)
+
+        content = scrub(result.content) if result.content else result.content
+        calls = [_scrub_call(call, scrub) for call in result.tool_calls]
+        parsed = _scrub_json(result.parsed, lambda text: scrub(text, False))
+        state = result.provider_state
+        if state is not None:
+            state, replayed, calls = self._scrub_reply_state(state, scrub, calls, bool(counts))
+            if replayed is not None:
+                content = replayed
+        if not counts:
+            return result
+        result.content, result.parsed, result.tool_calls, result.provider_state = content, parsed, calls, state
+        result.reply_redactions = dict(sorted(counts.items()))
         return result
+
+    def _scrub_reply_state(self, state: dict, scrub: Callable[..., str], calls: list[ToolCall],
+                           changed: bool) -> tuple[dict, str | None, list[ToolCall]]:
+        """The adapter's provider state with a weak secret's text replaced, consistent with the reply's scrubbed tool
+        calls (`calls`), so that the turn replays: (state, the reply text the state now replays or None when it is
+        unchanged, the calls). `scrub(text, counted=True)` replaces the text and counts it; text the reply's content
+        or calls already counted is scrubbed uncounted. `changed` says whether the content or calls held any. An
+        adapter whose state holds readable text must override this; the default leaves the state as it is."""
+        return state, None, calls
 
     def _retrying(self, attempt_once: Callable[[], T], *, attempt_guard: Callable[[dict], bool] | None = None,
                   billed=None) -> tuple[T, int, int]:

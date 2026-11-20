@@ -30,8 +30,10 @@ tool inputs the model streamed and the tools a required-tool instruction named, 
 Replay accepts only text, thinking, redacted-thinking and tool-use blocks with their known fields, as an assistant
 turn. An assistant turn with tool calls but no provider state (history from another provider, or a trimmed or
 rebuilt turn), a state that is malformed or holds anything else, a turn whose text or tool calls no longer match its
-state, raises HistoryError before anything is sent; one that holds a configured secret's text raises its subclass
-SecretGuardTripped, which names the setting and the part of the turn, never the value.
+state, raises HistoryError before anything is sent; one that holds a strong configured secret's text raises its
+subclass SecretGuardTripped, which names the setting and the part of the turn, never the value. A weak secret's text
+(config.weak_secret_names) is replaced in a reply when it arrives, and that turn is kept without its signed thinking,
+so the session goes on.
 """
 from __future__ import annotations
 
@@ -58,6 +60,7 @@ from romulus.agent.provider.base import (
     ToolCall,
     TransientFailure,
     Usage,
+    _scrub_json,
     endpoint_url,
     parse_tool_arguments,
     secret_trips,
@@ -66,7 +69,7 @@ from romulus.agent.provider.egress import EgressDecision
 from romulus.agent.provider.fallbacks import refusal_fallback_on
 from romulus.agent.provider.openai_compatible import probe_calls
 from romulus.agent.refusals import EXTRA, bounded, reason
-from romulus.config import MIN_SECRET_LENGTH, Settings, redact_text, secret_settings
+from romulus.config import MIN_SECRET_LENGTH, Settings, redact_text, secret_settings, weak_secret_names
 
 log = logging.getLogger("romulus.agent")
 # the server-side refusal fallback, "default" form: the API picks the fallback model by refusal category
@@ -728,6 +731,46 @@ class ClaudeMessagesProvider(ChatProvider):
     def reasoning_rejected(self, result: ChatResult) -> bool:
         return thinking_rejected(result)
 
+    def _scrub_reply_state(self, state: dict, scrub, calls: list[ToolCall],
+                           changed: bool) -> tuple[dict, str | None, list[ToolCall]]:
+        """Signed thinking can be neither edited nor replayed holding a weak secret's text, so a turn that held one
+        anywhere goes on without its thinking (removing it from the end of the history is accepted, as
+        without_thinking does), with its text and tool calls scrubbed as the reply's were."""
+        if _state_problem(state):
+            return state, None, calls      # never replayed: the replay check refuses it whatever it holds
+        blocks = state["content"]
+        # every thinking block is read (and its replacements counted) even though all of them are then removed
+        held = [scrub(block["thinking"]) != block["thinking"] for block in blocks if block["type"] == "thinking"]
+        if not changed and not any(held):
+            return state, None, calls
+        by_id = {call.id: i for i, call in enumerate(calls)}
+        calls = list(calls)
+        inputs = dict(state.get("tool_inputs") or {})
+        kept: list[dict] = []
+        for block in blocks:
+            if block["type"] in THINKING_BLOCKS:
+                continue
+            if block["type"] == "text":
+                kept.append({**block, "text": scrub(block["text"], False)})
+                continue
+            index = by_id.get(block["id"])
+            call = calls[index] if index is not None else None
+            raw = call.raw_arguments if call is not None else scrub(inputs.get(block["id"], ""), False)
+            derived = _derived_input(raw)
+            if not isinstance(derived, dict):
+                # the scrubbed raw text no longer parses as it did: the input is scrubbed as a value and written out
+                derived = _scrub_json(block["input"], lambda text: scrub(text, False))
+                raw = json.dumps(derived)
+                if call is not None:
+                    calls[index] = ToolCall(call.id, call.name, call.arguments, raw, call.error, call.problems)
+            inputs[block["id"]] = raw
+            kept.append({**block, "name": call.name if call is not None else scrub(block["name"], False),
+                         "input": derived})
+        if not kept:
+            kept = [{"type": "text", "text": NO_VISIBLE_REPLY}]
+        replayed = "".join(block["text"] for block in kept if block["type"] == "text")
+        return {**state, "content": kept, "tool_inputs": inputs}, replayed, calls
+
     # ---- sizes ----------------------------------------------------------------------------------------------
     def output_limit(self, request: ChatRequest) -> int:
         return super().output_limit(request) + self.s.agent_thinking_tokens
@@ -1028,7 +1071,7 @@ class ClaudeMessagesProvider(ChatProvider):
                     + [("tool_input_streamed", s[2]) for s in stored]
                     + [("tool_name", s[1]) for s in stored]
                     + [("tool_input_parsed", json.dumps(b["input"])) for b in blocks if b["type"] == "tool_use"])
-        trips = secret_trips(replayed, _long_secrets(self.s))
+        trips = secret_trips(replayed, _long_secrets(self.s), weak_secret_names(self.s))
         if trips:
             raise SecretGuardTripped(n, trips)
         if state.get("required_tools"):

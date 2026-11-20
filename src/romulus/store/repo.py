@@ -446,6 +446,9 @@ TRIAGE_FAILED = "hunt.ai_triage_failed"
 AGENT_MODEL_FORCED = "hunt.agent_model_forced"
 # Each secret-guard trip of an agent session: the setting, the part of the reply and the session (never a value).
 SECRET_GUARD_ACTION = "agent.secret_guard_tripped"
+# A model call whose reply held a weak secret's text, replaced before the reply was used (the session went on): the
+# setting, how many replacements, the call and its session (never a value).
+WEAK_SECRET_ACTION = "agent.weak_secret_redacted"
 # The AI agent's hunt-total and session-share source-query caps. Reaching either one means some leads could not be
 # followed at all, so they limit the investigation. The per-call slice and per-source caps are routine on dense
 # sources (a later call or a narrower window reads on); they are counted on the run page only.

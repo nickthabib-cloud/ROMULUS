@@ -1019,8 +1019,9 @@ def run_assessment(settings, repo, hunt_id: str, provider, budget: AgentBudget, 
         try:
             result = provider.chat(request)
         except SecretGuardTripped as exc:
-            # the retry replays the earlier answer, which held a configured secret's text: that signed turn can be
-            # neither redacted nor sent, so the session ends here and the run stores the template (names only)
+            # the retry replays the earlier answer, which held a strong configured secret's text (a weak one's was
+            # replaced when the answer arrived): that signed turn can be neither redacted nor sent, so the session
+            # ends here and the run stores the template (names only)
             record_secret_guard(repo, hunt_id=hunt_id, purpose="assess", session_id=session_id, error=exc,
                                 owner_token=owner_token)
             names = ", ".join(sorted({setting for setting, _ in exc.trips}))

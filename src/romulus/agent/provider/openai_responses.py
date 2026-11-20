@@ -24,8 +24,10 @@ applies): reasoning crosses turns as encrypted reasoning items. Each reply's out
 state of its assistant message (ChatResult.assistant_message()) and are replayed unchanged in their place. An
 assistant turn without provider state (history from another provider) is sent from its text and tool calls alone. A
 state that is malformed or holds anything else, or a turn whose text or tool calls no longer match its state, raises
-HistoryError before anything is sent; one that holds a configured secret's text raises its subclass
-SecretGuardTripped, which names the setting and the part of the turn, never the value.
+HistoryError before anything is sent; one that holds a strong configured secret's text raises its subclass
+SecretGuardTripped, which names the setting and the part of the turn, never the value. A weak secret's text
+(config.weak_secret_names) is replaced in a reply when it arrives, in its readable reasoning summaries too (the
+encrypted reasoning is opaque and kept), so the session goes on.
 
 A refusal in the reply, a content-filter stop, and a response that failed under a safety policy are refused. Usage
 maps input_tokens (cached tokens included) to prompt tokens, output_tokens (reasoning included) to completion tokens,
@@ -82,7 +84,7 @@ from romulus.agent.provider.openai_compatible import (
     strict_ok,
 )
 from romulus.agent.refusals import bounded
-from romulus.config import redact_text
+from romulus.config import redact_text, weak_secret_names
 
 OPENAI_HOST = "api.openai.com"
 # the output items a reply may hold and an assistant turn may replay, with only these fields
@@ -436,10 +438,42 @@ class OpenAIResponsesProvider(ChatProvider):
         if not same_calls or _text(original) != stored_text:
             raise HistoryError(f"assistant message {n} was changed after the model produced it; its reasoning no "
                                "longer matches the turn. Sessions must be append-only or start fresh")
-        trips = secret_trips(_plain_texts(items), _long_secrets(self.s))
+        trips = secret_trips(_plain_texts(items), _long_secrets(self.s), weak_secret_names(self.s))
         if trips:
             raise SecretGuardTripped(n, trips)
         return copy.deepcopy(items)
+
+    def _scrub_reply_state(self, state: dict, scrub, calls: list[ToolCall],
+                           changed: bool) -> tuple[dict, str | None, list[ToolCall]]:
+        """The reply's output items with a weak secret's text scrubbed as the reply's was: message text, function
+        calls (as the scrubbed calls carry them) and the readable text of reasoning summaries and content. The
+        encrypted reasoning is opaque and kept as it is."""
+        if _state_problem(state):
+            return state, None, calls      # never replayed: the replay check refuses it whatever it holds
+        by_id = {call.id: call for call in calls}
+
+        def reasoning_parts(parts: list) -> list:
+            return [{**part, "text": scrub(part["text"])} if isinstance(part, dict) and isinstance(part.get("text"), str)
+                    else part for part in parts]
+
+        items: list[dict] = []
+        for item in state["output"]:
+            if item["type"] == "reasoning":
+                items.append({**item, **{key: reasoning_parts(item[key]) for key in ("summary", "content")
+                                         if isinstance(item.get(key), list)}})
+            elif item["type"] == "message":
+                items.append({**item, "content": [
+                    {**part, "text": scrub(part["text"], False)} if part["type"] == "output_text"
+                    else {**part, "refusal": scrub(part["refusal"])} for part in item["content"]]})
+            else:
+                call = by_id.get(item["call_id"])
+                items.append({**item, "name": call.name, "arguments": call.raw_arguments} if call is not None else
+                             {**item, "name": scrub(item["name"], False), "arguments": scrub(item["arguments"], False)})
+        if not changed and items == state["output"]:
+            return state, None, calls
+        replayed = "".join(part["text"] for item in items if item["type"] == "message" for part in item["content"]
+                           if part["type"] == "output_text")
+        return {**state, "output": items}, replayed, calls
 
     # ---- reply ------------------------------------------------------------------------------------------------
     def _result(self, request: ChatRequest, data: dict, est: int, ms: int, attempts: int, broken: list[dict],

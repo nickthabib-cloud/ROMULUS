@@ -1042,8 +1042,9 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 return finish("failed", _deterministic_tool_summary(tool_history, hypothesis_changes),
                               "no_tool_call_twice")
             no_tool_misses = 0
-            # the calls as they are run and stored: any configured secret's text the model wrote is removed first
-            # (its turn, kept unchanged for replay, then ends the session at the secret guard)
+            # the calls as they are run and stored: any configured secret's text the model wrote is removed first. A
+            # weak secret's text was already replaced in the reply and its turn, and the session goes on; a strong
+            # secret's turn is kept unchanged for replay and then ends the session at the secret guard
             calls = [_without_secrets(call, settings) for call in result.tool_calls]
             if context_wrap_sent:
                 finish_call = next((call for call in calls if call.name == "finish_session"), None)
