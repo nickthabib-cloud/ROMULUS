@@ -62,7 +62,7 @@ def test_doctor_warns_about_a_dictionary_like_secret_by_name_only(tmp_path, capl
     assert check.status == "warn"
     assert "ARKIME_PASSWORD (under 16 characters)" in check.detail
     assert "easier to guess" in check.detail and "before the AI model sees it" in check.detail
-    assert "rather than ending AI sessions" in check.detail and "at a real site" in check.detail
+    assert "the session goes on rather than ending" in check.detail and "at a real site" in check.detail
     assert check.data == {"settings": ["ARKIME_PASSWORD"]}
     shown = check.detail + json.dumps(check.data) + caplog.text + "".join(capsys.readouterr())
     assert DICTIONARY_WORD not in shown.lower() and str(len(DICTIONARY_WORD)) not in check.detail

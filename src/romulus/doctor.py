@@ -396,18 +396,18 @@ def check_triage_model(s: Settings, transport: httpx.BaseTransport | None = None
 
 
 def check_secret_lengths(s: Settings) -> Check:
-    """Short secrets are weak: their text is redacted wherever it stands as a word of its own, ordinary words
-    included. Names only: never a secret or its length."""
+    """Short secrets are redacted wherever their text turns up, ordinary words included. Names only: never a
+    secret or its length."""
     short = short_secrets(s)
     if not short:
         return Check("secrets.length", "ok", f"configured secrets are at least {MIN_SECRET_LENGTH} characters")
     return Check("secrets.length", "warn",
-                 f"{', '.join(short)}: shorter than {MIN_SECRET_LENGTH} characters. Text that short is often an "
-                 "ordinary word, so redaction distorts prompts and reports (and very short secrets cannot be "
+                 f"{', '.join(short)}: shorter than {MIN_SECRET_LENGTH} characters. Text that short also turns up in "
+                 "ordinary words, so redaction distorts prompts and reports (and very short secrets cannot be "
                  "redacted); use longer secrets")
 
 
-# The weak-secret rule (config.weak_secret_names) is shared with redaction and the AI agent's secret guard. Doctor
+# The weak-secret rule (config.weak_secret_names) is shared with the AI agent's secret guard. Doctor
 # judges secrets of at least MIN_SECRET_LENGTH characters here and warns, never fails; shorter ones are reported by
 # check_secret_lengths instead.
 COARSE_LENGTH = 16     # the only length a warning gives: "under 16 characters"
@@ -426,9 +426,10 @@ def check_secret_strength(s: Settings, source_root: Path | None = None) -> Check
                       for name, value in secrets if name in weak)
     return Check("secrets.strength", "warn",
                  f"{shown}: low-entropy or dictionary-like. A weak secret is easier to guess. Its text is redacted "
-                 "wherever it appears as a word of its own: in telemetry before the AI model sees it, hiding parts of "
-                 "those records, and in the model's own replies before they are stored, shown, run or sent back, "
-                 "rather than ending AI sessions. Replace it with a long random value at a real site",
+                 "wherever it appears: telemetry holding it is redacted before the AI model sees it, hiding parts of "
+                 "those records, and a model reply that writes it is scrubbed before it is stored, shown, run or sent "
+                 "back, and the session goes on rather than ending. Replace it with a long random value at a real "
+                 "site",
                  {"settings": sorted(weak)})
 
 

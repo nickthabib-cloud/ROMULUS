@@ -466,13 +466,13 @@ def secret_settings(settings: Settings) -> list[tuple[str, str]]:
 
 def short_secrets(settings: Settings) -> list[str]:
     """The environment names of configured secrets shorter than MIN_SECRET_LENGTH (never their values or lengths).
-    Text that short is often an ordinary word, so redacting it distorts prompts and reports, and below 4 characters
-    it is not redacted at all."""
+    Text that short also turns up in ordinary words, so redacting it distorts prompts and reports, and below 4
+    characters it is not redacted at all."""
     return sorted(name for name, value in secret_settings(settings) if len(value) < MIN_SECRET_LENGTH)
 
 
-# A configured secret is weak when any of these measures holds. Doctor's secrets.strength warning, redaction and the
-# AI agent's secret guard all use this one rule.
+# A configured secret is weak when any of these measures holds. Doctor's secrets.strength warning and the AI agent's
+# secret guard both use this one rule.
 # - It is shorter than MIN_SECRET_LENGTH (doctor's secrets.length warning reports those).
 # - It is under WEAK_SINGLE_CLASS_BELOW characters and uses one character class: all letters (either case), all
 #   digits, or all other characters. Ordinary words are all letters. A longer single-class value is left to the
@@ -484,8 +484,9 @@ def short_secrets(settings: Settings) -> list[str]:
 #   guard would also match.
 # No wordlist is bundled with the product, so dictionary words are found by the second and last measures.
 #
-# A weak secret's text is redacted only where it stands as a word of its own (see redact_counted): ordinary text that
-# holds it inside a longer word is left as it is. A strong secret's text is redacted wherever it appears.
+# The rule decides only what a secret in a model reply does to the agent's session, never what is redacted: every
+# secret's text is redacted wherever it appears. A weak secret in a reply is scrubbed and the session goes on; a
+# strong one ends the session at the secret guard.
 WEAK_ENTROPY_BITS = 40.0
 WEAK_SINGLE_CLASS_BELOW = 32
 SOURCE_SUFFIXES = frozenset({".py", ".html", ".md", ".js", ".css", ".mako", ".txt", ".json", ".yml", ".yaml",
@@ -580,26 +581,18 @@ def redact_text(text: str, settings: Settings) -> str:
 def redact_counted(text: str, settings: Settings, counts: dict[str, int] | None,
                    only: Collection[str] | None = None) -> str:
     """`redact_text`, adding to `counts` how many replacements each secret's setting (by environment name) needed.
-    The counts carry names and numbers only: never a value or the text around it. A strong secret's text is replaced
-    wherever it appears; a weak secret's (weak_secret_names) only where it stands as a word of its own, so a longer
-    word that merely contains it is left as it is. `only`, when given, limits the redaction to those settings."""
-    weak: frozenset[str] | None = None
+    The counts carry names and numbers only: never a value or the text around it. Every secret's text is replaced
+    wherever it appears, weak or strong. `only`, when given, limits the redaction to those settings."""
     # longest first: a secret whose text holds a shorter one's is replaced whole before the shorter one is looked for
     for name, secret in sorted(secret_settings(settings), key=lambda item: -len(item[1])):
         if len(secret) < 4 or (only is not None and name not in only):
             continue
         replaced = 0
         for form in sorted(_secret_forms(secret), key=len, reverse=True):
-            if form not in text:
-                continue
-            if weak is None:
-                weak = weak_secret_names(settings)
-            if name in weak:
-                text, found = word_pattern(form).subn("<redacted>", text)
-            else:
-                found = text.count(form)
+            found = text.count(form)
+            if found:
+                replaced += found
                 text = text.replace(form, "<redacted>")
-            replaced += found
         if len(secret) >= MASKED_SECRET_MIN_LENGTH and "****" in text:
             # Key characters only, bounded and delimited: never spans punctuation or starts inside a word,
             # and stays linear on long runs.
@@ -610,30 +603,3 @@ def redact_counted(text: str, settings: Settings, counts: dict[str, int] | None,
         if replaced and counts is not None:
             counts[name] = counts.get(name, 0) + replaced
     return text
-
-
-# A letter (any script): the one thing that makes a weak secret's text part of a longer word.
-_LETTER = r"[^\W\d_]"
-# What may stand before a weak secret's text: no letter, or a letter that ends an escape in serialised text (a JSON
-# escape such as \n or <, percent-encoding such as %3D), which separates words rather than joining them.
-_HEAD = (rf"(?:(?<!{_LETTER})|(?<=\\[bfnrt])|(?<=\\u[0-9A-Fa-f]{{4}})|(?<=\\x[0-9A-Fa-f]{{2}})"
-         r"|(?<=%[0-9A-Fa-f]{2}))")
-
-
-@functools.lru_cache(maxsize=64)
-def word_pattern(form: str) -> re.Pattern:
-    """`form` as a word of its own, case-sensitive: at an end where it has a letter, the text beside it must not be
-    a letter, so "set" is not found in "settings". A letter that ends an escape in serialised text (\\n, \\u003c,
-    %3D) does not join words, so the value after one still matches. Digits, underscores and punctuation beside it
-    match too, so a weak value glued to a number or an identifier is redacted rather than kept."""
-    head = _HEAD if form[:1].isalpha() else ""
-    tail = rf"(?!{_LETTER})" if form[-1:].isalpha() else ""
-    return re.compile(head + re.escape(form) + tail)
-
-
-def secret_in(text: str, value: str, weak: bool) -> bool:
-    """Whether `text` holds a secret's `value` the way redaction matches it: anywhere for a strong secret, as a word
-    of its own for a weak one."""
-    if value not in text:
-        return False
-    return not weak or word_pattern(value).search(text) is not None

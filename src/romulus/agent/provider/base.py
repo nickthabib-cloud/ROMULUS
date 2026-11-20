@@ -19,7 +19,6 @@ from romulus.config import (
     Settings,
     redact_counted,
     redact_text,
-    secret_in,
     secret_settings,
     weak_secret_names,
 )
@@ -79,13 +78,12 @@ class SecretGuardTripped(HistoryError):
 
 def secret_trips(parts: list[tuple[str, str]], secrets: list[tuple[str, str]],
                  weak: Collection[str] = ()) -> list[tuple[str, str]]:
-    """(setting, part) for every secret value found in a (part, text) list: names only. A strong secret is found
-    wherever its text appears; a weak one (its setting in `weak`) only as a word of its own. A reply has every weak
-    secret's text replaced when it arrives (ChatProvider.chat) unless it also holds a strong secret's, so a weak
-    secret is named only beside a strong one's or in a turn that did not come from this port: where a strong secret
-    is found, only the strong ones are named, since they are what end the session."""
-    found = [(name, part) for name, value in secrets for part, text in parts
-             if text and secret_in(text, value, name in weak)]
+    """(setting, part) for every secret value found in a (part, text) list, wherever its text appears: names only. A
+    reply has every weak secret's text (its setting in `weak`) replaced when it arrives (ChatProvider.chat) unless it
+    also holds a strong secret's, so a weak secret is found here only beside a strong one's or in a turn that did not
+    come from this port. Where a strong secret is found, only the strong ones are named, since they are what end the
+    session."""
+    found = [(name, part) for name, value in secrets for part, text in parts if text and value in text]
     strong = [trip for trip in found if trip[0] not in weak]
     return strong or found
 
@@ -301,8 +299,9 @@ def _scrub_json(value, scrub: Callable[[str], str]):
 def _scrub_call(call: ToolCall, scrub: Callable[..., str]) -> ToolCall:
     """The tool call with `scrub` applied to its name and arguments, counted once. Parsed arguments are scrubbed as
     values and written out again as the raw arguments, so the two still agree; arguments that did not parse are
-    scrubbed as text."""
-    name = scrub(call.name)
+    scrubbed as text. A name keeps a tool name's characters ("redacted" in place of the marker), so the turn still
+    replays; no tool has that name, so the call is refused as an unknown tool."""
+    name = scrub(call.name).replace("<redacted>", "redacted")
     if call.arguments is None:
         arguments, raw = None, scrub(call.raw_arguments)
     else:
@@ -426,8 +425,8 @@ class ChatProvider:
     # ---- weak secrets in replies ----------------------------------------------------------------------------------
     def _without_weak_secrets(self, result: ChatResult) -> ChatResult:
         """`result` with every weak configured secret's text (config.weak_secret_names) replaced by the redaction
-        marker wherever it stands as a word of its own: in the reply's text, its parsed answer, its tool calls' names
-        and arguments, and the provider state its turn is replayed from (`_scrub_reply_state`). This happens before
+        marker wherever it appears, as all redaction does: in the reply's text, its parsed answer, its tool calls'
+        names and arguments, and the provider state its turn is replayed from (`_scrub_reply_state`). This happens before
         the reply is validated, run, stored, shown or appended to its conversation, so the session goes on and its
         turn never carries the text onward. `reply_redactions` counts the replacements by setting.
 
