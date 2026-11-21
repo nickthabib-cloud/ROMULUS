@@ -198,13 +198,17 @@ def test_a_pathological_line_stays_within_the_backtracking_bound(tmp_path):
     # two unbounded repeats (the most admitted), against a line built to make them backtrack
     worst = _pattern(id="mention.t.worst", match={"anchored": "abcd.*x.*y"},
                      examples={"positive": ["abcd x y"], "negative": ["abcd y x"]})
-    _file(tmp_path, "w.yaml", [worst])
-    matcher = MentionMatcher(load_mention_patterns(tmp_path).compiled)
-    line = ("abcd" + "x" * 300) * (MAX_SCAN_CHARS // 304)
-    began = time.perf_counter()
-    for _ in range(10):
-        assert matcher.match(bound_text(line)[0]) == []
-    assert (time.perf_counter() - began) / 10 < 0.5
+    loose = _pattern(id="mention.t.loose", match={"anchored": "wxyz\\S+\\S+q"},
+                     examples={"positive": ["wxyz ab q"[0:4] + "abq"], "negative": ["wxyz q"]})
+    _file(tmp_path, "w.yaml", [worst, loose])
+    loaded = load_mention_patterns(tmp_path)
+    assert loaded.refused == [] and len(loaded.compiled) == 2
+    matcher = MentionMatcher(loaded.compiled)
+    for line in (("abcd" + "x" * 300) * (MAX_SCAN_CHARS // 304), ("wxyz" + "s" * 600) * 13):
+        began = time.perf_counter()
+        for _ in range(5):
+            assert matcher.match(bound_text(line)[0]) == []
+        assert (time.perf_counter() - began) / 5 < 0.5
 
 
 def test_a_long_line_is_scanned_to_the_bound_and_the_rest_counted():
@@ -626,8 +630,11 @@ def _rss() -> int:
                         ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
         counters = Counters()
         counters.cb = ctypes.sizeof(Counters)
-        ctypes.windll.psapi.GetProcessMemoryInfo(ctypes.windll.kernel32.GetCurrentProcess(),
-                                                 ctypes.byref(counters), counters.cb)
+        kernel32, psapi = ctypes.WinDLL("kernel32"), ctypes.WinDLL("psapi")
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD]
+        psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+        assert psapi.GetProcessMemoryInfo(kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb)
         return int(counters.WorkingSetSize)
     with open("/proc/self/statm") as handle:
         return int(handle.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")

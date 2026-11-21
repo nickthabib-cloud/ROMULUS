@@ -196,8 +196,8 @@ def _ways(items, in_repeat: bool) -> int:
             _ways(body, True)
             if unbounded and not (len(body) == 1 and body[0][0] in _ATOMS):
                 raise ValueError("an unbounded repeat must be of one character, class or '.'")
-            span = REGEX_WINDOW if unbounded else min(int(high), REGEX_WINDOW)
-            product *= max(1, span - int(low) + 1)
+            # the ways a repeat can stop inside the window: never more than the window's characters
+            product *= REGEX_WINDOW if unbounded else max(1, min(int(high) - int(low) + 1, REGEX_WINDOW))
         else:
             raise ValueError(f"{str(op).lower()} is refused (back references, lookaround, conditionals, atomic "
                              "groups and possessive repeats are outside the admitted subset)")
@@ -227,15 +227,10 @@ def compile_anchored(expression: str, case_sensitive: bool) -> tuple[re.Pattern,
         if op != _sre.LITERAL:
             break
         prefix.append(chr(arg))
+    # (a repeated last character, as in abcd+, is parsed into the repeat: it is never part of the prefix)
     if len(prefix) < MIN_PREFIX_CHARS:
         raise ValueError(f"an anchored expression must start with ^ or with a literal prefix of at least "
                          f"{MIN_PREFIX_CHARS} characters")
-    # a repeat after the prefix's last literal takes that literal with it (abcd+): the prefix stops before it
-    if len(items) > len(prefix) and items[len(prefix)][0] in _REPEATS:
-        prefix.pop()
-        if len(prefix) < MIN_PREFIX_CHARS:
-            raise ValueError(f"the literal prefix before the first repeat is shorter than {MIN_PREFIX_CHARS} "
-                             "characters")
     return compiled, "".join(prefix)
 
 
