@@ -25,7 +25,8 @@ Every (pattern, host) that lost lines is published with its count and can be pag
 
 The pool's coverage says what was and was not scanned: a partition the sweep could not read in full, a record without
 a text field, a line past the literal pass's bound, a line an anchored pattern could not be ruled out on, a source the
-sweep's fetch filters leave out, a cap, a stage write refused, a refused or changed pattern file, a scan that failed, a
+sweep's fetch filters leave out, a cap, a stage write refused, a refused pattern or pattern file, a changed pattern
+file, a scan that failed, a
 stop. Any of them makes the pool `partial`; with none it `scanned every offered record`, which never means that there
 are no mentions. With no patterns loaded the pool is `not_scanned`.
 
@@ -55,7 +56,7 @@ from xml.etree import ElementTree
 
 from romulus.agent.safety import injection_flags
 from romulus.config import redact_counted
-from romulus.content.mention_patterns import PatternSet
+from romulus.content.mention_patterns import REFUSED_SHOWN, PatternSet
 from romulus.evidence.mention_match import (
     MAX_PREFIX_TRIES,
     MAX_SCAN_CHARS,
@@ -98,6 +99,8 @@ EXCERPT_BEFORE = 256
 MAX_GONE_KEYS = 200_000
 MAX_SEEN_PAIRS = 1_000_000
 MAX_HOST_CHARS = 255
+# refused patterns and files named one by one among the coverage reasons (the rest are counted in one reason)
+REFUSALS_NAMED = 20
 # names listed in the coverage summary (the counts cover all; the stored losses page through every host)
 NAMES_SHOWN = 20
 # partitions the sweep could not read in full, listed by name (every one is counted)
@@ -707,9 +710,17 @@ class MentionScanner:
         reasons = []
         if not self.patterns.patterns:
             reasons.append("no mention patterns are loaded: unparsed text was not scanned")
-        for refused in self.patterns.refused:
-            reasons.append(f"pattern file {refused['name']} was refused, its patterns did not run: "
-                           f"{refused['error']}")
+        refused_all = self.patterns.refused
+        for refused in refused_all[:REFUSALS_NAMED]:
+            if refused.get("pattern") is None:
+                reasons.append(f"pattern file {refused['name']} was refused, its patterns did not run: "
+                               f"{refused['error']}")
+            else:
+                reasons.append(f"pattern {refused['pattern']} refused, it did not run: {refused['error']}")
+        if len(refused_all) > REFUSALS_NAMED:
+            reasons.append(f"{len(refused_all) - REFUSALS_NAMED} further pattern(s) or file(s) were refused and did not "
+                           f"run (the first {REFUSED_SHOWN} are listed under patterns.refused, every one is counted in "
+                           "patterns.refused_total)")
         if self.pin_changes:
             reasons.append("the pattern files differ from those pinned when the hunt was created: "
                            + ", ".join(self.pin_changes))

@@ -395,7 +395,7 @@ from tests import throughput_fixture as tf
 # as tests load no shipped pattern), and the manifest gains its mentions section under schema report-manifest@2.
 # Every other digest is unchanged.
 GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
- 'audit': 'ae36fd27f69a9915ce76e3a1361e48061072a44dbdd3c667e6bc79f9a99b910e',
+ 'audit': '6aaa77152013d8144a2ea79cff57b8d733d083841ea42dc4e534f59f13c3a546',
  'baseline_counts': 'be05fabb25336f21341b46eae7d8c2627828f7a7a7e8fdb24f4eb58576099354',
  'baseline_hunt_exclusions': 'c91eefda01c512d6d63e892dc9696016b01a71d44e4abcc429d954bd51864852',
  'baseline_observations': 'a55a6d933fecc9cbe7816e04638a044d82a4e1dd88f2c3b36ac160cf07d85af7',
@@ -412,15 +412,15 @@ GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe55
  'events': '13ccf787c362c3ed292b78492d8acb5e1f67d5ad191fa8113651b2320314af91',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
  'links': 'a4a267240e42c0155c746d50994b0cde06b4e77d95e1af4ced1fa53279046505',
- 'manifest': '99a3c4598f74d88a5c28d4247b3dfce245df8d595787be6990a425b2efcf511a',
+ 'manifest': '87407f0d6176f0368d90085ac142a6ef5d44e1e584d1a6a882fb9df5e250b80e',
  'raw': '04715be9c0dfa35e600d0f40ea09e9f738acb76e67eac64551cc380cc93de5f1',
  'rule_cells': 'e2dad7d7704bef089060ca184ee714a228033d3a90c3e212855f995c783c603d',
- 'stats': '934da7918807ae00bfc5a4cf19391d355f7f992109329a3264d5d52da99e04a2',
+ 'stats': '3cab287a0e842808a55545533e3005e8ebaf22bebf7af112b62598c7bd3c3ca6',
  'tasks': '1e1eeb69d05da151bec8f6dff43c1863a4eb43a288f84c1ba35168311b303360'}
 # The rule-estimate stack's digests (expansion seeded by the urgent and high lanes, as before evidence ranking;
 # the manifest's moved only with the incident tactics above).
 GOLDEN_STACK_BY_RULE_ESTIMATE = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
- 'audit': 'e984faea58f4cd173aa111e651d90159b1dc80f78cc78fde4b73e5c2c1b81edd',
+ 'audit': 'b15b1a78630e01d2bcbed75823d000750a1547fd1a9303d51e681fe41d57c4f9',
  'baseline_counts': 'be05fabb25336f21341b46eae7d8c2627828f7a7a7e8fdb24f4eb58576099354',
  'baseline_hunt_exclusions': 'c91eefda01c512d6d63e892dc9696016b01a71d44e4abcc429d954bd51864852',
  'baseline_observations': 'a55a6d933fecc9cbe7816e04638a044d82a4e1dd88f2c3b36ac160cf07d85af7',
@@ -437,10 +437,10 @@ GOLDEN_STACK_BY_RULE_ESTIMATE = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e
  'events': '13ccf787c362c3ed292b78492d8acb5e1f67d5ad191fa8113651b2320314af91',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
  'links': 'a4a267240e42c0155c746d50994b0cde06b4e77d95e1af4ced1fa53279046505',
- 'manifest': 'ea9b6e4bbb088df2e06f992bf487add55e8a0db5213a214c09511813c55a6474',
+ 'manifest': '3bea59e80e329ecec9d6946bc30fe0ccc5853d424177b5d9725a772a24c0e00c',
  'raw': '04715be9c0dfa35e600d0f40ea09e9f738acb76e67eac64551cc380cc93de5f1',
  'rule_cells': 'e2dad7d7704bef089060ca184ee714a228033d3a90c3e212855f995c783c603d',
- 'stats': '934da7918807ae00bfc5a4cf19391d355f7f992109329a3264d5d52da99e04a2',
+ 'stats': '3cab287a0e842808a55545533e3005e8ebaf22bebf7af112b62598c7bd3c3ca6',
  'tasks': '1e1eeb69d05da151bec8f6dff43c1863a4eb43a288f84c1ba35168311b303360'}
 GOLDEN_CANDIDATES_BY_RULE_ESTIMATE = GOLDEN_STACK_BY_RULE_ESTIMATE['candidates']
 GOLDEN_NON_BASELINE_SEMANTICS_BY_RULE_ESTIMATE = {'candidates': {'all_fields': '700437956302822956db19de3ac396f2c2bd0f0f5352543147a022e4eed147c6',

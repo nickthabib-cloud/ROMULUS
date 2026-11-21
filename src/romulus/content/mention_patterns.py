@@ -14,10 +14,11 @@ list of patterns:
       rationale: str
       examples: {positive: [str, ...], negative: [str, ...]}                 # one positive at least
 
-A file is validated strictly as a whole before any of its patterns run: an unknown key, a missing field, a duplicate
-id, an expression outside the admitted subset, or an example that does not behave as stated (every positive must match
-and no negative may) refuses the whole file, with an error naming the file, the pattern and the reason. A refused file
-is reported (its patterns did not run); it never makes a hunt read as having no mentions.
+Each pattern is validated strictly before it runs: an unknown key, a missing field, a duplicate id, an expression
+outside the admitted subset, or an example that does not behave as stated (every positive must match and no negative
+may) refuses that pattern, with an error naming the file, the pattern and the reason; the rest of its file still runs.
+A file that cannot be read as a pattern list (too large, not UTF-8 YAML, not a non-empty list) is refused whole. Every
+refusal is reported and makes the pool partial; it never makes a hunt read as having no mentions.
 
 A literal matches as a substring, under the pattern's case flag. An anchored expression runs as a regular-expression
 search (case-insensitive unless case_sensitive): it must start with `^`, or with a literal prefix of at least four
@@ -88,6 +89,8 @@ MAX_OPEN_GAPS = 2
 # expression that backtracks catastrophically takes seconds)
 PROBE_LIMIT_SECONDS = 0.005
 PROBE_RUNS = 3
+# refused patterns listed one by one in a stored summary or pin (every one is counted)
+REFUSED_SHOWN = 200
 _TECHNIQUE = r"^T[0-9]{4}(?:\.[0-9]{3})?$"
 
 
@@ -172,11 +175,12 @@ class MentionPattern(_Strict):
 
 @dataclass
 class PatternSet:
-    """The patterns a hunt runs, and every file that was refused (its patterns did not run)."""
+    """The patterns a hunt runs, and every pattern or file that was refused (it did not run)."""
     patterns: list[MentionPattern] = field(default_factory=list)
     compiled: list[CompiledPattern] = field(default_factory=list)
-    files: list[dict] = field(default_factory=list)       # {name, digest, patterns}
-    refused: list[dict] = field(default_factory=list)     # {name, error}
+    files: list[dict] = field(default_factory=list)       # {name, digest, patterns, refused}
+    # {name, pattern, error}: pattern is the refused pattern's id (or #position), None when the whole file was refused
+    refused: list[dict] = field(default_factory=list)
     directory: str = ""
     digest: str = "none"
     _matcher: MentionMatcher | None = field(default=None, repr=False, compare=False)
@@ -197,7 +201,7 @@ class PatternSet:
     def summary(self) -> dict:
         # no directory: a stored summary never depends on where the content is installed
         return {"digest": self.digest, "patterns": len(self.patterns), "files": list(self.files),
-                "refused": list(self.refused)}
+                "refused": self.refused[:REFUSED_SHOWN], "refused_total": len(self.refused)}
 
 
 def _shipped_dir() -> Path:
@@ -218,12 +222,14 @@ def mention_dir(settings=None) -> Path:
 
 
 def pattern_pin(patterns: PatternSet) -> dict:
-    """What a hunt pins of its pattern set at creation: the set's digest and each file's digest (the sweep names every
-    file that differs when it runs)."""
+    """What a hunt pins of its pattern set at creation: the set's digest, each file's digest (the sweep names every
+    file that differs when it runs) and each refused pattern or file with why."""
     return {"digest": patterns.digest, "patterns": len(patterns.patterns),
             "files": [{"name": item["name"], "digest": item["digest"], "patterns": item["patterns"]}
                       for item in patterns.files],
-            "refused": [item["name"] for item in patterns.refused]}
+            "refused": [{"name": item["name"], "pattern": item["pattern"], "error": item["error"][:300]}
+                        for item in patterns.refused[:REFUSED_SHOWN]],
+            "refused_total": len(patterns.refused)}
 
 
 # ---- anchored expressions -------------------------------------------------------------------------------------------
@@ -562,23 +568,23 @@ def compile_pattern(index: int, pattern: MentionPattern) -> CompiledPattern:
                            literals=tuple(pattern.match.literal))
 
 
-def _check_examples(name: str, patterns: list[MentionPattern], compiled: list[CompiledPattern]) -> None:
-    """Every positive example matches its pattern and no negative does, through the matcher the sweep runs."""
-    matcher = MentionMatcher(compiled)
-    for pattern, built in zip(patterns, compiled, strict=True):
-        for kind, values, wanted in (("positive", pattern.examples.positive, True),
-                                     ("negative", pattern.examples.negative, False)):
-            for value in values:
-                if (built.index in matcher.match(bound_text(value)[0])) != wanted:
-                    raise MentionPatternError(
-                        f"{name}: {pattern.id}: {kind} example {value[:120]!r} "
-                        f"{'does not match' if wanted else 'matches'}")
+def _example_problem(pattern: MentionPattern, built: CompiledPattern) -> str:
+    """Why the pattern's examples do not behave as stated through the matcher the sweep runs ('' when they do):
+    every positive must match and no negative may."""
+    matcher = MentionMatcher([built])
+    for kind, values, wanted in (("positive", pattern.examples.positive, True),
+                                 ("negative", pattern.examples.negative, False)):
+        for value in values:
+            if (built.index in matcher.match(bound_text(value)[0])) != wanted:
+                return f"{kind} example {value[:120]!r} {'does not match' if wanted else 'matches'}"
+    return ""
 
 
 def load_pattern_file(path: Path, *, taken: set[str] | frozenset[str] = frozenset(),
-                      start: int = 0) -> tuple[list[MentionPattern], list[CompiledPattern]]:
-    """The validated patterns of one file (indexes from `start`); MentionPatternError when the file is refused.
-    `taken` holds the ids earlier files already define."""
+                      start: int = 0) -> tuple[list[MentionPattern], list[CompiledPattern], list[dict]]:
+    """The patterns of one file that validate (indexes from `start`, in file order) and the patterns refused one by
+    one, each as {name, pattern, error}. MentionPatternError when the file as a whole is refused: too large, not UTF-8
+    YAML, or not a list holding at least one mapping. `taken` holds the ids earlier files already define."""
     name = path.name
     raw = path.read_bytes()
     if len(raw) > MAX_FILE_BYTES:
@@ -587,11 +593,16 @@ def load_pattern_file(path: Path, *, taken: set[str] | frozenset[str] = frozense
         document = yaml.safe_load(raw.decode("utf-8"))
     except (UnicodeDecodeError, yaml.YAMLError) as error:
         raise MentionPatternError(f"{name}: not valid UTF-8 YAML: {str(error)[:300]}") from None
-    if not isinstance(document, list) or not document:
+    if not isinstance(document, list) or not any(isinstance(item, dict) for item in document):
         raise MentionPatternError(f"{name}: the file must be a non-empty YAML list of patterns")
     patterns: list[MentionPattern] = []
     compiled: list[CompiledPattern] = []
+    refused: list[dict] = []
     seen: set[str] = set()
+
+    def refuse(label: str, why: str) -> None:
+        refused.append({"name": name, "pattern": label[:128], "error": f"{name}: {label[:128]}: {why}"[:800]})
+
     for position, item in enumerate(document):
         label = item.get("id") if isinstance(item, dict) and isinstance(item.get("id"), str) else f"#{position}"
         try:
@@ -599,22 +610,33 @@ def load_pattern_file(path: Path, *, taken: set[str] | frozenset[str] = frozense
         except ValidationError as error:
             problems = "; ".join(f"{'.'.join(str(part) for part in e['loc']) or '(pattern)'}: {e['msg']}"
                                  for e in error.errors(include_url=False))
-            raise MentionPatternError(f"{name}: {label}: {problems[:600]}") from None
+            refuse(label, problems[:600])
+            if re.fullmatch(_ID, label):
+                seen.add(label)
+            continue
         if pattern.id in seen or pattern.id in taken:
-            raise MentionPatternError(f"{name}: {pattern.id}: the id is defined twice")
+            refuse(pattern.id, "the id is defined twice")
+            continue
         seen.add(pattern.id)
         try:
-            compiled.append(compile_pattern(start + len(patterns), pattern))
+            built = compile_pattern(start + len(patterns), pattern)
         except ValueError as error:
-            raise MentionPatternError(f"{name}: {pattern.id}: {error}") from None
+            refuse(pattern.id, str(error))
+            continue
+        problem = _example_problem(pattern, built)
+        if problem:
+            refuse(pattern.id, problem)
+            continue
         patterns.append(pattern)
-    _check_examples(name, patterns, compiled)
-    return patterns, compiled
+        compiled.append(built)
+    return patterns, compiled, refused
 
 
 def load_mention_patterns(directory: Path | None = None, settings=None) -> PatternSet:
-    """Every valid pattern file of the directory, in file-name order; a refused file is listed with its error. A
-    missing directory or one without files gives an empty set, which the sweep reports as not scanned."""
+    """Every valid pattern of the directory's files, in file-name then file order. A pattern that fails validation,
+    the probe or its own examples is refused on its own and the rest of its file still runs; a file that cannot be
+    read as a pattern list is refused whole. Each refusal is listed with its error. A missing directory or one without
+    files gives an empty set, which the sweep reports as not scanned."""
     root = directory or mention_dir(settings)
     out = PatternSet(directory=str(root))
     files = sorted(root.glob("*.yaml")) if root.is_dir() else []
@@ -622,20 +644,25 @@ def load_mention_patterns(directory: Path | None = None, settings=None) -> Patte
     whole = hashlib.sha256()
     for path in files:
         try:
-            patterns, compiled = load_pattern_file(path, taken=frozenset(taken), start=len(out.patterns))
+            patterns, compiled, refused = load_pattern_file(path, taken=frozenset(taken), start=len(out.patterns))
         except MentionPatternError as error:
-            out.refused.append({"name": path.name, "error": str(error)[:800]})
+            out.refused.append({"name": path.name, "pattern": None, "error": str(error)[:800]})
             continue
         except OSError as error:
-            out.refused.append({"name": path.name, "error": f"{path.name}: could not be read ({type(error).__name__})"})
+            out.refused.append({"name": path.name, "pattern": None,
+                                "error": f"{path.name}: could not be read ({type(error).__name__})"})
             continue
         raw = path.read_bytes()
         file_digest = hashlib.sha256(raw).hexdigest()
         whole.update(json.dumps([path.name, file_digest]).encode())
+        # an id a refused pattern defined stays taken: a later file defining it again is still a duplicate
         taken.update(pattern.id for pattern in patterns)
+        taken.update(item["pattern"] for item in refused if re.fullmatch(_ID, item["pattern"]))
         out.patterns.extend(patterns)
         out.compiled.extend(compiled)
-        out.files.append({"name": path.name, "digest": file_digest, "patterns": len(patterns)})
+        out.refused.extend(refused)
+        out.files.append({"name": path.name, "digest": file_digest, "patterns": len(patterns),
+                          "refused": len(refused)})
     if out.files:
         out.digest = whole.hexdigest()
     return out

