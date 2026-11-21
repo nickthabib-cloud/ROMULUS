@@ -98,14 +98,14 @@ def test_a_late_refusal_cites_the_compact_success_for_fetching_at_publication():
         [match] = rule.consume([refused(0, actor="u1", host="h1")])
         cited = next(e for e in match.events if e.id == success.id)
         assert COMPACT_CITATION_NOTE in cited.caveats and cited.raw == success.raw
-        assert not cited.has("process.cwd")                     # only the fields the judgment reads are held
+        assert cited.has("process.cwd")                         # the whole typed event is held, without its raw copy
     finally:
         rule.close_spill()
 
 
 def test_cross_target_successes_are_held_until_every_target_has_read_past_them():
     rule = PrivilegeBrokerSuspiciousSuccess()
-    rule.sweep_targets = ("auth-a", "auth-b")
+    rule.linux_host_targets = ("auth-a", "auth-b")
     try:
         rule.bind_raw({}, "auth-a")
         for start in range(0, 20_000, 1000):                    # target a: successes over about 5.5 hours

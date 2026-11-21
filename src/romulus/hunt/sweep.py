@@ -392,9 +392,11 @@ class Sweep:
             pb.budget = self.budget
             pb.window_start = window.start
             pb.window_end = window.end
-            # the hunt's source targets, read one after another: a rule holding state across targets keeps it until
-            # every target has read past it
-            pb.sweep_targets = tuple(contracts)
+            # the hunt's targets that can hold Linux host records (a Linux target, or one mixing Linux text), read one
+            # after another: a rule holding state across them keeps it until every one has read past it
+            pb.linux_host_targets = tuple(
+                name for name, contract in contracts.items()
+                if contract is None or contract.os_family == "linux" or contract.linux_text_mixed is not False)
             if pb.id == "host.telemetry_gap_after_tamper":
                 pb.persisted_loader = lambda ids: [
                     TypedEvent.model_validate(row["event"]) for row in repo.citation_events(hunt_id, ids)]

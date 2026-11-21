@@ -216,6 +216,45 @@ def _shellish(name: str) -> bool:
     return name in INTERPRETERS or name.startswith("python")
 
 
+# Separators of the statements in a `sh -c` script as sudo logs it (words split on spaces).
+_SCRIPT_SEPARATORS = frozenset({";", "&&", "||", "|", "&"})
+_NETCAT = frozenset({"nc", "ncat", "netcat"})
+
+
+def script_risks(script: list[str]) -> list[str]:
+    """What a `sh -c` script run as root shows that a deployment script does not: a statement that is a bare shell or
+    interpreter, a shell with -i, or a reverse-shell form (nc/ncat -e, socat exec:)."""
+    risks: list[str] = []
+    statement: list[str] = []
+    for word in [*script, ";"]:
+        if word not in _SCRIPT_SEPARATORS and not word.endswith(";"):
+            statement.append(word)
+            continue
+        if word.endswith(";") and word != ";":
+            statement.append(word[:-1])
+        if statement:
+            first, rest = basename(statement[0]), statement[1:]
+            if _shellish(first) and ("-i" in rest or not any(not arg.startswith("-") for arg in rest)):
+                risks.append(f"its script starts an interactive {first!r}")
+            elif first in _NETCAT and any(arg in ("-e", "-c", "--exec", "--sh-exec")
+                                          or (arg.startswith("-") and not arg.startswith("--") and "e" in arg[1:])
+                                          for arg in rest):
+                risks.append(f"its script runs {first!r} with a command to execute (a reverse-shell form)")
+            elif first == "socat" and any(arg.lower().startswith(("exec:", "system:")) for arg in rest):
+                risks.append("its script runs socat with exec: (a reverse-shell form)")
+        statement = []
+    return risks
+
+
+def ansible_module_run(words: list[str], account: str) -> bool:
+    """Ansible's become wrapper: the BECOME-SUCCESS marker, and a module under the account's ~/.ansible/tmp
+    (remote_tmp's default, ~/.ansible/tmp/ansible-tmp-<id>/)."""
+    marker = any(word.startswith("BECOME-SUCCESS-") for word in words)
+    module = any(re.search(rf"^(?:~|/home/{re.escape(account)}|/var/lib/{re.escape(account)})"
+                           r"/\.ansible/tmp/ansible-tmp-[^/\s]+/", word) for word in words)
+    return marker and module
+
+
 def _plain_service_action(program_name: str, args: list[str]) -> bool:
     if program_name == "systemctl":
         return (bool(args) and args[0] in SYSTEMCTL_PLAIN
@@ -242,15 +281,11 @@ def _identifier(event) -> str:
     return str(event.get("log.identifier") or event.get("auth.service") or "the broker")
 
 
-# The fields a held success keeps for judging it again (and for its claim and citation); the rest of the event, and
-# its raw copy, are not kept: a re-judged success is cited by its native reference and fetched at publication.
-_HELD_FIELDS = frozenset({"user.name", "auth.target_user", "auth.service", "process.tty", "sudo.command",
-                          "privilege.command", "process.pid", "log.identifier", "log.writer", "journal.identifier"})
-
-
 def _held_success(event) -> bytes:
-    slim = event.model_copy(update={"fields": {k: v for k, v in event.fields.items() if k in _HELD_FIELDS}})
-    return compact_event(slim)
+    """A held success: its whole typed event (every field with its provenance, its native reference and digest),
+    compressed, without its raw copy. A re-judged success is cited from this, marked compact, and its raw body is
+    fetched by native reference at publication."""
+    return compact_event(event)
 
 
 class PrivilegeBrokerSuspiciousSuccess(FoldedLinuxDirect):
@@ -326,8 +361,11 @@ class PrivilegeBrokerSuspiciousSuccess(FoldedLinuxDirect):
                     "argument that is a shell or interpreter, a GTFOBins shell-escape program, a missing or ambiguous "
                     "command, or refusals first. Automation accounts (ansible, jenkins, gitlab-runner, puppet, chef, "
                     "salt) run shell scripts as root by design, often from a pseudo-terminal (Ansible's 'sh -c echo "
-                    "BECOME-SUCCESS-<id> ; <module>'): a non-interactive 'sh -c <script>' or '<shell> <script-file>' "
-                    "is a lead; high for a bare interactive shell or interpreter, su or sudo, an argument that is a "
+                    "BECOME-SUCCESS-<id> ; <module>', routine only with the marker and a module under the account's "
+                    "~/.ansible/tmp): a non-interactive 'sh -c <script>' or '<shell> <script-file>' is a lead; high "
+                    "when the script starts a bare or -i shell or interpreter, opens /dev/tcp or /dev/udp, or holds a "
+                    "reverse-shell form (nc/ncat -e, socat exec:), for a bare interactive shell or interpreter, su or "
+                    "sudo, an argument that is a "
                     "shell or interpreter, a shell-escape program, a missing or ambiguous command, or refusals first. "
                     "systemctl and journalctl escape only through a pager, so a plain subcommand on named units "
                     "without a terminal stays a lead",
@@ -338,9 +376,12 @@ class PrivilegeBrokerSuspiciousSuccess(FoldedLinuxDirect):
                  "or automation account's routine success; a success after fewer failed attempts; a success whose only "
                  "refusals are lines journald shows another program wrote. Never context. A lead whose success a later "
                  "refusal raised to high is revised with a note naming the high finding (both stay)",
-        "state": "refusals with their raw copies, and compact successes, per (host, account, target), at most 16 each "
-                 "and only inside the window, in keyed stores over the rule's disk spill; rows are pruned across "
-                 "every key once every relevant target has read past them by the window plus 15 minutes",
+        "state": "refusals with their raw copies, and successes as their whole typed event compressed without a raw "
+                 "copy (fetched by native reference when a late refusal cites one), per (host, account, target), at "
+                 "most 16 each and only inside the window, in keyed stores over the rule's disk spill; rows are "
+                 "pruned across every key once every Linux-capable target has read past them by the window plus 15 "
+                 "minutes (a network-only target never holds them); a record read after rows of its time were pruned "
+                 "is still judged and makes the window partial",
     }
 
     def __init__(self):
@@ -352,6 +393,7 @@ class PrivilegeBrokerSuspiciousSuccess(FoldedLinuxDirect):
         # time bucket -> keys holding rows of that bucket, for pruning across every key
         self.buckets = KeyedStore(self, "broker_buckets", self.HOT)
         self._oldest_bucket: int | None = None
+        self._pruned_before = float("-inf")           # rows older than this may have been pruned
         self._progress: dict[str | None, float] = {}    # per source target: the newest record time read
         self._done: set[str | None] = set()              # targets the sweep finished reading
         self._current: str | None = None
@@ -372,6 +414,7 @@ class PrivilegeBrokerSuspiciousSuccess(FoldedLinuxDirect):
             if self._current in self._progress:
                 self._done.add(self._current)       # the sweep reads one target to its end before the next
             self._current = target
+            self._done.discard(target)
         self._progress.setdefault(target, float("-inf"))
         if events:
             self._progress[target] = max(self._progress[target], max(e.ts.timestamp() for e in events))
@@ -395,20 +438,21 @@ class PrivilegeBrokerSuspiciousSuccess(FoldedLinuxDirect):
     # ------------------------------------------------------------------------------------------------- held rows
     def horizon(self) -> float:
         """Rows older than this are needed by no record still to be read: every relevant target that is not finished
-        has read past it by the window plus the margin. A planned target not yet read holds it at the hunt's start."""
-        planned = getattr(self, "sweep_targets", None)
-        pending = [t for t in (planned if planned is not None else self._progress) if t not in self._done]
-        if not pending:
-            # every target is read: nothing older than the newest record read, less the window, is needed
-            pending = list(self._progress)
+        has read past it by the window plus the margin. A planned target not yet read holds it at the hunt's start.
+        Only targets that can hold broker lines count (the sweep's linux_host_targets: a Linux target, or one mixing
+        Linux text); a network-only target never holds the horizon."""
+        planned = getattr(self, "linux_host_targets", None)
+        relevant = list(planned) if planned is not None else list(self._progress)
+        # every relevant target read: nothing older than the newest of them, less the window, is needed
+        pending = [t for t in relevant if t not in self._done] or relevant
         reached = min((self._progress.get(t, float("-inf")) for t in pending), default=float("-inf"))
         return reached - self.WINDOW_SECONDS - self.PRUNE_MARGIN_SECONDS
 
     def _index(self, key, when: float) -> None:
         bucket = int(when // self.BUCKET_SECONDS)
-        held = self.buckets.get(bucket, [])
-        if not held or held[-1] != key:
-            self._put(self.buckets, bucket, [*held, key], cap=None)
+        held = self.buckets.get(bucket, None)
+        if held is None or key not in held:
+            self._put(self.buckets, bucket, {*(held or ()), key}, cap=None)
         self._oldest_bucket = bucket if self._oldest_bucket is None else min(self._oldest_bucket, bucket)
 
     def prune(self) -> int:
@@ -433,6 +477,7 @@ class PrivilegeBrokerSuspiciousSuccess(FoldedLinuxDirect):
                         store.pop(key, None)
             bucket += 1
         self._oldest_bucket = last
+        self._pruned_before = max(self._pruned_before, limit)
         return dropped
 
     @staticmethod
@@ -443,7 +488,7 @@ class PrivilegeBrokerSuspiciousSuccess(FoldedLinuxDirect):
         return [row for row in store.get(key, []) if abs(when - self._row_time(row)) <= self.WINDOW_SECONDS]
 
     def _put(self, store, key, items, cap: int | None = KEPT) -> None:
-        if not store.put(key, items[-cap:] if cap else items):
+        if not store.put(key, items[-cap:] if cap and isinstance(items, list) else items):
             self.note_limit(store.name, f"the {store.name.replace('_', ' ')} store's disk budget is spent; later "
                                         "records are not held for the refusal-then-success join")
 
@@ -458,6 +503,12 @@ class PrivilegeBrokerSuspiciousSuccess(FoldedLinuxDirect):
             return []
         key = (e.host, str(actor), str(target))
         when = e.ts.timestamp()
+        if when < self._pruned_before:
+            # read after rows of its time were pruned (a target or partition out of the expected order): it is still
+            # judged, but a refusal or success it would have joined may be gone
+            self.note_limit("late_record", "a broker record older than the pruning horizon was read after rows of "
+                                           "its time were pruned; a refusal or success it would join may be missing",
+                            records=0)
         if e.outcome == Outcome.failure:
             refusals = self._held(self.refusals, key, when) + [(e, super().raw_of(e))]
             self._put(self.refusals, key, refusals)
@@ -527,6 +578,8 @@ class PrivilegeBrokerSuspiciousSuccess(FoldedLinuxDirect):
         name, args = basename(words[0]), words[1:]
         if kind == "app" and on_tty:
             risks.append(f"it ran from terminal {tty}")
+        if socket := next((word for word in words if "/dev/tcp/" in word or "/dev/udp/" in word), None):
+            risks.append(f"the command opens a network socket through the shell ({socket!r})")
         if name in ("su", "sudo"):
             risks.append(f"the command is {name!r}, an account switch")
         elif _shellish(name):
@@ -536,6 +589,12 @@ class PrivilegeBrokerSuspiciousSuccess(FoldedLinuxDirect):
             elif bare:
                 risks.append(f"the command is a bare interactive {name!r}"
                              + (f" from terminal {tty}" if on_tty else ""))
+            else:
+                script = args[args.index("-c") + 1:] if "-c" in args else []
+                risks += script_risks(script)
+                if str(success.get("user.name")) == "ansible" and not ansible_module_run(words, "ansible"):
+                    risks.append("it is not Ansible's become wrapper (no BECOME-SUCCESS marker with a module under "
+                                 "the account's ~/.ansible/tmp)")
         else:
             shells = [arg for arg in args if _shellish(basename(arg))]
             if shells:
