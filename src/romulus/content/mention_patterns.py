@@ -9,22 +9,23 @@ Each file in the mention directory (`content/mentions/*.yaml`, or `ROMULUS_MENTI
       strength: strong | medium | weak
       attack: [T1059.004, ...]      # optional: the pattern's own metadata, never an observed technique
       telemetry: [linux_text, windows_text, any]
-      source: {name: str, url: str, license: str, upstream_id: str | null}
+      source: {name: str, url: str, license: str, upstream_id: str | null}   # upstream_id may be left out
       rationale: str
-      examples: {positive: [str, ...], negative: [str, ...]}
+      examples: {positive: [str, ...], negative: [str, ...]}                 # one positive at least
 
 A file is validated strictly as a whole before any of its patterns run: an unknown key, a missing field, a duplicate
 id, an expression outside the admitted subset, or an example that does not behave as stated (every positive must match
 and no negative may) refuses the whole file, with an error naming the file, the pattern and the reason. A refused file
 is reported (its patterns did not run); it never makes a hunt read as having no mentions.
 
-An anchored expression must be linear-time to run on attacker-written text. It must start with `^` or with a literal
-prefix of at least four characters (the matcher runs it only where that prefix occurs), be at most 512 characters, and
-use only literals, character classes, `.`, groups, alternation, repeats and `^`/`\\A`/`\\b`/`\\B`. It may not use back
-references, lookaround, conditionals, atomic groups, possessive repeats, inline flags or end anchors (the matcher reads
-a bounded window, where an end anchor would also match at the window's edge). No repeat may hold another repeat or an
-alternation, and the backtracking product of its repeats and alternations must stay within the matcher's bound (two
-unbounded repeats at most).
+A literal is 3 to 512 characters. An anchored expression must be linear-time to run on attacker-written text. It
+must start with `^` or with a literal prefix of at least four characters (the matcher runs it only where that prefix
+occurs), be at most 512 characters, and use only literals, character classes, `.`, groups, alternation, repeats and
+the anchors `^`, `$`, `\\A`, `\\Z`, `\\b` and `\\B`. It may not use back references, lookaround, conditionals, atomic
+groups, possessive repeats or inline flags. No repeat may hold another repeat or an alternation, and the backtracking
+product of its repeats and alternations must stay within the matcher's bound (two unbounded repeats at most). The
+matcher reads an expression over at most 512 characters from where it is tried; a line it could not rule out there is
+counted in the pool's coverage.
 """
 from __future__ import annotations
 
@@ -56,7 +57,7 @@ except ImportError:  # pragma: no cover - older interpreters
 
 MAX_ANCHORED_CHARS = 512
 MIN_PREFIX_CHARS = 4
-MIN_LITERAL_CHARS = 4
+MIN_LITERAL_CHARS = 3
 MAX_LITERAL_CHARS = 512
 MAX_LITERALS = 256
 MAX_EXAMPLE_CHARS = 4_096
@@ -97,12 +98,12 @@ class Source(_Strict):
     name: str = Field(min_length=1, max_length=200)
     url: str = Field(min_length=1, max_length=1000)
     license: str = Field(min_length=1, max_length=200)
-    upstream_id: str | None = Field(max_length=500)
+    upstream_id: str | None = Field(default=None, max_length=500)
 
 
 class Examples(_Strict):
     positive: list[str] = Field(min_length=1, max_length=50)
-    negative: list[str] = Field(min_length=1, max_length=50)
+    negative: list[str] = Field(default_factory=list, max_length=50)
 
     @field_validator("positive", "negative")
     @classmethod
@@ -153,8 +154,9 @@ class PatternSet:
     digest: str = "none"
 
     def summary(self) -> dict:
-        return {"directory": self.directory, "digest": self.digest, "patterns": len(self.patterns),
-                "files": list(self.files), "refused": list(self.refused)}
+        # no directory: a stored summary never depends on where the content is installed
+        return {"digest": self.digest, "patterns": len(self.patterns), "files": list(self.files),
+                "refused": list(self.refused)}
 
 
 def mention_dir() -> Path:
@@ -164,7 +166,9 @@ def mention_dir() -> Path:
 
 # ---- anchored expressions -------------------------------------------------------------------------------------------
 _ATOMS = {_sre.LITERAL, _sre.NOT_LITERAL, _sre.ANY, _sre.IN}
-_ALLOWED_AT = {_sre.AT_BEGINNING, _sre.AT_BEGINNING_STRING, _sre.AT_BOUNDARY, _sre.AT_NON_BOUNDARY}
+_ALLOWED_AT = {_sre.AT_BEGINNING, _sre.AT_BEGINNING_STRING, _sre.AT_BOUNDARY, _sre.AT_NON_BOUNDARY,
+               _sre.AT_END, _sre.AT_END_STRING}
+_END_AT = {_sre.AT_END, _sre.AT_END_STRING}
 _REPEATS = {_sre.MAX_REPEAT, _sre.MIN_REPEAT}
 
 
@@ -176,7 +180,7 @@ def _ways(items, in_repeat: bool) -> int:
             continue
         if op == _sre.AT:
             if arg not in _ALLOWED_AT:
-                raise ValueError("end anchors ($, \\Z) are refused: the matcher reads a bounded window")
+                raise ValueError(f"the anchor {str(arg).lower()} is refused")
             continue
         if op == _sre.SUBPATTERN:
             _group, add_flags, del_flags, body = arg
@@ -194,8 +198,6 @@ def _ways(items, in_repeat: bool) -> int:
                 raise ValueError("a repeat inside a repeat is refused (nested quantifiers)")
             unbounded = high == _sre.MAXREPEAT
             _ways(body, True)
-            if unbounded and not (len(body) == 1 and body[0][0] in _ATOMS):
-                raise ValueError("an unbounded repeat must be of one character, class or '.'")
             # the ways a repeat can stop inside the window: never more than the window's characters
             product *= REGEX_WINDOW if unbounded else max(1, min(int(high) - int(low) + 1, REGEX_WINDOW))
         else:
@@ -207,8 +209,31 @@ def _ways(items, in_repeat: bool) -> int:
     return product
 
 
-def compile_anchored(expression: str, case_sensitive: bool) -> tuple[re.Pattern, str | None]:
-    """The compiled expression and its literal prefix (None when it starts with ^); ValueError when refused."""
+def _ends(items) -> bool:
+    """Whether a parsed sequence uses an end anchor anywhere."""
+    for op, arg in items:
+        if op == _sre.AT and arg in _END_AT:
+            return True
+        if op == _sre.SUBPATTERN and _ends(arg[3]):
+            return True
+        if op == _sre.BRANCH and any(_ends(alt) for alt in arg[1]):
+            return True
+        if op in _REPEATS and _ends(arg[2]):
+            return True
+    return False
+
+
+@dataclass(frozen=True)
+class Anchored:
+    regex: re.Pattern
+    prefix: str | None              # None: it starts with ^
+    end_anchored: bool
+    max_width: int | None           # the longest text it can match; None when unbounded
+    lead: str = ""                  # for one that starts with ^: the literal text right after it
+
+
+def compile_anchored(expression: str, case_sensitive: bool) -> Anchored:
+    """The compiled expression, its literal prefix and its shape; ValueError when refused."""
     if not expression or len(expression) > MAX_ANCHORED_CHARS:
         raise ValueError(f"an anchored expression is 1 to {MAX_ANCHORED_CHARS} characters")
     try:
@@ -220,8 +245,15 @@ def compile_anchored(expression: str, case_sensitive: bool) -> tuple[re.Pattern,
         raise ValueError("inline flags are refused: case is set by case_sensitive")
     items = list(parsed)
     _ways(items, False)
+    widest = parsed.getwidth()[1]
+    shape = {"end_anchored": _ends(items), "max_width": None if widest >= _sre.MAXREPEAT else int(widest)}
     if items and items[0][0] == _sre.AT and items[0][1] in {_sre.AT_BEGINNING, _sre.AT_BEGINNING_STRING}:
-        return compiled, None
+        lead = []
+        for op, arg in items[1:]:
+            if op != _sre.LITERAL:
+                break
+            lead.append(chr(arg))
+        return Anchored(compiled, None, **shape, lead="".join(lead))
     prefix = []
     for op, arg in items:
         if op != _sre.LITERAL:
@@ -231,14 +263,15 @@ def compile_anchored(expression: str, case_sensitive: bool) -> tuple[re.Pattern,
     if len(prefix) < MIN_PREFIX_CHARS:
         raise ValueError(f"an anchored expression must start with ^ or with a literal prefix of at least "
                          f"{MIN_PREFIX_CHARS} characters")
-    return compiled, "".join(prefix)
+    return Anchored(compiled, "".join(prefix), **shape)
 
 
 def compile_pattern(index: int, pattern: MentionPattern) -> CompiledPattern:
     if pattern.match.anchored is not None:
-        regex, prefix = compile_anchored(pattern.match.anchored, pattern.case_sensitive)
-        return CompiledPattern(index=index, id=pattern.id, case_sensitive=pattern.case_sensitive, regex=regex,
-                               prefix=prefix)
+        built = compile_anchored(pattern.match.anchored, pattern.case_sensitive)
+        return CompiledPattern(index=index, id=pattern.id, case_sensitive=pattern.case_sensitive, regex=built.regex,
+                               prefix=built.prefix, end_anchored=built.end_anchored, max_width=built.max_width,
+                               lead=built.lead)
     return CompiledPattern(index=index, id=pattern.id, case_sensitive=pattern.case_sensitive,
                            literals=tuple(pattern.match.literal))
 
@@ -304,8 +337,11 @@ def load_mention_patterns(directory: Path | None = None) -> PatternSet:
     for path in files:
         try:
             patterns, compiled = load_pattern_file(path, taken=frozenset(taken), start=len(out.patterns))
-        except (MentionPatternError, OSError) as error:
+        except MentionPatternError as error:
             out.refused.append({"name": path.name, "error": str(error)[:800]})
+            continue
+        except OSError as error:
+            out.refused.append({"name": path.name, "error": f"{path.name}: could not be read ({type(error).__name__})"})
             continue
         raw = path.read_bytes()
         file_digest = hashlib.sha256(raw).hexdigest()

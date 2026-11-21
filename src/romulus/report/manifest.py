@@ -1433,7 +1433,6 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
     mentions = canonical.get("mentions")
     if mentions:
         # a mention's id and its raw record's id are hunt-scoped: projected to their content
-        (mentions.get("coverage") or {}).get("patterns", {}).pop("directory", None)
         for item in mentions.get("items") or []:
             item["id"] = "M-" + digest({"pattern": item["pattern"]["id"], "host": item["host"],
                                         "line": item["line"]})[:20]

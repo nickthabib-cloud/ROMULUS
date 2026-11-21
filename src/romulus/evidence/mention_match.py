@@ -145,6 +145,16 @@ class CompiledPattern:
     literals: tuple[str, ...] = ()
     regex: re.Pattern | None = None
     prefix: str | None = None             # the literal an anchored expression starts with (None: it starts with ^)
+    end_anchored: bool = False            # the expression uses $ or \Z: it must see the line's real end
+    max_width: int | None = None          # the longest text it can match (None: unbounded)
+    lead: str = ""                        # for one that starts with ^: the literal text right after it
+
+
+# Why a line could not be ruled out for an anchored expression (MentionMatcher.match `unresolved`): its literal
+# prefix occurred more often than it is tried, its window ended before the line did, or (with an end anchor) the
+# line's end was past the window or the scan bound.
+TRIES_EXHAUSTED = "prefix_tries_exhausted"
+WINDOW_CUT = "window_cut"
 
 
 class MentionMatcher:
@@ -174,25 +184,57 @@ class MentionMatcher:
                 self._views.append((sensitive, LiteralSet(list(literals)), owners, at_start))
         self._by_index = {pattern.index: pattern for pattern in self.patterns}
 
-    def match(self, text: str) -> list[int]:
+    @staticmethod
+    def _try(pattern: CompiledPattern, view: str, start: int, cut: bool, unresolved: set[str]) -> bool:
+        """Whether the expression matches at `start`, over its window. A window that ends before the line does (or,
+        for an end anchor, a line whose real end the matcher cannot see) is noted when nothing matched."""
+        end = len(view)
+        fits = pattern.max_width is not None and pattern.max_width <= REGEX_WINDOW
+        if pattern.end_anchored:
+            if end - start > REGEX_WINDOW:
+                # a match must reach the line's end; one no wider than the window cannot from here
+                if not fits:
+                    unresolved.add(WINDOW_CUT)
+                return False
+            if cut:
+                unresolved.add(WINDOW_CUT)                # the line's real end was past the scan bound
+                return False
+            return pattern.regex.match(view, start, end) is not None
+        if pattern.regex.match(view, start, min(end, start + REGEX_WINDOW)) is not None:
+            return True
+        if start + REGEX_WINDOW < end and not fits:
+            unresolved.add(WINDOW_CUT)
+        return False
+
+    def match(self, text: str, *, cut: bool = False, unresolved: set[str] | None = None) -> list[int]:
+        """The indexes of the patterns whose text occurs in `text` (a line `bound_text` returned; `cut` when it cut
+        the line). `unresolved` receives why an anchored expression could not be ruled out on this line."""
         matched: set[int] = set()
+        notes: set[str] = set() if unresolved is None else unresolved
         lowered = None
         for sensitive, literals, owners, at_start in self._views:
             if sensitive:
                 view = text
             else:
                 view = lowered = text.lower() if lowered is None else lowered
-            for slot, starts in literals.find(view).items():
+            for slot, starts in literals.find(view, MAX_PREFIX_TRIES + 1).items():
                 for index, gated in owners[slot]:
                     if index in matched:
                         continue
                     if not gated:
                         matched.add(index)
                         continue
-                    regex = self._by_index[index].regex
-                    if any(regex.match(view, start, start + REGEX_WINDOW) for start in starts[:MAX_PREFIX_TRIES]):
+                    pattern = self._by_index[index]
+                    if any(self._try(pattern, view, start, cut, notes) for start in starts[:MAX_PREFIX_TRIES]):
                         matched.add(index)
+                    elif len(starts) > MAX_PREFIX_TRIES:
+                        notes.add(TRIES_EXHAUSTED)
             for pattern in at_start:
-                if pattern.index not in matched and pattern.regex.match(view, 0, REGEX_WINDOW):
+                if pattern.index in matched:
+                    continue
+                lead = pattern.lead if sensitive else pattern.lead.lower()
+                if lead and not view.startswith(lead):
+                    continue                                     # it cannot match this line at all
+                if self._try(pattern, view, 0, cut, notes):
                     matched.add(pattern.index)
         return sorted(matched)

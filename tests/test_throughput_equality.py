@@ -391,8 +391,11 @@ from tests import throughput_fixture as tf
 # links, citations and the non-baseline semantic projection are unchanged.
 # Every coverage cell then gains the rule's cost (records offered and rows selected; wall times are volatile): only
 # rule-cell digests move.
+# The mention sweep: the sweep's stats and its summary audit record gain the mention pool's coverage (not_scanned here,
+# as tests load no shipped pattern), and the manifest gains its mentions section under schema report-manifest@2.
+# Every other digest is unchanged.
 GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
- 'audit': 'a47a8a17ee37a9a0602a77461806f3ab98d84bb587c19c4e62c6053d6f6af318',
+ 'audit': '5c342a9fca078b24c7c3f9015cf9bdc8200c050268337b1bb733675fff75d158',
  'baseline_counts': 'be05fabb25336f21341b46eae7d8c2627828f7a7a7e8fdb24f4eb58576099354',
  'baseline_hunt_exclusions': 'c91eefda01c512d6d63e892dc9696016b01a71d44e4abcc429d954bd51864852',
  'baseline_observations': 'a55a6d933fecc9cbe7816e04638a044d82a4e1dd88f2c3b36ac160cf07d85af7',
@@ -409,15 +412,15 @@ GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe55
  'events': '13ccf787c362c3ed292b78492d8acb5e1f67d5ad191fa8113651b2320314af91',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
  'links': 'a4a267240e42c0155c746d50994b0cde06b4e77d95e1af4ced1fa53279046505',
- 'manifest': 'd6d90944df59bcef786e30c4c030bcba5f63f5c35de2c39eba6ed0682afee4c4',
+ 'manifest': 'd61fac029f5b1a3469e5620ca2891247f506feee46660732f5aa8fdbd099d663',
  'raw': '04715be9c0dfa35e600d0f40ea09e9f738acb76e67eac64551cc380cc93de5f1',
  'rule_cells': 'e2dad7d7704bef089060ca184ee714a228033d3a90c3e212855f995c783c603d',
- 'stats': 'be588e34e14e570c11a47fc9b3953e564d8f6026d909d9ae7f9c7ef561c99c5a',
+ 'stats': '0fe4c444926bff193a20f74f2e49256366371461c6a4c44fbf946d2691399e6f',
  'tasks': '1e1eeb69d05da151bec8f6dff43c1863a4eb43a288f84c1ba35168311b303360'}
 # The rule-estimate stack's digests (expansion seeded by the urgent and high lanes, as before evidence ranking;
 # the manifest's moved only with the incident tactics above).
 GOLDEN_STACK_BY_RULE_ESTIMATE = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
- 'audit': 'ad7203bc0be8e336c46f3fefdb57fb54f8b116f2ef299be4577dabd982a571b9',
+ 'audit': '2f89362a4e19b940e312d567c8f8928733f4d9bff97ba5ac895cdc3e25973968',
  'baseline_counts': 'be05fabb25336f21341b46eae7d8c2627828f7a7a7e8fdb24f4eb58576099354',
  'baseline_hunt_exclusions': 'c91eefda01c512d6d63e892dc9696016b01a71d44e4abcc429d954bd51864852',
  'baseline_observations': 'a55a6d933fecc9cbe7816e04638a044d82a4e1dd88f2c3b36ac160cf07d85af7',
@@ -434,10 +437,10 @@ GOLDEN_STACK_BY_RULE_ESTIMATE = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e
  'events': '13ccf787c362c3ed292b78492d8acb5e1f67d5ad191fa8113651b2320314af91',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
  'links': 'a4a267240e42c0155c746d50994b0cde06b4e77d95e1af4ced1fa53279046505',
- 'manifest': 'f184b53aa1c64e235efa8bb100875278a984cf6131534095746a3a5850a7b750',
+ 'manifest': '6092ec8c279484d32ee9795294bc4c8c1d303408b3c91021c65262bb3b076b9c',
  'raw': '04715be9c0dfa35e600d0f40ea09e9f738acb76e67eac64551cc380cc93de5f1',
  'rule_cells': 'e2dad7d7704bef089060ca184ee714a228033d3a90c3e212855f995c783c603d',
- 'stats': 'be588e34e14e570c11a47fc9b3953e564d8f6026d909d9ae7f9c7ef561c99c5a',
+ 'stats': '0fe4c444926bff193a20f74f2e49256366371461c6a4c44fbf946d2691399e6f',
  'tasks': '1e1eeb69d05da151bec8f6dff43c1863a4eb43a288f84c1ba35168311b303360'}
 GOLDEN_CANDIDATES_BY_RULE_ESTIMATE = GOLDEN_STACK_BY_RULE_ESTIMATE['candidates']
 GOLDEN_NON_BASELINE_SEMANTICS_BY_RULE_ESTIMATE = {'candidates': {'all_fields': '700437956302822956db19de3ac396f2c2bd0f0f5352543147a022e4eed147c6',

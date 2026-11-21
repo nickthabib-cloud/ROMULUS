@@ -39,7 +39,15 @@ from romulus.agent.safety import injection_flags
 from romulus.config import redact_counted
 from romulus.content.mention_patterns import PatternSet
 from romulus.evidence.linux_catalog import text_payload
-from romulus.evidence.mention_match import MentionMatcher, bound_text, line_digest
+from romulus.evidence.mention_match import (
+    MAX_PREFIX_TRIES,
+    REGEX_WINDOW,
+    TRIES_EXHAUSTED,
+    WINDOW_CUT,
+    MentionMatcher,
+    bound_text,
+    line_digest,
+)
 from romulus.evidence.mentions import (
     LINUX_TEXT,
     MENTION_LABEL,
@@ -61,6 +69,12 @@ MAX_GROUPS_PER_HOST = 2_000
 MAX_GROUPS_PER_HUNT = 20_000
 # the matched line kept on a mention (the whole record is kept, bounded, on its raw record)
 MAX_LINE_CHARS = 1_024
+# The keys of groups past a cap that the stage remembers (so their later lines are counted under the same group), and
+# the (pattern, host) pairs it counts lines for. Past either bound, and while the hunt's state budget asks the pool to
+# give way, every line is still counted exactly; only the number of distinct groups not kept becomes a lower bound,
+# and a pattern's distinct hosts (its rarity) a lower bound too.
+MAX_GONE_KEYS = 200_000
+MAX_SEEN_PAIRS = 1_000_000
 MAX_HOST_CHARS = 255
 # names listed per cap in the coverage summary (the counts cover all)
 NAMES_SHOWN = 20
@@ -121,7 +135,8 @@ class MentionScanner:
         self.window = window
         self.stage_dir = stage_dir
         self.budget = budget
-        self.account = budget.account("mention_pool") if budget is not None else None
+        # a store no detection reads: it gives way before any detection store refuses a key, and has no floor
+        self.account = budget.account("mention_pool", yields=True) if budget is not None else None
         self.max_per_pattern, self.max_per_host, self.max_per_hunt = max_per_pattern, max_per_host, max_per_hunt
         self._matchers: dict[str, MentionMatcher | None] = {}
         self._dir: str | None = None
@@ -134,8 +149,13 @@ class MentionScanner:
         self.caps: dict[str, Counter] = {"per_pattern": Counter(), "per_host": Counter(), "per_hunt": Counter(),
                                          "stage": Counter()}
         self.stage_error = ""
+        self._gone = 0
+        self._seen = 0
+        self._overflow: Counter = Counter()      # (pattern index, "lines" | "lost") past the pair bound
+        self.lower_bound = False                 # some distinct groups not kept were not remembered
         self._broken = False            # the stage failed: later matches are counted, never kept
         self.publish_error = ""
+        self.stage_refusal = ""
         self.stopped = ""
 
     # ---- matching -------------------------------------------------------------------------------------------------
@@ -183,7 +203,10 @@ class MentionScanner:
             if past:
                 stats["lines_cut"] += 1
                 stats["chars_not_scanned"] += past
-            matched = matcher.match(text)
+            unresolved: set[str] = set()
+            matched = matcher.match(text, cut=bool(past), unresolved=unresolved)
+            for note in unresolved:
+                stats["lines_" + note] += 1
             if not matched:
                 continue
             stats["lines_matched"] += 1
@@ -234,14 +257,26 @@ class MentionScanner:
         return self.db
 
     def _charge(self) -> None:
+        """Charge the stage file's growth (or release its shrinkage) to the pool's account, on disk as in the ledger
+        every store's physical writes are capped against."""
         if self.db is None or self.budget is None or self.account is None:
             return
         size = self.db.execute("PRAGMA page_count").fetchone()[0] * self._page
-        if size != self._size:
-            self.budget.charge(self.account, size - self._size)
-            if size > self._size:
-                self.budget.grew(size - self._size)
+        delta = size - self._size
+        if delta:
+            self.budget.charge(self.account, delta)
+            self.budget.physical_account(self.account, delta)
+            if delta > 0:
+                self.budget.grew(delta)
+            else:
+                self.budget._physical_released += -delta
             self._size = size
+
+    def _refusal(self) -> str:
+        """Why the stage may take no new row now ("" while it may)."""
+        if self.budget is None or self.account is None:
+            return ""
+        return self.budget.new_key_reason(self.account)
 
     def touch(self) -> None:
         """Mark the stage live, so another hunt's stale-stage cleanup never removes it."""
@@ -253,21 +288,34 @@ class MentionScanner:
         if self.db is not None:
             self.db.close()
             self.db = None
-            if self.budget is not None and self.account is not None and self._size:
-                self.budget.charge(self.account, -self._size)
+            if self.budget is not None and self.account is not None:
+                self.budget.release_physical_account(self.account)
             self._size = 0
         if self._dir is not None:
             shutil.rmtree(self._dir, ignore_errors=True)
             self._dir = None
 
     def _count_line(self, db, pattern: int, host: str, lost: bool) -> None:
-        db.execute("INSERT INTO seen VALUES (?, ?, 1, ?) ON CONFLICT (pattern, host) DO UPDATE SET "
-                   "lines = lines + 1, lost = lost + excluded.lost", (pattern, host, int(lost)))
+        """Count one matching line under its pattern and host, exactly, whatever the bounds."""
+        if db.execute("UPDATE seen SET lines = lines + 1, lost = lost + ? WHERE pattern = ? AND host = ?",
+                      (int(lost), pattern, host)).rowcount:
+            return
+        if self._seen < MAX_SEEN_PAIRS and not self._refusal():
+            db.execute("INSERT INTO seen VALUES (?, ?, 1, ?)", (pattern, host, int(lost)))
+            self._seen += 1
+            return
+        self._overflow[(pattern, "lines")] += 1
+        self._overflow[(pattern, "lost")] += int(lost)
 
     def _lose(self, db, key: str, pattern: int, host: str, cap: str) -> None:
-        """A new group past a cap: not kept, its key remembered so its later lines count as not kept too."""
-        db.execute("INSERT OR IGNORE INTO gone VALUES (?, ?, ?)", (key, pattern, host))
-        self.caps[cap][self.patterns.patterns[pattern].id] += 1
+        """A new group past a cap: not kept, its key remembered (while the bound allows) so its later lines count
+        as not kept too."""
+        if self._gone < MAX_GONE_KEYS and not self._refusal():
+            if db.execute("INSERT OR IGNORE INTO gone VALUES (?, ?, ?)", (key, pattern, host)).rowcount:
+                self._gone += 1
+            self.caps[cap][self.patterns.patterns[pattern].id] += 1
+        else:
+            self.lower_bound = True
         self._count_line(db, pattern, host, True)
 
     def _evict(self, db, where: str, params: tuple, strength: int) -> bool:
@@ -278,7 +326,11 @@ class MentionScanner:
             return False
         key, pattern, host, lines, _strength = victim
         db.execute("DELETE FROM grp WHERE key = ?", (key,))
-        db.execute("INSERT OR IGNORE INTO gone VALUES (?, ?, ?)", (key, pattern, host))
+        if self._gone < MAX_GONE_KEYS:
+            if db.execute("INSERT OR IGNORE INTO gone VALUES (?, ?, ?)", (key, pattern, host)).rowcount:
+                self._gone += 1
+        else:
+            self.lower_bound = True
         db.execute("UPDATE seen SET lost = lost + ? WHERE pattern = ? AND host = ?", (lines, pattern, host))
         db.execute("UPDATE host SET kept = kept - 1 WHERE host = ?", (host,))
         db.execute("UPDATE pat SET kept = kept - 1 WHERE pattern = ?", (pattern,))
@@ -323,8 +375,9 @@ class MentionScanner:
             if self._groups >= self.max_per_hunt and not self._evict(db, "1 = 1", (), strength):
                 self._lose(db, key, index, host, "per_hunt")
                 continue
-            if self.budget is not None and self.budget.hard:
-                self.stage_error = self.stage_error or self.budget.hard
+            if refusal := self._refusal():
+                # the hunt's state budget asks the pool to give way: new groups are counted, not kept
+                self.stage_refusal = self.stage_refusal or refusal
                 self._lose(db, key, index, host, "stage")
                 continue
             raw = build_raw_record(
@@ -364,6 +417,9 @@ class MentionScanner:
         self.db.execute("DROP TABLE IF EXISTS rarity")
         self.db.execute("CREATE TEMP TABLE rarity AS SELECT pattern, count(*) AS hosts, sum(lines) AS lines "
                         "FROM seen GROUP BY pattern")
+        for (pattern, kind), count in self._overflow.items():
+            if kind == "lines":
+                self.db.execute("UPDATE rarity SET lines = lines + ? WHERE pattern = ?", (count, pattern))
         yield from self.db.execute(
             "SELECT g.key, g.pattern, g.host, g.n, g.first_ts, g.last_ts, g.telemetry, g.raw, g.line, g.line_chars, "
             "g.line_cut, g.suspicious, r.hosts, r.lines FROM grp g JOIN rarity r USING (pattern) "
@@ -381,7 +437,8 @@ class MentionScanner:
         """The pool's coverage: what was scanned, what was not and why, and every cap that was hit."""
         stats = self.stats
         loaded = self.patterns.summary()
-        lost_lines = stats["lines_not_staged"] + stats["lines_not_published"]
+        lost_lines = (stats["lines_not_staged"] + stats["lines_not_published"]
+                      + sum(count for (_pattern, kind), count in self._overflow.items() if kind == "lost"))
         lost_hosts: list[tuple[str, int]] = []
         if self.db is not None:
             try:
@@ -415,6 +472,17 @@ class MentionScanner:
             reasons.append(f"{lost_lines} matching line(s) were not kept in the pool ({', '.join(why)})")
         if self.stage_error:
             reasons.append(f"the mention stage refused writes: {self.stage_error}")
+        if self.stage_refusal:
+            reasons.append(f"the hunt's state budget asked the mention pool to give way: {self.stage_refusal}")
+        if stats["lines_" + TRIES_EXHAUSTED]:
+            reasons.append(f"{stats['lines_' + TRIES_EXHAUSTED]} line(s) held an anchored pattern's literal prefix "
+                           f"more often than it is tried ({MAX_PREFIX_TRIES}) without a match: not ruled out")
+        if stats["lines_" + WINDOW_CUT]:
+            reasons.append(f"{stats['lines_' + WINDOW_CUT]} line(s) went on past an anchored pattern's window "
+                           f"({REGEX_WINDOW} characters) without a match: not ruled out")
+        if self.lower_bound or self._overflow:
+            reasons.append("some groups not kept were not remembered: the count of groups not kept is a lower "
+                           "bound (every line is counted exactly)")
         if self.publish_error:
             reasons.append(f"the pool was not stored: {self.publish_error}")
         if self.stopped:
@@ -433,6 +501,9 @@ class MentionScanner:
                                                     "them")},
             "groups_kept": self._groups, "groups_evicted": stats["groups_evicted"],
             "lines_not_kept": lost_lines, "caps": caps,
+            "groups_not_kept_lower_bound": bool(self.lower_bound or self._overflow),
+            "not_ruled_out": {"prefix_tries_exhausted": stats["lines_" + TRIES_EXHAUSTED],
+                              "window_cut": stats["lines_" + WINDOW_CUT]},
         }
 
     def publish(self, repo, *, owner_token: str | None = None) -> dict:

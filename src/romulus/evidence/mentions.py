@@ -20,14 +20,10 @@ MENTION_LANE = "mention"
 MENTION_LABEL = ("mention: text a record contains, matched by a curated pattern; it shows that a record with this "
                  "text exists, not that an action happened")
 MENTION_LABEL_SHORT = "mention (text a record contains, not an action)"
-# where the mention lane sits in every ordering of lanes: below lead, above context
-LANE_ORDER = ("urgent", "high", "lead", MENTION_LANE, "context")
 # a pattern's ATT&CK tags are the pattern author's, never an observed technique
 PATTERN_ATTACK_LABEL = "pattern metadata: the technique the pattern's text is associated with, not an observed technique"
 
-STRENGTHS = ("strong", "medium", "weak")
 STRENGTH_RANK = {"strong": 3, "medium": 2, "weak": 1}
-TELEMETRY = ("linux_text", "windows_text", "any")
 # the telemetry class of a scanned record: a Windows event record's rendered text, any other host text, or text of a
 # record that is neither (a network sensor's record), which only `any` patterns read
 LINUX_TEXT, WINDOWS_TEXT, OTHER_TEXT = "linux_text", "windows_text", "other"

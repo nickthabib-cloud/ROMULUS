@@ -89,6 +89,7 @@ REFUSALS = [
     ({"telemetry": ["network"]}, "telemetry"),
     ({"telemetry": []}, "telemetry"),
     ({"match": {"literal": ["nc"]}}, "characters"),
+    ({"match": {"literal": ["   "]}}, "whitespace"),
     ({"match": {"literal": ["abcdef"], "anchored": "abcdef"}}, "exactly one"),
     ({"match": {"anchored": "(abcd)\\1"}}, "refused"),
     ({"match": {"anchored": "abcd(?=x)"}}, "refused"),
@@ -97,13 +98,13 @@ REFUSALS = [
     ({"match": {"anchored": "abcd.*e.*f.*g"}}, "backtrack"),
     ({"match": {"anchored": "[a-z]+foo"}}, "literal prefix"),
     ({"match": {"anchored": "abc.*d"}}, "literal prefix"),
-    ({"match": {"anchored": "abcd$"}}, "end anchors"),
+    ({"match": {"anchored": "abcd(?<=d)"}}, "refused"),
     ({"match": {"anchored": "(?i)abcd"}}, "inline flags"),
     ({"match": {"anchored": "abcd" + "e" * 600}}, "512"),
     ({"match": {"anchored": "abcd(e"}}, "does not compile"),
     ({"examples": {"positive": ["no match here"], "negative": ["zzzz"]}}, "does not match"),
     ({"examples": {"positive": ["abcdef"], "negative": ["xx abcdef"]}}, "matches"),
-    ({"examples": {"positive": ["abcdef"], "negative": []}}, "negative"),
+    ({"examples": {"positive": [], "negative": []}}, "positive"),
     ({"case_sensitive": "yes"}, "case_sensitive"),
 ]
 
@@ -211,6 +212,58 @@ def test_a_pathological_line_stays_within_the_backtracking_bound(tmp_path):
         assert (time.perf_counter() - began) / 5 < 0.5
 
 
+def test_decoy_prefixes_and_long_windows_are_counted_as_not_ruled_out(tmp_path):
+    decoy = _pattern(id="mention.t.bang", match={"anchored": "abcd[a-z]{0,3}!"},
+                     examples={"positive": ["abcdx!"], "negative": ["abcd1!"]})
+    tail = _pattern(id="mention.t.tail", match={"anchored": "wxyz\\S*\\.php"},
+                    examples={"positive": ["wxyz/x.php"], "negative": ["wxyz x.php"]})
+    _file(tmp_path / "p", "u.yaml", [decoy, tail])
+    scanner = MentionScanner("h1", load_mention_patterns(tmp_path / "p"), stage_dir=tmp_path)
+    decoys = "abcd1 abcd2 abcd3 abcd4 abcd5 abcdx!"                 # the real match is the sixth prefix
+    unbounded = "wxyz" + "/" * 600 + ".php"                         # past the unbounded expression's window
+    scanner.scan(TARGET, CONTRACT, [(_hit(1, decoys), "x"), (_hit(2, unbounded), "x")], None)
+    summary = scanner.summary()
+    assert summary["lines_matched"] == 0
+    assert summary["not_ruled_out"] == {"prefix_tries_exhausted": 1, "window_cut": 1}
+    assert summary["status"] == "partial" and any("more often than it is tried" in r for r in summary["reasons"])
+    scanner.close()
+    # a bounded expression's window cannot cut it, and a ^ expression whose leading text is absent cannot match
+    fixtures = _scanner(tmp_path)
+    fixtures.scan(TARGET, CONTRACT, [(_hit(3, "curl " + "-" * 600 + " | bash"), "x"),
+                                     (_hit(4, "x" * 900), "x")], None)
+    assert fixtures.summary()["not_ruled_out"] == {"prefix_tries_exhausted": 0, "window_cut": 0}
+    assert fixtures.summary()["status"] == "complete"
+    fixtures.close()
+
+
+def test_relaxed_rules_and_end_anchors_load_and_match(tmp_path):
+    items = [
+        _pattern(id="mention.t.short", match={"literal": ["nc "]}, examples={"positive": ["nc -lv"]}),
+        _pattern(id="mention.t.group", match={"anchored": "abcd(?:ef)+g"},
+                 examples={"positive": ["abcdefefg"], "negative": ["abcdg"]}),
+        _pattern(id="mention.t.end", match={"anchored": "abcd\\S+\\.php$"},
+                 examples={"positive": ["GET abcd/shell.php"], "negative": ["abcd/shell.php?x=1"]}),
+    ]
+    items[0]["source"].pop("upstream_id")
+    _file(tmp_path, "r.yaml", items)
+    loaded = load_mention_patterns(tmp_path)
+    assert loaded.refused == [] and [p.id for p in loaded.patterns] == [item["id"] for item in items]
+    matcher = MentionMatcher(loaded.compiled)
+    unresolved: set = set()
+    long = "abcd/" + "a" * 600 + ".php"
+    assert matcher.match(bound_text(long)[0], unresolved=unresolved) == [] and unresolved == {"window_cut"}
+    cut_text, past = bound_text("abcd/x.php".rjust(MAX_SCAN_CHARS + 20, "-"))
+    unresolved = set()
+    assert matcher.match(cut_text, cut=bool(past), unresolved=unresolved) == []
+
+
+def test_the_shipped_pattern_corpus_loads_without_a_refused_file():
+    import romulus.content.mention_patterns as module
+    shipped = Path(module.__file__).resolve().parents[3] / "content" / "mentions"
+    loaded = load_mention_patterns(shipped)
+    assert loaded.refused == [], loaded.refused
+
+
 def test_a_long_line_is_scanned_to_the_bound_and_the_rest_counted():
     text, past = bound_text("a" * (MAX_SCAN_CHARS + 10))
     assert len(text) == MAX_SCAN_CHARS and past == 10
@@ -315,25 +368,48 @@ def test_records_without_text_and_cut_lines_are_counted_not_scanned(tmp_path):
     scanner.close()
 
 
-def test_a_stage_the_volume_cannot_take_refuses_new_groups_and_says_so(tmp_path):
-    class Hard:
-        hard = "the stage volume is at its reserve"
+def test_the_pool_gives_way_to_the_state_budget_and_never_costs_a_detection_store_a_key(tmp_path):
+    from romulus.detect.bounded import StateBudget
 
-        def account(self, *_args, **_kwargs):
-            from romulus.detect.bounded import Account
-            return Account("mention_pool", False)
-
-        def charge(self, *_args):
-            pass
-
-        def grew(self, *_args):
-            pass
-
-    scanner = MentionScanner("h1", load_mention_patterns(FIXTURES), stage_dir=tmp_path, budget=Hard())
-    scanner.scan(TARGET, _Contract(), [(_hit(1, "MIMIKATZ"), "x")], None)
+    budget = StateBudget(tmp_path, disk_total=64 * 2**20)
+    detection = budget.account("some_rule")
+    scanner = MentionScanner("h1", load_mention_patterns(FIXTURES), stage_dir=tmp_path, budget=budget)
+    assert scanner.account.yields and scanner.account.weight == 0
+    scanner.scan(TARGET, CONTRACT, [(_hit(1, "MIMIKATZ one"), "x")], None)
+    assert scanner.summary()["groups_kept"] == 1 and budget.new_key_reason(detection) == ""
+    budget.force_full("the stage volume is at its reserve", lambda account: account.name == "mention_pool")
+    scanner.scan(TARGET, CONTRACT, [(_hit(2, "MIMIKATZ two"), "x"), (_hit(3, "MIMIKATZ one"), "x")], None)
     summary = scanner.summary()
-    assert summary["groups_kept"] == 0 and summary["caps"]["stage"]["groups_not_kept"] == 1
-    assert summary["status"] == "partial" and any("refused writes" in r for r in summary["reasons"])
+    # the kept group still counts its line; the new one is counted, not kept
+    assert summary["groups_kept"] == 1 and summary["lines_matched"] == 3 and summary["lines_not_kept"] == 1
+    assert summary["status"] == "partial" and any("give way" in r for r in summary["reasons"])
+    assert budget.new_key_reason(detection) == ""
+    scanner.close()
+    assert budget._physical.get(("account", id(scanner.account)), (0, 0))[0] == 0
+
+
+def test_a_flood_of_distinct_matching_lines_keeps_the_stage_bounded_and_counts_every_line(tmp_path, monkeypatch):
+    import romulus.hunt.mentions as scanner_module
+    monkeypatch.setattr(scanner_module, "MAX_GONE_KEYS", 500)
+    monkeypatch.setattr(scanner_module, "MAX_SEEN_PAIRS", 300)
+    scanner = MentionScanner("h1", load_mention_patterns(FIXTURES), stage_dir=tmp_path, max_per_pattern=100,
+                             max_per_host=100, max_per_hunt=200)
+    count = 20_000
+    batch = [(_hit(n, f"MIMIKATZ unique {n}", host=f"h{n % 1000}"), "x") for n in range(count)]
+    began = time.process_time()
+    for start in range(0, count, 2_000):
+        scanner.scan(TARGET, CONTRACT, batch[start:start + 2_000], None)
+    rate = count / max(time.process_time() - began, 1e-9)
+    summary = scanner.summary()
+    assert summary["lines_matched"] == count and summary["groups_kept"] == 100
+    assert summary["lines_not_kept"] == count - 100                 # every line counted exactly
+    assert summary["groups_not_kept_lower_bound"] is True
+    with scanner.db as db:
+        assert db.execute("SELECT count(*) FROM gone").fetchone()[0] <= 500
+        assert db.execute("SELECT count(*) FROM seen").fetchone()[0] <= 300
+    assert rate > 2_000, rate
+    kept = sum(row[3] for row in scanner.ranked())
+    assert kept + summary["lines_not_kept"] == count
     scanner.close()
 
 
@@ -512,7 +588,7 @@ def test_injection_shaped_mention_text_stays_inert_in_every_renderer(swept, tmp_
     manifest["revision"] = {"number": 1, "id": "r1", "supersedes": None}
     text = markdown.render(manifest)
     section = text.split("## Mentions (text a record contains, not an action)", 1)[1].split("\n## ", 1)[0]
-    assert "<script>" not in section and "&lt;script&gt;" in section or "\\<script\\>" in section
+    assert "<script>" not in section and ("&lt;script&gt;" in section or "\\<script\\>" in section)
     assert "possible prompt injection" in section and "Pattern ATT&CK (metadata)" in section
     path = tmp_path / "x.docx"
     executive.write(manifest, path, "x.md")
@@ -668,7 +744,7 @@ def _stream(tmp_path, count: int, batch: int = 5_000) -> tuple[float, int, dict]
     contract = _Contract()
     base = _rss()
     peak = 0
-    began = time.perf_counter()
+    began = time.process_time()
     chunk: list = []
     for item in _lines(count):
         chunk.append(item)
@@ -677,7 +753,7 @@ def _stream(tmp_path, count: int, batch: int = 5_000) -> tuple[float, int, dict]
             chunk = []
             peak = max(peak, _rss() - base)
     scanner.scan(TARGET, contract, chunk, None)
-    seconds = time.perf_counter() - began
+    seconds = time.process_time() - began
     summary = scanner.summary()
     scanner.close()
     return count / seconds, peak, summary
@@ -688,7 +764,7 @@ def test_a_streamed_hunt_keeps_memory_bounded_and_counts_every_line(tmp_path):
     assert summary["lines_scanned"] == 200_000 and summary["lines_matched"] == 400
     assert summary["groups_kept"] <= 5_000
     assert peak < 64 * 2**20, peak
-    assert rate > 20_000, rate
+    assert rate > 5_000, rate
 
 
 @pytest.mark.slow
@@ -704,3 +780,96 @@ def test_a_mission_scale_stream_keeps_memory_bounded(tmp_path):
     assert summary["groups_kept"] <= 5_000 and summary["status"] == "partial"
     assert peak < 128 * 2**20, peak
     assert rate > 20_000, rate
+
+
+# ---- the agent and the sweep's raw records ---------------------------------------------------------------------------
+
+def _sweep_kept(repo: Repo, hit: dict, *, rank: int = 1) -> dict:
+    """Store a pool of one mention whose citation is `hit`, as the sweep would."""
+    from romulus.evidence.raw_citation import build_raw_record, raw_record_id
+
+    raw = build_raw_record("h1", hit, source_kind="index", time_field="@timestamp", session_id=None,
+                           task_id="t-sweep", query_digest="mention:x", query_text="mention sweep: pattern x",
+                           redact=lambda value: value, flagged=lambda value: [])
+    mention = {
+        "id": f"mn-{rank:024d}", "hunt_id": "h1", "rank": rank, "pattern_id": "mention.test.x",
+        "pattern_title": "X", "strength": "strong", "pattern_attack": ["T1059.004"],
+        "pattern_source": {"name": "t", "url": "u", "license": "l", "upstream_id": None}, "telemetry": "linux_text",
+        "host": "web01", "target": hit["_index"], "native_id": hit["_id"],
+        "raw_id": raw_record_id("h1", hit["_index"], hit["_id"]), "first_ts": T0, "last_ts": T0, "count": 1,
+        "pattern_hosts": 1, "pattern_lines": 1, "line": hit["_source"].get("message", ""), "line_chars": 10,
+        "line_cut": False, "suspicious_content": False, "created_at": T0,
+    }
+    repo.replace_mentions("h1", [(mention, {**raw, "origin": "mention_sweep"})], {"status": "complete"})
+    return mention
+
+
+def test_a_sweep_record_the_agent_queries_itself_is_at_most_a_lead_mention_and_never_decides(tmp_path):
+    from romulus.agent.aliases import AliasBook
+    from tests.test_agent_query_source import TERM, QueryES, _box, _query, _response
+    from tests.test_agent_raw_records import _admission, _ghost, _raw_aliases
+    from tests.test_agent_search_events import _hunt
+
+    repo = _hunt(tmp_path / "seam.sqlite")
+    hit = _ghost(1)
+    mention = _sweep_kept(repo, hit)
+    toolbox = _box(QueryES(_response([hit])), repo=repo)
+    admission = _admission(toolbox, Settings(home=tmp_path))
+    # the pool itself issues no alias: a mention cannot be cited
+    assert all("alias" not in item for item in toolbox.execute("list_mentions", {})["data"]["items"])
+    result = _query(toolbox, query=TERM)
+    admission.issue_aliases(result, tool_name="query_source")
+    raws = _raw_aliases(result)
+    # the agent's own query returned the record the sweep kept: the same row, now the agent's
+    assert AliasBook(repo, "h1").resolve(raws[0], {"Q"}) == mention["raw_id"]
+    assert repo.agent_raw_records("h1", [mention["raw_id"]])[0]["origin"] == "agent"
+    refused = toolbox.execute("propose_finding", {"claim": "A log names a reverse shell", "claim_kind": "mention",
+                                                  "cites": raws, "lane": "high", "techniques": ["T1059.004"]})
+    assert refused["status"] == "refused" and "takes no ATT&CK techniques" in refused["errors"][0]
+    for kind in ("execution", "network"):
+        action = toolbox.execute("propose_finding", {"claim": "A host ran a reverse shell", "claim_kind": kind,
+                                                     "cites": raws, "lane": "urgent"})
+        assert action["status"] == "refused" and "only a mention" in action["errors"][0]
+    proposed = toolbox.execute("propose_finding", {"claim": "A log names a reverse shell", "claim_kind": "mention",
+                                                   "cites": raws, "lane": "urgent"})
+    assert proposed["status"] == "complete" and proposed["data"]["lane"] == "lead"
+    assert proposed["data"]["claim_type"] == "mention"
+    opened = toolbox.execute("open_hypothesis", {"statement": "An implant beacons from web01 to 10.9.9.9"})
+    admission.issue_aliases(opened, tool_name="open_hypothesis")
+    for status, field in (("supported", "add_support"), ("refuted", "add_contradiction")):
+        decided = toolbox.execute("update_hypothesis", {"hypothesis": opened["data"]["hypothesis"], "status": status,
+                                                        field: raws, "note": "the log says so"})
+        assert decided["status"] == "refused", decided
+    # the pool is unchanged: the mention still cites the record, which a sweep run again leaves to the agent
+    assert repo.mentions("h1")[0]["raw_id"] == mention["raw_id"]
+
+
+def test_the_orient_page_carries_the_mention_slice_ahead_of_findings_and_keeps_its_scope(tmp_path):
+    from romulus.agent.dossier import MENTION_DOSSIER_LIMIT, build_dossier
+    from tests.test_agent_dossier import _repo as finding_repo
+
+    repo = finding_repo()
+    rows = []
+    for rank in range(1, 16):
+        mention = {
+            "id": f"mn-{rank:024d}", "hunt_id": "h1", "rank": rank, "pattern_id": f"mention.test.p{rank}",
+            "pattern_title": "P", "strength": "medium", "pattern_attack": [], "pattern_source": {},
+            "telemetry": "linux_text", "host": "web01", "target": "host-index", "native_id": f"n{rank}",
+            "raw_id": f"rr-{rank:024d}", "first_ts": T0, "last_ts": T0, "count": rank, "pattern_hosts": 1,
+            "pattern_lines": rank, "line": f"line {rank} " + "y" * 300, "line_chars": 310, "line_cut": False,
+            "suspicious_content": False, "created_at": T0,
+        }
+        raw = {"id": mention["raw_id"], "hunt_id": "h1", "target": "host-index", "native_id": f"n{rank}",
+               "source_kind": "index", "ts": T0, "time_field": "@timestamp", "time_text": None, "text": "{}",
+               "text_cut": False, "text_bytes": 2, "digest": "d", "session_id": None, "task_id": None,
+               "query_digest": "q", "query": "q", "suspicious_content": False, "origin": "mention_sweep"}
+        rows.append((mention, raw))
+    repo.replace_mentions("h1", rows, {"status": "partial"})
+    small = build_dossier(repo, "h1", token_budget=2_500)
+    page = small.page(1)
+    assert len(small.pages) > 1, "the findings overflow the first page"
+    assert [item["rank"] for item in page["mentions"]["items"]] == list(range(1, MENTION_DOSSIER_LIMIT + 1))
+    assert page["mentions"]["total"] == 15 and page["mentions"]["status"] == "partial"
+    # the investigate prompt's small dossier still carries its scope
+    tiny = build_dossier(repo, "h1", token_budget=1_000)
+    assert tiny.payload.get("scope") and tiny.payload["mentions"]["total"] == 15

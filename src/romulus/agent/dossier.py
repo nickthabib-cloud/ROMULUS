@@ -745,8 +745,9 @@ def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int, owner_token: s
         "mentions": mentions,
     })
     def details() -> Iterator[tuple[str, dict]]:
-        yield from (("findings", _finding_row(item, aliases)) for item in reportable)
+        # the bounded mention slice first, so orient's first page always carries it
         yield from (("mentions", item) for item in mentions)
+        yield from (("findings", _finding_row(item, aliases)) for item in reportable)
         yield from (("sources", item) for item in sources)
         yield from (("context_counts", item) for item in context_rows)
         yield from (("entities", item) for item in entities)

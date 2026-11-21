@@ -408,8 +408,7 @@ class Sweep:
         # Plan only detection stores. Citation owners have no floor and yield their optional cache bytes first.
         # Windows hunts additionally own id-only delivery, continuity and script assembly state.
         stage_owners = [pb for pb in self.pack if pb.staged and not hasattr(pb, "citation_fields")]
-        # one floor more for the mention pool's stage
-        self.budget.plan(live_stores(self.pack) + 2 + (3 if self._has_windows else 0))
+        self.budget.plan(live_stores(self.pack) + 1 + (3 if self._has_windows else 0))
         self._stage_account = self.budget.account("event_stage")
         self._stage_owner_accounts = {pb.id: self.budget.account("event_stage:"+pb.id,
                                                                strong=pb.state_slice == "strong", yields=True)
@@ -2303,8 +2302,9 @@ class Sweep:
                                                skip_families=skip_families, rpc_remote_only=True, contract=contract,
                                                surrogate_free=out.surrogate_free, shapes=shapes,
                                                windows_records=windows_records, unread=unread)
-        if unread and getattr(self, "mentions", None) is not None:
-            # the text of records no normalizer read, matched against the curated mention patterns
+        if unread and not partition_tag and getattr(self, "mentions", None) is not None:
+            # the text of records no normalizer read, matched against the curated mention patterns (a tagged
+            # partition reads records again for another purpose: they were scanned when first read)
             self.mentions.scan(target, contract, unread, tid)
         unread = []
         if shapes:
