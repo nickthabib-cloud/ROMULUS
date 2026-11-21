@@ -703,7 +703,9 @@ def test_a_definition_that_covers_none_of_the_observed_sessions_warns_and_says_w
     text = result["summary"]
     assert f"0 of {len(rows):,} sessions (0.0%) had an endpoint inside the internal networks" in text
     assert "will evaluate almost nothing" in text and "ROMULUS_INTERNAL_NETWORKS" in text
-    assert "172.31.0.0/16" in text and "fewer than 5% of sessions" in text
+    assert "172.31.0.0/16" in text and "fewer than 5% of a target's sessions" in text
+    assert f"Fewer than 5% of sessions had an internal endpoint in: sessions (0 of {len(rows):,})" in text
+    assert "outside the definition (the site's own or external peers)" in text
     # the definition is read, never changed; one request per target as before
     assert DEV_SITE.record() == SiteNetworks.from_lists(["10.1.0.0/16", "192.168.10.0/24"]).record()
     assert len(source.requests) == 1
@@ -748,11 +750,13 @@ def test_keyword_addresses_are_judged_on_the_busiest_and_a_capped_listing_is_nam
     direction = result["direction"]
     assert direction["status"] == "ok" and direction["judged_targets"] == ["wire"] and not direction["warn"]
     assert direction["with_internal"] == 0 and direction["internal_share"] is None
-    assert "the 20 busiest addresses on each side were judged, and an internal one was among them" in (
+    assert "the 20 busiest addresses on each side were judged, and an internal one was among them in each" in (
         direction["summary"])
     wrong = _check(EndpointSource({"wire": rows}, {"wire": LISTED}), DEV_SITE)["direction"]
     assert wrong["status"] == "none" and wrong["warn"] and wrong["judged_without_internal"] == ["wire"]
-    assert "none was internal in wire" in wrong["summary"]
+    assert "none of them was internal in wire" in wrong["summary"]
+    # judged on a sample of addresses, it cannot say the rules will see nothing, only that they may
+    assert "may evaluate little or nothing" in wrong["summary"] and "will evaluate" not in wrong["summary"]
     source = EndpointSource({"wire": rows}, {"wire": LISTED})
     _check(source, site)
     ((_, body),) = source.requests
@@ -770,12 +774,17 @@ def test_an_answer_that_is_not_complete_says_partial_and_never_claims_the_direct
     result = _check(EndpointSource({"wire": rows}, response_patch=patch), SiteNetworks.from_lists(["172.31.0.0/16"]))
     direction = result["direction"]
     assert direction["partial"] and direction["reasons"] and result["warn"]
-    assert direction["status"] in ("ok", "unknown")
-    assert "partial:" in direction["summary"] or direction["status"] == "unknown"
+    assert direction["status"] in ("partial", "unknown") and direction["status"] != "ok"
+    assert "partial" in direction["summary"]
     # with nothing internal in what was counted, a cut-short answer still warns, and says it is partial
     wrong = _check(EndpointSource({"wire": rows}, response_patch=lambda answer: answer.update(timed_out=True)),
                    DEV_SITE)["direction"]
-    assert wrong["status"] == "none" and wrong["warn"] and "partial: wire: timed out" in wrong["summary"]
+    assert wrong["status"] == "none" and wrong["warn"]
+    assert "partial: the incomplete answers named above" in wrong["summary"]
+    assert "may evaluate little or nothing" in wrong["summary"]          # a share from a cut-short answer
+    timed_out = _check(EndpointSource({"wire": rows}, response_patch=lambda answer: answer.update(timed_out=True)),
+                       DEV_SITE)["summary"]
+    assert timed_out.count("timed out") == 1                              # named once, not again for direction
 
 
 def test_a_failed_or_unqueryable_target_leaves_the_direction_unknown_not_fine():
@@ -820,6 +829,7 @@ def test_create_hunt_records_the_direction_and_every_report_shows_its_warning(tm
         assert SiteNetworks.from_record(record) == SiteNetworks.from_lists(["10.1.0.0/16"])
         report = build_report(repo, hunt_id, "analyst")
         assert "will evaluate almost nothing" in report["internal_networks"]["warning"]
+        assert report["internal_networks"]["warning_checks"] == ["traffic-direction"]
         text = markdown.render({**report, "revision": {"number": 1, "id": "r1", "supersedes": None}})
         section = text.split("## Coverage", 1)[1]
         assert "Internal-network coverage" in section and "203.0.0.0/16" in section
@@ -846,6 +856,42 @@ def test_link_local_chatter_never_counts_as_the_sites_own(types):
     direction = result["direction"]
     assert direction["status"] == "none" and direction["warn"]
     assert all(not item["prefix"].startswith("fe80") for item in direction["busiest_outside"])
+
+
+def test_one_target_whose_sessions_miss_the_definition_warns_however_the_others_pool():
+    # an enclave the definition covers, beside a DMZ in public space it does not: pooled, 2,000 of 2,300 sessions
+    # (87%) look fine; judged per target, the DMZ's 300 sessions have no internal endpoint
+    enclave = [row(f"10.1.0.{n % 50 + 1}", f"10.1.1.{n % 40 + 1}") for n in range(2000)]
+    dmz_hosts = [f"203.0.113.{n}" for n in range(1, 11)]
+    dmz = [row(dmz_hosts[n % 10], f"198.51.100.{n % 150 + 1}") for n in range(300)]
+    result = _check(EndpointSource({"enclave": enclave, "dmz": dmz}))
+    direction = result["direction"]
+    assert (direction["sessions"], direction["with_internal"]) == (2300, 2000)
+    assert direction["status"] == "rare" and direction["warn"] and result["warn"]
+    assert direction["low_targets"] == ["dmz"]
+    assert {t["target"]: (t["sessions"], t["with_internal"], t["low"]) for t in direction["per_target"]} == {
+        "enclave": (2000, 2000, False), "dmz": (300, 0, True)}
+    text = direction["summary"]
+    assert "2,000 of 2,300 sessions (87.0%)" in text                      # the pooled figure stays
+    assert "had an internal endpoint in: dmz (0 of 300)" in text and "enclave (" not in text
+    assert "will evaluate almost nothing there" in text and "203.0.0.0/16" in text
+    # with the DMZ declared, neither warns
+    fixed = _check(EndpointSource({"enclave": enclave, "dmz": dmz}),
+                   SiteNetworks.from_lists(["10.1.0.0/16", "203.0.113.0/24"]))
+    assert fixed["direction"]["status"] == "ok" and not fixed["warn"]
+
+
+def test_busiest_values_that_are_not_addresses_never_read_as_none_internal():
+    rows = [row("not-an-address", "also-not") for _ in range(50)]
+    direction = _check(EndpointSource({"wire": rows}, {"wire": LISTED}), DEV_SITE)["direction"]
+    assert direction["judged_without_internal"] == [] and "none of them was internal" not in direction["summary"]
+    assert direction["status"] == "unknown" and direction["warn"]
+    assert any("not readable as IP addresses" in reason for reason in direction["reasons"])
+    missing = _check(EndpointSource({"wire": _cloud_site(hosts=5, peers=50)[1]}, {"wire": LISTED},
+                                    response_patch=lambda answer: answer["aggregations"].pop("busiest_source")),
+                     DEV_SITE)["direction"]
+    assert missing["judged_without_internal"] == [] and missing["status"] == "unknown"
+    assert "busiest source addresses missing" in " ".join(missing["reasons"])
 
 
 def test_a_coverage_record_from_before_the_direction_check_still_renders():

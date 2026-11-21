@@ -979,18 +979,29 @@ def _rank_order(finding: dict) -> tuple:
 
 
 def internal_networks_view(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dict:
-    """The definition the hunt recorded, with the sweep's host-address check and its warning when it ran."""
+    """The definition the hunt recorded, with the sweep's host-address check and its warning when it ran.
+    `warning_checks` names the checks whose warning the view carries (observed-address coverage, traffic direction,
+    host addresses)."""
     view = recorded_view(hunt_manifest.get("internal_networks"))
     coverage = (hunt_manifest.get("internal_networks") or {}).get("coverage")
+    checks: list[str] = []
     if coverage:
         view["coverage"] = coverage
         if coverage_shown(coverage):
             view["warning"] = coverage["summary"]
+            if coverage.get("outside") or coverage.get("status") == "unknown":
+                checks.append("observed-address")
+            if (coverage.get("direction") or {}).get("warn"):
+                checks.append("traffic-direction")
     sweep = repo.latest_audit(hunt_id, "hunt.sweep_summary")
     check = ((sweep or {}).get("detail") or {}).get("internal_networks")
     if check:
         warning = " ".join(text for text in (view.get("warning"), check.get("warning")) if text) or None
+        if check.get("warning"):
+            checks.append("host-address")
         view = {**view, "host_address_check": check, "warning": warning}
+    if checks:
+        view["warning_checks"] = checks        # only with a warning: a report without one is unchanged
     return view
 
 

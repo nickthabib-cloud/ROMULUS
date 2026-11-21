@@ -126,3 +126,29 @@ def test_the_web_hunt_page_shows_one_line(tmp_path):
     page = client.get("/hunts/h1")
     assert page.status_code == 200
     assert '<dt>Internal networks</dt><dd>configured (2 ranges, 1 carve-out)' in page.text
+
+
+@pytest.mark.parametrize("direction, host, named", [
+    (True, False, "the traffic-direction check reported a warning."),
+    (True, True, "the traffic-direction, host-address checks reported a warning."),
+    (False, True, "the host-address check reported a warning."),
+])
+def test_the_hunt_page_notice_names_the_checks_that_warned(tmp_path, direction, host, named):
+    settings = Settings(home=tmp_path, secret_key=secrets.token_urlsafe(32))
+    app = create_app(settings)
+    manifest = {**_manifest(Settings(home=tmp_path, **SITE_LISTS)), "targets": ["idx"]}
+    manifest["internal_networks"]["coverage"] = {
+        "status": "no_private_observed", "outside": 0, "summary": "Synthetic coverage summary.",
+        "direction": {"status": "none" if direction else "ok", "warn": direction}}
+    repo = _hunt(settings, manifest)
+    repo.set_hunt_state("h1", "running")
+    if host:
+        repo.audit("system", "hunt.sweep_summary", "h1", {"internal_networks": {
+            "warning": "Synthetic host-address warning", "outside": 1}})
+    password = secrets.token_urlsafe(18)
+    create_user(repo.engine, "analyst1", password, "analyst")
+    client = TestClient(app)
+    client.post("/login", data={"username": "analyst1", "password": password})
+    page = client.get("/hunts/h1")
+    assert page.status_code == 200
+    assert f"<b>Internal networks:</b> {named}</span>" in page.text

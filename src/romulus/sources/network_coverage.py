@@ -32,10 +32,11 @@ PRIVATE_RANGES = tuple(map(ipaddress.ip_network, (
 # Direction: whether the definition reads any of the observed traffic as the site's own, over every address (a site
 # may use public space, which the private-address check above never sees). A sensor placed for a site records the
 # site's traffic, so nearly every session it holds has a site endpoint: the destination of an inbound scan or brute
-# force, the source of an outbound connection, both ends of lateral traffic. When fewer than one session in twenty
-# has an endpoint inside the definition, the definition is the likely fault, and the rules that need an internal side
-# (inbound, outbound and lateral traffic) evaluate almost nothing. Where a target's addresses cannot be selected by
-# range in the cluster, its busiest addresses on each side are judged here instead.
+# force, the source of an outbound connection, both ends of lateral traffic. When fewer than one session in twenty of a
+# target has an endpoint inside the definition, the definition is the likely fault there, and the rules that need an
+# internal side (inbound, outbound and lateral traffic) evaluate little or nothing of it. Each target is judged on its
+# own, so a well-covered one cannot hide another. Where a target's addresses cannot be selected by range in the
+# cluster, its busiest addresses on each side are judged here instead.
 MIN_INTERNAL_SHARE = 0.05
 BUSIEST = 20                            # addresses per side, by session count, judged with the definition
 BUSIEST_NAMED = 5                       # of those outside the definition, named in the summary
@@ -197,13 +198,12 @@ def _prefix(address):
 
 
 class _Direction:
-    """What the targets' answers say about the share of sessions with an endpoint inside the definition."""
+    """What the targets' answers say about the share of sessions with an endpoint inside the definition, judged per
+    target: one target whose sessions almost never touch the site (a DMZ or an enclave in space the definition
+    misses) warns even when the others' pooled share looks fine."""
 
     def __init__(self):
-        self.sessions = self.internal = 0          # over targets whose sides are both ip fields: exact counts
-        self.counted, self.judged, self.bare = [], [], []   # bare: judged targets with sessions and no internal talker
-        self.talker_seen = False                   # an internal address among some target's busiest
-        self.judged_sessions = 0
+        self.targets: list[dict] = []              # per target: sessions, counts and verdict
         self.outside = {}                          # prefix -> sessions, for the busiest addresses outside
         self.reasons = []
 
@@ -214,12 +214,13 @@ class _Direction:
             return
         if incomplete:
             self.reasons.append(f"{target}: {incomplete}")
-        talkers = False
+        talkers, readable, unread = False, True, 0
         for side in fields:
             terms = aggregations.get(f"busiest_{side}")
             buckets = terms.get("buckets") if isinstance(terms, dict) else None
             if not isinstance(buckets, list):
                 self.reasons.append(f"{target}: busiest {side} addresses missing")
+                readable = False
                 continue
             for bucket in islice(buckets, BUSIEST):
                 key = bucket.get("key") if isinstance(bucket, dict) else None
@@ -229,6 +230,7 @@ class _Direction:
                         raise ValueError("not a bounded IP address")
                     address = ipaddress.ip_address(key)
                 except ValueError:
+                    readable, unread = False, unread + 1
                     continue
                 if address.version == 6 and address.ipv4_mapped:
                     address = address.ipv4_mapped
@@ -239,78 +241,111 @@ class _Direction:
                 else:
                     prefix = _prefix(address)
                     self.outside[prefix] = self.outside.get(prefix, 0) + count
-        self.talker_seen |= talkers
+        if unread:
+            self.reasons.append(f"{target}: {unread} busiest address value(s) not readable as IP addresses")
+        entry = {"target": target, "sessions": sessions, "with_internal": None, "internal_share": None,
+                 "method": "counted", "internal_talker": talkers, "complete": not incomplete, "low": False}
         if all(is_ip for _field, is_ip in fields.values()):        # counted in the cluster (see _direction)
             internal = _doc_count(aggregations.get("with_internal"))
             if internal is None:
                 self.reasons.append(f"{target}: internal-endpoint count missing")
                 return
-            self.sessions += sessions
-            self.internal += internal
-            self.counted.append(target)
+            entry.update(with_internal=internal, internal_share=internal / sessions if sessions else None)
+            entry["low"] = bool(sessions) and internal / sessions < MIN_INTERNAL_SHARE
         else:
-            self.judged.append(target)
-            self.judged_sessions += sessions
-            if sessions and not talkers:
-                self.bare.append(target)
+            # judged on the busiest addresses alone: said to hold none of the site's only when all of them were read
+            entry["method"] = "judged"
+            entry["low"] = bool(sessions) and readable and not talkers
+        self.targets.append(entry)
 
-    def record(self, window_text, unchecked) -> dict:
-        share = self.internal / self.sessions if self.sessions else None
-        seen = bool(self.internal) or self.talker_seen
-        low = (share is not None and share < MIN_INTERNAL_SHARE) or bool(self.bare)
+    def record(self, window_text, unchecked, reported=()) -> dict:
+        counted = [t for t in self.targets if t["method"] == "counted"]
+        judged = [t for t in self.targets if t["method"] == "judged"]
+        sessions = sum(t["sessions"] for t in counted)
+        internal = sum(t["with_internal"] for t in counted)
+        share = internal / sessions if sessions else None
+        low = [t for t in self.targets if t["low"]]
+        seen = bool(internal) or any(t["internal_talker"] for t in self.targets)
         reasons = [*self.reasons, *(f"{target}: {why}" for target, why in unchecked.items())]
         if low:
             state = "rare" if seen else "none"
-        elif not (self.counted or self.judged):
+        elif not self.targets:
             state = "unknown" if reasons else "not_applicable"
-        elif not self.sessions and not self.judged_sessions:
+        elif not any(t["sessions"] for t in self.targets):
             state = "unknown" if reasons else "no_sessions"
+        elif reasons:
+            # an answer cut short or a target not read is never taken for a fine one
+            state = "partial" if seen else "unknown"
         else:
-            state = "unknown" if reasons and not seen else "ok"
+            state = "ok"
+        # certain only when every target under the share was counted exactly and none of its sessions was internal
+        certain = bool(low) and all(t["method"] == "counted" and t["complete"] and t["with_internal"] == 0
+                                    for t in low)
         busiest = sorted(self.outside.items(), key=lambda item: (-item[1], _order(item[0].network_address)))
-        # an answer that could not be read is never taken for a fine one: it warns as unknown
-        out = {"status": state, "warn": low or state == "unknown", "sessions": self.sessions,
-               "with_internal": self.internal, "internal_share": share, "minimum_share": MIN_INTERNAL_SHARE, "window": window_text,
-               "counted_targets": list(self.counted), "judged_targets": list(self.judged),
-               "judged_without_internal": list(self.bare), "busiest_per_side": BUSIEST,
+        out = {"status": state, "warn": state in ("none", "rare", "unknown", "partial"), "sessions": sessions,
+               "with_internal": internal, "internal_share": share, "minimum_share": MIN_INTERNAL_SHARE,
+               "window": window_text, "counted_targets": [t["target"] for t in counted],
+               "judged_targets": [t["target"] for t in judged],
+               "low_targets": [t["target"] for t in low],
+               "judged_without_internal": [t["target"] for t in judged if t["low"]],
+               "certain": certain, "busiest_per_side": BUSIEST,
+               "per_target": [{k: t[k] for k in ("target", "sessions", "with_internal", "internal_share", "method",
+                                                 "internal_talker", "low")} for t in self.targets],
                "busiest_outside": [{"prefix": str(prefix), "sessions": count}
                                    for prefix, count in busiest[:BUSIEST_NAMED]],
                "partial": bool(reasons), "reasons": reasons}
-        out["summary"] = _direction_summary(out)
+        out["summary"] = _direction_summary(out, set(reported))
         return out
 
 
-def _direction_summary(d) -> str:
+def _direction_summary(d, reported: set) -> str:
     state = d["status"]
     if state == "not_applicable":
         return ""
+    # reasons the coverage summary already names are not repeated here
+    extra = [reason for reason in d["reasons"] if reason not in reported]
+    partial = ""
+    if d["partial"]:
+        partial = "; partial: " + ("; ".join(extra) if extra else "the incomplete answers named above")
+        if extra and len(extra) < len(d["reasons"]):
+            partial += ", and those named above"
     where = (f"{d['window']}; {len(d['counted_targets']) + len(d['judged_targets'])} network target(s) checked"
-             + (f"; partial: {'; '.join(d['reasons'])}" if d["partial"] else ""))
+             + partial)
     share = d["internal_share"]
+    parts = []
     if d["counted_targets"]:
-        counted = (f"{d['with_internal']:,} of {d['sessions']:,} sessions"
-                   + (f" ({share:.1%})" if share is not None else "") + " had an endpoint inside the internal networks")
-    else:
-        counted = ""
-    judged = ""
+        parts.append(f"{d['with_internal']:,} of {d['sessions']:,} sessions"
+                     + (f" ({share:.1%})" if share is not None else "")
+                     + " had an endpoint inside the internal networks")
     if d["judged_targets"]:
-        judged = (f"in {len(d['judged_targets'])} target(s) whose addresses cannot be selected by range, the "
-                  f"{d['busiest_per_side']} busiest addresses on each side were judged"
-                  + (f", and none was internal in {', '.join(d['judged_without_internal'])}"
-                     if d["judged_without_internal"] else ", and an internal one was among them"))
-    found = "; ".join(part for part in (counted, judged) if part)
+        bare = d["judged_without_internal"]
+        every = all(t["internal_talker"] for t in d["per_target"] if t["method"] == "judged")
+        parts.append(f"in {len(d['judged_targets'])} target(s) whose addresses cannot be selected by range, the "
+                     f"{d['busiest_per_side']} busiest addresses on each side were judged"
+                     + (f", and none of them was internal in {', '.join(bare)}" if bare else
+                        ", and an internal one was among them in each" if every else ""))
+    found = "; ".join(parts)
     if state == "unknown":
         return f"Traffic direction unknown: {found or 'no session was counted'} ({where})."
     if state == "no_sessions":
         return f"Traffic direction: no session was recorded in the window ({where})."
     text = f"Traffic direction: {found} ({where})."
+    if state == "partial":
+        text += " The answer is partial, so the share is not confirmed."
     if state in ("none", "rare"):
-        text += (" Rules that need an internal side (inbound, outbound and lateral traffic) will evaluate almost "
-                 f"nothing: check the internal networks (Site setup page or {INTERNAL_SETTING}).")
+        counted_low = [t for t in d["per_target"] if t["low"] and t["method"] == "counted"]
+        if counted_low:
+            text += (f" Fewer than {MIN_INTERNAL_SHARE:.0%} of sessions had an internal endpoint in: "
+                     + ", ".join(f"{t['target']} ({t['with_internal']:,} of {t['sessions']:,})" for t in counted_low)
+                     + ".")
+        effect = "will evaluate almost nothing" if d["certain"] else "may evaluate little or nothing"
+        text += (f" Rules that need an internal side (inbound, outbound and lateral traffic) {effect} there: check "
+                 f"the internal networks (Site setup page or {INTERNAL_SETTING}).")
         if d["busiest_outside"]:
-            text += (" Busiest prefixes outside them: "
+            text += (" Busiest prefixes outside the definition (the site's own or external peers): "
                      + ", ".join(f"{p['prefix']} ({p['sessions']:,} sessions)" for p in d["busiest_outside"]) + ".")
-        text += f" Warning threshold: fewer than {MIN_INTERNAL_SHARE:.0%} of sessions with an internal endpoint."
+        text += (f" Warning threshold: fewer than {MIN_INTERNAL_SHARE:.0%} of a target's sessions with an internal "
+                 "endpoint.")
     return text
 
 
@@ -384,7 +419,8 @@ def _result(window, state, *, outside=(), covered=0, reasons=(), checked=(), unc
     if direction is not None:
         span = result["window"]
         result["direction"] = direction.record(
-            f"{span['start']} to {span['end']}" if isinstance(span, dict) else span, unchecked or {})
+            f"{span['start']} to {span['end']}" if isinstance(span, dict) else span, unchecked or {},
+            reported=result["reasons"])
         result["warn"] = result["warn"] or result["direction"]["warn"]
     result["summary"] = _summary(result)
     if (result.get("direction") or {}).get("summary"):
