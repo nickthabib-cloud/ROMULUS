@@ -6,11 +6,15 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from romulus.agent.provider import egress_banners
 from romulus.report.manifest import coverage_for_hunt, internal_networks_view, investigations_for_hunt
+from romulus.report.mentions import coverage_lines, mention_item, mentions_view
 from romulus.web import agent_views, hunt_views
 from romulus.web.auth import csrf_ok
 from romulus.web.control_routes import CONTROL_MESSAGES, controls_view, stop_banner
 
 TIMELINE_PAGE = 50
+MENTION_PAGE = 50
+# the line each mention row shows; its raw record page shows the whole kept record
+MENTION_LINE_CHARS = 1_024
 
 
 def make_hunt_page(repo, page):
@@ -64,6 +68,32 @@ def register_hunt_routes(app, repo, s, need, hunt_page):
             raise HTTPException(400, "Invalid page cursor") from error
         agent_views.validate_hypothesis_links(repo, hunt_id, view["rows"])
         return hunt_page(request, "hunt_findings.html", u, h, "findings", head, fv=view)
+
+    @app.get("/hunts/{hunt_id}/mentions", response_class=HTMLResponse)
+    def hunt_mentions(request: Request, hunt_id: str, after: int = 0, pattern: str = "", host: str = "",
+                      losses_after: int = 0):
+        """The mention pool, a page at a time in pool order: each mention labelled, the text around its match, its
+        coverage and a link to its raw record; and every (pattern, host) whose lines were not kept, paged."""
+        u = need(request)
+        h = hunt(hunt_id)
+        if len(pattern) > 256 or len(host) > 512 or after < 0 or losses_after < 0:
+            raise HTTPException(400, "Invalid mention filter")
+        loss_rows = repo.mention_losses(hunt_id, after=losses_after, limit=MENTION_PAGE + 1)
+        losses = loss_rows[:MENTION_PAGE]
+        losses_next = (hunt_views.hunt_url(hunt_id, "/mentions", after=after or "", pattern=pattern, host=host,
+                                           losses_after=losses[-1]["id"])
+                       if len(loss_rows) > MENTION_PAGE else "")
+        view = mentions_view(repo, hunt_id, limit=0)
+        rows = repo.mentions(hunt_id, after_rank=after, limit=MENTION_PAGE + 1, pattern_id=pattern or None,
+                             host=host or None)
+        more = len(rows) > MENTION_PAGE
+        items = [mention_item(row, line_chars=MENTION_LINE_CHARS) for row in rows[:MENTION_PAGE]]
+        next_url = (hunt_views.hunt_url(hunt_id, "/mentions", after=items[-1]["rank"], pattern=pattern, host=host)
+                    if more and items else "")
+        return hunt_page(request, "hunt_mentions.html", u, h, "mentions", mv=view, items=items, next_url=next_url,
+                         coverage=coverage_lines(view), pattern=pattern, host=host, losses=losses,
+                         losses_next=losses_next,
+                         first_url=hunt_views.hunt_url(hunt_id, "/mentions", pattern=pattern, host=host))
 
     @app.get("/hunts/{hunt_id}/assessment", response_class=HTMLResponse)
     def hunt_assessment(request: Request, hunt_id: str):

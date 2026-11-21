@@ -622,6 +622,32 @@ def check_site(s: Settings) -> Check:
     )
 
 
+def check_mention_patterns(s: Settings) -> Check:
+    """The mention pattern set a hunt would load: the patterns and files loaded and every refusal. An empty or missing
+    directory, or any refused pattern or file, is a warning (the sweep then reports its mention pool as not scanned or
+    partial); never a failure."""
+    from romulus.content.mention_patterns import SHIPPED_DIR, load_mention_patterns, mention_dir
+
+    directory = mention_dir(s)
+    where = ("ROMULUS_MENTION_DIR " if directory != SHIPPED_DIR else "the shipped corpus ") + str(directory)
+    loaded = load_mention_patterns(directory)
+    data = {"directory": str(directory), "shipped": directory == SHIPPED_DIR, "patterns": len(loaded.patterns),
+            "files": len(loaded.files), "refused": loaded.refused[:20], "refused_total": len(loaded.refused)}
+    if not directory.is_dir():
+        return Check("mentions.patterns", "warn", f"{where} is missing: hunts will not scan unparsed text", data)
+    if not loaded.files and not loaded.refused:
+        return Check("mentions.patterns", "warn", f"{where} holds no pattern files: hunts will not scan unparsed text",
+                     data)
+    detail = f"{len(loaded.patterns)} pattern(s) from {len(loaded.files)} file(s) in {where}"
+    if loaded.refused:
+        named = "; ".join(item["error"] for item in loaded.refused[:5])
+        more = f" (and {len(loaded.refused) - 5} more)" if len(loaded.refused) > 5 else ""
+        return Check("mentions.patterns", "warn",
+                     f"{detail}; {len(loaded.refused)} pattern(s) or file(s) refused and will not run: {named}{more}"[:1500],
+                     data)
+    return Check("mentions.patterns", "ok", detail, data)
+
+
 def check_linux_text_sources(s: Settings, client: ElasticClient | None = None) -> list[Check]:
     """List native Windows shapes and potential text samples, separately from typed coverage."""
     client = client or ElasticClient(s, timeout=ES_TIMEOUT)
@@ -736,6 +762,7 @@ def doctor_steps(s: Settings, env_file: Path | None = None, check_seconds: float
         Step("tshark", lambda: check_tshark(s), bound(LOCAL_SECONDS), True),
         Step("paths", lambda: check_paths(s, env_file), bound(LOCAL_SECONDS), False),
         Step("site.collection", lambda: check_site(s), bound(LOCAL_SECONDS), False),
+        Step("mentions.patterns", lambda: check_mention_patterns(s), bound(LOCAL_SECONDS), False),
         Step("db.integrity", lambda: check_db(s, integrity), integrity + DB_GRACE_SECONDS, False),
         Step("db.space", lambda: check_db_space(s), bound(LOCAL_SECONDS), False),
     ]

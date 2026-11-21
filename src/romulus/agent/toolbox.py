@@ -43,6 +43,7 @@ from romulus.evidence.raw_citation import RAW_GATE, RAW_LABEL, raw_record_view
 from romulus.evidence.typed import TypedEvent
 from romulus.report.incidents import build_incident_graph
 from romulus.report.manifest import EVALUATED_SKIPS, coverage_for_rules
+from romulus.report.mentions import mention_item, mentions_view
 from romulus.store.db import digest
 from romulus.store.repo import FINAL_RANK_PASS, Repo
 
@@ -102,6 +103,22 @@ class GetFindingArgs(_Args):
 class ListCoverageArgs(_Args):
     page: int = Field(default=1, ge=1, description=_PAGE)
     cursor: str | None = Field(default=None, pattern=r"^C[0-9a-f]{20}$", description=_CURSOR)
+
+
+LIST_MENTIONS_PAGE_SIZE = 25
+LIST_MENTIONS_DESCRIPTION = (
+    "Page the hunt's mention pool: lines of records no normalizer read where a curated pattern's text occurs, in pool "
+    "order (pattern strength, then rarity, then time). A mention is text a record contains, never an action, and is "
+    "not citable: to act on one, look for typed evidence of the same activity (search_events, entity_timeline, "
+    "process_tree, query_source on its host and time) and cite that. Its pattern's ATT&CK tags are the pattern's "
+    "metadata, not an observed technique. Optional filters: one pattern id, one host.")
+
+
+class ListMentionsArgs(_Args):
+    after: int = Field(default=0, ge=0, description=(
+        "The rank of the last mention of the previous page (next_after); 0 for the first page."))
+    pattern: str | None = Field(default=None, max_length=128, description="Only this pattern id (mention.<slug>).")
+    host: str | None = Field(default=None, max_length=255, description="Only this host, as a mention names it.")
 
 
 class GetEvidenceArgs(_Args):
@@ -710,6 +727,11 @@ class Toolbox:
                     "get_result", GET_RESULT_DESCRIPTION,
                     GetResultArgs, self._get_result,
                 ),
+                # Registered for every session with fixed text, like list_search_fields; it reads the stored pool.
+                RegisteredTool(
+                    "list_mentions", LIST_MENTIONS_DESCRIPTION,
+                    ListMentionsArgs, self._list_mentions,
+                ),
             )
         }
         # the session's stored tool results, which get_result reads (set by the session that owns this toolbox)
@@ -902,6 +924,34 @@ class Toolbox:
             data={"entries": entries, "page": args.page, "cursor": cursor},
             more=args.page * COVERAGE_PAGE_SIZE < total,
         )
+
+    def _list_mentions(self, args: ListMentionsArgs) -> dict:
+        """One page of the mention pool, each mention labelled and its line bounded as untrusted telemetry."""
+        view = mentions_view(self.repo, self.hunt_id, limit=0)
+        rows = self.repo.mentions(self.hunt_id, after_rank=args.after, limit=LIST_MENTIONS_PAGE_SIZE + 1,
+                                  pattern_id=args.pattern, host=args.host)
+        more = len(rows) > LIST_MENTIONS_PAGE_SIZE
+        items = []
+        for row in rows[:LIST_MENTIONS_PAGE_SIZE]:
+            item = mention_item(row, line_chars=TOOL_TEXT_LIMIT)
+            items.append({
+                "rank": item["rank"], "label": item["label"], "pattern": item["pattern"]["id"],
+                "headline": _bounded_text(item["headline"]), "strength": item["pattern"]["strength"],
+                "telemetry_fit": item["telemetry_fit"],
+                "pattern_attack_metadata": item["pattern"]["attack"]["techniques"],
+                "also_matched": [other["id"] for other in item["also_matched"]],
+                "host": item["host"], "count": item["count"], "first_seen": item["first_seen"],
+                "last_seen": item["last_seen"], "rarity": item["rarity"],
+                "text_around_match": item["line"], "match_at": item["match_at"], "line_cut": item["line_cut"],
+                "suspicious_content": item["suspicious_content"],
+            })
+        coverage = view["coverage"]
+        status = "complete" if view["status"] == "complete" else "partial"
+        return _result(status, coverage={"status": view["status"], "gaps": list(coverage.get("reasons") or [])[:10]},
+                       counts={"returned": len(items), "total": view["total"]}, data={
+                           "label": view["label"], "lane_note": view["lane_note"], "pool_status": view["status"],
+                           "items": items, "next_after": items[-1]["rank"] if more and items else None,
+                       }, more=more)
 
     @staticmethod
     def _matches_entity(candidate: dict, entity: dict) -> bool:

@@ -19,7 +19,7 @@ def _quiet(monkeypatch, **overrides):
              "check_ollama": "ollama.reachable", "check_agent": "agent.provider",
              "check_triage_model": "triage.provider", "check_secret_lengths": "secrets.length",
              "check_secret_strength": "secrets.strength", "check_tshark": "tshark", "check_site": "site.collection",
-             "check_db_space": "db.space"}
+             "check_db_space": "db.space", "check_mention_patterns": "mentions.patterns"}
     for function, name in names.items():
         monkeypatch.setattr(doctor, function, overrides.get(function, lambda *_a, _n=name, **_k: Check(_n, "ok")))
     monkeypatch.setattr(doctor, "check_arkime_auth", overrides.get("check_arkime_auth", lambda _s: None))
@@ -54,7 +54,8 @@ def test_a_hanging_check_times_out_and_the_run_continues(tmp_path, monkeypatch):
     assert by_name["site.collection"].status == "warn"
     assert by_name["site.collection"].detail.startswith("timed out after 0.3 s")
     # the checks after them still ran, and each result was reported as it was known
-    assert [check.name for check in checks][-3:] == ["site.collection", "db.integrity", "db.space"]
+    assert [check.name for check in checks][-4:] == ["site.collection", "mentions.patterns", "db.integrity",
+                                                     "db.space"]
     assert by_name["tshark"].status == "ok" and by_name["db.space"].status == "ok"
     assert seen == checks
 

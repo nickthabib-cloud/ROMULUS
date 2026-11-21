@@ -33,6 +33,10 @@ MATERIALIZE_COVERAGE_LIMIT = 10_000
 MATERIALIZE_ENTITY_LIMIT = 10_000
 MATERIALIZE_LINK_BYTES_LIMIT = 16_000_000
 LARGE_DOSSIER_PAGE_SIZE = 25
+# the top of the mention pool the dossier carries; list_mentions pages through the rest
+MENTION_DOSSIER_LIMIT = 10
+MENTION_RULE = ("text a record contains, not an action and not citable: corroborate with typed evidence and cite "
+                "that; list_mentions pages the pool")
 # A finding's place in the report (from the hunt's final ranking); its stored lane stays the rule's own estimate.
 RANK_SECTIONS = ("confirmed", "reported", "ranked_not_reported")
 NOT_RANKED = "not_ranked"
@@ -417,6 +421,32 @@ def _entity_refs(repo: Repo, candidates: list[dict], aliases: AliasBook) -> list
     } for row in repo.entities_for_keys(aliases.hunt_id, wanted)]
 
 
+def _mention_header(repo: Repo, hunt_id: str) -> dict:
+    """The mention pool in a few tokens: its status and size, and how to read it."""
+    summary = repo.mention_scan(hunt_id)
+    total = repo.mention_count(hunt_id) if summary is not None else 0
+    return {"status": (summary or {}).get("status", "not_scanned"), "total": total,
+            "in_dossier": min(total, MENTION_DOSSIER_LIMIT), "rule": MENTION_RULE}
+
+
+def _mentions(repo: Repo, hunt_id: str) -> list[dict]:
+    """The top of the mention pool, each labelled, the text around its match bounded as untrusted telemetry, and its
+    own flags beside it when that text holds instruction-shaped content."""
+    from romulus.report.mentions import mention_item
+    out = []
+    for row in repo.mentions(hunt_id, limit=MENTION_DOSSIER_LIMIT):
+        item = mention_item(row, line_chars=DATA_TEXT_LIMIT)
+        entry = {"rank": row["rank"], "kind": "mention", "pattern": _bounded_text(row["pattern_id"]),
+                 "headline": _bounded_text(item["headline"]), "strength": row["strength"],
+                 "host": _bounded_text(row["host"]) if row["host"] else None, "count": row["count"],
+                 "first_seen": _jsonable(row["first_ts"]), "text_around_match": item["line"],
+                 "suspicious_content": item["suspicious_content"]}
+        if flags := injection_flags(item["line"], "$.text_around_match"):
+            entry["safety_flags"] = flags
+        out.append(entry)
+    return out
+
+
 def _page_payload(payload: dict, page: int, pages: int, cursor: str) -> dict:
     if page < pages:
         message = (f"index page {page} of {pages}; call list_findings(page={page + 1},"
@@ -435,6 +465,8 @@ def _page_payload(payload: dict, page: int, pages: int, cursor: str) -> dict:
 def _append_detail(payload: dict, section: str, item: dict) -> None:
     if section in {"findings", "context_counts", "entities", "incidents"}:
         payload.setdefault(section, []).append(item)
+    elif section == "mentions":
+        payload.setdefault("mentions", {}).setdefault("items", []).append(item)
     elif section == "sources":
         payload.setdefault("scope", {}).setdefault("sources", []).append(item)
     elif section == "coverage_gaps":
@@ -510,6 +542,8 @@ def _detail_fetch(section: str, item: dict) -> str:
         return f"get_incident incident={alias} page=1"
     if section.startswith("coverage_"):
         return "list_coverage page=1"
+    if section == "mentions":
+        return "list_mentions"
     return "use the corresponding paged toolbox read with a narrower page"
 
 
@@ -609,6 +643,7 @@ def _large_dossier(repo: Repo, hunt_id: str, manifest: dict, token_budget: int,
             },
         },
         "agent_budget": _budget(repo, hunt_id, manifest),
+        "mentions": {**_mention_header(repo, hunt_id), "in_dossier": 0},
         "safety": {
             "flags": [], "status": "unscanned_at_materialization_cap",
             "flags_status": assessment(
@@ -686,6 +721,7 @@ def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int, owner_token: s
     entities = _entity_refs(repo, reportable, aliases)
     incidents = _incidents(repo, hunt_id, reportable, aliases)
     expansion = _expansion(repo, hunt_id, aliases, followable)
+    mentions = _mentions(repo, hunt_id)
     base = {
         "schema": DOSSIER_SCHEMA,
         "header": {"finding_counts": {
@@ -703,6 +739,7 @@ def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int, owner_token: s
         "incidents": [],
         "expansion": {key: [] for key in expansion},
         "agent_budget": _budget(repo, hunt_id, manifest),
+        "mentions": _mention_header(repo, hunt_id),
         "safety": {"flags": []},
         "findings": [],
     }
@@ -715,6 +752,8 @@ def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int, owner_token: s
     })
     def details() -> Iterator[tuple[str, dict]]:
         yield from (("findings", _finding_row(item, aliases)) for item in reportable)
+        # the bounded mention slice after the findings; the header says how many there are and how to page them
+        yield from (("mentions", item) for item in mentions)
         yield from (("sources", item) for item in sources)
         yield from (("context_counts", item) for item in context_rows)
         yield from (("entities", item) for item in entities)
@@ -728,7 +767,7 @@ def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int, owner_token: s
     cursor = "D" + digest({
         "hunt_id": hunt_id, "token_budget": token_budget, "context": base,
         "candidate_fingerprint": repo.candidate_fingerprint(hunt_id), "rank_state": repo.rank_state(hunt_id),
-        "coverage": coverage, "incidents": incidents, "expansion": expansion,
+        "coverage": coverage, "incidents": incidents, "expansion": expansion, "mentions": mentions,
     })[:16]
     plan = repo.create_agent_page_plan(
         hunt_id, cursor, {"kind": "dossier"}, {
