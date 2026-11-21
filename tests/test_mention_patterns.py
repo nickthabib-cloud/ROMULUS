@@ -1,23 +1,26 @@
-"""Schema and example checks for the mention pattern corpus (content/mentions/*.yaml).
+"""Corpus checks for the mention patterns (content/mentions/*.yaml).
 
-The corpus is matched against raw text lines that no typed parser normalized. These tests hold every entry to the
-strict schema, keep anchored patterns inside a linear-time regex subset, prove that every positive example matches and
-every benign negative does not, and check that no strong or medium pattern fires on a shared set of everyday admin,
-package-manager and monitoring lines.
+The corpus is matched against raw text lines that no typed parser normalized. Every file must load through the
+engine the sweep runs (`load_mention_patterns`), which holds each entry to the strict schema, keeps anchored patterns
+inside its linear-time regex subset and proves each file's examples. Matching here goes through `PatternSet.match`, so
+a line counts as matched exactly when the sweep would match it. On top of that, these tests hold the corpus to its own
+editorial policy (fuller rationales, two benign negatives, cited sources, titles that describe text), keep the public
+true-positive catalogs from regressing, and check that no strong or medium pattern fires on a shared set of everyday
+admin, package-manager and monitoring lines.
 """
 
 from __future__ import annotations
 
 import json
 import re
-import re._constants as sre_c
-import re._parser as sre_parse
 import time
-from functools import lru_cache
+from functools import cache, lru_cache
 from pathlib import Path
 
 import pytest
 import yaml
+
+from romulus.content.mention_patterns import PatternSet, compile_anchored, load_mention_patterns
 
 ROOT = Path(__file__).resolve().parents[1]
 MENTIONS = ROOT / "content" / "mentions"
@@ -34,34 +37,11 @@ THEME_FILES = {
     "webshells.yaml",
 }
 
-KEYS_REQUIRED = {
-    "id",
-    "title",
-    "match",
-    "case_sensitive",
-    "strength",
-    "telemetry",
-    "source",
-    "rationale",
-    "examples",
-}
-KEYS_OPTIONAL = {"attack"}
-STRENGTHS = {"strong", "medium", "weak"}
-TELEMETRY = {"linux_text", "windows_text", "any"}
 SOURCE_KEYS = {"name", "url", "license", "upstream_id"}
-ID_RE = re.compile(r"^mention\.[a-z0-9]+(?:_[a-z0-9]+)*$")
-ATTACK_RE = re.compile(r"^T\d{4}(?:\.\d{3})?$")
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 SIGMA_COMMIT = "698f0912f571d5fac3bf8c51f5421139834a011c"
-
-MAX_ANCHORED_CHARS = 512
-MIN_LITERAL_PREFIX = 4
+# corpus policy, stricter than the engine's floor of three characters
 MIN_LITERAL_CHARS = 4
-MAX_REPEAT_BOUND = 1024
-# Sum of the upper bounds of the open gaps ('.' or a negated class such as [^\n]) along any path through an anchored
-# pattern. Each gap is where a backtracking engine re-scans; keeping their sum small keeps the per-start work small.
-MAX_GAP_SUM = 360
-NEAR_BUDGET: list[tuple[int, str]] = []
 REGRESSION_DIR = ROOT / "tests" / "data" / "mention_regression"
 STRENGTH_RANK = {"none": 0, "weak": 1, "medium": 2, "strong": 3}
 # Titles describe text, never an executed action: no past-tense or participle verbs outside quoted text.
@@ -70,21 +50,11 @@ TITLE_VERB_RE = re.compile(
     r"deletes|adds|removes|opens|executes|loads|starts|stops|sets|makes|copies|saves|exports|dumps|downloads|"
     r"fetches|clears|disables|enables|installs|requests|sends|uses|calls|spawns|pipes|feeds|launches|drops|"
     r"modifies|changes|replaces|reads|connects|binds|listens|hands|wires|points|turns|hides|steals|injects)\b",
-    re.I,
+    re.IGNORECASE,
 )
 TITLE_ALLOWED_ED = {"encoded", "embedded", "based", "privileged", "numbered", "compressed", "obfuscated", "need",
                     "speed", "feed", "seed", "red", "shared", "unparsed", "related", "shred", "string", "during", "thing",
                     "spring", "ring", "king", "padding"}
-
-_FORBIDDEN_OPS = {
-    sre_c.GROUPREF: "backreference",
-    sre_c.GROUPREF_EXISTS: "conditional backreference",
-    sre_c.ASSERT: "lookahead/lookbehind",
-    sre_c.ASSERT_NOT: "negative lookahead/lookbehind",
-    sre_c.ATOMIC_GROUP: "atomic group",
-    sre_c.POSSESSIVE_REPEAT: "possessive quantifier",
-}
-_REPEAT_OPS = {sre_c.MAX_REPEAT, sre_c.MIN_REPEAT, sre_c.POSSESSIVE_REPEAT}
 
 # Everyday lines from package managers, admins, monitoring and services. No strong or medium pattern may match any.
 BENIGN_CORPUS = [
@@ -236,6 +206,7 @@ def _mention_files() -> list[Path]:
 
 @lru_cache(maxsize=1)
 def _corpus() -> tuple[tuple[str, dict], ...]:
+    """The raw entries, for the editorial policy the engine does not hold."""
     entries: list[tuple[str, dict]] = []
     for path in _mention_files():
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -252,131 +223,28 @@ def _attack():
     return load_attack_bundle()
 
 
-def _walk(items, inside_repeat: bool, where: str) -> None:
-    """Reject regex features outside the linear-time subset; `items` is a parsed (sub)pattern."""
-    for op, av in items:
-        if op in _FORBIDDEN_OPS:
-            raise AssertionError(f"{where}: {_FORBIDDEN_OPS[op]} is not allowed")
-        if op in _REPEAT_OPS:
-            low, high, sub = av
-            if inside_repeat:
-                raise AssertionError(f"{where}: nested quantifier")
-            if high == sre_c.MAXREPEAT or high > MAX_REPEAT_BOUND:
-                raise AssertionError(f"{where}: every quantifier needs an upper bound <= {MAX_REPEAT_BOUND}")
-            _walk(sub, True, where)
-        elif op is sre_c.SUBPATTERN:
-            _group, add_flags, del_flags, sub = av
-            if add_flags or del_flags:
-                raise AssertionError(f"{where}: inline flags are not allowed")
-            _walk(sub, inside_repeat, where)
-        elif op is sre_c.BRANCH:
-            for alternative in av[1]:
-                _walk(alternative, inside_repeat, where)
+@lru_cache(maxsize=1)
+def _loaded() -> PatternSet:
+    return load_mention_patterns(MENTIONS)
 
 
-def _strip_leading_boundary(parsed):
-    """A leading \\b is zero-width; the literal prefix starts after it."""
-    items = list(parsed)
-    if items and items[0][0] is sre_c.AT and items[0][1] is sre_c.AT_BOUNDARY:
-        return items[1:]
-    return items
+@pytest.fixture(scope="module")
+def patterns() -> PatternSet:
+    """The shipped corpus as the sweep loads it. Every test that matches text depends on it, so a refused file fails
+    them all with one stated cause instead of passing on a partial corpus."""
+    loaded = _loaded()
+    errors = "\n".join(item["error"] for item in loaded.refused)
+    assert not loaded.refused, f"the engine refuses {len(loaded.refused)} shipped file(s):\n{errors}"
+    return loaded
 
 
-def _is_open_gap(sub) -> bool:
-    if len(sub) != 1:
-        return False
-    op, av = sub[0]
-    if op is sre_c.ANY or op is sre_c.NOT_LITERAL:
-        return True
-    return op is sre_c.IN and any(item[0] is sre_c.NEGATE for item in av)
+@cache
+def _ids(line: str) -> frozenset[str]:
+    return frozenset(_loaded().match(line))
 
 
-def _gap_sum(items) -> int:
-    total = 0
-    for op, av in items:
-        if op in _REPEAT_OPS:
-            _low, high, sub = av
-            if _is_open_gap(list(sub)):
-                total += high
-            else:
-                total += high * _gap_sum(sub) if _gap_sum(sub) else 0
-        elif op is sre_c.SUBPATTERN:
-            total += _gap_sum(av[3])
-        elif op is sre_c.BRANCH:
-            total += max(_gap_sum(alt) for alt in av[1])
-    return total
-
-
-def _literal_prefix_length(parsed) -> int:
-    count = 0
-    for op, _av in _strip_leading_boundary(parsed):
-        if op is not sre_c.LITERAL:
-            break
-        count += 1
-    return count
-
-
-_METACHARS = set(".^$*+?{}[]|()")
-
-
-def _textual_literal_prefix_length(pattern: str) -> int:
-    """Leading characters written as plain literals (or escaped punctuation); a scanner can read these without a
-    regex parser. A literal followed by a quantifier is optional and does not count."""
-    count = 0
-    index = 2 if pattern.startswith("\\b") else 0
-    while index < len(pattern):
-        char = pattern[index]
-        if char == "\\":
-            if index + 1 >= len(pattern) or pattern[index + 1].isalnum():
-                break
-            step = 2
-        elif char in _METACHARS:
-            break
-        else:
-            step = 1
-        following = pattern[index + step : index + step + 1]
-        if following and following in "?*{+":
-            break
-        count += 1
-        index += step
-    return count
-
-
-def check_anchored(pattern: str, case_sensitive: bool, where: str) -> re.Pattern:
-    assert isinstance(pattern, str) and pattern, f"{where}: anchored must be a non-empty string"
-    assert len(pattern) <= MAX_ANCHORED_CHARS, f"{where}: anchored is longer than {MAX_ANCHORED_CHARS} chars"
-    assert "\n" not in pattern and "\r" not in pattern, f"{where}: anchored must be one line"
-    flags = 0 if case_sensitive else re.IGNORECASE
-    compiled = re.compile(pattern, flags)
-    parsed = sre_parse.parse(pattern, flags)
-    assert not parsed.state.groupdict, f"{where}: named groups are not allowed"
-    baseline_flags = sre_parse.parse("x", flags).state.flags
-    assert parsed.state.flags == baseline_flags, f"{where}: inline flags are not allowed"
-    _walk(parsed, False, where)
-    gaps = _gap_sum(parsed)
-    assert gaps <= MAX_GAP_SUM, f"{where}: open gaps sum to {gaps}, above {MAX_GAP_SUM}"
-    if gaps >= 0.8 * MAX_GAP_SUM:
-        NEAR_BUDGET.append((gaps, where))
-    first = parsed[0] if len(parsed) else None
-    starts_caret = first is not None and first[0] is sre_c.AT and first[1] is sre_c.AT_BEGINNING
-    prefix = min(_literal_prefix_length(parsed), _textual_literal_prefix_length(pattern))
-    assert starts_caret or prefix >= MIN_LITERAL_PREFIX, (
-        f"{where}: anchored must start with ^ or a literal prefix of at least {MIN_LITERAL_PREFIX} characters"
-    )
-    return compiled
-
-
-def matcher(entry: dict):
-    match = entry["match"]
-    case_sensitive = entry["case_sensitive"]
-    if "literal" in match:
-        literals = list(match["literal"])
-        if case_sensitive:
-            return lambda line: any(literal in line for literal in literals)
-        folded = [literal.lower() for literal in literals]
-        return lambda line: any(literal in line.lower() for literal in folded)
-    compiled = re.compile(match["anchored"], 0 if case_sensitive else re.IGNORECASE)
-    return lambda line: compiled.search(line) is not None
+def _strength(patterns: PatternSet) -> dict[str, str]:
+    return {pattern.id: pattern.strength for pattern in patterns.patterns}
 
 
 def _strings(value):
@@ -407,53 +275,23 @@ def test_theme_files_present_and_only_yaml() -> None:
     assert not strays, f"only .yaml pattern files belong in content/mentions: {strays}"
 
 
-def test_every_entry_matches_the_schema() -> None:
-    seen_ids: set[str] = set()
-    for filename, entry in _corpus():
-        assert isinstance(entry, dict), f"{filename}: each pattern must be a mapping"
-        where = f"{filename}:{entry.get('id', '?')}"
-        keys = set(entry)
-        assert KEYS_REQUIRED <= keys, f"{where}: missing keys {sorted(KEYS_REQUIRED - keys)}"
-        assert keys <= KEYS_REQUIRED | KEYS_OPTIONAL, f"{where}: unknown keys {sorted(keys - KEYS_REQUIRED - KEYS_OPTIONAL)}"
+def test_the_engine_loads_every_file_and_every_entry(patterns) -> None:
+    assert [item["name"] for item in patterns.files] == [path.name for path in _mention_files()]
+    assert [pattern.id for pattern in patterns.patterns] == [entry["id"] for _f, entry in _corpus()]
 
-        assert isinstance(entry["id"], str) and ID_RE.match(entry["id"]), f"{where}: bad id"
-        assert entry["id"] not in seen_ids, f"{where}: duplicate id"
-        seen_ids.add(entry["id"])
-        assert isinstance(entry["title"], str) and 0 < len(entry["title"]) <= 120, f"{where}: bad title"
-        assert isinstance(entry["case_sensitive"], bool), f"{where}: case_sensitive must be a bool"
-        assert entry["strength"] in STRENGTHS, f"{where}: bad strength"
+
+def test_every_entry_meets_the_corpus_policy() -> None:
+    """Editorial rules on top of the engine's schema: fuller rationales, two benign negatives per entry, every source
+    key written out, https sources, Sigma entries pinned to the reviewed commit."""
+    for filename, entry in _corpus():
+        where = f"{filename}:{entry.get('id', '?')}"
         rationale = entry["rationale"]
         assert isinstance(rationale, str) and len(rationale.strip()) >= 40, f"{where}: rationale too short"
         if entry["strength"] == "strong":
             assert len(rationale.strip()) >= 80, f"{where}: a strong pattern needs a fuller rationale"
-
-        telemetry = entry["telemetry"]
-        assert isinstance(telemetry, list) and telemetry, f"{where}: telemetry must be a non-empty list"
-        assert set(telemetry) <= TELEMETRY and len(set(telemetry)) == len(telemetry), f"{where}: bad telemetry"
-        assert "any" not in telemetry or telemetry == ["any"], f"{where}: 'any' stands alone"
-
-        match = entry["match"]
-        assert isinstance(match, dict) and len(match) == 1, f"{where}: match has exactly one of literal/anchored"
-        if "literal" in match:
-            literals = match["literal"]
-            assert isinstance(literals, list) and literals, f"{where}: literal must be a non-empty list"
-            for literal in literals:
-                assert isinstance(literal, str), f"{where}: literals are strings"
-                assert len(literal.strip()) >= MIN_LITERAL_CHARS, f"{where}: literal {literal!r} is too short"
-                assert "\n" not in literal and "\r" not in literal, f"{where}: literal must be one line"
-            keyed = [lit if entry["case_sensitive"] else lit.lower() for lit in literals]
-            assert len(set(keyed)) == len(keyed), f"{where}: duplicate literal"
-        else:
-            assert set(match) == {"anchored"}, f"{where}: match key must be literal or anchored"
-            check_anchored(match["anchored"], entry["case_sensitive"], where)
-
-        if "attack" in entry:
-            attack = entry["attack"]
-            assert isinstance(attack, list) and attack, f"{where}: attack, when present, is a non-empty list"
-            assert len(set(attack)) == len(attack), f"{where}: duplicate ATT&CK id"
-            for attack_id in attack:
-                assert isinstance(attack_id, str) and ATTACK_RE.match(attack_id), f"{where}: bad ATT&CK id"
-
+        assert len(entry["title"]) <= 120, f"{where}: title too long"
+        for literal in entry["match"].get("literal", ()):
+            assert len(literal.strip()) >= MIN_LITERAL_CHARS, f"{where}: literal {literal!r} is too short"
         source = entry["source"]
         assert isinstance(source, dict) and set(source) == SOURCE_KEYS, f"{where}: source keys are {SOURCE_KEYS}"
         for key in ("name", "url", "license"):
@@ -465,12 +303,9 @@ def test_every_entry_matches_the_schema() -> None:
             assert isinstance(upstream, str) and UUID_RE.match(upstream), f"{where}: Sigma entries cite the rule id"
             assert source["license"] == "DRL-1.1", f"{where}: Sigma rules are DRL-1.1"
             assert SIGMA_COMMIT in source["url"], f"{where}: Sigma url pins the reviewed commit"
-
-        examples = entry["examples"]
-        assert isinstance(examples, dict) and set(examples) == {"positive", "negative"}, f"{where}: bad examples"
-        assert isinstance(examples["positive"], list) and len(examples["positive"]) >= 1, f"{where}: >=1 positive"
-        assert isinstance(examples["negative"], list) and len(examples["negative"]) >= 2, f"{where}: >=2 negatives"
-        for line in examples["positive"] + examples["negative"]:
+        negatives = entry["examples"]["negative"]
+        assert isinstance(negatives, list) and len(negatives) >= 2, f"{where}: >=2 negatives"
+        for line in entry["examples"]["positive"] + negatives:
             assert isinstance(line, str) and line.strip(), f"{where}: examples are non-empty strings"
 
 
@@ -499,38 +334,23 @@ def test_attack_ids_are_current_enterprise_20() -> None:
             )
 
 
-def test_positives_match_and_negatives_do_not() -> None:
-    for filename, entry in _corpus():
-        matches = matcher(entry)
-        where = f"{filename}:{entry['id']}"
-        for line in entry["examples"]["positive"]:
-            assert matches(line), f"{where}: positive example does not match: {line!r}"
-        for line in entry["examples"]["negative"]:
-            assert not matches(line), f"{where}: benign negative matches: {line!r}"
+def test_positives_match_and_negatives_do_not(patterns) -> None:
+    """The loader proves each file's examples alone; here every example is matched against the whole corpus."""
+    for pattern in patterns.patterns:
+        for line in pattern.examples.positive:
+            assert pattern.id in _ids(line), f"{pattern.id}: positive example does not match: {line!r}"
+        for line in pattern.examples.negative:
+            assert pattern.id not in _ids(line), f"{pattern.id}: benign negative matches: {line!r}"
 
 
-def test_gap_budget_report() -> None:
-    """Print the anchored patterns whose open gaps are near the budget. Before any gap is shortened, the public
-    true-positive regression corpus test below must still pass: a cost bound must never silently cost detection."""
-    NEAR_BUDGET.clear()
-    for filename, entry in _corpus():
-        if "anchored" in entry["match"]:
-            check_anchored(entry["match"]["anchored"], entry["case_sensitive"], f"{filename}:{entry['id']}")
-    for gaps, where in sorted(NEAR_BUDGET, reverse=True):
-        print(f"near gap budget: {gaps}/{MAX_GAP_SUM} {where}")
-
-
-def _line_strength(line: str) -> tuple[str, list[str]]:
-    best, ids = "none", []
-    for _filename, entry in _corpus():
-        if matcher(entry)(line):
-            ids.append(entry["id"])
-            if STRENGTH_RANK[entry["strength"]] > STRENGTH_RANK[best]:
-                best = entry["strength"]
+def _line_strength(patterns: PatternSet, line: str) -> tuple[str, list[str]]:
+    strength = _strength(patterns)
+    ids = sorted(_ids(line))
+    best = max((strength[pattern_id] for pattern_id in ids), key=STRENGTH_RANK.__getitem__, default="none")
     return best, ids
 
 
-def test_public_true_positive_corpus_does_not_regress() -> None:
+def test_public_true_positive_corpus_does_not_regress(patterns) -> None:
     """Every command of the cited public catalogs keeps at least the strength it had when the corpus was first
     reviewed (recorded per line in the data file). Narrowing a pattern or shortening a gap must not lose them."""
     files = sorted(REGRESSION_DIR.glob("*.json"))
@@ -540,8 +360,8 @@ def test_public_true_positive_corpus_does_not_regress() -> None:
         assert data.get("license") and data.get("url") and data.get("commit"), f"{path.name}: attribution missing"
         for item in data["entries"]:
             assert len(item["lines"]) == len(item["expected_min_strength"]), f"{path.name}:{item['name']}"
-            for line, expected in zip(item["lines"], item["expected_min_strength"]):
-                got, ids = _line_strength(line)
+            for line, expected in zip(item["lines"], item["expected_min_strength"], strict=True):
+                got, ids = _line_strength(patterns, line)
                 assert STRENGTH_RANK[got] >= STRENGTH_RANK[expected], (
                     f"{path.name}:{item['name']}: expected at least {expected}, got {got} ({ids}) for {line[:160]!r}"
                 )
@@ -567,67 +387,43 @@ def test_strong_literals_each_have_a_positive_example() -> None:
             assert hit, f"{filename}:{entry['id']}: literal {literal!r} has no positive example"
 
 
-def test_strong_and_medium_patterns_do_not_fire_on_other_patterns_negatives() -> None:
-    corpus = _corpus()
-    negatives = [(entry["id"], line) for _f, entry in corpus for line in entry["examples"]["negative"]]
-    for filename, entry in corpus:
-        if entry["strength"] == "weak":
-            continue
-        matches = matcher(entry)
-        for owner, line in negatives:
-            if entry["id"] in KNOWN_BENIGN_MEDIUM_MATCHES.get(line, ()):
-                continue
-            assert not matches(line), f"{filename}:{entry['id']}: matches benign negative of {owner}: {line!r}"
+def _loud(patterns: PatternSet, line: str) -> set[str]:
+    strength = _strength(patterns)
+    return {pattern_id for pattern_id in _ids(line) if strength[pattern_id] != "weak"}
 
 
-def test_strong_and_medium_patterns_stay_quiet_on_everyday_lines() -> None:
-    for filename, entry in _corpus():
-        if entry["strength"] == "weak":
-            continue
-        matches = matcher(entry)
-        for line in BENIGN_CORPUS:
-            assert not matches(line), f"{filename}:{entry['id']}: fires on everyday line {line!r}"
-        for line, allowed in KNOWN_BENIGN_MEDIUM_MATCHES.items():
-            if entry["id"] in allowed:
-                assert entry["strength"] == "medium", f"{entry['id']}: a known benign match is allowed only at medium"
-                continue
-            assert not matches(line), f"{filename}:{entry['id']}: fires on everyday line {line!r}"
+def test_strong_and_medium_patterns_do_not_fire_on_other_patterns_negatives(patterns) -> None:
+    for owner in patterns.patterns:
+        for line in owner.examples.negative:
+            loud = _loud(patterns, line) - set(KNOWN_BENIGN_MEDIUM_MATCHES.get(line, ()))
+            assert not loud, f"{sorted(loud)} match benign negative of {owner.id}: {line!r}"
 
 
-def test_known_benign_medium_matches_are_real() -> None:
-    """The allow-list documents real matches; an entry that no longer matches its listed line must be removed."""
-    by_id = {entry["id"]: entry for _f, entry in _corpus()}
+def test_strong_and_medium_patterns_stay_quiet_on_everyday_lines(patterns) -> None:
+    strength = _strength(patterns)
+    for line in BENIGN_CORPUS:
+        assert not _loud(patterns, line), f"{sorted(_loud(patterns, line))} fire on everyday line {line!r}"
     for line, allowed in KNOWN_BENIGN_MEDIUM_MATCHES.items():
         for pattern_id in allowed:
-            assert pattern_id in by_id, f"unknown pattern id {pattern_id}"
-            assert matcher(by_id[pattern_id])(line), f"{pattern_id} no longer matches {line!r}"
+            assert strength.get(pattern_id) == "medium", f"{pattern_id}: a known benign match is allowed only at medium"
+        loud = _loud(patterns, line) - set(allowed)
+        assert not loud, f"{sorted(loud)} fire on everyday line {line!r}"
 
 
-def _literal_runs(parsed) -> list[str]:
-    runs, current = [], ""
-    for op, av in _strip_leading_boundary(parsed):
-        if op is sre_c.LITERAL:
-            current += chr(av)
-        else:
-            if current:
-                runs.append(current)
-            current = ""
-    if current:
-        runs.append(current)
-    return runs
+def test_known_benign_medium_matches_are_real(patterns) -> None:
+    """The allow-list documents real matches; an entry that no longer matches its listed line must be removed."""
+    known = {pattern.id for pattern in patterns.patterns}
+    for line, allowed in KNOWN_BENIGN_MEDIUM_MATCHES.items():
+        for pattern_id in allowed:
+            assert pattern_id in known, f"unknown pattern id {pattern_id}"
+            assert pattern_id in _ids(line), f"{pattern_id} no longer matches {line!r}"
 
 
-def _adversarial_lines(pattern: str, flags: int, positives: list[str]) -> list[str]:
-    """Long single lines built to make a backtracking engine work hard: the literal prefix followed by filler; dense
-    near-misses that repeat every literal run of the pattern except the last, back to back, so each start position
-    explores every gap; and each positive example cut short and repeated."""
-    parsed = sre_parse.parse(pattern, flags)
-    runs = _literal_runs(parsed)
-    prefix = runs[0] if runs else ""
+def _adversarial_lines(prefix: str, positives: list[str]) -> list[str]:
+    """Long single lines built to make the matcher work hard: the pattern's literal prefix followed by filler, the
+    prefix repeated back to back, and each positive example cut short and repeated."""
     lines = [(prefix + "A1/+ x" * 40) * 400 + "Z" * 65536]
-    if len(runs) > 1:
-        dense = " ".join(runs[:-1]) + " "
-        lines.append(dense * max(1, 200_000 // len(dense)))
+    if prefix:
         lines.append((prefix + " ") * max(1, 200_000 // (len(prefix) + 1)))
     for positive in positives:
         for keep in (0.5, 0.75, 0.9):
@@ -636,44 +432,49 @@ def _adversarial_lines(pattern: str, flags: int, positives: list[str]) -> list[s
     return lines
 
 
-def test_anchored_patterns_stay_fast_on_large_adversarial_lines() -> None:
-    """Python's backtracking engine is the worst case: a long line full of near-misses must still scan quickly.
-    Lines are about 200 KB; the budget is per line and generous for slow CI hosts."""
+def test_anchored_patterns_stay_fast_on_large_adversarial_lines(patterns) -> None:
+    """A long line full of near-misses must still scan quickly through the whole matcher the sweep runs. Lines are
+    about 200 KB; the budget is per line and generous for slow CI hosts."""
     budget_seconds = 2.0
     slowest = (0.0, "")
-    for filename, entry in _corpus():
-        pattern = entry["match"].get("anchored")
-        if pattern is None:
+    for pattern, built in zip(patterns.patterns, patterns.compiled, strict=True):
+        if built.regex is None:
             continue
-        flags = 0 if entry["case_sensitive"] else re.IGNORECASE
-        compiled = re.compile(pattern, flags)
-        for line in _adversarial_lines(pattern, flags, entry["examples"]["positive"]):
+        for line in _adversarial_lines(built.prefix or built.lead, pattern.examples.positive):
             started = time.perf_counter()
-            compiled.search(line)
+            patterns.match(line)
             elapsed = time.perf_counter() - started
-            slowest = max(slowest, (elapsed, entry["id"]))
-            assert elapsed < budget_seconds, f"{filename}:{entry['id']}: {elapsed:.2f}s on a {len(line)}-char line"
-    print(f"slowest anchored search on adversarial lines: {slowest[0]:.3f}s ({slowest[1]})")
+            slowest = max(slowest, (elapsed, pattern.id))
+            assert elapsed < budget_seconds, f"{pattern.id}: {elapsed:.2f}s on a {len(line)}-char line"
+    print(f"slowest corpus match on adversarial lines: {slowest[0]:.3f}s ({slowest[1]})")
 
 
-def test_validator_rejects_unsafe_regex_features() -> None:
-    unsafe = [
-        r"(abcd)\1",  # backreference
-        r"abcd(?=x)",  # lookahead
-        r"abcd(?<!x)y",  # lookbehind
-        r"abcd(?:x{1,3}){1,5}",  # nested quantifier
-        r"abcd(?:[a-z]{0,9}x)?",  # optional group holding a quantifier
-        r"abcd.*x",  # unbounded quantifier
-        r"abcd[a-z]+",  # unbounded quantifier
-        r"(?i)abcd",  # inline flag
-        r"(?P<n>abcd)",  # named group
-        r"abc[d]x",  # three-character literal prefix
-        r"ab|cdef",  # top-level alternation has no literal prefix
-        r"[a-z]{4}abcd",  # starts with a class
-        "abcd" + "x" * 600,  # over the length cap
-    ]
-    for pattern in unsafe:
-        with pytest.raises(AssertionError):
-            check_anchored(pattern, True, f"probe {pattern!r}")
-    for pattern in (r"^\S{1,20} abc", r"abcd[^\n]{0,80}efg", r"/dev/(?:tcp|udp)/[0-9]{1,3}"):
-        check_anchored(pattern, True, f"probe {pattern!r}")
+@pytest.mark.parametrize("expression", [
+    r"(abcd)\1",  # backreference
+    r"abcd(?=x)",  # lookahead
+    r"abcd(?<!x)y",  # lookbehind
+    r"abcd(?:x{1,3}){1,5}",  # nested quantifier
+    r"abcd(?:[a-z]{0,9}x)?",  # optional group holding a quantifier
+    r"abcd.*x",  # an unbounded open gap
+    r"(?i)abcd",  # inline flag
+    r"(?P<n>abcd)",  # a group before the literal prefix
+    r"abc[x-y]d",  # three-character literal prefix
+    r"ab|cdef",  # top-level alternation has no literal prefix
+    r"[a-z]{4}abcd",  # starts with a class
+    "abcd" + "x" * 600,  # over the length cap
+    r"abcd.{0,80}=.{0,80}=.{0,80}=.{0,80}X",  # more than two open gaps along one path
+])
+def test_the_engine_refuses_unsafe_expressions(expression) -> None:
+    with pytest.raises(ValueError):
+        compile_anchored(expression, True)
+
+
+@pytest.mark.parametrize("expression", [
+    r"^\S{1,20} abc",
+    r"abcd[^\n]{0,80}efg",
+    r"/dev/(?:tcp|udp)/[0-9]{1,3}",
+    r"abcd[a-z]+",  # an unbounded positive class: the matcher's window bounds it
+    r"abc[d]x",  # a one-character class is a literal, so the prefix is abcd
+])
+def test_the_engine_accepts_bounded_expressions(expression) -> None:
+    compile_anchored(expression, True)

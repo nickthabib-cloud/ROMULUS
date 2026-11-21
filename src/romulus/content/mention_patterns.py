@@ -200,8 +200,15 @@ class PatternSet:
                 "refused": list(self.refused)}
 
 
+def _shipped_dir() -> Path:
+    # a built wheel carries the corpus inside the package (romulus/content/mentions); a source checkout or an
+    # editable install reads it from the repository's content/mentions
+    packaged = Path(__file__).resolve().parent / "mentions"
+    return packaged if packaged.is_dir() else Path(__file__).resolve().parents[3] / "content" / "mentions"
+
+
 # the shipped corpus; a deployment names another directory through its settings (ROMULUS_MENTION_DIR)
-SHIPPED_DIR = Path(__file__).resolve().parents[3] / "content" / "mentions"
+SHIPPED_DIR = _shipped_dir()
 
 
 def mention_dir(settings=None) -> Path:
