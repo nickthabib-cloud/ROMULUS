@@ -72,7 +72,12 @@ from romulus.evidence.linux_catalog import (
 )
 from romulus.evidence.linux_service_text import parse_service, service_skip_reason
 from romulus.evidence.linux_text import TextLine, classify, inline_time
-from romulus.evidence.linux_text_types import NEW_WRITER_CAVEAT, SYSLOG_WRITER_CAVEAT, WRITER_MISMATCH_CAVEAT
+from romulus.evidence.linux_text_types import (
+    NEW_WRITER_CAVEAT,
+    SUDO_AMBIGUOUS_CAVEAT,
+    SYSLOG_WRITER_CAVEAT,
+    WRITER_MISMATCH_CAVEAT,
+)
 from romulus.evidence.raw_scrub import clean_source, might_be_zeek
 from romulus.evidence.suricata_protocols import (
     SURICATA_NORMALIZER,
@@ -1480,8 +1485,6 @@ _SUDO = re.compile(r"^\s*(?P<user>\S+) : (?:(?P<fail>" + _SUDO_DENIALS + r") ; )
                    r"(?:TTY=(?P<tty>[^\s;]+) ; )?(?:CHROOT=(?P<chroot>.*?) ; )?PWD=(?P<pwd>.*?) ; "
                    r"USER=(?P<target>[^\s;]+) ;(?: GROUP=(?P<group>[^\s;]+) ;)?(?: TSID=(?P<tsid>[^\s;]+) ;)?"
                    r"(?: ENV=(?P<env>.*?) ;)?(?: COMMAND=(?P<cmd>.*))?$")
-SUDO_AMBIGUOUS_CAVEAT = ("The sudo record repeats a field separator inside its working directory or command text; the "
-                         "run-as account and the command are read at the first separator and may be misattributed")
 # A record sudo split across lines (lib/eventlog do_syslog): the first part, and the "(command continued)" rest.
 _SUDO_HEAD = re.compile(r"^\s*(?P<user>\S+) : (?:(?P<fail>" + _SUDO_DENIALS + r")(?: ;.*)?|"
                         r"(?:HOST=[^\s;]+ ; )?TTY=(?P<tty>[^\s;]+) ;.*|(?:HOST|TTY|CHROOT|PWD)=.*)$")
@@ -1602,7 +1605,11 @@ def _journal_event(hit: dict, j: dict, o: Callable[[str], str], boots_seen: list
             g = piece.groupdict()
             f["user.name"] = fv(g["user"], origin)
             continued = piece.re is _SUDO_CONTINUED
-            f["sudo.chunk"] = fv("continuation" if continued else "head", origin)
+            # a record whose run-as and command fields are all present but could not be read in order (a separator
+            # inside the caller's text, such as a directory a refusal names) is complete, not a split record
+            complete = not continued and " ; USER=" in msg and " ; COMMAND=" in msg
+            if not complete:
+                f["sudo.chunk"] = fv("continuation" if continued else "head", origin)
             if g.get("fail"):
                 f["privilege.denial_reason"] = fv(g["fail"], origin)
             if g.get("tty"):
@@ -1610,7 +1617,7 @@ def _journal_event(hit: dict, j: dict, o: Callable[[str], str], boots_seen: list
             outcome = Outcome.failure if g.get("fail") else Outcome.unknown
             return TypedEvent(id=event_id("privilege_use", [ref]), family="privilege_use", ts=_ts(src["@timestamp"]),
                               host=host, outcome=outcome, fields=f, raw=[ref], normalizer=NORMALIZER_VERSION,
-                              caveats=[*caveats, SUDO_SPLIT_CAVEAT])
+                              caveats=[*caveats, SUDO_AMBIGUOUS_CAVEAT if complete else SUDO_SPLIT_CAVEAT])
         raise Skip("sudo message not a command record")
     raise Skip(f"{kind} identifier {ident!r} is not normalized")
 
@@ -3750,6 +3757,11 @@ def _record_message(hit: dict) -> str | None:
 
 _SUDO_MESSAGE_FIELDS = frozenset({"user.name", "auth.target_user", "sudo.command", "process.cwd", "process.tty",
                                   "privilege.denial_reason", "sudo.run_group", "sudo.env", "sudo.chroot", "sudo.chunk"})
+SUDO_FORGED_PIECE = "sudo continuation line that journald shows another program wrote (not joined)"
+SUDO_JOIN_WRITER_PID_CAVEAT = ("The lines were joined on a pid the writer chose (its syslog header or SYSLOG_PID), "
+                               "which journald does not vouch for")
+SUDO_JOIN_NO_PID_CAVEAT = ("The lines were joined without a pid: this was the only sudo record of the host and account "
+                           "within 2 seconds")
 SUDO_UNJOINED = "sudo continuation line not joined to its first line (another batch, host, account or writer pid)"
 
 
@@ -3768,16 +3780,23 @@ def _join_sudo_pieces(events: list[TypedEvent], hits: list[dict], skips) -> None
         hit = by_ref.get((event.raw[0].target, event.raw[0].native_id)) if event.raw else None
         return _record_message(hit) if hit is not None else None
 
+    # the batch's own order breaks ties between records of one instant, never an event id
+    position = {e.id: index for index, e in enumerate(events)}
     heads = sorted((e for e in events if e.family == "privilege_use" and e.get("auth.service") == "sudo"
-                    and e.get("sudo.chunk") != "continuation"), key=lambda e: (e.ts, e.id))
+                    and e.get("sudo.chunk") != "continuation"), key=lambda e: (e.ts, position[e.id]))
     joined: dict[str, tuple[TypedEvent, str, list[TypedEvent]]] = {}
     dropped: set[str] = set()
-    for piece in sorted(pieces, key=lambda e: (e.ts, e.id)):
+    for piece in sorted(pieces, key=lambda e: (e.ts, position[e.id])):
         dropped.add(piece.id)
+        if WRITER_MISMATCH_CAVEAT in piece.caveats:
+            skips[SUDO_FORGED_PIECE] += 1
+            continue
         candidates = [h for h in heads if h.host == piece.host and h.get("user.name") == piece.get("user.name")
                       and 0 <= (piece.ts - h.ts).total_seconds() <= SUDO_JOIN_SECONDS
                       and h.has("process.pid") == piece.has("process.pid")
                       and h.get("process.pid") == piece.get("process.pid")]
+        # a first part (a record sudo split) continues before a complete record of the same writer does
+        candidates = [h for h in candidates if h.get("sudo.chunk") == "head"] or candidates
         rest = _SUDO_CONTINUED.match(text(piece) or "")
         if not candidates or rest is None or (not piece.has("process.pid") and len(candidates) != 1):
             skips[SUDO_UNJOINED] += 1
@@ -3807,6 +3826,14 @@ def _join_sudo_pieces(events: list[TypedEvent], hits: list[dict], skips) -> None
                 fields[name] = fv(g[key], origin)
         raw = [*head.raw, *(ref for part in parts for ref in part.raw)]
         caveats = [c for c in head.caveats if c != SUDO_SPLIT_CAVEAT] + [SUDO_JOINED_CAVEAT]
+        # every piece's writer caveats, and how far the pid the join rests on is the writer's own choice
+        caveats += [c for part in parts for c in part.caveats
+                    if c in (NEW_WRITER_CAVEAT, SYSLOG_WRITER_CAVEAT) and c not in caveats]
+        pid_origin = head.fields["process.pid"].origin if head.has("process.pid") else None
+        if pid_origin is None:
+            caveats.append(SUDO_JOIN_NO_PID_CAVEAT)
+        elif not re.search(r"(?:#journal:_PID|:journald\.pid)$", pid_origin):
+            caveats.append(SUDO_JOIN_WRITER_PID_CAVEAT)
         if full.count(" ; USER=") > 1 or full.count(" ; COMMAND=") > 1:
             caveats.append(SUDO_AMBIGUOUS_CAVEAT)
         replaced[head.id] = TypedEvent(id=event_id("privilege_use", raw), family="privilege_use", ts=head.ts,

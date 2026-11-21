@@ -870,7 +870,8 @@ def _privilege(program: str, message: str) -> ParsedLine | None:
         if match[4] and match[4] != "unknown":
             fields["process.tty"] = match[4]
         caveats = [PRIVILEGE_TEXT_CAVEAT]
-        if message.count("] [COMMAND=") == 1 and "] [CWD=" not in match[5]:
+        if (len(re.findall(r"\]\s*\[COMMAND=", message)) == 1 and not re.search(r"\]\s*\[CWD=", match[5])
+                and not re.search(r"\]\s*\[CWD=", match[6])):
             fields["process.cwd"], fields["privilege.command"] = match[5], match[6]
         else:
             caveats.append(PKEXEC_AMBIGUOUS_CAVEAT)

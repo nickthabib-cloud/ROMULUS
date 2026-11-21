@@ -268,7 +268,7 @@ def test_success_after_three_failed_attempts_is_high_and_cites_the_refusals():
     first, success = refused(0), allowed(120)
     _rule, matches = run(PrivilegeBrokerSuspiciousSuccess, [success, first])
     [match] = matches
-    assert match.proposed_lane == "high" and "3 failed password attempt(s)" in match.claim
+    assert match.proposed_lane == "high" and "3 counted failed password attempt(s)" in match.claim
     assert {e.id for e in match.events} == {first.id, success.id}
 
 

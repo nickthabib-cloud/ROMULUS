@@ -1197,7 +1197,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 - ATT&CK: [`T1078.003`](https://attack.mitre.org/techniques/T1078/003/), [`T1110.001`](https://attack.mitre.org/techniques/T1110/001/), [`T1548`](https://attack.mitre.org/techniques/T1548/), [`T1548.003`](https://attack.mitre.org/techniques/T1548/003/)
 - Telemetry families: privilege_use
 - Required typed fields: auth.service
-- Behavior: sudo, su, runuser or pkexec logged a success letting an account act as another account, either after it refused the same account and target within 15 minutes, or for a web-service or system service account
+- Behavior: sudo, su, runuser or pkexec logged a success letting an account act as another account, either after it refused the same account and target within 15 minutes, or for a web-service, system or application account
 - Positive-only reason: Only recorded typed positive observations are reported; unaudited activity is unresolved.
 
 <a id="rule-host-python-pty-spawn"></a>
