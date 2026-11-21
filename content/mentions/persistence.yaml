@@ -826,7 +826,7 @@
 - id: mention.persist_schtasks_suspicious_action
   title: 'schtasks /create text with an encoded, IEX, download or remote-HTA action'
   match:
-    anchored: 'schtasks(?:\.exe)?[\"'']? [\w ./\\:"''@$!#%*+=,()-]{0,40}/create[^\n]{1,240}(?: -enc |(?:powershell|pwsh)(?:\.exe)?[^\n]{0,60} -e [A-Za-z0-9+/]{20}|\.DownloadString|\.DownloadFile|\.DownloadData|FromBase64String|mshta(?:\.exe)? http| IEX)'
+    anchored: 'schtasks(?:\.exe)?[\"'']? [\w ./\\:"''@$!#%*+=,()-]{0,40}/create [^\n]{1,240}(?: -enc |(?:powershell|pwsh)(?:\.exe)?[^\n]{0,60} -e [A-Za-z0-9+/]{20}|\.DownloadString|\.DownloadFile|\.DownloadData|FromBase64String|mshta(?:\.exe)? http| IEX)'
   case_sensitive: false
   strength: strong
   attack: [T1053.005]
