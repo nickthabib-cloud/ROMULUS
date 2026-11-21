@@ -27,7 +27,9 @@ A literal is 3 to 512 characters. An anchored expression must stay fast on attac
 characters and uses only literals, character classes, `.`, groups, alternation, repeats and the anchors `^`, `$`,
 `\\A`, `\\Z`, `\\b` and `\\B`: no back references, lookaround, conditionals, atomic groups, possessive repeats or inline
 flags. A repeat that can match more than once may hold neither another repeat nor an alternation (an optional group
-may hold both), and at most four repeats may each match more than 16 characters. Each expression is then timed at
+may hold both), and at most four repeats may each match more than 16 characters. The upper bounds of its open gaps
+(`.`, a negated class such as `[^\\n]`, or a negated character, each repeated) along any path sum to at most
+MAX_GAP_SUM: an unbounded open gap is refused. Each expression is then timed at
 load against lines built to make it backtrack (from its own examples), and refused when one takes longer than
 `PROBE_LIMIT_SECONDS`. The matcher reads an expression over at most 512 characters from where it is tried; a line it
 could not rule out there is counted in the pool's coverage.
@@ -72,6 +74,9 @@ _ID = r"^mention\.[a-z0-9]+(?:_[a-z0-9]+)*$"
 # repeats that may each match more than WIDE_REPEAT characters, at most this many per expression
 WIDE_REPEAT = 16
 MAX_WIDE_REPEATS = 4
+# the sum of the upper bounds of the open gaps along any path through an anchored expression: each is where a
+# backtracking engine re-scans, so keeping their sum small keeps the work from one place small
+MAX_GAP_SUM = 360
 # the longest one hostile probe line may take an anchored expression at load, its fastest of PROBE_RUNS runs (the
 # curated corpus's worst is under 1 ms; the margin keeps a loaded machine from refusing a sound expression, while an
 # expression that backtracks catastrophically takes seconds)
@@ -238,6 +243,32 @@ def _check(items, multiplies: bool) -> int:
     return wide
 
 
+def _open_gap(body) -> bool:
+    """A repeat body that matches almost any character: `.`, a negated class, or a negated character."""
+    if len(body) != 1:
+        return False
+    op, arg = body[0]
+    return op in (_sre.ANY, _sre.NOT_LITERAL) or (op == _sre.IN and any(item[0] == _sre.NEGATE for item in arg))
+
+
+def _gap_sum(items) -> int:
+    """The sum of the open gaps' upper bounds along the widest path (an alternation counts its widest branch)."""
+    total = 0
+    for op, arg in items:
+        if op in _REPEATS:
+            _low, high, body = arg
+            if _open_gap(list(body)):
+                total += int(high)
+            else:
+                inner = _gap_sum(body)
+                total += int(high) * inner if inner else 0
+        elif op == _sre.SUBPATTERN:
+            total += _gap_sum(arg[3])
+        elif op == _sre.BRANCH:
+            total += max((_gap_sum(alt) for alt in arg[1]), default=0)
+    return total
+
+
 def _width(items) -> int:
     widest = _sre_parse.SubPattern(_sre_parse.State(), list(items)).getwidth()[1]
     return min(int(widest), MAX_SCAN_CHARS)
@@ -312,6 +343,9 @@ def compile_anchored(expression: str, case_sensitive: bool) -> Anchored:
         raise ValueError("inline flags are refused: case is set by case_sensitive")
     items = list(parsed)
     _check(items, False)
+    if (gaps := _gap_sum(items)) > MAX_GAP_SUM:
+        shown = "unbounded" if gaps >= _sre.MAXREPEAT else str(gaps)
+        raise ValueError(f"its open gaps ('.', negated classes) sum to {shown} characters, above {MAX_GAP_SUM}")
     widest = parsed.getwidth()[1]
     shape = {"end_anchored": _ends(items), "max_width": None if widest >= _sre.MAXREPEAT else int(widest)}
     if items and items[0][0] == _sre.AT and items[0][1] in {_sre.AT_BEGINNING, _sre.AT_BEGINNING_STRING}:

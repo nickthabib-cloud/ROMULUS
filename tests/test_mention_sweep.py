@@ -95,12 +95,15 @@ REFUSALS = [
     ({"match": {"anchored": "abcd(?=x)"}}, "refused"),
     ({"match": {"anchored": "abcd(?:e+)+"}}, "nested"),
     ({"match": {"anchored": "abcd(?:ef|gh)*"}}, "alternation inside a repeat"),
-    ({"match": {"anchored": "abcd.*e.*f.*g.*h.*i"}}, "more than 4 repeats"),
-    ({"match": {"anchored": "abcd.*.*.*x"}}, "backtrack too far"),
+    ({"match": {"anchored": "abcd\\S*e\\S*f\\S*g\\S*h\\S*i"}}, "more than 4 repeats"),
+    ({"match": {"anchored": "abcd.*x"}}, "open gaps"),
+    ({"match": {"anchored": "abcd[^ ]{0,200}x.{0,200}"}}, "sum to 400"),
+    ({"match": {"anchored": "abcd\\S*\\S*\\S*x"}}, "backtrack too far"),
     ({"telemetry": ["any", "linux_text"]}, "stands alone"),
     ({"id": "mention.two.parts"}, "id"),
     ({"match": {"anchored": "[a-z]+foo"}}, "literal prefix"),
-    ({"match": {"anchored": "abc.*d"}}, "literal prefix"),
+    ({"match": {"anchored": "abc.{0,9}d"}}, "literal prefix"),
+    ({"match": {"anchored": "\\babc.{0,9}d"}}, "literal prefix"),
     ({"match": {"anchored": "abcd(?<=d)"}}, "refused"),
     ({"match": {"anchored": "(?i)abcd"}}, "inline flags"),
     ({"match": {"anchored": "abcd" + "e" * 600}}, "512"),
@@ -200,7 +203,7 @@ def test_patterns_match_by_case_prefix_and_line_start():
 
 def test_a_pathological_line_stays_within_the_backtracking_bound(tmp_path):
     # two unbounded repeats (the most admitted), against a line built to make them backtrack
-    worst = _pattern(id="mention.t_worst", match={"anchored": "abcd.*x.*y"},
+    worst = _pattern(id="mention.t_worst", match={"anchored": "abcd.{0,170}x.{0,170}y"},
                      examples={"positive": ["abcd x y"], "negative": ["abcd y x"]})
     loose = _pattern(id="mention.t_loose", match={"anchored": "wxyz\\S+\\S+q"},
                      examples={"positive": ["wxyz ab q"[0:4] + "abq"], "negative": ["wxyz q"]})
@@ -247,6 +250,8 @@ def test_relaxed_rules_and_end_anchors_load_and_match(tmp_path):
         _pattern(id="mention.t_end", match={"anchored": "abcd\\S+\\.php$"},
                  examples={"positive": ["GET abcd/shell.php"], "negative": ["abcd/shell.php?x=1"]}),
     ]
+    items.append(_pattern(id="mention.t_boundary", match={"anchored": "\\bnc -[a-z]{0,6}e"},
+                          examples={"positive": ["x nc -lve /bin/sh"], "negative": ["xnc -e x"]}))
     items[0]["source"].pop("upstream_id")
     _file(tmp_path, "r.yaml", items)
     loaded = load_mention_patterns(tmp_path)
