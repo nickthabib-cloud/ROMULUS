@@ -439,8 +439,9 @@ class Sweep:
                       "boot": {"recorded": 0, "from_interval": 0, "unknown": 0}}
         # The mention sweep over the raw text of records no normalizer read (romulus.hunt.mentions): its pool is a
         # separate lane, never findings, and its coverage is its own (it never makes the detection result partial).
-        self.mentions = MentionScanner(hunt_id, load_mention_patterns(), stage_dir=stage_dir, budget=self.budget,
-                                       settings=settings, window=(window.start, window.end))
+        self.mentions = MentionScanner(hunt_id, load_mention_patterns(settings=settings), stage_dir=stage_dir,
+                                       budget=self.budget, settings=settings, window=(window.start, window.end),
+                                       pinned=manifest.get("mention_patterns"))
 
     # -------------------------------------------------------------------------------------
     def _sources_for(self, m: Match, raw_sources: dict[str, dict]) -> dict[str, dict]:
@@ -2147,6 +2148,7 @@ class Sweep:
             self._note_zeek_inventory_gap(target,contract,[reason])
             self.partial_reasons.append(f"{target}: {reason}")
             self._mark_all(target, f"plan:{self.window.key()}", "executed_failed", {"error": reason})
+            self._mention_unscanned(target, f"plan:{self.window.key()}", reason)
             return
         if not parts and contract.temporal_gaps:
             self.repo.set_rule_cells(self.hunt_id, [self._cell(pb, target, "temporal:"+self.window.key(),
@@ -2292,7 +2294,12 @@ class Sweep:
             self.partial_reasons.append(f"{target} {pkey}: {out.error}")
             self._mark_all(target, pkey, "executed_failed", {"error": out.error})
             self.repo.update_task(tid, "failed", error=out.error)
+            self._mention_unscanned(target, pkey, f"retrieval failed: {out.error}")
             return
+        if out.completeness != Completeness.complete and not partition_tag:
+            # capped and not splittable, timed out, or shard-partial: some records were never offered to the scan
+            self._mention_unscanned(target, pkey, "retrieval incomplete: " + ("; ".join(out.reasons)
+                                                                            or out.error or "partial"))
         malformed_text: dict[str, list[str]] = {}
         skip_families: dict[str, frozenset[str] | None] = {}
         shapes: dict[str, int] = {}
@@ -2304,8 +2311,12 @@ class Sweep:
                                                windows_records=windows_records, unread=unread)
         if unread and not partition_tag and getattr(self, "mentions", None) is not None:
             # the text of records no normalizer read, matched against the curated mention patterns (a tagged
-            # partition reads records again for another purpose: they were scanned when first read)
-            self.mentions.scan(target, contract, unread, tid)
+            # partition reads records again for another purpose: they were scanned when first read). A scan that
+            # raises costs the pool this partition, never the partition's detection.
+            try:
+                self.mentions.scan(target, contract, unread, tid)
+            except Exception as exc:  # noqa: BLE001 - the mention pool never ends the sweep
+                self.mentions.note_scan_failure(target, pkey, exc)
         unread = []
         if shapes:
             # the shipper shapes read, by target: Linux host shapes, the EVE event types an Elastic shipper indexed
@@ -3299,6 +3310,32 @@ class Sweep:
         self.publish_mentions()
         self.close_stage()
 
+    def _mention_unscanned(self, target: str, partition: str, reason: str) -> None:
+        scanner = getattr(self, "mentions", None)
+        if scanner is not None:
+            scanner.note_unscanned(target, partition, reason)
+
+    def _mention_left_out(self, scanner) -> None:
+        """Name, per target, the sources the fetch filters leave out (so their text is never offered to the scan):
+        Linux text datasets not retrieved, and Windows event classes not read (on a target the sweep reads by class,
+        every class it does not select; otherwise the classes of channels outside the catalog's)."""
+        from romulus.evidence.windows_catalog import WINDOWS_CHANNELS
+        for target, datasets in sorted((self.stats.get("linux_text_not_retrieved") or {}).items()):
+            for name, reason in sorted(datasets.items()):
+                scanner.note_left_out(target, "dataset", name, None, reason)
+        channels = {channel.casefold() for channel in WINDOWS_CHANNELS if channel}
+        for target, classes in sorted((self.stats.get("windows_unassessed") or {}).items()):
+            selective = target in getattr(self, "_windows_selective", set())
+            by_channel: dict[str, int] = {}
+            for item in classes:
+                channel = str(item.get("channel") or "(several channels)")
+                if selective or item.get("overflow") or channel.casefold() not in channels:
+                    by_channel[channel] = by_channel.get(channel, 0) + int(item.get("records") or 0)
+            for channel, records in sorted(by_channel.items()):
+                reason = ("event classes the sweep does not select on this target" if selective
+                          else "a channel outside the ones the sweep reads")
+                scanner.note_left_out(target, "channel", channel, records, reason)
+
     def publish_mentions(self, stopped: str = "") -> None:
         """Rank the mention pool and replace the hunt's stored pool with it (every exit that keeps the sweep's
         findings: the end of the sweep, or an analyst's stop during it)."""
@@ -3306,6 +3343,7 @@ class Sweep:
         if scanner is None or self.repo is None:
             return
         scanner.stopped = stopped
+        self._mention_left_out(scanner)
         self.stats["mentions"] = scanner.publish(self.repo)
 
     @staticmethod

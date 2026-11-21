@@ -220,12 +220,28 @@ mention = Table(
     Column("pattern_lines", Integer, nullable=False),
     Column("line", Text, nullable=False),
     Column("line_chars", Integer, nullable=False),
+    # `line` is a redacted excerpt of the line: where it starts in the line, and where the first match starts in it
+    Column("line_offset", Integer, nullable=False),
+    Column("match_offset", Integer, nullable=False),
     Column("line_cut", Boolean, nullable=False),
     Column("suspicious_content", Boolean, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     CheckConstraint("strength IN ('strong','medium','weak')", name="ck_mention_strength"),
     UniqueConstraint("hunt_id", "rank", name="uq_mention_rank"),
 )
+
+# Every (pattern, host) whose matching lines the pool did not keep (a cap, the budget, a failed stage), with the count:
+# a host that lost a strong pattern's lines is never only a top-N name. Replaced with the pool.
+mention_loss = Table(
+    "mention_loss", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("pattern_id", String, nullable=False),
+    Column("strength", String, nullable=False),
+    Column("host", String, nullable=False),
+    Column("lines_not_kept", Integer, nullable=False),
+)
+Index("ix_mention_loss_hunt", mention_loss.c.hunt_id, mention_loss.c.id)
 
 # The mention pool's coverage for a hunt: what was scanned and not, patterns loaded and refused, caps hit.
 mention_scan = Table(

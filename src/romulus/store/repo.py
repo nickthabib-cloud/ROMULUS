@@ -1025,7 +1025,7 @@ class Repo:
             for table in (t.agent_tool_call, t.agent_note, t.agent_rule_request, t.agent_link,
                           t.agent_hypothesis_cite, t.agent_hypothesis_event, t.agent_assessment,
                           t.agent_raw_record, t.agent_session, t.agent_hypothesis, t.agent_run,
-                          t.mention, t.mention_scan):
+                          t.mention, t.mention_loss, t.mention_scan):
                 rm(table.name, table.delete().where(table.c.hunt_id == hunt_id))
 
             # The journal is disk-backed and may outgrow a bind list; remove one bounded page at a time.
@@ -6225,9 +6225,15 @@ class Repo:
                 if stored is not None:
                     if stored.origin != "agent":
                         # the mention sweep kept this record as a mention's citation; the agent's own query returned
-                        # it too, so it becomes the agent's (a sweep run again replaces only its own rows)
+                        # it too, so it becomes the agent's, under the agent's cap and with the agent's provenance (a
+                        # sweep run again replaces only its own rows)
+                        if count >= max_count:
+                            refused += 1
+                            continue
                         connection.execute(t.agent_raw_record.update().where(t.agent_raw_record.c.id == stored.id)
-                                           .values(origin="agent"))
+                                           .values(origin="agent", session_id=row.get("session_id"),
+                                                   task_id=row.get("task_id"), query_digest=row["query_digest"],
+                                                   query=row["query"]))
                         count += 1
                     kept.append(stored.id)
                     continue
@@ -6272,14 +6278,24 @@ class Repo:
     MENTION_PAGE_ROWS = 500
 
     def replace_mentions(self, hunt_id: str, rows: Iterable[tuple[dict, dict]], summary: dict, *,
-                         owner_token: str | None = None) -> int:
-        """Replace the hunt's mention pool and its coverage with `rows` ((mention row, raw record row) pairs in pool
-        order) in one transaction. The raw record rows are the mentions' citations (origin 'mention_sweep'); a record
-        the hunt already keeps (the agent's own) is cited as it is. Returns the mentions stored."""
+                         owner_token: str | None = None, losses: Iterable[dict] = ()) -> int:
+        """Replace the hunt's mention pool, its losses and its coverage with `rows` ((mention row, raw record row)
+        pairs in pool order) and `losses` ((pattern, host) rows whose lines were not kept) in one transaction. The raw
+        record rows are the mentions' citations (origin 'mention_sweep'); a record the hunt already keeps (the agent's
+        own) is cited as it is. Returns the mentions stored."""
         stored = 0
         with write_txn(self.engine) as connection:
             self._fence_lease(connection, hunt_id, owner_token)
             connection.execute(t.mention.delete().where(t.mention.c.hunt_id == hunt_id))
+            connection.execute(t.mention_loss.delete().where(t.mention_loss.c.hunt_id == hunt_id))
+            pending: list[dict] = []
+            for loss in losses:
+                pending.append(loss)
+                if len(pending) >= self.MENTION_PAGE_ROWS:
+                    connection.execute(t.mention_loss.insert(), pending)
+                    pending = []
+            if pending:
+                connection.execute(t.mention_loss.insert(), pending)
             connection.execute(t.agent_raw_record.delete().where(t.agent_raw_record.c.hunt_id == hunt_id,
                                                                  t.agent_raw_record.c.origin == "mention_sweep"))
             now = utcnow()
@@ -6313,6 +6329,13 @@ class Repo:
         with self.engine.connect() as connection:
             return connection.execute(select(t.mention_scan.c.summary).where(
                 t.mention_scan.c.hunt_id == hunt_id)).scalar_one_or_none()
+
+    def mention_losses(self, hunt_id: str, *, after: int = 0, limit: int = 50) -> list[dict]:
+        """One page of the (pattern, host) pairs whose lines the pool did not keep, strongest patterns first."""
+        query = (select(t.mention_loss).where(t.mention_loss.c.hunt_id == hunt_id, t.mention_loss.c.id > after)
+                 .order_by(t.mention_loss.c.id).limit(max(0, int(limit))))
+        with self.engine.connect() as connection:
+            return [dict(row) for row in connection.execute(query).mappings()]
 
     def mention_count(self, hunt_id: str) -> int:
         with self.engine.connect() as connection:

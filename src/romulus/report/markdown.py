@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import re
 
-from romulus.report.mentions import coverage_lines
+from romulus.report.mentions import coverage_lines, snippet
 
 BANNER = "UNCLASSIFIED // FOR TRAINING USE"
 _MD_SPECIAL = re.compile(r"([\\`*_{}\[\]<>#|])")
@@ -147,12 +147,15 @@ def _mentions_section(m: dict) -> list[str]:
                 "Unparsed text was not scanned, so this is not a finding that no mention exists.", ""]
         return out
     out += [f"Order: {cell(view['order'])}.", "",
-            "| # | Strength | Pattern | Pattern ATT&CK (metadata) | Host | Lines | First seen (UTC) | Raw record | Line |",
+            ("| # | Strength | Pattern | Pattern ATT&CK (metadata) | Host | Lines | First seen (UTC) | Raw record | "
+             "Text around the match |"),
             "|---:|---|---|---|---|---:|---|---|---|"]
     for item in items[:MARKDOWN_MENTIONS]:
         pattern = item["pattern"]
-        line = item["line"][:MENTION_LINE_CHARS]
-        cut = "…" if item["line_cut"] or len(item["line"]) > len(line) else ""
+        # the text around the match, never only the head of the line
+        line, _at, before, after = snippet(item["line"], item.get("match_at", 0), MENTION_LINE_CHARS)
+        line = ("…" if before or item.get("line_from") else "") + line
+        cut = "…" if after or (item["line_cut"] and not before) else ""
         flag = " (flagged: possible prompt injection)" if item.get("suspicious_content") else ""
         also = item.get("also_matched") or []
         also_text = f"; also matches {', '.join(other['id'] for other in also)}" if also else ""

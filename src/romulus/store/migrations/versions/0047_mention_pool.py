@@ -44,12 +44,24 @@ def upgrade():
         sa.Column("pattern_lines", sa.Integer(), nullable=False),
         sa.Column("line", sa.Text(), nullable=False),
         sa.Column("line_chars", sa.Integer(), nullable=False),
+        sa.Column("line_offset", sa.Integer(), nullable=False),
+        sa.Column("match_offset", sa.Integer(), nullable=False),
         sa.Column("line_cut", sa.Boolean(), nullable=False),
         sa.Column("suspicious_content", sa.Boolean(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint("strength IN ('strong','medium','weak')", name="ck_mention_strength"),
         sa.UniqueConstraint("hunt_id", "rank", name="uq_mention_rank"),
     )
+    op.create_table(
+        "mention_loss",
+        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
+        sa.Column("hunt_id", sa.String(), sa.ForeignKey("hunt.id"), nullable=False),
+        sa.Column("pattern_id", sa.String(), nullable=False),
+        sa.Column("strength", sa.String(), nullable=False),
+        sa.Column("host", sa.String(), nullable=False),
+        sa.Column("lines_not_kept", sa.Integer(), nullable=False),
+    )
+    op.create_index("ix_mention_loss_hunt", "mention_loss", ["hunt_id", "id"])
     op.create_table(
         "mention_scan",
         sa.Column("hunt_id", sa.String(), sa.ForeignKey("hunt.id"), primary_key=True),
@@ -61,6 +73,8 @@ def upgrade():
 def downgrade():
     connection = _begin()
     op.drop_table("mention_scan")
+    op.drop_index("ix_mention_loss_hunt", table_name="mention_loss")
+    op.drop_table("mention_loss")
     op.drop_table("mention")
     # the sweep's raw records exist only as mention citations
     connection.exec_driver_sql("DELETE FROM agent_raw_record WHERE origin = 'mention_sweep'")

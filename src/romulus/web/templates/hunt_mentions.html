@@ -20,7 +20,7 @@
 <td class="n">{{ m.rank }}</td>
 <td><span class="chip" title="{{ m.label }}">mention</span> <span class="small">{{ m.pattern.strength }}</span>
 {% if m.suspicious_content %}<p class="warn small"><b>Contains text flagged as possible prompt injection.</b></p>{% endif %}
-<pre class="raw">{{ m.line }}</pre>{% if m.line_cut %}<p class="help small">Line cut here ({{ m.line_chars }} characters); the raw record keeps the record.</p>{% endif %}</td>
+<pre class="raw">{% if m.line_from %}…{% endif %}{{ m.line }}</pre>{% if m.line_cut %}<p class="help small">The text around the match, from character {{ m.line_from }} of {{ m.line_chars }}; the raw record keeps the record.</p>{% endif %}</td>
 <td><a href="{{ head.hunt_url(h.id, '/mentions', pattern=m.pattern.id) }}">{{ m.headline }}</a><br><span class="mono small">{{ m.pattern.id }}</span>
 {% if m.pattern.attack.techniques %}<br><span class="small" title="{{ m.pattern.attack.label }}">Pattern ATT&amp;CK (metadata): {{ m.pattern.attack.techniques | join(', ') }}</span>{% endif %}
 {% if m.also_matched %}<br><span class="small">Also matches (metadata): {% for o in m.also_matched %}<span class="mono">{{ o.id }}</span>{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}
@@ -39,4 +39,17 @@
   <span>Page limit: 50. {% if next_url %}More mentions follow.{% else %}No more mentions after this page.{% endif %}</span>
   <span class="links">{% if items and items[0].rank > 1 %}<a class="btn ghost sm" href="{{ first_url }}">← First page</a>{% endif %}{% if next_url %}<a class="btn ghost sm" href="{{ next_url }}">Next mentions →</a>{% endif %}</span>
 </div>
+{% if losses %}
+<section class="panel">
+  <div class="panel-head"><h2>Matching lines not kept, by pattern and host</h2></div>
+  <div class="panel-body">
+  <p class="help small">Every host whose matching lines the pool did not keep (a cap, the state budget, a failed stage), strongest patterns first. These lines were counted, not kept.</p>
+  <div class="table-wrap"><table class="grid">
+  <thead><tr><th>Pattern</th><th>Strength</th><th>Host</th><th class="n">Lines not kept</th></tr></thead>
+  <tbody>{% for l in losses %}<tr><td class="mono small">{{ l.pattern_id }}</td><td>{{ l.strength }}</td><td class="mono">{{ l.host or 'no host' }}</td><td class="n">{{ l.lines_not_kept }}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  {% if losses_next %}<a class="btn ghost sm" href="{{ losses_next }}">More hosts →</a>{% endif %}
+  </div>
+</section>
+{% endif %}
 {% endblock %}

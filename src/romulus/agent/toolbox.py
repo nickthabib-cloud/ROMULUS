@@ -942,7 +942,7 @@ class Toolbox:
                 "also_matched": [other["id"] for other in item["also_matched"]],
                 "host": item["host"], "count": item["count"], "first_seen": item["first_seen"],
                 "last_seen": item["last_seen"], "rarity": item["rarity"],
-                "line": item["line"], "line_cut": item["line_cut"],
+                "text_around_match": item["line"], "match_at": item["match_at"], "line_cut": item["line_cut"],
                 "suspicious_content": item["suspicious_content"],
             })
         coverage = view["coverage"]

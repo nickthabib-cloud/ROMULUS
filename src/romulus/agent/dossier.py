@@ -430,14 +430,20 @@ def _mention_header(repo: Repo, hunt_id: str) -> dict:
 
 
 def _mentions(repo: Repo, hunt_id: str) -> list[dict]:
-    """The top of the mention pool, each labelled, its line bounded as untrusted telemetry."""
+    """The top of the mention pool, each labelled, the text around its match bounded as untrusted telemetry, and its
+    own flags beside it when that text holds instruction-shaped content."""
+    from romulus.report.mentions import mention_item
     out = []
     for row in repo.mentions(hunt_id, limit=MENTION_DOSSIER_LIMIT):
-        out.append({"rank": row["rank"], "kind": "mention", "pattern": _bounded_text(row["pattern_id"]),
-                    "headline": _bounded_text(f"{row['pattern_title']} (mention)"),
-                    "strength": row["strength"], "host": _bounded_text(row["host"]) if row["host"] else None,
-                    "count": row["count"], "first_seen": _jsonable(row["first_ts"]),
-                    "line": _bounded_text(row["line"])})
+        item = mention_item(row, line_chars=DATA_TEXT_LIMIT)
+        entry = {"rank": row["rank"], "kind": "mention", "pattern": _bounded_text(row["pattern_id"]),
+                 "headline": _bounded_text(item["headline"]), "strength": row["strength"],
+                 "host": _bounded_text(row["host"]) if row["host"] else None, "count": row["count"],
+                 "first_seen": _jsonable(row["first_ts"]), "text_around_match": item["line"],
+                 "suspicious_content": item["suspicious_content"]}
+        if flags := injection_flags(item["line"], "$.text_around_match"):
+            entry["safety_flags"] = flags
+        out.append(entry)
     return out
 
 
@@ -743,12 +749,11 @@ def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int, owner_token: s
         "entities": entities,
         "incidents": incidents,
         "expansion": expansion,
-        "mentions": mentions,
     })
     def details() -> Iterator[tuple[str, dict]]:
-        # the bounded mention slice first, so orient's first page always carries it
-        yield from (("mentions", item) for item in mentions)
         yield from (("findings", _finding_row(item, aliases)) for item in reportable)
+        # the bounded mention slice after the findings; the header says how many there are and how to page them
+        yield from (("mentions", item) for item in mentions)
         yield from (("sources", item) for item in sources)
         yield from (("context_counts", item) for item in context_rows)
         yield from (("entities", item) for item in entities)
