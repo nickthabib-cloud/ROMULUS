@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import re
 
+from romulus.detect.netdef import coverage_shown
+
 BANNER = "UNCLASSIFIED // FOR TRAINING USE"
 _MD_SPECIAL = re.compile(r"([\\`*_{}\[\]<>#|])")
 _CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\x1b\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
@@ -936,8 +938,8 @@ def _render_body(m: dict, banner: str = BANNER) -> str:
         out.append(f"| {esc(r['rule_id'])} | {r['records_evaluated']} | {esc(r['search_result'])} | "
                    f"{esc(json.dumps(r['states'], sort_keys=True))} |")
     network_coverage = m["coverage"].get("internal_networks") or {}
-    if network_coverage.get("outside") or network_coverage.get("status") == "unknown":
-        out += ["", "### Internal-network coverage", "", esc(network_coverage["summary"])]
+    if coverage_shown(network_coverage):
+        out +=["", "### Internal-network coverage", "", esc(network_coverage["summary"])]
     baseline = m["coverage"].get("baseline") or {}
     baseline_specs = baseline.get("specs") or []
     if baseline_specs:

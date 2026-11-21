@@ -46,6 +46,8 @@ def _values(row, field, kind):
 
 def _matches(row, clause, types):
     """The query DSL the check sends, evaluated per document the way the cluster evaluates it."""
+    if "match_all" in clause:
+        return True
     if "bool" in clause:
         parts = clause["bool"]
         if any(_matches(row, part, types) for part in parts.get("must_not", [])):
@@ -82,11 +84,13 @@ def _aggregate(rows, aggs, types):
             values.update(set(_values(row, field, types.get(field))))
         if kind == "terms":
             assert spec["size"] <= 1000
-            assert spec["order"] == {"_key": "asc"}
+            assert spec.get("order", {"_count": "desc"}) in ({"_key": "asc"}, {"_count": "desc"})
             # an ip field orders by address, IPv4 among the IPv4-mapped IPv6 addresses; a keyword by its text
             order = ((lambda key: int(ipaddress.IPv6Address(f"::ffff:{key}" if ":" not in key else key)))
                      if types.get(field) == "ip" else str)
             keys = sorted(values, key=order)
+            if "order" not in spec:     # the cluster's default: the most documents first, then the key
+                keys = sorted(keys, key=lambda key: -values[key])
             out[name] = {"doc_count_error_upper_bound": 0,
                          "sum_other_doc_count": sum(values[key] for key in keys[spec["size"]:]),
                          "buckets": [{"key": key, "doc_count": values[key]} for key in keys[:spec["size"]]]}
@@ -531,8 +535,11 @@ def test_a_sensor_facing_the_internet_never_warns_for_its_peers(hosts, status):
     peers = _peers(5000)
     rows = _site_rows(hosts, peers) if hosts else [row(peer, peers[-n - 1]) for n, peer in enumerate(peers)]
     result = _check(EndpointSource({"wire": rows}), SiteNetworks.from_lists(["192.168.0.0/16"]))
-    assert result["status"] == status and not result["warn"] and result["reasons"] == []
+    assert result["status"] == status and result["reasons"] == []
     assert (result["outside"], result["covered"], result["prefixes"]) == (0, len(hosts), [])
+    # public peers never count as an uncovered private range; but sessions none of which touches the site are the
+    # sign of a wrong definition, whatever their addresses
+    assert result["warn"] is (not hosts) and result["direction"]["status"] == ("none" if not hosts else "ok")
 
 
 def test_an_undeclared_ipv6_unique_local_range_is_named_past_thousands_of_global_peers():
@@ -671,3 +678,178 @@ def test_create_hunt_records_unknown_coverage_when_the_diagnostic_raises(tmp_pat
     assert coverage["reasons"] == ["the network-address coverage check failed (RuntimeError)"]
     assert "secret" not in json.dumps(coverage) and "Coverage unknown" in coverage["summary"]
     assert coverage["window"]["start"] == START.isoformat()
+
+
+# ---- traffic direction: does the definition read any observed session as the site's own? -------------------
+
+DEV_SITE = SiteNetworks.from_lists(["10.1.0.0/16", "192.168.10.0/24"])     # another site's ranges
+
+
+def _cloud_site(hosts=40, peers=2000):
+    """A site in 172.31.0.0/16 seen from its own sensor: inbound scans to its hosts and their outbound sessions."""
+    own = [f"172.31.{n // 200}.{n % 200 + 1}" for n in range(hosts)]
+    return own, _site_rows(own, _peers(peers))
+
+
+def test_a_definition_that_covers_none_of_the_observed_sessions_warns_and_says_why():
+    _own, rows = _cloud_site()
+    source = EndpointSource({"sessions": rows})
+    result = _check(source, DEV_SITE)
+    direction = result["direction"]
+    assert direction["status"] == "none" and direction["warn"] and result["warn"]
+    assert (direction["sessions"], direction["with_internal"], direction["internal_share"]) == (len(rows), 0, 0.0)
+    assert direction["counted_targets"] == ["sessions"] and not direction["partial"]
+    assert direction["busiest_outside"][0]["prefix"] == "172.31.0.0/16"
+    text = result["summary"]
+    assert f"0 of {len(rows):,} sessions (0.0%) had an endpoint inside the internal networks" in text
+    assert "will evaluate almost nothing" in text and "ROMULUS_INTERNAL_NETWORKS" in text
+    assert "172.31.0.0/16" in text and "fewer than 5% of sessions" in text
+    # the definition is read, never changed; one request per target as before
+    assert DEV_SITE.record() == SiteNetworks.from_lists(["10.1.0.0/16", "192.168.10.0/24"]).record()
+    assert len(source.requests) == 1
+    # the same site with its own range declared
+    fixed = _check(EndpointSource({"sessions": rows}), SiteNetworks.from_lists(["172.31.0.0/16"]))
+    assert fixed["direction"]["status"] == "ok" and not fixed["warn"]
+    assert fixed["direction"]["internal_share"] == 1.0 and "will evaluate" not in fixed["summary"]
+
+
+def test_a_site_in_public_space_with_another_sites_ranges_is_no_longer_silent(tmp_path):
+    # the private-address check sees nothing here: the site's own addresses are public
+    own = [f"203.0.113.{n}" for n in range(1, 60)]
+    source = EndpointSource({"wire": _site_rows(own, _peers(3000))})
+    result = _check(source, DEV_SITE)
+    assert result["status"] == "no_private_observed" and result["private_addresses"] == 0
+    assert result["direction"]["status"] == "none" and result["warn"]
+    assert "203.0.0.0/16" in result["direction"]["summary"]
+    check = check_site_networks(Settings(home=tmp_path, es_index_patterns=["wire"],
+                                         internal_networks=["10.1.0.0/16", "192.168.10.0/24"]), source)
+    assert check.status == "warn" and "will evaluate almost nothing" in check.detail
+    assert "last 7 days of each target" in check.detail
+    declared = _check(EndpointSource({"wire": _site_rows(own, _peers(3000))}),
+                      SiteNetworks.from_lists(["203.0.113.0/24"]))
+    assert declared["direction"]["status"] == "ok" and not declared["warn"]
+
+
+@pytest.mark.parametrize("internal, status, warn", [(1, "rare", True), (4, "rare", True), (5, "ok", False),
+                                                    (60, "ok", False)])
+def test_only_a_tiny_share_of_sessions_with_an_internal_endpoint_warns(internal, status, warn):
+    rows = ([row("198.51.100.7", f"203.0.113.{n % 200 + 1}") for n in range(100 - internal)]
+            + [row("10.1.0.9", "203.0.113.250")] * internal)
+    result = _check(EndpointSource({"wire": rows}))
+    direction = result["direction"]
+    assert (direction["status"], direction["warn"], result["warn"]) == (status, warn, warn)
+    assert direction["with_internal"] == internal and direction["internal_share"] == internal / 100
+
+
+def test_keyword_addresses_are_judged_on_the_busiest_and_a_capped_listing_is_named():
+    _own, rows = _cloud_site(hosts=5, peers=500)
+    site = SiteNetworks.from_lists(["172.31.0.0/16"])
+    result = _check(EndpointSource({"wire": rows}, {"wire": LISTED}), site)
+    direction = result["direction"]
+    assert direction["status"] == "ok" and direction["judged_targets"] == ["wire"] and not direction["warn"]
+    assert direction["with_internal"] == 0 and direction["internal_share"] is None
+    assert "the 20 busiest addresses on each side were judged, and an internal one was among them" in (
+        direction["summary"])
+    wrong = _check(EndpointSource({"wire": rows}, {"wire": LISTED}), DEV_SITE)["direction"]
+    assert wrong["status"] == "none" and wrong["warn"] and wrong["judged_without_internal"] == ["wire"]
+    assert "none was internal in wire" in wrong["summary"]
+    source = EndpointSource({"wire": rows}, {"wire": LISTED})
+    _check(source, site)
+    ((_, body),) = source.requests
+    assert body["aggs"]["busiest_source"] == {"terms": {"field": "source.ip", "size": 20}}
+    assert "with_internal" not in body["aggs"]
+
+
+@pytest.mark.parametrize("patch", [
+    lambda answer: answer.update(timed_out=True),
+    lambda answer: answer["aggregations"].pop("with_internal"),
+    lambda answer: answer["aggregations"].pop("sessions"),
+])
+def test_an_answer_that_is_not_complete_says_partial_and_never_claims_the_direction_is_fine(patch):
+    _own, rows = _cloud_site(hosts=5, peers=100)
+    result = _check(EndpointSource({"wire": rows}, response_patch=patch), SiteNetworks.from_lists(["172.31.0.0/16"]))
+    direction = result["direction"]
+    assert direction["partial"] and direction["reasons"] and result["warn"]
+    assert direction["status"] in ("ok", "unknown")
+    assert "partial:" in direction["summary"] or direction["status"] == "unknown"
+    # with nothing internal in what was counted, a cut-short answer still warns, and says it is partial
+    wrong = _check(EndpointSource({"wire": rows}, response_patch=lambda answer: answer.update(timed_out=True)),
+                   DEV_SITE)["direction"]
+    assert wrong["status"] == "none" and wrong["warn"] and "partial: wire: timed out" in wrong["summary"]
+
+
+def test_a_failed_or_unqueryable_target_leaves_the_direction_unknown_not_fine():
+    failed = _check(EndpointSource({"wire": [row("10.1.0.8")]}, fail=True))["direction"]
+    assert failed["status"] == "unknown" and failed["partial"] and failed["warn"]
+    assert "Traffic direction unknown" in failed["summary"]
+    types = {"@timestamp": "date", "source.ip": "ip", "event.dataset": "keyword"}
+    from romulus.sources.network_coverage import check_network_addresses
+    unqueryable = check_network_addresses(EndpointSource({"wire": []}, {"wire": types}),
+                                          {"wire": contract_from_types("wire", types, role="network")}, SITE, WINDOW)
+    assert unqueryable["direction"]["status"] == "unknown" and unqueryable["status"] == "unknown"
+
+
+def test_no_network_source_has_no_direction_to_judge():
+    source = EndpointSource({"host": []}, {"host": {"@timestamp": "date", "host.ip": "ip"}})
+    result = _check(source)
+    assert result["direction"]["status"] == "not_applicable" and not result["direction"]["warn"]
+    assert result["direction"]["summary"] == "" and "Traffic direction" not in result["summary"]
+    assert not result["warn"] and not source.requests
+    quiet = _check(EndpointSource({"wire": [row("10.1.0.8", at=WINDOW.end)]}))      # no session in the window
+    assert quiet["direction"]["status"] == "no_sessions" and not quiet["direction"]["warn"]
+
+
+def test_create_hunt_records_the_direction_and_every_report_shows_its_warning(tmp_path, monkeypatch):
+    own = [f"203.0.113.{n}" for n in range(1, 30)]
+    source = EndpointSource({"wire": _site_rows(own, _peers(300))})
+    settings = Settings(home=tmp_path, es_index_patterns=["wire"], internal_networks=["10.1.0.0/16"])
+    profile = SourceProfile(id="synthetic", target="wire", kind="lab_ecs", role="network", os_family="unknown",
+        backend="elasticsearch", backend_version="8", captured_at=START, field_types=TYPES, doc_count=1)
+    monkeypatch.setattr(hunt_run, "ElasticClient", lambda _settings: source)
+    monkeypatch.setattr(hunt_run, "build_profile",
+                        lambda *_args, **_kwargs: (profile, contract_from_types("wire", TYPES)))
+    monkeypatch.setattr(hunt_run, "ai_agent_entry", lambda *_args: {"requested": False})
+    hunt_id = hunt_run.create_hunt(settings, START, WINDOW.end, "analyst")
+    repo = hunt_run.open_repo(settings)
+    try:
+        record = repo.get_hunt(hunt_id)["manifest"]["internal_networks"]
+        coverage = record["coverage"]
+        assert coverage["status"] == "no_private_observed" and coverage["direction"]["status"] == "none"
+        assert coverage["direction"]["window"] == f"{START.isoformat()} to {WINDOW.end.isoformat()}"
+        # the record the detection rules read is the definition alone: the diagnostic never changes it
+        assert SiteNetworks.from_record(record) == SiteNetworks.from_lists(["10.1.0.0/16"])
+        report = build_report(repo, hunt_id, "analyst")
+        assert "will evaluate almost nothing" in report["internal_networks"]["warning"]
+        text = markdown.render({**report, "revision": {"number": 1, "id": "r1", "supersedes": None}})
+        section = text.split("## Coverage", 1)[1]
+        assert "Internal-network coverage" in section and "203.0.0.0/16" in section
+        from xml.etree import ElementTree
+        from zipfile import ZipFile
+
+        from romulus.report import executive
+        document = tmp_path / "executive.docx"
+        executive.write({**report, "revision": {"number": 1}}, document, "technical.md")
+        with ZipFile(document) as archive:
+            doc_text = " ".join(ElementTree.fromstring(archive.read("word/document.xml")).itertext())
+        assert "Internal-network coverage" in doc_text and "evaluate almost nothing" in doc_text
+    finally:
+        repo.engine.dispose()
+
+
+@pytest.mark.parametrize("types", [TYPES, LISTED], ids=["ip", "keyword"])
+def test_link_local_chatter_never_counts_as_the_sites_own(types):
+    # loopback and link-local are internal under every definition: neighbour discovery on a tap must not hide a
+    # definition that names none of the site's ranges, on the cluster count or among the busiest addresses
+    _own, rows = _cloud_site(hosts=5, peers=200)
+    chatter = [row(f"fe80::{n % 30 + 1:x}", "ff02::1") for n in range(len(rows) // 9)]
+    result = _check(EndpointSource({"wire": rows + chatter}, {"wire": types}), DEV_SITE)
+    direction = result["direction"]
+    assert direction["status"] == "none" and direction["warn"]
+    assert all(not item["prefix"].startswith("fe80") for item in direction["busiest_outside"])
+
+
+def test_a_coverage_record_from_before_the_direction_check_still_renders():
+    from romulus.detect.netdef import coverage_shown
+    old = {"status": "covered", "outside": 0, "summary": "Observed private network addresses: 0 of 3."}
+    assert not coverage_shown(old) and not coverage_shown(None)
+    assert coverage_shown({**old, "direction": {"warn": True}}) and coverage_shown({"status": "unknown"})

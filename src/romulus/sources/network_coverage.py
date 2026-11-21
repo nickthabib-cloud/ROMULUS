@@ -10,7 +10,7 @@ import math
 from datetime import UTC, datetime, timedelta
 from itertools import islice
 
-from romulus.detect.netdef import INTERNAL_SETTING, SiteNetworks
+from romulus.detect.netdef import ALWAYS_INTERNAL, INTERNAL_SETTING, SiteNetworks
 from romulus.errors import SourceError
 from romulus.sources.compile import epoch_ms_ceiling
 from romulus.sources.models import Window
@@ -29,6 +29,20 @@ WARN_SHARE = 0.10
 PRIVATE_RANGES = tuple(map(ipaddress.ip_network, (
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "fc00::/7",
 )))
+# Direction: whether the definition reads any of the observed traffic as the site's own, over every address (a site
+# may use public space, which the private-address check above never sees). A sensor placed for a site records the
+# site's traffic, so nearly every session it holds has a site endpoint: the destination of an inbound scan or brute
+# force, the source of an outbound connection, both ends of lateral traffic. When fewer than one session in twenty
+# has an endpoint inside the definition, the definition is the likely fault, and the rules that need an internal side
+# (inbound, outbound and lateral traffic) evaluate almost nothing. Where a target's addresses cannot be selected by
+# range in the cluster, its busiest addresses on each side are judged here instead.
+MIN_INTERNAL_SHARE = 0.05
+BUSIEST = 20                            # addresses per side, by session count, judged with the definition
+BUSIEST_NAMED = 5                       # of those outside the definition, named in the summary
+# Loopback and link-local are internal under every definition, and link-local chatter (neighbour discovery, mDNS,
+# LLMNR) can be a real share of what a tap records: they never count as the site's own here, or they could mask a
+# definition that names none of the site's ranges.
+LOCAL_ONLY = tuple(map(ipaddress.ip_network, ALWAYS_INTERNAL))
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
@@ -104,10 +118,38 @@ def _fields(contract):
     return fields
 
 
+def _inside(field, definition):
+    """Documents whose `field` holds an address the definition may read as internal (an internal range outside every
+    carve-out; a range nested inside a carve-out is counted outside, so the count never overstates), loopback and
+    link-local aside."""
+    return {"bool": {"must_not": [outside_candidates(field, definition),
+                                  {"terms": {field: [str(network) for network in LOCAL_ONLY]}}]}}
+
+
+def _site_address(address, definition) -> bool:
+    """An address the definition reads as the site's own, loopback and link-local aside."""
+    local = any(address.version == network.version and address in network for network in LOCAL_ONLY)
+    return not local and definition.is_internal(address)
+
+
+def _direction(fields, definition):
+    """The sessions in the window, the busiest addresses on each side, and, when both sides are ip fields, the
+    sessions with an endpoint inside the definition, counted in the cluster."""
+    aggs = {"sessions": {"filter": {"match_all": {}}}}
+    for side, (field, _is_ip) in fields.items():
+        aggs[f"busiest_{side}"] = {"terms": {"field": field, "size": BUSIEST}}
+    if all(is_ip for _field, is_ip in fields.values()):
+        aggs["with_internal"] = {"filter": {"bool": {"should": [_inside(field, definition)
+                                                                for field, _is_ip in fields.values()],
+                                                     "minimum_should_match": 1}}}
+    return aggs
+
+
 def _query(contract, fields, definition, window):
     return {"size": 0, "track_total_hits": False, "timeout": "10s",
             "query": {"bool": {"filter": [_bounds(contract, window.start, window.end)]}},
-            "aggs": {side: _side(field, is_ip, definition) for side, (field, is_ip) in fields.items()}}
+            "aggs": {**{side: _side(field, is_ip, definition) for side, (field, is_ip) in fields.items()},
+                     **_direction(fields, definition)}}
 
 
 def _incomplete(response):
@@ -143,6 +185,133 @@ def _recent_window(client, target, contract):
         return Window(start=end - DOCTOR_LOOKBACK, end=end + timedelta(milliseconds=1))
     except (OverflowError, OSError, ValueError) as error:
         raise ValueError("newest record time unknown") from error
+
+
+def _doc_count(node):
+    value = node.get("doc_count") if isinstance(node, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _prefix(address):
+    return ipaddress.ip_network(f"{address}/{16 if address.version == 4 else 48}", strict=False)
+
+
+class _Direction:
+    """What the targets' answers say about the share of sessions with an endpoint inside the definition."""
+
+    def __init__(self):
+        self.sessions = self.internal = 0          # over targets whose sides are both ip fields: exact counts
+        self.counted, self.judged, self.bare = [], [], []   # bare: judged targets with sessions and no internal talker
+        self.talker_seen = False                   # an internal address among some target's busiest
+        self.judged_sessions = 0
+        self.outside = {}                          # prefix -> sessions, for the busiest addresses outside
+        self.reasons = []
+
+    def read(self, target, aggregations, fields, definition, incomplete):
+        sessions = _doc_count(aggregations.get("sessions"))
+        if sessions is None:
+            self.reasons.append(f"{target}: session count missing")
+            return
+        if incomplete:
+            self.reasons.append(f"{target}: {incomplete}")
+        talkers = False
+        for side in fields:
+            terms = aggregations.get(f"busiest_{side}")
+            buckets = terms.get("buckets") if isinstance(terms, dict) else None
+            if not isinstance(buckets, list):
+                self.reasons.append(f"{target}: busiest {side} addresses missing")
+                continue
+            for bucket in islice(buckets, BUSIEST):
+                key = bucket.get("key") if isinstance(bucket, dict) else None
+                count = _doc_count(bucket) or 0
+                try:
+                    if not isinstance(key, str) or len(key) > 45:
+                        raise ValueError("not a bounded IP address")
+                    address = ipaddress.ip_address(key)
+                except ValueError:
+                    continue
+                if address.version == 6 and address.ipv4_mapped:
+                    address = address.ipv4_mapped
+                if any(address.version == network.version and address in network for network in LOCAL_ONLY):
+                    continue                     # neither the site's own nor a range worth naming
+                if _site_address(address, definition):
+                    talkers = True
+                else:
+                    prefix = _prefix(address)
+                    self.outside[prefix] = self.outside.get(prefix, 0) + count
+        self.talker_seen |= talkers
+        if all(is_ip for _field, is_ip in fields.values()):        # counted in the cluster (see _direction)
+            internal = _doc_count(aggregations.get("with_internal"))
+            if internal is None:
+                self.reasons.append(f"{target}: internal-endpoint count missing")
+                return
+            self.sessions += sessions
+            self.internal += internal
+            self.counted.append(target)
+        else:
+            self.judged.append(target)
+            self.judged_sessions += sessions
+            if sessions and not talkers:
+                self.bare.append(target)
+
+    def record(self, window_text, unchecked) -> dict:
+        share = self.internal / self.sessions if self.sessions else None
+        seen = bool(self.internal) or self.talker_seen
+        low = (share is not None and share < MIN_INTERNAL_SHARE) or bool(self.bare)
+        reasons = [*self.reasons, *(f"{target}: {why}" for target, why in unchecked.items())]
+        if low:
+            state = "rare" if seen else "none"
+        elif not (self.counted or self.judged):
+            state = "unknown" if reasons else "not_applicable"
+        elif not self.sessions and not self.judged_sessions:
+            state = "unknown" if reasons else "no_sessions"
+        else:
+            state = "unknown" if reasons and not seen else "ok"
+        busiest = sorted(self.outside.items(), key=lambda item: (-item[1], _order(item[0].network_address)))
+        # an answer that could not be read is never taken for a fine one: it warns as unknown
+        out = {"status": state, "warn": low or state == "unknown", "sessions": self.sessions,
+               "with_internal": self.internal, "internal_share": share, "minimum_share": MIN_INTERNAL_SHARE, "window": window_text,
+               "counted_targets": list(self.counted), "judged_targets": list(self.judged),
+               "judged_without_internal": list(self.bare), "busiest_per_side": BUSIEST,
+               "busiest_outside": [{"prefix": str(prefix), "sessions": count}
+                                   for prefix, count in busiest[:BUSIEST_NAMED]],
+               "partial": bool(reasons), "reasons": reasons}
+        out["summary"] = _direction_summary(out)
+        return out
+
+
+def _direction_summary(d) -> str:
+    state = d["status"]
+    if state == "not_applicable":
+        return ""
+    where = (f"{d['window']}; {len(d['counted_targets']) + len(d['judged_targets'])} network target(s) checked"
+             + (f"; partial: {'; '.join(d['reasons'])}" if d["partial"] else ""))
+    share = d["internal_share"]
+    if d["counted_targets"]:
+        counted = (f"{d['with_internal']:,} of {d['sessions']:,} sessions"
+                   + (f" ({share:.1%})" if share is not None else "") + " had an endpoint inside the internal networks")
+    else:
+        counted = ""
+    judged = ""
+    if d["judged_targets"]:
+        judged = (f"in {len(d['judged_targets'])} target(s) whose addresses cannot be selected by range, the "
+                  f"{d['busiest_per_side']} busiest addresses on each side were judged"
+                  + (f", and none was internal in {', '.join(d['judged_without_internal'])}"
+                     if d["judged_without_internal"] else ", and an internal one was among them"))
+    found = "; ".join(part for part in (counted, judged) if part)
+    if state == "unknown":
+        return f"Traffic direction unknown: {found or 'no session was counted'} ({where})."
+    if state == "no_sessions":
+        return f"Traffic direction: no session was recorded in the window ({where})."
+    text = f"Traffic direction: {found} ({where})."
+    if state in ("none", "rare"):
+        text += (" Rules that need an internal side (inbound, outbound and lateral traffic) will evaluate almost "
+                 f"nothing: check the internal networks (Site setup page or {INTERNAL_SETTING}).")
+        if d["busiest_outside"]:
+            text += (" Busiest prefixes outside them: "
+                     + ", ".join(f"{p['prefix']} ({p['sessions']:,} sessions)" for p in d["busiest_outside"]) + ".")
+        text += f" Warning threshold: fewer than {MIN_INTERNAL_SHARE:.0%} of sessions with an internal endpoint."
+    return text
 
 
 def _count(node):
@@ -183,7 +352,7 @@ def _summary(result):
 
 
 def _result(window, state, *, outside=(), covered=0, reasons=(), checked=(), unchecked=None, omitted=0, invalid=0,
-            arkime=(), estimate=None):
+            arkime=(), estimate=None, direction: _Direction | None = None):
     """The recorded answer: `outside` holds the uncovered addresses that were listed, `covered` counts the rest."""
     prefixes = sorted({ipaddress.ip_network(f"{address}/{16 if address.version == 4 else 48}", strict=False)
                        for address in outside}, key=lambda network: _order(network.network_address))
@@ -212,7 +381,14 @@ def _result(window, state, *, outside=(), covered=0, reasons=(), checked=(), unc
                    "note": ("Arkime session indices are checked through the configured search backend."
                             if arkime else "No queryable Arkime session target was configured; viewer-only coverage is unknown.")},
     }
+    if direction is not None:
+        span = result["window"]
+        result["direction"] = direction.record(
+            f"{span['start']} to {span['end']}" if isinstance(span, dict) else span, unchecked or {})
+        result["warn"] = result["warn"] or result["direction"]["warn"]
     result["summary"] = _summary(result)
+    if (result.get("direction") or {}).get("summary"):
+        result["summary"] += " " + result["direction"]["summary"]
     return result
 
 
@@ -241,6 +417,7 @@ def check_network_addresses(client, contracts: dict[str, FieldContract | None], 
     checked, unchecked, reasons, arkime = [], {}, [], []
     invalid = considered = omitted = covered = 0
     estimate = None
+    direction = _Direction()
     # Contracts are already held by the caller. Iterate without allocating an
     # unbounded sorted copy; final detail lists are bounded by TARGET_LIMIT.
     for target, contract in contracts.items():
@@ -269,19 +446,24 @@ def check_network_addresses(client, contracts: dict[str, FieldContract | None], 
             # Backend text can contain URL/auth details. The target and failed
             # operation are sufficient to identify this unresolved check.
             reasons.append(f"{target}: network-address query failed")
+            direction.reasons.append(reasons[-1])
             continue
         except ValueError:
             reasons.append(f"{target}: newest record time unknown")
+            direction.reasons.append(reasons[-1])
             continue
         if not isinstance(response, dict):
             reasons.append(f"{target}: malformed network-address response")
+            direction.reasons.append(reasons[-1])
             continue
         if (problem := _incomplete(response)) is not None:
             reasons.append(f"{target}: {problem}")
         aggregations = response.get("aggregations")
         if not isinstance(aggregations, dict):
             reasons.append(f"{target}: address aggregations missing")
+            direction.reasons.append(reasons[-1])
             continue
+        direction.read(target, aggregations, fields, definition, problem)
         for side, (_native, is_ip) in fields.items():
             found, terms, counted = None, aggregations.get(side), 0
             if is_ip:
@@ -333,10 +515,12 @@ def check_network_addresses(client, contracts: dict[str, FieldContract | None], 
         reasons.append(f"{invalid} malformed address bucket(s)")
     if omitted:
         reasons.append(f"network target cap reached; {omitted} target(s) not checked")
+        direction.reasons.append(reasons[-1])
     reasons.extend(f"{target}: {why}" for target, why in unchecked.items())
     # An uncovered address that was seen is a finding whatever else is incomplete; only an incomplete observation
     # that saw none leaves the question open.
     state = ("uncovered" if outside else "unknown" if reasons else "not_applicable" if not checked else
              "covered" if covered else "no_private_observed")
     return _result(window, state, outside=outside, covered=covered, reasons=reasons, checked=checked,
-                   unchecked=unchecked, omitted=omitted, invalid=invalid, arkime=arkime, estimate=estimate)
+                   unchecked=unchecked, omitted=omitted, invalid=invalid, arkime=arkime, estimate=estimate,
+                   direction=direction)

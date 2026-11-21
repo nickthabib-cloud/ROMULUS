@@ -13,7 +13,7 @@ from romulus.agent.cases import seed_candidate_ids
 from romulus.agent.provider import egress_banners
 from romulus.decide.policy import LANE_ORDER
 from romulus.detect.metadata import hunt_rule_metadata, is_sigma_id, pinned_rule_ids
-from romulus.detect.netdef import recorded_view
+from romulus.detect.netdef import coverage_shown, recorded_view
 from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.evidence.raw_citation import RAW_GATE, RAW_ID_PREFIX, RAW_LABEL_PLURAL, raw_record_view
 from romulus.hunt.publish import subject_event_ids
@@ -984,7 +984,7 @@ def internal_networks_view(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dic
     coverage = (hunt_manifest.get("internal_networks") or {}).get("coverage")
     if coverage:
         view["coverage"] = coverage
-        if coverage.get("outside") or coverage.get("status") == "unknown":
+        if coverage_shown(coverage):
             view["warning"] = coverage["summary"]
     sweep = repo.latest_audit(hunt_id, "hunt.sweep_summary")
     check = ((sweep or {}).get("detail") or {}).get("internal_networks")

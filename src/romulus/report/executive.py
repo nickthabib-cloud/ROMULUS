@@ -4,6 +4,7 @@ import re
 from xml.etree.ElementTree import Element, SubElement, tostring
 from zipfile import ZIP_DEFLATED, ZipFile
 
+from romulus.detect.netdef import coverage_shown
 from romulus.evidence.raw_citation import RAW_LABEL_PLURAL
 from romulus.report.markdown import (
     BANNER,
@@ -55,7 +56,7 @@ def write(m, path, technical_name):
         paragraph("Degraded report: incomplete evidence or host lists are identified in the technical report.")
     paragraph(f"Technical report: {technical_name}. This contains the full findings, citations and coverage gaps.")
     network_coverage = m["coverage"].get("internal_networks") or {}
-    if network_coverage.get("outside") or network_coverage.get("status") == "unknown":
+    if coverage_shown(network_coverage):
         paragraph("Internal-network coverage", bold=True)
         paragraph(network_coverage["summary"])
     if is_ranked(m):

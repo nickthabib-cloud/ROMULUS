@@ -215,6 +215,15 @@ def _listed(networks: tuple[IPNetwork, ...]) -> str:
     return shown + (f" and {len(networks) - LISTED_RANGES} more" if len(networks) > LISTED_RANGES else "")
 
 
+def coverage_shown(coverage: dict | None) -> bool:
+    """Whether an observed-address coverage record (romulus.sources.network_coverage) carries something the report
+    and the run page must show: an uncovered address, an unknown answer, or traffic the definition reads as almost
+    never the site's own."""
+    coverage = coverage or {}
+    return bool(coverage.get("outside") or coverage.get("status") == "unknown"
+                or (coverage.get("direction") or {}).get("warn"))
+
+
 def recorded_view(record: dict | None) -> dict:
     """A hunt's recorded definition for a report or page: the record (the default for a hunt recorded before the
     setting existed) with its one-line summary. A record that does not match its digest is shown as such."""
