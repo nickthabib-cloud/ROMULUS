@@ -72,7 +72,7 @@ from romulus.evidence.linux_catalog import (
 )
 from romulus.evidence.linux_service_text import parse_service, service_skip_reason
 from romulus.evidence.linux_text import TextLine, classify, inline_time
-from romulus.evidence.linux_text_types import WRITER_MISMATCH_CAVEAT
+from romulus.evidence.linux_text_types import NEW_WRITER_CAVEAT, SYSLOG_WRITER_CAVEAT, WRITER_MISMATCH_CAVEAT
 from romulus.evidence.raw_scrub import clean_source, might_be_zeek
 from romulus.evidence.suricata_protocols import (
     SURICATA_NORMALIZER,
@@ -1471,13 +1471,27 @@ _UNIT_JOB_VERBS = {"Stopped": ("stop", "done"), "Stopping": ("stop", "begun"), "
 # command line. The working directory and the command are the invoking user's own text.
 _SUDO_DENIALS = (r"(?:\d+ )?incorrect password attempts?|command not allowed|user NOT in sudoers|"
                  r"user NOT authorized on host|a password is required|"
-                 r"sorry, you are not allowed to set the following environment variables: [^;]*")
+                 r"sorry, you are not allowed to set the following environment variables: [^;]*|no tty|"
+                 r"user not allowed to preserve the environment|user not allowed to change directory to [^;]*|"
+                 r"user not allowed to change root directory to [^;]*|user not allowed to set a command timeout|"
+                 r"user not allowed to override closefrom limit|setid command rejected in intercept mode|"
+                 r"unknown user [^;]*|unknown group [^;]*")
 _SUDO = re.compile(r"^\s*(?P<user>\S+) : (?:(?P<fail>" + _SUDO_DENIALS + r") ; )?(?:HOST=(?P<host>[^\s;]+) ; )?"
                    r"(?:TTY=(?P<tty>[^\s;]+) ; )?(?:CHROOT=(?P<chroot>.*?) ; )?PWD=(?P<pwd>.*?) ; "
                    r"USER=(?P<target>[^\s;]+) ;(?: GROUP=(?P<group>[^\s;]+) ;)?(?: TSID=(?P<tsid>[^\s;]+) ;)?"
                    r"(?: ENV=(?P<env>.*?) ;)?(?: COMMAND=(?P<cmd>.*))?$")
 SUDO_AMBIGUOUS_CAVEAT = ("The sudo record repeats a field separator inside its working directory or command text; the "
                          "run-as account and the command are read at the first separator and may be misattributed")
+# A record sudo split across lines (lib/eventlog do_syslog): the first part, and the "(command continued)" rest.
+_SUDO_HEAD = re.compile(r"^\s*(?P<user>\S+) : (?:(?P<fail>" + _SUDO_DENIALS + r")(?: ;.*)?|"
+                        r"(?:HOST=[^\s;]+ ; )?TTY=(?P<tty>[^\s;]+) ;.*|(?:HOST|TTY|CHROOT|PWD)=.*)$")
+_SUDO_CONTINUED = re.compile(r"^\s*(?P<user>\S+) : \(command continued\) (?P<rest>.*)$")
+SUDO_SPLIT_CAVEAT = ("sudo split this record across log lines; a part not joined to the rest names no run-as "
+                     "account or command")
+SUDO_JOINED_CAVEAT = ("Joined from the lines sudo split the record into (same host, account and writer pid, "
+                      "within 2 seconds); sudo splits at a space when it can, so a split inside a word reads as an "
+                      "extra space in the working directory or command text")
+SUDO_JOIN_SECONDS = 2.0     # sudo writes a split record's lines in consecutive syslog calls; this covers clock rounding
 
 
 def normalize_journal(hit: dict, boots_seen: list | None = None) -> TypedEvent:
@@ -1546,29 +1560,57 @@ def _journal_event(hit: dict, j: dict, o: Callable[[str], str], boots_seen: list
     if ident == "systemd":
         return _unit_job(hit, j, msg, base, host, o)
     if ident == "sudo":
+        origin = o("MESSAGE~sudo")
+        f = {**base, "auth.service": fv("sudo", o("SYSLOG_IDENTIFIER"))}
+        caveats: list[str] = []
+        # the writer's pid: journald's own _PID, else the one the writer logged (syslog header or SYSLOG_PID)
+        spec = next((key for key in ("_PID", "SYSLOG_PID") if _pid_value(j.get(key)) is not None), None)
+        if spec is not None:
+            f["process.pid"] = fv(_pid_value(j[spec]), o(spec))
+        # journald's own record of the writing process, checked as for other programs: a disagreeing writer keeps its
+        # event with a caveat and is named
+        writer_fields = {key: j[key] for key in ("_COMM", "_EXE") if key in j}
+        if writer_fields:
+            try:
+                _writer, writer_caveats = _new_writer_identity("sudo", writer_fields)
+            except Skip:
+                writer_caveats = [WRITER_MISMATCH_CAVEAT]
+            if WRITER_MISMATCH_CAVEAT in writer_caveats:
+                caveats.append(WRITER_MISMATCH_CAVEAT)
+                key = "_COMM" if isinstance(j.get("_COMM"), str) else "_EXE"
+                if isinstance(j.get(key), str):
+                    f["log.writer"] = fv(basename_of(j[key]) if key == "_EXE" else j[key], o(key))
         m = _SUDO.match(msg)
         if m:
             g = m.groupdict()
-            origin = o("MESSAGE~sudo")
-            f = {**base,
-                 "auth.service": fv("sudo", o("SYSLOG_IDENTIFIER")),
-                 "user.name": fv(g["user"], origin),
-                 "auth.target_user": fv(g["target"], origin),
-                 "sudo.command": fv(g.get("cmd"), origin),
-                 "process.cwd": fv(g.get("pwd"), origin)}
+            f.update({"user.name": fv(g["user"], origin), "auth.target_user": fv(g["target"], origin),
+                      "sudo.command": fv(g.get("cmd"), origin), "process.cwd": fv(g.get("pwd"), origin)})
             for name, key in (("privilege.denial_reason", "fail"), ("process.tty", "tty"), ("sudo.run_group", "group"),
                               ("sudo.env", "env"), ("sudo.chroot", "chroot")):
                 if g.get(key):
                     f[name] = fv(g[key], origin)
-            # the writer's pid: journald's own _PID, else the one the writer logged (syslog header or SYSLOG_PID)
-            spec = next((key for key in ("_PID", "SYSLOG_PID") if _pid_value(j.get(key)) is not None), None)
-            if spec is not None:
-                f["process.pid"] = fv(_pid_value(j[spec]), o(spec))
             outcome = Outcome.failure if g.get("fail") else Outcome.success
-            ambiguous = msg.count(" ; USER=") > 1 or msg.count(" ; COMMAND=") > 1
+            if msg.count(" ; USER=") > 1 or msg.count(" ; COMMAND=") > 1:
+                caveats.append(SUDO_AMBIGUOUS_CAVEAT)
             return TypedEvent(id=event_id("privilege_use", [ref]), family="privilege_use", ts=_ts(src["@timestamp"]),
                               host=host, outcome=outcome, fields=f, raw=[ref], normalizer=NORMALIZER_VERSION,
-                              caveats=[SUDO_AMBIGUOUS_CAVEAT] if ambiguous else [])
+                              caveats=caveats)
+        # sudo splits a record longer than its syslog line limit (syslog_maxlen, 980 by default) at a space into
+        # "user : <first part>" and "user : (command continued) <rest>" lines; normalize_hits joins them
+        piece = _SUDO_CONTINUED.match(msg) or _SUDO_HEAD.match(msg)
+        if piece:
+            g = piece.groupdict()
+            f["user.name"] = fv(g["user"], origin)
+            continued = piece.re is _SUDO_CONTINUED
+            f["sudo.chunk"] = fv("continuation" if continued else "head", origin)
+            if g.get("fail"):
+                f["privilege.denial_reason"] = fv(g["fail"], origin)
+            if g.get("tty"):
+                f["process.tty"] = fv(g["tty"], origin)
+            outcome = Outcome.failure if g.get("fail") else Outcome.unknown
+            return TypedEvent(id=event_id("privilege_use", [ref]), family="privilege_use", ts=_ts(src["@timestamp"]),
+                              host=host, outcome=outcome, fields=f, raw=[ref], normalizer=NORMALIZER_VERSION,
+                              caveats=[*caveats, SUDO_SPLIT_CAVEAT])
         raise Skip("sudo message not a command record")
     raise Skip(f"{kind} identifier {ident!r} is not normalized")
 
@@ -1701,7 +1743,6 @@ def normalize_journal_fields(hit: dict, boots_seen: list | None = None) -> Typed
 # ---------------------------------------------------------------------------------------------
 
 SYSLOG_TIME_CAVEAT = "Time from a syslog line with no year or zone: the shipper supplied them."
-SYSLOG_WRITER_CAVEAT = "Writer identity from the syslog header only."
 SHIPPER_SSH_CAVEAT = "Parsed by the shipper; a user name containing ' from ' can move the recorded source address."
 SHIPPER_PARSED_CAVEAT = "Parsed by the shipper; the line's text was not indexed."
 # shadow-utils' own log lines (account names cannot hold a comma)
@@ -1753,7 +1794,10 @@ def _syslog_account(hit: dict, ident: str, message: str, host, origin: str) -> T
     m = rx.match(message)
     if not m:
         raise Skip(f"{ident} line is not an account creation record")
-    return _account_event(hit, host, action, m["name"], m["id"], origin, origin, [])
+    event = _account_event(hit, host, action, m["name"], m["id"], origin, origin, [])
+    if ident == "useradd" and m["gid"]:
+        event.fields["account.group_id"] = fv(m["gid"], origin)
+    return event
 
 
 def _account_event(hit: dict, host, action: str, name, number, name_origin: str, id_origin: str,
@@ -3407,7 +3451,6 @@ def _auditbeat_group(h: dict, errors: list[tuple[str, str]]) -> list[tuple[dict,
     return members
 
 
-NEW_WRITER_CAVEAT = "Writer identity not verifiable"
 _COMM_LENGTH = 15
 _SSH_WRITERS = frozenset({"sshd", "sshd-session", "sshd-auth"})
 _WRITER_ALIASES = (
@@ -3487,6 +3530,9 @@ def _new_writer_identity(program: str, journal: dict | None) -> tuple[str, list[
             disagreeing.append(field)
     if disagreeing and name in _SSH_WRITERS:
         raise Skip(f"Writer identity mismatch: identifier disagrees with trusted {disagreeing[0]}")
+    if name == "kernel" and journal.get("_TRANSPORT") == "kernel" and not disagreeing:
+        # journald's kernel transport carries only what it read from the kernel ring buffer
+        verified = True
     caveats = [WRITER_MISMATCH_CAVEAT] if disagreeing else [] if verified else [NEW_WRITER_CAVEAT]
     # A split helper must never be promoted into the legacy sshd stream. Prefer
     # captured comm, then executable, and preserve unverified identifier spelling.
@@ -3501,6 +3547,20 @@ def _new_writer_identity(program: str, journal: dict | None) -> tuple[str, list[
 
 # Families whose rules join a tool's own log line to the exec and audit records of the same process (host and pid).
 _PID_FAMILIES = frozenset({"account_change", "privilege_use"})
+# Families whose rules name the process journald says wrote the line (log.writer) when it is not the program the
+# line names.
+_WRITER_FAMILIES = frozenset({"account_change", "privilege_use", "kernel_module"})
+
+
+def _trusted_writer(journal: dict | None, origin_of: Callable[[str], str] | None) -> tuple[str, str] | None:
+    """The writing process journald recorded (its comm, else its executable's name) and that field's origin."""
+    if not journal or origin_of is None:
+        return None
+    for key in ("_COMM", "_EXE"):
+        value = journal.get(key)
+        if isinstance(value, str) and value and len(value) <= 4096:
+            return (basename_of(value) if key == "_EXE" else value), origin_of(key)
+    return None
 
 
 def _pid_value(value) -> int | None:
@@ -3509,9 +3569,11 @@ def _pid_value(value) -> int | None:
 
 
 def _program_events(hit: dict, program: str, message: str, origin: str, *,
-                    journal: dict | None = None, pid: tuple[int, str] | None = None) -> list[TypedEvent]:
+                    journal: dict | None = None, pid: tuple[int, str] | None = None,
+                    writer_origin: Callable[[str], str] | None = None) -> list[TypedEvent]:
     """`pid`: the writing process's id and its origin (journald's _PID, the shipper's process.pid or the syslog
-    header's), typed on account and privilege-broker events so their rules can join them to the process's exec."""
+    header's), typed on account and privilege-broker events so their rules can join them to the process's exec.
+    `writer_origin(field)`: the origin of a trusted journald writer field (_COMM, _EXE) in this record's shape."""
     # Preserve existing untyped-message skip reasons; validate a recognized
     # fallback action or a PAM message claiming the privileged SSH service.
     parsed_records = [parsed for parsed in (parse_auth(program, message), parse_service(program, message))
@@ -3532,10 +3594,15 @@ def _program_events(hit: dict, program: str, message: str, origin: str, *,
                          outcome=parsed.outcome, caveats=[*parsed.caveats, *caveats], raw=[ref],
                          normalizer=NORMALIZER_VERSION)
               for parsed in parsed_records]
-    if pid is not None:
-        for event in events:
-            if event.family in _PID_FAMILIES:
-                event.fields["process.pid"] = fv(pid[0], pid[1])
+    trusted = _trusted_writer(journal, writer_origin)
+    for event in events:
+        if pid is not None and event.family in _PID_FAMILIES:
+            event.fields["process.pid"] = fv(pid[0], pid[1])
+        if event.family in _WRITER_FAMILIES:
+            # the identifier the line was logged under, which a claim names when journald does not confirm it
+            event.fields["log.identifier"] = fv(program, origin)
+            if trusted is not None:
+                event.fields["log.writer"] = fv(trusted[0], trusted[1])
     return events
 
 
@@ -3554,6 +3621,8 @@ def _linux_events(hit: dict, normalizer, *args) -> list[TypedEvent]:
         boot_origin = None
         journal = _indexed_writer_fields(src)
         pid = (number, f"{hit['_id']}:process.pid") if (number := _pid_value(_get(src, "process.pid"))) else None
+        nid = hit["_id"]
+        writer_origin = lambda key: f"{nid}:{_TRUSTED_WRITER_PATHS.get(key, key)}"
         if normalizer is normalize_journal:
             journal = json.loads(_get(src, "event.original"))
             message = journal.get("MESSAGE") or message
@@ -3562,6 +3631,7 @@ def _linux_events(hit: dict, normalizer, *args) -> list[TypedEvent]:
             boot_origin = f"{hit['_id']}:event.original#journal:_BOOT_ID"
             spec = next((key for key in ("_PID", "SYSLOG_PID") if _pid_value(journal.get(key))), None)
             pid = (_pid_value(journal[spec]), f"{hit['_id']}:event.original#journal:{spec}") if spec else None
+            writer_origin = lambda key: f"{nid}:event.original#journal:{key}"
         elif normalizer is normalize_journal_fields:
             journal, paths = journal_from_fields(src)
             journal.update(_indexed_writer_fields(src))
@@ -3571,9 +3641,10 @@ def _linux_events(hit: dict, normalizer, *args) -> list[TypedEvent]:
             boot_origin = _indexed_origin(hit["_id"], paths)("_BOOT_ID")
             spec = next((key for key in ("_PID", "SYSLOG_PID") if _pid_value(journal.get(key))), None)
             pid = (_pid_value(journal[spec]), _indexed_origin(hit["_id"], paths)(spec)) if spec else None
+            writer_origin = lambda key: f"{nid}:{paths.get(key) or _TRUSTED_WRITER_PATHS.get(key, key)}"
         if isinstance(program, str) and isinstance(message, str):
             events = _program_events(hit, program, message, f"{hit['_id']}:{path}~{program}", journal=journal,
-                                     pid=pid)
+                                     pid=pid, writer_origin=writer_origin)
             if events:
                 if boot_origin is not None and (boot := _journal_boot(journal)) is not None:
                     for event in events:
@@ -3626,7 +3697,8 @@ def normalize_text(hit: dict) -> list[TypedEvent]:
             header_pid = _pid_value(parsed.pid)
             records = _program_events(hit, parsed.program, parsed.message, origin, journal=journal,
                                       pid=(header_pid, origin.rsplit("~", 1)[0] + "#syslog-header:pid")
-                                      if header_pid else None)
+                                      if header_pid else None,
+                                      writer_origin=lambda key: f"{hit['_id']}:{_TRUSTED_WRITER_PATHS.get(key, key)}")
             if not records:
                 detail = service_skip_reason(parsed.program, parsed.message)
                 # the detail precedes " is not normalized: ", after which the report reads the dataset
@@ -3649,6 +3721,98 @@ def normalize_text(hit: dict) -> list[TypedEvent]:
         event.caveats.extend(writer_caveats)
     _text_provenance(event, parsed, origin)
     return [event]
+
+
+def _record_message(hit: dict) -> str | None:
+    """The message text a Linux line record carries, read the way its shape's normalizer reads it."""
+    src = hit["_source"]
+    found = match_shape(src)
+    if found is not None and found[1].shape == JOURNAL_JSON:
+        try:
+            j = json.loads(_get(src, "event.original"))
+        except (TypeError, ValueError):
+            return None
+        return j.get("MESSAGE") if isinstance(j, dict) and isinstance(j.get("MESSAGE"), str) else None
+    if found is not None and found[1].shape == JOURNAL_FIELDS:
+        message = journal_from_fields(src)[0].get("MESSAGE")
+        return message if isinstance(message, str) else None
+    if (found is not None and found[1].shape == SYSLOG_LINE and isinstance(src.get("message"), str)
+            and _get(src, "process.name")):
+        return src["message"]
+    payload = text_payload(src)
+    if payload is None:
+        return None
+    parsed = classify(payload[1], openvpn_file=openvpn_file(src))
+    if parsed.format == "unknown" and isinstance(_get(src, "process.name"), str):
+        return payload[1]
+    return parsed.message if parsed.format == "syslog" else None
+
+
+_SUDO_MESSAGE_FIELDS = frozenset({"user.name", "auth.target_user", "sudo.command", "process.cwd", "process.tty",
+                                  "privilege.denial_reason", "sudo.run_group", "sudo.env", "sudo.chroot", "sudo.chunk"})
+SUDO_UNJOINED = "sudo continuation line not joined to its first line (another batch, host, account or writer pid)"
+
+
+def _join_sudo_pieces(events: list[TypedEvent], hits: list[dict], skips) -> None:
+    """Join each "(command continued)" sudo line to the line it continues: the latest earlier sudo record of the same
+    host and account within SUDO_JOIN_SECONDS, with the same writer pid (or, when neither records a pid, the only such
+    record). The joined text is parsed as one record citing every line. Bounded by the batch; a continuation line left
+    unjoined is a counted skip, and a first part left unjoined stays a partial record (its refusal, if it names one,
+    is kept with no run-as account)."""
+    pieces = [e for e in events if e.family == "privilege_use" and e.get("sudo.chunk") == "continuation"]
+    if not pieces:
+        return
+    by_ref = {(hit.get("_index"), hit.get("_id")): hit for hit in hits}
+
+    def text(event: TypedEvent) -> str | None:
+        hit = by_ref.get((event.raw[0].target, event.raw[0].native_id)) if event.raw else None
+        return _record_message(hit) if hit is not None else None
+
+    heads = sorted((e for e in events if e.family == "privilege_use" and e.get("auth.service") == "sudo"
+                    and e.get("sudo.chunk") != "continuation"), key=lambda e: (e.ts, e.id))
+    joined: dict[str, tuple[TypedEvent, str, list[TypedEvent]]] = {}
+    dropped: set[str] = set()
+    for piece in sorted(pieces, key=lambda e: (e.ts, e.id)):
+        dropped.add(piece.id)
+        candidates = [h for h in heads if h.host == piece.host and h.get("user.name") == piece.get("user.name")
+                      and 0 <= (piece.ts - h.ts).total_seconds() <= SUDO_JOIN_SECONDS
+                      and h.has("process.pid") == piece.has("process.pid")
+                      and h.get("process.pid") == piece.get("process.pid")]
+        rest = _SUDO_CONTINUED.match(text(piece) or "")
+        if not candidates or rest is None or (not piece.has("process.pid") and len(candidates) != 1):
+            skips[SUDO_UNJOINED] += 1
+            continue
+        head = candidates[-1]
+        prior = joined.get(head.id)
+        head_text = prior[1] if prior else text(head)
+        if head_text is None:
+            skips[SUDO_UNJOINED] += 1
+            continue
+        joined[head.id] = (head, f"{head_text} {rest['rest']}", [*(prior[2] if prior else []), piece])
+    replaced: dict[str, TypedEvent] = {}
+    for head, full, parts in joined.values():
+        m = _SUDO.match(full)
+        if m is None:
+            skips[SUDO_UNJOINED] += len(parts)
+            continue
+        g = m.groupdict()
+        head_origin = head.fields["user.name"].origin
+        origin = "+".join([head_origin, *(part.fields["user.name"].origin for part in parts)])
+        fields = {name: value for name, value in head.fields.items() if name not in _SUDO_MESSAGE_FIELDS}
+        fields.update({"user.name": fv(g["user"], origin), "auth.target_user": fv(g["target"], origin),
+                       "sudo.command": fv(g.get("cmd"), origin), "process.cwd": fv(g.get("pwd"), origin)})
+        for name, key in (("privilege.denial_reason", "fail"), ("process.tty", "tty"), ("sudo.run_group", "group"),
+                          ("sudo.env", "env"), ("sudo.chroot", "chroot")):
+            if g.get(key):
+                fields[name] = fv(g[key], origin)
+        raw = [*head.raw, *(ref for part in parts for ref in part.raw)]
+        caveats = [c for c in head.caveats if c != SUDO_SPLIT_CAVEAT] + [SUDO_JOINED_CAVEAT]
+        if full.count(" ; USER=") > 1 or full.count(" ; COMMAND=") > 1:
+            caveats.append(SUDO_AMBIGUOUS_CAVEAT)
+        replaced[head.id] = TypedEvent(id=event_id("privilege_use", raw), family="privilege_use", ts=head.ts,
+                                       host=head.host, outcome=Outcome.failure if g.get("fail") else Outcome.success,
+                                       fields=fields, raw=raw, normalizer=head.normalizer, caveats=caveats)
+    events[:] = [replaced.get(e.id, e) for e in events if e.id not in dropped]
 
 
 def _text_provenance(event: TypedEvent, parsed: TextLine, origin: str) -> None:
@@ -3972,6 +4136,7 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
         for event in events[audit_start:]:
             boots.observe_event(event)
         boots.fill(events[audit_start:], incremental=True)
+    _join_sudo_pieces(events, hits, skips)
     # Native host addresses support the same unique-owner mapping that host pivots use. A network
     # sensor's host.ip names its observer and is never a traffic endpoint.
     native_hosts = {hit["_id"]: hit for hit in hits if _get(hit.get("_source", {}), "host.ip")}

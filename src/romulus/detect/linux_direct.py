@@ -606,10 +606,12 @@ class KernelModuleLoad(LinuxDirect):
     TAINTS: ClassVar[dict[str, str]] = {"out_of_tree": "an out-of-tree module (not built with the kernel tree)",
               "unsigned": "a module whose signature failed or was missing",
               "proprietary_license": "a module with a license that is not GPL-compatible",
-              "test": "a test module"}
+              "test": "a test module", "license": "a module whose license taints the kernel",
+              "staging": "a module from the kernel's staging directory", "livepatch": "a live patch module"}
     card: ClassVar[dict] = {
         "behavior": "a kernel module was loaded (audit init_module/finit_module record), the kernel logged that a "
-                    "loaded module tainted it (out-of-tree, unsigned, non-GPL license), or insmod/modprobe was run "
+                    "loaded module tainted it (out-of-tree, unsigned, non-GPL license, staging, test or livepatch), or "
+                    "insmod/modprobe was run "
                     "with a module file outside the module package trees",
         "telemetry": "kernel_module from audit module syscalls (module.op, module.name, module.path, process "
                      "identity) and from the kernel's own taint notices in kern.log or the journal (module.name, "
@@ -619,7 +621,9 @@ class KernelModuleLoad(LinuxDirect):
                     "far enough to taint itself, printed for the first module of each kind after boot only; argv: "
                     "the command was run (positive-only, the load not proved)",
         "benign_and_cost": "DKMS and vendor drivers (GPU, virtualization guest tools, storage) are out-of-tree and "
-                           "often unsigned; one folded lead per shape, cheap to check against installed packages",
+                           "often unsigned; one finding per record (this rule does not fold), which stays small because a "
+                           "load is rare and a taint notice is printed at most once per kind per boot; cheap to "
+                           "check against installed packages",
         "query_cost": "none beyond the sweep",
         "next_pivot": "the module file on disk (path, package ownership, signature) and the session that loaded it",
         "adds": "the taint notice is the only module-load evidence on hosts without module-load auditing",

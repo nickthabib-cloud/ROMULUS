@@ -413,9 +413,9 @@ GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe55
  'events': '9b9544ad6f24d002f3f71d874518df5ecee3d968e12ec1fd5c9dce2345d7a87f',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
  'links': '5fa22b4162492394955b6b1873f566f427a58dfd7529c0df73e87a6da8daa76f',
- 'manifest': 'f7d472bf6f640c27aee98de8b607bf5834c5a6f119d46b9bef38e8e6f109e3d7',
+ 'manifest': '523e1d07ddb6a98d085ca343105a1c2e3adb369476e10c3f5bec85aebc6abd03',
  'raw': 'd924f62eebd5ee88c8142c690333924450c3344b18210ddfe87b8e486127dd35',
- 'rule_cells': '205fe55064aceda734f71916b3eee43df53479cc83f6d42d542879df108d4f08',
+ 'rule_cells': 'ef5931b9402c0f851be82d8103703226b8d8027e909ac42b10ef8d7a1646585f',
  'stats': 'be588e34e14e570c11a47fc9b3953e564d8f6026d909d9ae7f9c7ef561c99c5a',
  'tasks': '1e1eeb69d05da151bec8f6dff43c1863a4eb43a288f84c1ba35168311b303360'}
 # The rule-estimate stack's digests (expansion seeded by the urgent and high lanes, as before evidence ranking;
@@ -438,9 +438,9 @@ GOLDEN_STACK_BY_RULE_ESTIMATE = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e
  'events': '9b9544ad6f24d002f3f71d874518df5ecee3d968e12ec1fd5c9dce2345d7a87f',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
  'links': '5fa22b4162492394955b6b1873f566f427a58dfd7529c0df73e87a6da8daa76f',
- 'manifest': 'aaddf2603243f5e2f02e0d963718b8cf9e0e67266396b62c67ed56f94cb7539f',
+ 'manifest': 'eb0e496504d58a0a287482e6d26e385f7163384893d2dfbeecb7be9d4fe56f38',
  'raw': 'd924f62eebd5ee88c8142c690333924450c3344b18210ddfe87b8e486127dd35',
- 'rule_cells': '205fe55064aceda734f71916b3eee43df53479cc83f6d42d542879df108d4f08',
+ 'rule_cells': 'ef5931b9402c0f851be82d8103703226b8d8027e909ac42b10ef8d7a1646585f',
  'stats': 'be588e34e14e570c11a47fc9b3953e564d8f6026d909d9ae7f9c7ef561c99c5a',
  'tasks': '1e1eeb69d05da151bec8f6dff43c1863a4eb43a288f84c1ba35168311b303360'}
 GOLDEN_CANDIDATES_BY_RULE_ESTIMATE = GOLDEN_STACK_BY_RULE_ESTIMATE['candidates']
@@ -465,16 +465,16 @@ GOLDEN_NON_BASELINE_SEMANTICS_BY_RULE_ESTIMATE = {'candidates': {'all_fields': '
                 'severity': 'd8fb260b8a62f9175181cdba1356bfbd3dab9167f0965c5e7586e2202c62bcc3',
                 'source_presence': '31f6a55e225e04f5da96ef7f565969408d500a329be1bf37e463188763a5af16',
                 'ts': 'bfc0e0328d7a2b9fb224bc2791da7a13f533d4b8f03819ad9f65e7609fac08e0'},
- 'rule_cells': {'all_fields': '8e6ad6d30cf2b9cbec71ee29077cc15719909986d69ba0d3fc7de464d23dd80d',
-                'count': 19031,
-                'detail': 'e9e0db85698cb92ca31e3a393968000bb5fe6fe80cd9c7b18823bf16970ccfb8',
-                'evaluated': '41fa1985774f1e3a04acf7640e0f950a5fc989f748dbbc9c7a8ec3d361b85a0f',
-                'matched': '4728b54f48c9958b6422d78fc53fe04bf19987dd25c962bc958ac728efcd24f7',
-                'partition': 'fb40b6c19e5cb9dd777b3a0dbf80f7c3bedceaf2a09eb608ecb9a95d3b6b4cda',
-                'rule_id': '07b71c0b9275fa5cc4c52fd4d84b6b9e4981dd58224c1a998ecd1ccfc1ec8e6c',
-                'rule_version': '24a33b0fd318728a87bd17112b35b54c3f7146bdbd0dc21753c49b7b933953c6',
-                'state': 'b4958950447914efaf4951e1462601a792aab4a6102ed20b4764c485709212fc',
-                'target': 'a590e41e24abacef0bed8fa103bb391ca09effbb4c5e7e32e1fc85437fa62e33'}}
+ 'rule_cells': {'all_fields': 'f940a78a3bbd86d07b7bfb51281623d1a7e881dbe18fe8a862bf3d8ca030b43a',
+                'count': 19101,
+                'detail': '9ae8eb135f74e5a28036a798ad4f6d0a0256c0924b521f97d734a46dc2773cf0',
+                'evaluated': '4e966692e60912e38bec63790db681b516bfa4109c16fddef94fe3cf056fe9b9',
+                'matched': 'ddfd9c6ed1fa6f03f2f7f7046b2d206bccdc1df992f4f63da7ea81776cfca02d',
+                'partition': 'a99e2c10fb0ffd39888e13022785d2a2838e5f3a7a0ffd8a40af9c316d148dc5',
+                'rule_id': '69ec88451280e542dc24ad89d964517c490faead9dbdcec230d87952640fb1cb',
+                'rule_version': '2a05019bd1479bf35d393497b26cc7a4716bc8dc741784e217791db335208585',
+                'state': 'b1808fb24fabaec4a2a44d58b47e59423475d1f36736e2624c9148ec61730367',
+                'target': 'a9321c6ded04403230d071f3c0607e5c9fc5e48f87d03d3208acc0078d2c7a10'}}
 # Captured directly from the S7 fixture through _non_baseline_semantic_digests. Typed-event-derived hashes and
 # interchangeable predicate origins are normalized, while every decision, claim, lane, raw citation and gate is
 # checked field by field.
@@ -499,16 +499,16 @@ GOLDEN_NON_BASELINE_SEMANTICS = {'candidates': {'all_fields': '7c7845e9969d4e689
                 'severity': 'd8fb260b8a62f9175181cdba1356bfbd3dab9167f0965c5e7586e2202c62bcc3',
                 'source_presence': '31f6a55e225e04f5da96ef7f565969408d500a329be1bf37e463188763a5af16',
                 'ts': 'bfc0e0328d7a2b9fb224bc2791da7a13f533d4b8f03819ad9f65e7609fac08e0'},
- 'rule_cells': {'all_fields': '8e6ad6d30cf2b9cbec71ee29077cc15719909986d69ba0d3fc7de464d23dd80d',
-                'count': 19031,
-                'detail': 'e9e0db85698cb92ca31e3a393968000bb5fe6fe80cd9c7b18823bf16970ccfb8',
-                'evaluated': '41fa1985774f1e3a04acf7640e0f950a5fc989f748dbbc9c7a8ec3d361b85a0f',
-                'matched': '4728b54f48c9958b6422d78fc53fe04bf19987dd25c962bc958ac728efcd24f7',
-                'partition': 'fb40b6c19e5cb9dd777b3a0dbf80f7c3bedceaf2a09eb608ecb9a95d3b6b4cda',
-                'rule_id': '07b71c0b9275fa5cc4c52fd4d84b6b9e4981dd58224c1a998ecd1ccfc1ec8e6c',
-                'rule_version': '24a33b0fd318728a87bd17112b35b54c3f7146bdbd0dc21753c49b7b933953c6',
-                'state': 'b4958950447914efaf4951e1462601a792aab4a6102ed20b4764c485709212fc',
-                'target': 'a590e41e24abacef0bed8fa103bb391ca09effbb4c5e7e32e1fc85437fa62e33'}}
+ 'rule_cells': {'all_fields': 'f940a78a3bbd86d07b7bfb51281623d1a7e881dbe18fe8a862bf3d8ca030b43a',
+                'count': 19101,
+                'detail': '9ae8eb135f74e5a28036a798ad4f6d0a0256c0924b521f97d734a46dc2773cf0',
+                'evaluated': '4e966692e60912e38bec63790db681b516bfa4109c16fddef94fe3cf056fe9b9',
+                'matched': 'ddfd9c6ed1fa6f03f2f7f7046b2d206bccdc1df992f4f63da7ea81776cfca02d',
+                'partition': 'a99e2c10fb0ffd39888e13022785d2a2838e5f3a7a0ffd8a40af9c316d148dc5',
+                'rule_id': '69ec88451280e542dc24ad89d964517c490faead9dbdcec230d87952640fb1cb',
+                'rule_version': '2a05019bd1479bf35d393497b26cc7a4716bc8dc741784e217791db335208585',
+                'state': 'b1808fb24fabaec4a2a44d58b47e59423475d1f36736e2624c9148ec61730367',
+                'target': 'a9321c6ded04403230d071f3c0607e5c9fc5e48f87d03d3208acc0078d2c7a10'}}
 GOLDEN_NORMALIZED = {'arkime_sessions3-x': 'b4464dbf8fe8d697a71ef62d8c965b6ad2034f24e0fb055db657a71564d0061c',
  'arkime_sessions3-x+boots': 'b4464dbf8fe8d697a71ef62d8c965b6ad2034f24e0fb055db657a71564d0061c',
  'romulus-host-x': 'da6a5732309c18006b62fd4711ed9cc8212cb9b95f47541750adf0b8fbffb9b2',

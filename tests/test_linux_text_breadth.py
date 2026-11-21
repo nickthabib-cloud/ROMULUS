@@ -239,8 +239,17 @@ def test_firewall_lines_still_win_for_the_kernel():
      "AXFR", "denied", Outcome.failure),
     (("client @0x7f8b1c0e1f68 198.51.100.7#41346 (example.test): transfer of 'example.test/IN': AXFR started "
       "(serial 2026110901)"), "AXFR", "started", Outcome.success),
-    (("client 198.51.100.7#41346: transfer of 'example.test/IN': AXFR-style IXFR started, TSIG xfr-key "
-      "(serial 7)"), "IXFR", "started", Outcome.success),
+    # lib/ns/client.c prefix pieces: a TSIG key after the port, the query name in parentheses, a view
+    (("client @0x7f8b1c0e1f68 198.51.100.7#41346/key xfr-key (example.test): view external: transfer of "
+      "'example.test/IN': AXFR-style IXFR started: TSIG xfr-key (serial 7)"), "IXFR", "started", Outcome.success),
+    (("client @0x7f8b1c0e1f68 198.51.100.7#41346 (example.test): view internal: transfer of 'example.test/IN': "
+      "IXFR started (serial 6 -> 7)"), "IXFR", "started", Outcome.success),
+    ("client 198.51.100.7#41346: transfer of 'example.test/IN': AXFR started", "AXFR", "started", Outcome.success),
+    (("client @0x7f8b1c0e1f68 198.51.100.7#41346 (example.test): view external: zone transfer "
+      "'example.test/AXFR/IN' denied"), "AXFR", "denied", Outcome.failure),
+    # the DLZ path does not log whether the request was AXFR or IXFR
+    ("client @0x7f8b1c0e1f68 198.51.100.7#41346 (example.test): zone transfer 'example.test/IN' denied", None,
+     "denied", Outcome.failure),
 ])
 def test_bind_transfer_lines_are_typed_zone_transfer_requests(shape, body, qtype, result, outcome):
     event = one(shape, "named", body)

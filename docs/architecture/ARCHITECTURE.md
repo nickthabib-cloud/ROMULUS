@@ -125,7 +125,10 @@ are `privilege_use` records; their command and working directory are kept as the
 account tools' lines are `account_change` records with the same actions and operations as the tools' audit records,
 and a tool that logs one change once per account database has only its `/etc/group` (or final) line typed. Account
 and broker records carry the writer's pid (journald's `_PID`, the shipper's `process.pid` or the syslog header's,
-each with its own origin) so rules can join them to the process's exec. The kernel's module taint notices
+each with its own origin) so rules can join them to the process's exec, and name the identifier the line was
+logged under and the process journald says wrote it; a claim resting on a line whose writer journald contradicts or
+cannot confirm says so. A sudo record sudo split across lines is joined within a batch (same host, account and
+writer pid, within seconds); a part left unjoined stays a partial record. The kernel's module taint notices
 (out-of-tree, unsigned, non-GPL license) are `kernel_module` load records without a process or file, and are never
 taken as evidence that module-load auditing is in place. BIND's zone-transfer denials and started transfers are
 `dns_query` requests the server logged. OpenVPN also logs under the `ovpn-<instance>` identifier Debian's

@@ -626,8 +626,9 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
                    ("every answer record from the server to the client for the zone, and the transport (TCP for "
                     "a transfer that carried data)"),
                    "other reconnaissance from the client: port scans, reverse-lookup sweeps, web scans")
-    REQUEST_TYPES = ("AXFR", "IXFR", "ANY")
-    TRANSFER_TYPES = ("AXFR", "IXFR")
+    # "AXFR/IXFR": a server's transfer decision line that does not say which (BIND's DLZ denial)
+    REQUEST_TYPES = ("AXFR", "IXFR", "AXFR/IXFR", "ANY")
+    TRANSFER_TYPES = ("AXFR", "IXFR", "AXFR/IXFR")
     card: ClassVar[dict] = {
         "behavior": "a client asked a DNS server for a full or incremental zone transfer (AXFR/IXFR) or for ANY "
                     "records of a name; answer records, where typed, show whether the server answered NOERROR or "
@@ -684,6 +685,8 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
             if server is None and client is not None and record_role in ("query", "transaction"):
                 server, server_from = logging_server(event) or (None, None)
             question_type = qtype(event.get("dns.question.type"))
+            if question_type is None and event.has("dns.transfer.result"):
+                question_type = "AXFR/IXFR"
             if record_role is None or client is None or server is None or question_type is None:
                 why = self._unread(event, record_role) if client is None else None
                 if why is None and record_role == "answer" and question_type is None:

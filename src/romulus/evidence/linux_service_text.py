@@ -428,10 +428,12 @@ def _fastlog(line: str) -> ParsedLine | None:
 # BIND 9 lib/ns: a client-context prefix ("client @0x<ptr> <addr>#<port> (<name>): ", the pointer and name absent in
 # older releases), then xfrout.c's outgoing transfer statements (default xfer-out category) or the security
 # category's ACL decision from client.c, built by ns_client_aclmsg as "zone transfer '<zone>/<type>/<class>'".
-_BIND_CLIENT = re.compile(r"client (?:@0x[0-9a-fA-F]+ )?([^\s#]+)#(\d+)(?: \([^)]*\))?: (.*)")
-_BIND_DENIED = re.compile(r"zone transfer '([^'/\s]+)/(AXFR|IXFR)/(IN|CH|HS)' denied")
+_BIND_CLIENT = re.compile(r"client (?:@0x\S+ )?([^\s#]+)#(\d+)(?:/key \S+)?(?: \([^)]*\))?(?:: view [^:\s]+)?: (.*)")
+# ns_client_aclmsg gives "zone transfer '<zone>/<type>/<class>'"; the DLZ path logs "zone transfer '<zone>/<class>'",
+# which does not say whether the request was AXFR or IXFR
+_BIND_DENIED = re.compile(r"zone transfer '([^'/\s]+)(?:/(AXFR|IXFR))?/(IN|CH|HS)' denied")
 _BIND_STARTED = re.compile(r"transfer of '([^'/\s]+)/(IN|CH|HS)': (AXFR|IXFR|AXFR-style IXFR) started"
-                           r"(?:, [^()]*)? \(serial \d+(?: -> \d+)?\)")
+                           r"(?:: TSIG \S+)?(?: \(serial \d+(?: -> \d+)?\))?")
 _BIND_ENDED = re.compile(r"transfer of '[^'/\s]+/(?:IN|CH|HS)': (?:AXFR|IXFR|AXFR-style IXFR) ended: .*")
 BIND_TRANSFER_CAVEAT = ("BIND transfer log line: a request the server denied, or a transfer it started; the zone's "
                         "content and the records sent are not shown")
@@ -447,17 +449,19 @@ def _bind_transfer(message: str) -> ParsedLine | None:
         zone, qtype, result, outcome = started[1], started[3].rsplit(" ", 1)[-1], "started", Outcome.success
     else:
         return None
-    return ParsedLine("dns_query", {"dns.type": "query", "source.ip": address, "source.port": int(client[2]),
-                                    "dns.question.name": zone.rstrip(".") or ".", "dns.question.type": qtype,
-                                    "dns.transfer.result": result, SERVER_LOGGED: True},
-                      outcome, (BIND_TRANSFER_CAVEAT,))
+    fields: dict[str, object] = {"dns.type": "query", "source.ip": address, "source.port": int(client[2]),
+                                 "dns.question.name": zone.rstrip(".") or ".", "dns.transfer.result": result,
+                                 SERVER_LOGGED: True}
+    if qtype:
+        fields["dns.question.type"] = qtype
+    return ParsedLine("dns_query", fields, outcome, (BIND_TRANSFER_CAVEAT,))
 
 
 def _bind(message: str) -> ParsedLine | None:
     if message.startswith("client ") and (transfer := _bind_transfer(message)) is not None:
         return transfer
     match = re.fullmatch(
-        r"client (?:@0x[0-9a-fA-F]+ )?([^\s#]+)#(\d+) \(([^)]+)\): "
+        r"client (?:@0x[0-9a-fA-F]+ )?([^\s#]+)#(\d+)(?:/key \S+)? \(([^)]+)\):(?: view [^:\s]+:)? "
         r"query: (\S+) (IN|CH|HS) ([A-Z0-9]+) ([+\-][A-Za-z0-9()+\-]*) \(([^)]+)\)(?: \[.*\])?", message)
     if not match or not (address := _ip(match[1])) or _port(match[2]) is None:
         return None
@@ -684,7 +688,8 @@ _NAME = r"[^'\s]+"
 _ACCOUNT_DUPLICATES = re.compile(
     rf"(?:add '{_NAME}' to shadow group '{_NAME}'|delete '{_NAME}' from shadow group '{_NAME}'|"
     rf"removed shadow group '{_NAME}'(?: owned by '{_NAME}')?|group added to \S+: name=\S+(?:, GID=\d+)?|"
-    rf"group '{_NAME}' removed from \S+|"
+    rf"group '{_NAME}' removed from \S+|change (?:admin )?'{_NAME}' to '{_NAME}' in shadow group '{_NAME}'|"
+    r"\S+ failed to (?:add user \S+ to|remove user \S+ from) group \S+ in \S+|"
     r"(?:user \S+ (?:added by \S+ to|removed by \S+ from) group \S+|members of group \S+ set by \S+ to .*|"
     r"administrators of group \S+ set by \S+ to .*|password of group \S+ (?:changed|removed) by \S+|"
     r"access to group \S+ restricted by \S+) in \S+)")
@@ -714,6 +719,19 @@ def _account(program: str, message: str) -> ParsedLine | None:
             fields = {"account.action": "modify_user", "account.name": match[1], "account.group": match[4],
                       "user.name": match[3],
                       "account.op": "add-user-to-group" if match[2] == "added" else "delete-user-from-group"}
+        # gpasswd log_gpasswd_failure: "<caller> failed to add user <u> to group <g>" (or ": Permission denied")
+        match = re.fullmatch(r"(\S+) failed to (add user (\S+) to|remove user (\S+) from) group (\S+?)"
+                             r"(?:: Permission denied)?", message)
+        if match and program == "gpasswd" and not _ACCOUNT_DUPLICATES.fullmatch(message):
+            fields = {"account.action": "modify_user", "account.name": match[3] or match[4], "account.group": match[5],
+                      "user.name": match[1],
+                      "account.op": "add-user-to-group" if match[3] else "delete-user-from-group"}
+            outcome = Outcome.failure
+        # usermod -l: "change '<old>' to '<new>' in group '<g>'" (the member renamed with the account)
+        match = re.fullmatch(rf"change '({_NAME})' to '({_NAME})' in group '({_NAME})'", message)
+        if match and program == "usermod":
+            fields = {"account.action": "modify_user", "account.name": match[2], "account.previous_name": match[1],
+                      "account.group": match[3], "account.op": "rename-group-member"}
     if program == "useradd":
         match = re.fullmatch(r"new user: name=([^,\s]+), UID=(\d+), GID=(\d+)(?:, .*)?", message)
         if match:
@@ -776,8 +794,10 @@ def _account(program: str, message: str) -> ParsedLine | None:
                       "account.op": "change-group-password" if match[2] == "changed" else "remove-group-password"}
         match = re.fullmatch(r"(members|administrators) of group (\S+) set by (\S+) to (.*)", message)
         if match and not _ACCOUNT_DUPLICATES.fullmatch(message):
-            fields = {"account.action": "modify_group", "account.name": match[2], "user.name": match[3],
-                      "account.op": f"set-group-{match[1]}"}
+            # the group is the one whose list was set: a privileged group's members or administrators set is a grant
+            fields = {"account.action": "modify_group", "account.name": match[2], "account.group": match[2],
+                      "user.name": match[3], "account.op": f"set-group-{match[1]}",
+                      "account.members": [name for name in match[4].split(",") if name][:LIST_LIMIT]}
         match = re.fullmatch(r"access to group (\S+) restricted by (\S+)", message)
         if match:
             fields = {"account.action": "modify_group", "account.name": match[1], "user.name": match[2],
@@ -813,8 +833,8 @@ _PKEXEC_ENV = re.compile(r"The value for environment variable ([A-Za-z_][A-Za-z0
 _PKEXEC = re.compile(r"([^\s:]+): (Executing command|Error executing command as another user: (?:Not authorized|"
                      r"Request dismissed)|The value for the SHELL variable was not found (?:in )?the /etc/shells file|"
                      r"The value for environment variable [A-Za-z_][A-Za-z0-9_]{0,63} contains "
-                     r"(?:suspicious|suscipious) content) \[USER=([^\]\s]+)\] \[TTY=([^\]]*)\] \[CWD=(.*)\] "
-                     r"\[COMMAND=(.*)\]")
+                     r"(?:suspicious|suscipious) content) \[USER=([^\]\s]+)\] \[TTY=([^\]]*)\] "
+                     r"\[CWD=([\s\S]*)\] \[COMMAND=([\s\S]*)\]")
 PRIVILEGE_TEXT_CAVEAT = "Privilege broker log line; the command and working directory are the invoking user's text"
 PKEXEC_REJECTION_CAVEAT = ("pkexec logs a rejected SHELL or environment value before it reports it and exits; whether "
                            "it then refused, or code ran while it reported (CVE-2021-4034), is not shown")
@@ -877,7 +897,11 @@ _KERNEL_TAINTS = (
     ("loading out-of-tree module taints kernel.", "out_of_tree"),
     ("module verification failed: signature and/or required key missing - tainting kernel", "unsigned"),
     ("loading test module taints kernel.", "test"),
+    ("module license taints kernel.", "license"),
+    ("module is from the staging directory, the quality is unknown, you have been warned.", "staging"),
+    ("tainting kernel with TAINT_LIVEPATCH", "livepatch"),
 )
+KERNEL_MODULE_NAME_CAVEAT = "The module name holds characters kernel module names do not normally carry"
 _KERNEL_LICENSE = re.compile(r"module license '([^'\r\n]{0,128})' taints kernel\.")
 KERNEL_TAINT_CAVEAT = ("Kernel taint notice: the kernel prints it for the first module of its kind after boot only, "
                        "names no loading process or file, and does not show that the module's initialization "
@@ -887,7 +911,7 @@ KERNEL_TAINT_CAVEAT = ("Kernel taint notice: the kernel prints it for the first 
 def _kernel(message: str) -> ParsedLine | None:
     message = re.sub(r"^\[\s*\d+(?:\.\d+)?\] ", "", message)
     name, sep, note = message.partition(": ")
-    if not sep or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name):
+    if not sep or not re.fullmatch(r"\S{1,256}", name):
         return None
     taint = next((kind for text, kind in _KERNEL_TAINTS if note == text), None)
     fields: dict[str, object] = {"module.name": name, "module.op": "load"}
@@ -897,7 +921,9 @@ def _kernel(message: str) -> ParsedLine | None:
     if taint is None:
         return None
     fields["module.taint"] = taint
-    return ParsedLine("kernel_module", fields, Outcome.unknown, (KERNEL_TAINT_CAVEAT,))
+    caveats = (KERNEL_TAINT_CAVEAT,) if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name) else (
+        KERNEL_TAINT_CAVEAT, KERNEL_MODULE_NAME_CAVEAT)
+    return ParsedLine("kernel_module", fields, Outcome.unknown, caveats)
 
 
 def privilege_skip_reason(program: str, message: str) -> str | None:
@@ -910,9 +936,17 @@ def parse_service(program: str, message: str) -> ParsedLine | None:
     """Return only documented action records for an identified daemon, or None."""
     if (not isinstance(message, str) or len(message) > MAX_LINE
             or len(message.encode("utf-8", errors="replace")) > MAX_LINE
-            or any(char in message for char in "\r\n\x00")):
+            or "\x00" in message):
         return None
     program = program.lower()
+    if program == "pkexec":
+        # pkexec logs the caller's working directory and command verbatim, newlines included; its decision text
+        # comes before both
+        return _privilege(program, message)
+    # a statement written with its own trailing newline (shadow-utils userdel and groupdel) keeps it in the message
+    message = message.removesuffix("\n")
+    if "\r" in message or "\n" in message:
+        return None
     if program in ("exim", "exim4"):
         return _exim(message)
     if program.startswith("postfix/"):

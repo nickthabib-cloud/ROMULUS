@@ -91,8 +91,11 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # account statement (in the account audit records' actions and operations, with the writer's pid),
                    # kernel module taint notices, BIND transfer lines and the ovpn-<instance> OpenVPN identifier are
                    # typed; journald-shaped useradd/groupadd lines are typed as the syslog ones were; sudo records carry
-                   # the writer's pid; a pkexec SHELL or environment rejection has an unknown outcome.
-                   21: "5eb447e5d2bc5b661d2e33bab97109efd5927ca965cf8fc5a64baeac9b4bb2bd"}
+                   # the writer's pid; a pkexec SHELL or environment rejection has an unknown outcome. Account,
+                   # broker and kernel-module text records name their identifier and journald's writer; sudo lines
+                   # that journald says another program wrote carry the mismatch caveat; split sudo records are joined
+                   # per batch; journald's kernel transport verifies a kernel writer.
+                   21: "f11ea5200160e23001fd8149452b632b424312b51b7908069ad6dea1c8f6fb5b"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py", "rpc_catalog.py")
 PINNED_WINDOWS = {
     # A record's host addresses stand beside its stable source identifier, so clones that share the identifier
@@ -162,9 +165,9 @@ ARKIME_EVIDENCE_FILES = ("normalize.py", "arkime_protocols.py", "raw_scrub.py", 
 # typing of text alert lines and the evidence version that types them: EVE and Arkime records are read as before.
 # Nor do the Linux daemon families (privilege brokers, account tools, kernel taint notices, BIND transfers) and the
 # evidence version that types them.
-PINNED_SURICATA = {"suricata-eve@2": "1e6e5827a0c041274ea26e0aa7ce0eb469155e98116bec9c7d38ac1d717159b0",
+PINNED_SURICATA = {"suricata-eve@2": "def37b8fc4cf09c8aab0024b487f90d2ad2e37e75e104d93c14e4179dd955fe9",
                    "suricata-eve@1": "8aba0c3bbb2061eef70c0c9dd77e5ab49a42bbed9a68b01ba4b4eeffad181e38"}
-PINNED_ARKIME = {"arkime@1": "7d6a97987ea82bc45fd0ec99ace98c58d8fc45e22c94a495e954ff1fb3bf34e6"}
+PINNED_ARKIME = {"arkime@1": "8697793a2d1b14c22a41ab609e59695cd226f643d6affaa65839e47629f701d1"}
 
 
 # The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events, and TCP connections rebuilt
