@@ -20,13 +20,14 @@ is reported (its patterns did not run); it never makes a hunt read as having no 
 
 A literal matches as a substring, under the pattern's case flag. An anchored expression runs as a regular-expression
 search (case-insensitive unless case_sensitive): it must start with `^`, or with a literal prefix of at least four
-characters, which may occur anywhere in the line (the matcher runs the expression only where that prefix occurs).
+characters (after any leading `\b`), which may occur anywhere in the line (the matcher runs the expression only where
+that prefix occurs).
 
 A literal is 3 to 512 characters. An anchored expression must stay fast on attacker-written text. It is at most 512
 characters and uses only literals, character classes, `.`, groups, alternation, repeats and the anchors `^`, `$`,
 `\\A`, `\\Z`, `\\b` and `\\B`: no back references, lookaround, conditionals, atomic groups, possessive repeats or inline
 flags. A repeat that can match more than once may hold neither another repeat nor an alternation (an optional group
-may hold both), and at most three repeats may each match more than 16 characters. Each expression is then timed at
+may hold both), and at most four repeats may each match more than 16 characters. Each expression is then timed at
 load against lines built to make it backtrack (from its own examples), and refused when one takes longer than
 `PROBE_LIMIT_SECONDS`. The matcher reads an expression over at most 512 characters from where it is tried; a line it
 could not rule out there is counted in the pool's coverage.
@@ -70,9 +71,12 @@ MAX_FILE_BYTES = 4_000_000
 _ID = r"^mention\.[a-z0-9]+(?:_[a-z0-9]+)*$"
 # repeats that may each match more than WIDE_REPEAT characters, at most this many per expression
 WIDE_REPEAT = 16
-MAX_WIDE_REPEATS = 3
-# the longest one hostile probe line may take an anchored expression at load (a real one takes well under 1 ms)
-PROBE_LIMIT_SECONDS = 0.02
+MAX_WIDE_REPEATS = 4
+# the longest one hostile probe line may take an anchored expression at load, its fastest of PROBE_RUNS runs (the
+# curated corpus's worst is under 1 ms; the margin keeps a loaded machine from refusing a sound expression, while an
+# expression that backtracks catastrophically takes seconds)
+PROBE_LIMIT_SECONDS = 0.1
+PROBE_RUNS = 3
 _TECHNIQUE = r"^T[0-9]{4}(?:\.[0-9]{3})?$"
 
 
@@ -164,6 +168,20 @@ class PatternSet:
     refused: list[dict] = field(default_factory=list)     # {name, error}
     directory: str = ""
     digest: str = "none"
+    _matcher: MentionMatcher | None = field(default=None, repr=False, compare=False)
+
+    def match(self, line: str) -> list[str]:
+        """The ids of the patterns whose text occurs in `line`, strongest first (the earliest loaded among equals),
+        matched exactly as the sweep matches: the line bounded at the scan bound, every pattern whatever its
+        telemetry classes. `load_mention_patterns(directory).match(line)` is the whole API a corpus test needs."""
+        if not self.compiled:
+            return []
+        if self._matcher is None:
+            self._matcher = MentionMatcher(self.compiled)
+        text, past = bound_text(line)
+        found = self._matcher.match(text, cut=bool(past))
+        order = {"strong": 0, "medium": 1, "weak": 2}
+        return [self.patterns[i].id for i in sorted(found, key=lambda i: (order[self.patterns[i].strength], i))]
 
     def summary(self) -> dict:
         # no directory: a stored summary never depends on where the content is installed
@@ -242,12 +260,19 @@ def _probe_lines(examples: list[str]) -> list[str]:
 
 
 def probe(regex: re.Pattern, examples: list[str]) -> float:
-    """The longest time the expression takes over one hostile probe line, searched over its window."""
+    """The longest time the expression takes over one hostile probe line, searched over its window: for each line
+    the fastest of PROBE_RUNS runs, so a busy machine's pauses are not counted against the expression."""
     worst = 0.0
     for line in _probe_lines(examples):
-        began = time.perf_counter()
-        regex.search(line, 0, REGEX_WINDOW)
-        worst = max(worst, time.perf_counter() - began)
+        fastest = None
+        for _ in range(PROBE_RUNS):
+            began = time.perf_counter()
+            regex.search(line, 0, REGEX_WINDOW)
+            took = time.perf_counter() - began
+            fastest = took if fastest is None else min(fastest, took)
+            if fastest <= PROBE_LIMIT_SECONDS:
+                break
+        worst = max(worst, fastest)
     return worst
 
 
@@ -297,7 +322,12 @@ def compile_anchored(expression: str, case_sensitive: bool) -> Anchored:
             lead.append(chr(arg))
         return Anchored(compiled, None, **shape, lead="".join(lead))
     prefix = []
-    for op, arg in items:
+    # a leading word boundary (\b, \B) takes no character: the prefix is the literal text after it
+    lead = 0
+    while lead < len(items) and items[lead][0] == _sre.AT and items[lead][1] in {_sre.AT_BOUNDARY,
+                                                                                  _sre.AT_NON_BOUNDARY}:
+        lead += 1
+    for op, arg in items[lead:]:
         if op != _sre.LITERAL:
             break
         prefix.append(chr(arg))

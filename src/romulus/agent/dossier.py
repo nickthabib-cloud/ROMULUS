@@ -434,6 +434,7 @@ def _mentions(repo: Repo, hunt_id: str) -> list[dict]:
     out = []
     for row in repo.mentions(hunt_id, limit=MENTION_DOSSIER_LIMIT):
         out.append({"rank": row["rank"], "kind": "mention", "pattern": _bounded_text(row["pattern_id"]),
+                    "headline": _bounded_text(f"{row['pattern_title']} (mention)"),
                     "strength": row["strength"], "host": _bounded_text(row["host"]) if row["host"] else None,
                     "count": row["count"], "first_seen": _jsonable(row["first_ts"]),
                     "line": _bounded_text(row["line"])})

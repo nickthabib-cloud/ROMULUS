@@ -112,8 +112,8 @@ def write(m, path, technical_name):
                   f"are in {technical_name}.")
         for item in (mentions.get("items") or [])[:EXECUTIVE_MENTIONS]:
             pattern = item["pattern"]
-            paragraph(f"{item['rank']}. {pattern['strength']} pattern: {pattern['title']} — "
-                      f"{item['host'] or 'no host'}, {item['count']} line(s) (mention, not an action)")
+            paragraph(f"{item['rank']}. {item['headline']}, {pattern['strength']} pattern — "
+                      f"{item['host'] or 'no host'}, {item['count']} line(s); text a record contains, not an action")
     if assessment := m.get("ai_assessment"):
         paragraph("AI assessment", bold=True)
         paragraph(assessment.get("header") or "Template narrative.")

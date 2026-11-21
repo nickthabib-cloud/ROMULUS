@@ -936,7 +936,8 @@ class Toolbox:
             item = mention_item(row, line_chars=TOOL_TEXT_LIMIT)
             items.append({
                 "rank": item["rank"], "label": item["label"], "pattern": item["pattern"]["id"],
-                "pattern_title": _bounded_text(item["pattern"]["title"]), "strength": item["pattern"]["strength"],
+                "headline": _bounded_text(item["headline"]), "strength": item["pattern"]["strength"],
+                "telemetry_fit": item["telemetry_fit"],
                 "pattern_attack_metadata": item["pattern"]["attack"]["techniques"],
                 "also_matched": [other["id"] for other in item["also_matched"]],
                 "host": item["host"], "count": item["count"], "first_seen": item["first_seen"],

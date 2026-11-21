@@ -3,8 +3,9 @@
 The sweep hands each partition's unread records (`normalize_hits(unread=...)`: records of a dataset or event class no
 normalizer reads, text in no recognized format or too long to parse, and records a normalizer failed on; never a
 duplicate copy of a normalized record) to `MentionScanner.scan`. The scanner reads one typed text field per record
-(`message`, else `event.original`), never a serialized record, bounds it (`evidence.mentions.MAX_SCAN_CHARS`), and runs
-the hunt's patterns for the record's telemetry class over it.
+(`message`, else `event.original`), never a serialized record, bounds it (`evidence.mention_match.MAX_SCAN_CHARS`), and
+runs every one of the hunt's patterns over it. A pattern's telemetry classes are a ranking hint, never a filter: a
+match on a record of a class the pattern names ranks above one on another class of the same strength.
 
 Each matching line is grouped once, under the strongest pattern it matches (the others it matches are kept on the
 group as labelled metadata), by (pattern, host, normalized line) in a private SQLite stage under the hunt's stage directory,
@@ -19,9 +20,16 @@ never crowds out a strong one. Any cap that is hit, any refused pattern file, an
 write the stage could not take make the pool's coverage partial, with the counts and names of what was not kept or
 not scanned. With no patterns loaded the pool is `not_scanned`, never empty.
 
-At the end of the sweep the pool is ranked (pattern strength, then rarity: the pattern's distinct hosts and then its
-matching lines, fewest first; then first time) and published in one transaction that replaces the hunt's earlier
-pool, so a sweep run again on resume leaves one pool.
+At the end of the sweep the pool is ranked (pattern strength, then whether the record's telemetry class is one the
+pattern names, then rarity: the pattern's distinct hosts and then its matching lines, fewest first; then first time).
+Strength only orders the pool: a weak mention is in the same lane as a strong one, never context. The pool is
+published in one transaction that replaces the hunt's earlier pool, so a sweep run again on resume leaves one pool.
+
+The line bound: a line is matched over its first MAX_SCAN_CHARS characters (8 KiB of text), and every anchored
+expression over at most 512 characters from where it is tried, at most four places per line. Python's `re` is a
+backtracking engine, so the bound is what keeps a hostile megabyte line from costing seconds: the rest of a longer
+line is counted as not scanned and makes the pool's coverage partial. A command line, URL or shell one-liner a
+pattern names fits well inside 8 KiB; a longer line is almost always an encoded blob or a data dump.
 """
 from __future__ import annotations
 
@@ -139,7 +147,8 @@ class MentionScanner:
         # a store no detection reads: it gives way before any detection store refuses a key, and has no floor
         self.account = budget.account("mention_pool", yields=True) if budget is not None else None
         self.max_per_pattern, self.max_per_host, self.max_per_hunt = max_per_pattern, max_per_host, max_per_hunt
-        self._matchers: dict[str, MentionMatcher | None] = {}
+        self._matcher: MentionMatcher | None = (MentionMatcher(patterns.compiled) if patterns.compiled
+                                                else None)
         self._dir: str | None = None
         self.db: sqlite3.Connection | None = None
         self._size = 0
@@ -160,12 +169,10 @@ class MentionScanner:
         self.stopped = ""
 
     # ---- matching -------------------------------------------------------------------------------------------------
-    def _matcher(self, telemetry: str) -> MentionMatcher | None:
-        if telemetry not in self._matchers:
-            chosen = [built for built, pattern in zip(self.patterns.compiled, self.patterns.patterns, strict=True)
-                      if "any" in pattern.telemetry or telemetry in pattern.telemetry]
-            self._matchers[telemetry] = MentionMatcher(chosen) if chosen else None
-        return self._matchers[telemetry]
+    def _fits(self, index: int, telemetry: str) -> bool:
+        """Whether the record's telemetry class is one the pattern names (a ranking hint only)."""
+        named = self.patterns.patterns[index].telemetry
+        return "any" in named or telemetry in named
 
     def _redact_text(self, text: str) -> str:
         return redact_counted(text, self.settings, None) if self.settings is not None else text
@@ -193,11 +200,11 @@ class MentionScanner:
             if payload is None:
                 stats["no_text"] += 1
                 continue
-            telemetry = telemetry_class(source, contract, entry[2] if len(entry) > 2 else None)
-            matcher = self._matcher(telemetry)
+            matcher = self._matcher
             if matcher is None:
-                stats["no_patterns_for_telemetry"] += 1
+                stats["no_patterns"] += 1
                 continue
+            telemetry = telemetry_class(source, contract, entry[2] if len(entry) > 2 else None)
             text, past = bound_text(payload[1])
             stats["lines_scanned"] += 1
             self.by_telemetry[telemetry] += 1
@@ -242,7 +249,8 @@ class MentionScanner:
             db.execute("PRAGMA synchronous=OFF")
             db.execute("CREATE TABLE grp (key TEXT PRIMARY KEY, pattern INTEGER NOT NULL, host TEXT NOT NULL, "
                        "strength INTEGER NOT NULL, n INTEGER NOT NULL, first_ts TEXT, last_ts TEXT, "
-                       "seq INTEGER NOT NULL, telemetry TEXT NOT NULL, raw TEXT NOT NULL, line TEXT NOT NULL, "
+                       "seq INTEGER NOT NULL, telemetry TEXT NOT NULL, fit INTEGER NOT NULL, raw TEXT NOT NULL, "
+                       "line TEXT NOT NULL, "
                        "line_chars INTEGER NOT NULL, line_cut INTEGER NOT NULL, suspicious INTEGER NOT NULL, "
                        "others TEXT NOT NULL)")
             db.execute("CREATE INDEX grp_weak ON grp (strength, pattern, seq)")
@@ -348,7 +356,8 @@ class MentionScanner:
         when: tuple | None = None
         # one group per line, under its strongest pattern (the earliest loaded among equals); the rest are metadata
         patterns = self.patterns.patterns
-        ordered = sorted(matched, key=lambda i: (-STRENGTH_RANK[patterns[i].strength], i))
+        ordered = sorted(matched, key=lambda i: (-STRENGTH_RANK[patterns[i].strength],
+                                                 not self._fits(i, telemetry), i))
         others = json.dumps(ordered[1:])
         for index in ordered[:1]:
             pattern = self.patterns.patterns[index]
@@ -399,8 +408,9 @@ class MentionScanner:
             shown = line[:MAX_LINE_CHARS]
             self._seq += 1
             try:
-                db.execute("INSERT INTO grp VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (
+                db.execute("INSERT INTO grp VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (
                     key, index, host, strength, ts_text, ts_text, self._seq, telemetry,
+                    int(self._fits(index, telemetry)),
                     json.dumps(raw, ensure_ascii=False, default=str), shown, len(line), int(len(line) > len(shown)),
                     int(bool(injection_flags(line))), others))
                 db.execute("INSERT INTO host VALUES (?, 1) ON CONFLICT (host) DO UPDATE SET kept = kept + 1",
@@ -428,8 +438,8 @@ class MentionScanner:
                 self.db.execute("UPDATE rarity SET lines = lines + ? WHERE pattern = ?", (count, pattern))
         yield from self.db.execute(
             "SELECT g.key, g.pattern, g.host, g.n, g.first_ts, g.last_ts, g.telemetry, g.raw, g.line, g.line_chars, "
-            "g.line_cut, g.suspicious, r.hosts, r.lines, g.others FROM grp g JOIN rarity r USING (pattern) "
-            "ORDER BY g.strength DESC, r.hosts, r.lines, g.first_ts IS NULL, g.first_ts, g.key")
+            "g.line_cut, g.suspicious, r.hosts, r.lines, g.others, g.fit FROM grp g JOIN rarity r USING (pattern) "
+            "ORDER BY g.strength DESC, g.fit DESC, r.hosts, r.lines, g.first_ts IS NULL, g.first_ts, g.key")
 
     def _cap_view(self, name: str, limit: int) -> dict | None:
         counted = self.caps[name]
@@ -468,9 +478,6 @@ class MentionScanner:
         if stats["lines_cut"]:
             reasons.append(f"{stats['lines_cut']} line(s) longer than the scan bound were scanned only in part "
                            f"({stats['chars_not_scanned']} characters not scanned)")
-        if stats["no_patterns_for_telemetry"] and self.patterns.patterns:
-            reasons.append(f"{stats['no_patterns_for_telemetry']} record(s) of a telemetry class no loaded pattern "
-                           "reads were not scanned")
         if lost_lines:
             why = sorted(name for name in caps if not name.startswith("hosts"))
             if stats["lines_not_staged"] or stats["lines_not_published"]:
@@ -500,7 +507,6 @@ class MentionScanner:
             "records_offered": stats["records_offered"], "lines_scanned": stats["lines_scanned"],
             "lines_matched": stats["lines_matched"], "by_telemetry": dict(self.by_telemetry),
             "not_scanned": {"no_text_field": stats["no_text"],
-                            "no_pattern_for_telemetry": stats["no_patterns_for_telemetry"],
                             "lines_cut_at_bound": stats["lines_cut"], "chars_past_bound": stats["chars_not_scanned"],
                             "records_not_fetched": ("records of datasets and event classes the sweep does not read "
                                                     "are not scanned; the coverage section's not-assessed list names "
@@ -520,7 +526,7 @@ class MentionScanner:
 
         def rows():
             for rank, (key, index, host, count, first_ts, last_ts, telemetry, raw, line, line_chars, line_cut,
-                       suspicious, hosts, lines, others) in enumerate(self.ranked() or (), start=1):
+                       suspicious, hosts, lines, others, fit) in enumerate(self.ranked() or (), start=1):
                 pattern = patterns[index]
                 record = json.loads(raw)
                 record["ts"] = _parse(record.get("ts"))
@@ -531,7 +537,8 @@ class MentionScanner:
                     "pattern_attack": list(pattern.attack),
                     "also_matched": [{"id": patterns[other].id, "title": patterns[other].title,
                                       "strength": patterns[other].strength} for other in json.loads(others)],
-                    "pattern_source": pattern.source.model_dump(), "telemetry": telemetry, "host": host,
+                    "pattern_source": pattern.source.model_dump(), "telemetry": telemetry,
+                    "telemetry_fit": bool(fit), "host": host,
                     "target": record["target"], "native_id": record["native_id"],
                     "raw_id": raw_record_id(self.hunt_id, record["target"], record["native_id"]),
                     "first_ts": _parse(first_ts), "last_ts": _parse(last_ts), "count": count,

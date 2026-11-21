@@ -34,19 +34,25 @@ def _when(value) -> str | None:
     return value.isoformat().replace("+00:00", "Z")
 
 
+def headline(title: str) -> str:
+    """How a mention is named everywhere: its pattern's title, marked as a mention, so it never reads as an action."""
+    return f"{title} (mention)"
+
+
 def mention_item(row: dict, *, line_chars: int = MANIFEST_LINE_CHARS) -> dict:
     """One mention as every renderer shows it."""
     line = row["line"] or ""
     shown = line[:line_chars]
     return {
         "id": row["id"], "rank": row["rank"], "kind": MENTION_KIND, "lane": MENTION_LANE,
-        "label": MENTION_LABEL_SHORT,
+        "label": MENTION_LABEL_SHORT, "headline": headline(row["pattern_title"]),
         "pattern": {"id": row["pattern_id"], "title": row["pattern_title"], "strength": row["strength"],
                     "attack": {"techniques": list(row["pattern_attack"] or []), "label": PATTERN_ATTACK_LABEL},
                     "source": row["pattern_source"]},
         # other patterns the same line matches: metadata of this one mention, never mentions of their own
         "also_matched": list(row.get("also_matched") or []),
-        "telemetry": row["telemetry"], "host": row["host"] or None, "count": row["count"],
+        "telemetry": row["telemetry"], "telemetry_fit": bool(row.get("telemetry_fit", True)),
+        "host": row["host"] or None, "count": row["count"],
         "first_seen": _when(row["first_ts"]), "last_seen": _when(row["last_ts"]),
         "rarity": {"pattern_hosts": row["pattern_hosts"], "pattern_lines": row["pattern_lines"]},
         "line": shown, "line_cut": bool(row["line_cut"]) or len(line) > len(shown), "line_chars": row["line_chars"],
@@ -66,8 +72,8 @@ def mentions_view(repo, hunt_id: str, *, limit: int = MANIFEST_MENTIONS) -> dict
         "kind": MENTION_KIND, "lane": MENTION_LANE, "label": MENTION_LABEL, "lane_note": LANE_NOTE,
         "status": coverage.get("status", "not_scanned"), "coverage": coverage,
         "total": total, "shown": len(rows), "not_shown": total - len(rows),
-        "order": "pattern strength, then rarity (the pattern's distinct hosts, then its matching lines, fewest "
-                 "first), then first time",
+        "order": "pattern strength, then whether the record's telemetry class is one the pattern names, then "
+                 "rarity (the pattern's distinct hosts, then its matching lines, fewest first), then first time",
         "items": [mention_item(row) for row in rows],
     }
 

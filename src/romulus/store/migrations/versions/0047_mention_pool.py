@@ -32,6 +32,7 @@ def upgrade():
         sa.Column("pattern_source", sa.JSON(), nullable=False),
         sa.Column("also_matched", sa.JSON(), nullable=False),
         sa.Column("telemetry", sa.String(), nullable=False),
+        sa.Column("telemetry_fit", sa.Boolean(), nullable=False),
         sa.Column("host", sa.String(), nullable=False),
         sa.Column("target", sa.String(), nullable=False),
         sa.Column("native_id", sa.String(), nullable=False),
