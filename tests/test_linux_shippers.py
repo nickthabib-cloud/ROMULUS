@@ -522,10 +522,11 @@ def test_journald_field_shapes_give_the_dev_journal_events(activity, dataset, sp
     assert not any("event.original#journal" in value.origin for value in got[0].fields.values())
 
 
-def _syslog_view_of(j):
-    """The dev journal record holding only what a syslog line carries (no unit, boot, or journald process)."""
-    keep = {"MESSAGE", "SYSLOG_IDENTIFIER", "_HOSTNAME", "_PID", "__REALTIME_TIMESTAMP", "UNIT", "JOB_TYPE",
-            "JOB_RESULT", "MESSAGE_ID"}
+def _syslog_view_of(j, with_pid=True):
+    """The dev journal record holding only what a syslog line carries (no unit, boot, or journald process; no pid
+    when the line has none: sudo logs without one)."""
+    keep = {"MESSAGE", "SYSLOG_IDENTIFIER", "_HOSTNAME", "__REALTIME_TIMESTAMP", "UNIT", "JOB_TYPE",
+            "JOB_RESULT", "MESSAGE_ID"} | ({"_PID"} if with_pid else set())
     return {k: v for k, v in j.items() if k in keep}
 
 
@@ -539,7 +540,7 @@ SYSLOG_LINES = {
 @pytest.mark.parametrize("from_journal", [False, True])
 def test_syslog_lines_with_their_message_give_the_journal_events(activity, from_journal):
     ident, pid, journal = SYSLOG_LINES[activity]
-    j = _syslog_view_of(journal())
+    j = _syslog_view_of(journal(), with_pid=pid is not None)
     dev, _ = _events([fx.dev_journal(j)])
     line = fx.syslog(ident, pid, j["MESSAGE"], ts=int(j["__REALTIME_TIMESTAMP"]) / 1e6, from_journal=from_journal)
     got, _ = _events([line])
@@ -564,7 +565,7 @@ def test_shipper_parsed_syslog_lines_give_the_journal_events_with_a_caveat():
         "source.ip": "203.0.113.9", "source.port": 51515}, ts=int(sshd["__REALTIME_TIMESTAMP"]) / 1e6)])
     assert _views(got) == _views(dev)
     assert SHIPPER_SSH_CAVEAT in got[0].caveats
-    sudo = _syslog_view_of(fx.sudo_journal())
+    sudo = _syslog_view_of(fx.sudo_journal(), with_pid=False)
     dev, _ = _events([fx.dev_journal(sudo)])
     got, _ = _events([fx.parsed_syslog("sudo", None, {
         "user.name": "bob", "system.auth.sudo": {"error": "3 incorrect password attempts", "tty": "pts/0",

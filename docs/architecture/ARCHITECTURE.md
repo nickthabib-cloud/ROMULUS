@@ -130,7 +130,20 @@ write the same ISO time and the same words, an ISO-stamped line, and any line kn
 is read as OpenVPN only when the record's file path, dataset or module names an OpenVPN log. A resolver log's host
 server is the host its line header names, else the host that shipped it, and the claim says which. Certificate checks, TLS
 handshake failures and packet authentication failures are typed with their own authentication phase, never as password
-decisions. Recognized lines of these programs that carry no event are counted with a named reason. Authentication sessions are distinguished from authentication decisions. Firewall
+decisions. Recognized lines of these programs that carry no event are counted with a named reason. Privilege
+brokers (sudo with its optional fields and refusal reasons, su and runuser from util-linux and shadow-utils, pkexec)
+are `privilege_use` records; their command and working directory are kept as the caller's text. The shadow-utils
+account tools' lines are `account_change` records with the same actions and operations as the tools' audit records,
+and a tool that logs one change once per account database has only its `/etc/group` (or final) line typed. Account
+and broker records carry the writer's pid (journald's `_PID`, the shipper's `process.pid` or the syslog header's,
+each with its own origin) so rules can join them to the process's exec, and name the identifier the line was
+logged under and the process journald says wrote it; a claim resting on a line whose writer journald contradicts or
+cannot confirm says so. A sudo record sudo split across lines is joined within a batch (same host, account and
+writer pid, within seconds); a part left unjoined stays a partial record. The kernel's module taint notices
+(out-of-tree, unsigned, non-GPL license) are `kernel_module` load records without a process or file, and are never
+taken as evidence that module-load auditing is in place. BIND's zone-transfer denials and started transfers are
+`dns_query` requests the server logged. OpenVPN also logs under the `ovpn-<instance>` identifier Debian's
+`openvpn@.service` sets. Authentication sessions are distinguished from authentication decisions. Firewall
 log records do not invent connection counters, and a cron command log does not claim a kernel-observed exec.
 Two additional families preserve information that those contracts cannot express:
 

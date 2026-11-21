@@ -20,6 +20,7 @@ from romulus.detect.linux_sequences import share_linux_witnesses
 from romulus.detect.mail import MAIL_PLAYBOOKS
 from romulus.detect.network import NETWORK_PLAYBOOKS
 from romulus.detect.packets import PACKET_PLAYBOOKS
+from romulus.detect.privilege_brokers import PRIVILEGE_BROKER_RULES
 from romulus.detect.service_auth import SERVICE_AUTH_PLAYBOOKS
 from romulus.detect.service_catalog import ServiceCatalog
 from romulus.detect.sessions import SESSION_PLAYBOOKS
@@ -67,7 +68,7 @@ from romulus.detect.zeek_rates import RULES as ZEEK_RATE_PLAYBOOKS
 from romulus.detect.zeek_smb import RULES as ZEEK_SMB_PLAYBOOKS
 from romulus.detect.zeek_transfer import RULES as ZEEK_TRANSFER_PLAYBOOKS
 
-PACK_VERSION = "pack@60"
+PACK_VERSION = "pack@61"
 WINDOWS_PROCESS_PLAYBOOKS = (WINDOWS_LINEAGE_PLAYBOOKS + WINDOWS_PROXY_PLAYBOOKS + WINDOWS_CREDENTIAL_PLAYBOOKS
                              + WINDOWS_DEFENSE_PLAYBOOKS + WINDOWS_REMOTE_PLAYBOOKS)
 WINDOWS_HOST_PLAYBOOKS = list(WINDOWS_MEMORY_PLAYBOOKS + WINDOWS_REGISTRY_PLAYBOOKS
@@ -98,7 +99,7 @@ ALL_PLAYBOOKS = (HOST_PLAYBOOKS + HIJACK_PLAYBOOKS + KERNEL_FILE_PLAYBOOKS + LIN
                  + list(ZEEK_LATERAL_PLAYBOOKS) + list(ZEEK_SMB_PLAYBOOKS) + list(ZEEK_RATE_PLAYBOOKS)
                  + list(ZEEK_CLEARTEXT_PLAYBOOKS) + list(ZEEK_TRANSFER_PLAYBOOKS) + list(ZEEK_ENCRYPTED_PLAYBOOKS)
                  + list(ICS_PLAYBOOKS)
-                 + LINUX_DIRECT_RULES + LINUX_SEQUENCE_RULES
+                 + LINUX_DIRECT_RULES + LINUX_SEQUENCE_RULES + PRIVILEGE_BROKER_RULES
                  + SERVICE_AUTH_PLAYBOOKS + MAIL_PLAYBOOKS + VPN_PLAYBOOKS + BASELINE_PLAYBOOKS
                  + [SmbImpact, ServiceCatalog] + list(WEB_ATTACK_PLAYBOOKS))
 _ANCHOR_CLASSES = {playbook.id: playbook.anchor_class for playbook in ALL_PLAYBOOKS}

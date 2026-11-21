@@ -236,12 +236,12 @@ def test_cron_scheduler_observation_and_changes():
 
 
 @pytest.mark.parametrize("program,line,action,name", [
-    ("usermod", "add 'alice' to group 'sudo'", "add_user_to_group", "alice"),
-    ("usermod", "lock user 'alice' password", "lock_user", "alice"),
-    ("usermod", "unlock user 'alice' password", "unlock_user", "alice"),
+    ("usermod", "add 'alice' to group 'sudo'", "modify_user", "alice"),
+    ("usermod", "lock user 'alice' password", "lock", "alice"),
+    ("usermod", "unlock user 'alice' password", "unlock", "alice"),
     ("userdel", "delete user 'alice'", "delete_user", "alice"),
-    ("passwd", "password for 'alice' changed by 'root'", "change_password", "alice"),
-    ("chpasswd", "pam_unix(chpasswd:chauthtok): password changed for alice", "change_password", "alice"),
+    ("passwd", "password for 'alice' changed by 'root'", "password_change", "alice"),
+    ("chpasswd", "pam_unix(chpasswd:chauthtok): password changed for alice", "password_change", "alice"),
 ])
 def test_account_change_native_fields(program, line, action, name):
     event = parse(program, line)
@@ -358,10 +358,10 @@ def test_lookalike_application_envelopes_are_not_identified(line):
 
 
 @pytest.mark.parametrize("line,field,value", [
-    ("change user 'alice' UID from '1000' to '0'", "account.id", "0"),
+    ("change user 'alice' UID from '1000' to '0'", "account.new_id", "0"),
     ("change user 'alice' shell from '/bin/sh' to '/bin/bash'", "account.shell", "/bin/bash"),
     ("change user name 'alice' to 'bob'", "account.name", "bob"),
-    ("change user 'alice' GID from '1000' to '0'", "group.id", "0"),
+    ("change user 'alice' GID from '1000' to '0'", "account.group_id", "0"),
 ])
 def test_usermod_updates_are_typed_only_from_structured_log_values(line, field, value):
     event = parse("usermod", line)

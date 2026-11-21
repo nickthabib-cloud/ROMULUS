@@ -9,7 +9,7 @@ import ipaddress
 import re
 import shlex
 
-from romulus.evidence.linux_auth_text import _exim_tokens, parse_auth
+from romulus.evidence.linux_auth_text import _exim_tokens, openvpn_identifier, parse_auth
 from romulus.evidence.linux_text_types import ParsedLine
 from romulus.evidence.typed import Outcome
 
@@ -368,9 +368,14 @@ def service_skip_reason(program: str, message: str) -> str | None:
             if pattern.match(message):
                 return reason
         return None
-    if program == "openvpn" or program.startswith("openvpn-"):
+    if openvpn_identifier(program):
         return openvpn_skip_reason(message)
-    return None
+    if program in ("named", "bind9"):
+        client = _BIND_CLIENT.fullmatch(message)
+        if client and _BIND_ENDED.fullmatch(client[3]):
+            return "BIND transfer completion line (the same transfer's started line is typed)"
+        return None
+    return account_skip_reason(program, message) or privilege_skip_reason(program, message)
 
 
 # Suricata's fast.log (src/alert-fastlog.c, AlertFastLogger), one alert per line:
@@ -420,9 +425,43 @@ def _fastlog(line: str) -> ParsedLine | None:
     return ParsedLine("net_alert", fields, Outcome.unknown, (FASTLOG_CAVEAT,))
 
 
+# BIND 9 lib/ns: a client-context prefix ("client @0x<ptr> <addr>#<port> (<name>): ", the pointer and name absent in
+# older releases), then xfrout.c's outgoing transfer statements (default xfer-out category) or the security
+# category's ACL decision from client.c, built by ns_client_aclmsg as "zone transfer '<zone>/<type>/<class>'".
+_BIND_CLIENT = re.compile(r"client (?:@0x\S+ )?([^\s#]+)#(\d+)(?:/key \S+)?(?: \([^)]*\))?(?:: view [^:\s]+)?: (.*)")
+# ns_client_aclmsg gives "zone transfer '<zone>/<type>/<class>'"; the DLZ path logs "zone transfer '<zone>/<class>'",
+# which does not say whether the request was AXFR or IXFR
+_BIND_DENIED = re.compile(r"zone transfer '([^'/\s]+)(?:/(AXFR|IXFR))?/(IN|CH|HS)' denied")
+_BIND_STARTED = re.compile(r"transfer of '([^'/\s]+)/(IN|CH|HS)': (AXFR|IXFR|AXFR-style IXFR) started"
+                           r"(?:: TSIG \S+)?(?: \(serial \d+(?: -> \d+)?\))?")
+_BIND_ENDED = re.compile(r"transfer of '[^'/\s]+/(?:IN|CH|HS)': (?:AXFR|IXFR|AXFR-style IXFR) ended: .*")
+BIND_TRANSFER_CAVEAT = ("BIND transfer log line: a request the server denied, or a transfer it started; the zone's "
+                        "content and the records sent are not shown")
+
+
+def _bind_transfer(message: str) -> ParsedLine | None:
+    client = _BIND_CLIENT.fullmatch(message)
+    if not client or not (address := _ip(client[1])) or _port(client[2]) is None:
+        return None
+    if denied := _BIND_DENIED.fullmatch(client[3]):
+        zone, qtype, result, outcome = denied[1], denied[2], "denied", Outcome.failure
+    elif started := _BIND_STARTED.fullmatch(client[3]):
+        zone, qtype, result, outcome = started[1], started[3].rsplit(" ", 1)[-1], "started", Outcome.success
+    else:
+        return None
+    fields: dict[str, object] = {"dns.type": "query", "source.ip": address, "source.port": int(client[2]),
+                                 "dns.question.name": zone.rstrip(".") or ".", "dns.transfer.result": result,
+                                 SERVER_LOGGED: True}
+    if qtype:
+        fields["dns.question.type"] = qtype
+    return ParsedLine("dns_query", fields, outcome, (BIND_TRANSFER_CAVEAT,))
+
+
 def _bind(message: str) -> ParsedLine | None:
+    if message.startswith("client ") and (transfer := _bind_transfer(message)) is not None:
+        return transfer
     match = re.fullmatch(
-        r"client (?:@0x[0-9a-fA-F]+ )?([^\s#]+)#(\d+) \(([^)]+)\): "
+        r"client (?:@0x[0-9a-fA-F]+ )?([^\s#]+)#(\d+)(?:/key \S+)? \(([^)]+)\):(?: view [^:\s]+:)? "
         r"query: (\S+) (IN|CH|HS) ([A-Z0-9]+) ([+\-][A-Za-z0-9()+\-]*) \(([^)]+)\)(?: \[.*\])?", message)
     if not match or not (address := _ip(match[1])) or _port(match[2]) is None:
         return None
@@ -637,46 +676,278 @@ def _cron(program: str, message: str) -> ParsedLine | None:
     return None
 
 
+# shadow-utils account tools (src/useradd.c, usermod.c, userdel.c, groupadd.c, groupdel.c, groupmod.c, gpasswd.c,
+# chage.c, passwd.c), typed with the actions and operations the tools' own audit records carry (ADD_USER create_user,
+# USER_MGMT modify_user with op add-user-to-group, ...), so a syslog line and an audit record of one change read alike.
+# A tool logs one membership or deletion once per database it writes ("... group 'g'" for /etc/group, then "... shadow
+# group 'g'" or "... in /etc/gshadow" for /etc/gshadow, and groupadd's "group added to <db>" before its "new group"
+# line): only the /etc/group statement, or the final one, is typed, and the others are counted as recognized skips.
+ACCOUNT_TOOLS = ("useradd", "usermod", "userdel", "groupadd", "groupdel", "groupmod", "gpasswd", "chage", "passwd",
+                 "chpasswd")
+_NAME = r"[^'\s]+"
+_ACCOUNT_DUPLICATES = re.compile(
+    rf"(?:add '{_NAME}' to shadow group '{_NAME}'|delete '{_NAME}' from shadow group '{_NAME}'|"
+    rf"removed shadow group '{_NAME}'(?: owned by '{_NAME}')?|group added to \S+: name=\S+(?:, GID=\d+)?|"
+    rf"group '{_NAME}' removed from \S+|change (?:admin )?'{_NAME}' to '{_NAME}' in shadow group '{_NAME}'|"
+    r"\S+ failed to (?:add user \S+ to|remove user \S+ from) group \S+ in \S+|"
+    r"(?:user \S+ (?:added by \S+ to|removed by \S+ from) group \S+|members of group \S+ set by \S+ to .*|"
+    r"administrators of group \S+ set by \S+ to .*|password of group \S+ (?:changed|removed) by \S+|"
+    r"access to group \S+ restricted by \S+) in \S+)")
+_GROUPMOD = re.compile(r"group changed in (\S+) \((?:changing \S+; )?group ([^/\s,]+)(?:/\d+)?"
+                       r"(?:, new name: ([^\s,]+))?(, new password)?(?:, new gid: (\d+))?\)")
+
+
+def account_skip_reason(program: str, message: str) -> str | None:
+    if program in ACCOUNT_TOOLS and (_ACCOUNT_DUPLICATES.fullmatch(message) or (
+            (groupmod := _GROUPMOD.fullmatch(message)) and groupmod[1].rsplit("/", 1)[-1] != "group")):
+        return "account tool line for its shadow database (the same change's /etc/group line is typed)"
+    return None
+
+
 def _account(program: str, message: str) -> ParsedLine | None:
     fields: dict[str, object] = {}
-    if program == "usermod":
-        match = re.fullmatch(r"(lock|unlock) user '([^']+)' password", message)
+    outcome = Outcome.success
+    if program in ("useradd", "usermod", "userdel", "gpasswd"):
+        # useradd and usermod: "add 'u' to group 'g'"; usermod and userdel: "delete 'u' from group 'g'"
+        match = re.fullmatch(rf"(add|delete) '({_NAME})' (?:to|from) group '({_NAME})'", message)
+        if match and program in (("useradd", "usermod") if match[1] == "add" else ("usermod", "userdel")):
+            fields = {"account.action": "modify_user", "account.name": match[2], "account.group": match[3],
+                      "account.op": "add-user-to-group" if match[1] == "add" else "delete-user-from-group"}
+        # gpasswd -a / -d: "user u added by actor to group g", "user u removed by actor from group g"
+        match = re.fullmatch(r"user (\S+) (added|removed) by (\S+) (?:to|from) group (\S+)", message)
+        if match and program == "gpasswd":
+            fields = {"account.action": "modify_user", "account.name": match[1], "account.group": match[4],
+                      "user.name": match[3],
+                      "account.op": "add-user-to-group" if match[2] == "added" else "delete-user-from-group"}
+        # gpasswd log_gpasswd_failure: "<caller> failed to add user <u> to group <g>" (or ": Permission denied")
+        match = re.fullmatch(r"(\S+) failed to (add user (\S+) to|remove user (\S+) from) group (\S+?)"
+                             r"(?:: Permission denied)?", message)
+        if match and program == "gpasswd" and not _ACCOUNT_DUPLICATES.fullmatch(message):
+            fields = {"account.action": "modify_user", "account.name": match[3] or match[4], "account.group": match[5],
+                      "user.name": match[1],
+                      "account.op": "add-user-to-group" if match[3] else "delete-user-from-group"}
+            outcome = Outcome.failure
+        # usermod -l: "change '<old>' to '<new>' in group '<g>'" (the member renamed with the account)
+        match = re.fullmatch(rf"change '({_NAME})' to '({_NAME})' in group '({_NAME})'", message)
+        if match and program == "usermod":
+            fields = {"account.action": "modify_user", "account.name": match[2], "account.previous_name": match[1],
+                      "account.group": match[3], "account.op": "rename-group-member"}
+    if program == "useradd":
+        match = re.fullmatch(r"new user: name=([^,\s]+), UID=(\d+), GID=(\d+)(?:, .*)?", message)
         if match:
-            fields = {"account.action": match[1] + "_user", "account.name": match[2]}
-        match = re.fullmatch(r"(add|delete) '([^']+)' (?:to|from) (shadow )?group '([^']+)'", message)
+            fields = {"account.action": "create_user", "account.name": match[1], "account.id": match[2],
+                      "account.group_id": match[3]}
+        match = re.fullmatch(r"new group: name=([^,\s]+), GID=(\d+)", message)
         if match:
-            fields = {"account.action": "add_user_to_group" if match[1] == "add" else "remove_user_from_group",
-                      "account.name": match[2], "group.name": match[4]}
-        match = re.fullmatch(r"change user '([^']+)' (UID|GID|shell|home|inactive|expiration) from '([^']*)' to '([^']*)'", message)
+            fields = {"account.action": "create_group", "account.name": match[1], "account.id": match[2]}
+        match = re.fullmatch(rf"failed adding user '({_NAME})', (?:exit code: \d+|data deleted)", message)
         if match:
-            key = {"UID": "account.id", "GID": "group.id", "shell": "account.shell", "home": "account.home",
-                   "inactive": "account.inactive_days", "expiration": "account.expiration"}[match[2]]
+            fields, outcome = {"account.action": "create_user", "account.name": match[1]}, Outcome.failure
+    elif program == "usermod":
+        match = re.fullmatch(rf"(lock|unlock) user '({_NAME})' password", message)
+        if match:
+            fields = {"account.action": match[1], "account.name": match[2], "account.op": f"{match[1]}-password"}
+        match = re.fullmatch(rf"change user '({_NAME})' password", message)
+        if match:
+            fields = {"account.action": "password_change", "account.name": match[1]}
+        match = re.fullmatch(rf"change user '({_NAME})' (UID|GID|shell|home|inactive|expiration) "
+                             r"from '([^']*)' to '([^']*)'", message)
+        if match:
+            # account.new_id, not account.id: an audit record's id names the account changed, not a value assigned
+            key = {"UID": "account.new_id", "GID": "account.group_id", "shell": "account.shell",
+                   "home": "account.home", "inactive": "account.inactive_days",
+                   "expiration": "account.expiration"}[match[2]]
             fields = {"account.action": "modify_user", "account.name": match[1], key: match[4],
-                      "account.changed_attribute": match[2].lower(), "account.previous_value": match[3]}
-        match = re.fullmatch(r"change user name '([^']+)' to '([^']+)'", message)
+                      "account.changed_attribute": match[2].lower(), "account.previous_value": match[3],
+                      "account.op": f"change-{match[2].lower()}"}
+        match = re.fullmatch(rf"change user name '({_NAME})' to '({_NAME})'", message)
         if match:
-            fields = {"account.action": "rename_user", "account.name": match[2], "account.previous_name": match[1]}
+            fields = {"account.action": "modify_user", "account.name": match[2], "account.previous_name": match[1],
+                      "account.op": "change-name"}
     elif program == "userdel":
-        match = re.fullmatch(r"delete user '([^']+)'", message)
+        match = re.fullmatch(rf"delete user '({_NAME})'", message)
         if match:
             fields = {"account.action": "delete_user", "account.name": match[1]}
+        match = re.fullmatch(rf"removed group '({_NAME})'(?: owned by '({_NAME})')?", message)
+        if match:
+            fields = {"account.action": "delete_group", "account.name": match[1]}
+    elif program == "groupadd":
+        match = re.fullmatch(r"new group: name=([^,\s]+), GID=(\d+)", message)
+        if match:
+            fields = {"account.action": "create_group", "account.name": match[1], "account.id": match[2]}
+    elif program == "groupdel":
+        match = re.fullmatch(rf"group '({_NAME})' removed", message)
+        if match:
+            fields = {"account.action": "delete_group", "account.name": match[1]}
+    elif program == "groupmod":
+        match = _GROUPMOD.fullmatch(message)
+        if match and match[1].rsplit("/", 1)[-1] == "group":
+            fields = {"account.action": "modify_group", "account.name": match[3] or match[2], "account.op": "modify-group"}
+            if match[3]:
+                fields["account.previous_name"] = match[2]
+            if match[5]:
+                fields["account.new_id"] = match[5]
+    elif program == "gpasswd":
+        match = re.fullmatch(r"password of group (\S+) (changed|removed) by (\S+)", message)
+        if match:
+            fields = {"account.action": "group_password_change", "account.name": match[1], "user.name": match[3],
+                      "account.op": "change-group-password" if match[2] == "changed" else "remove-group-password"}
+        match = re.fullmatch(r"(members|administrators) of group (\S+) set by (\S+) to (.*)", message)
+        if match and not _ACCOUNT_DUPLICATES.fullmatch(message):
+            # the group is the one whose list was set: a privileged group's members or administrators set is a grant
+            fields = {"account.action": "modify_group", "account.name": match[2], "account.group": match[2],
+                      "user.name": match[3], "account.op": f"set-group-{match[1]}",
+                      "account.members": [name for name in match[4].split(",") if name][:LIST_LIMIT]}
+        match = re.fullmatch(r"access to group (\S+) restricted by (\S+)", message)
+        if match:
+            fields = {"account.action": "modify_group", "account.name": match[1], "user.name": match[2],
+                      "account.op": "restrict-group"}
+    elif program == "chage":
+        match = re.fullmatch(r"changed password expiry for (\S+)", message)
+        if match:
+            fields = {"account.action": "modify_user", "account.name": match[1], "account.op": "change-password-expiry"}
     elif program in ("passwd", "chpasswd"):
         match = re.fullmatch(r"password for '([^']+)' changed by '([^']+)'", message)
         if match:
-            fields = {"account.action": "change_password", "account.name": match[1], "user.name": match[2]}
+            fields = {"account.action": "password_change", "account.name": match[1], "user.name": match[2]}
         match = re.fullmatch(r"pam_unix\((?:passwd|chpasswd):chauthtok\): password changed for ([^\s]+)", message)
         if match:
-            fields = {"account.action": "change_password", "account.name": match[1]}
-    return ParsedLine("account_change", fields, Outcome.success) if fields else None
+            fields = {"account.action": "password_change", "account.name": match[1]}
+    return ParsedLine("account_change", fields, outcome) if fields else None
+
+
+# Privilege brokers. util-linux login-utils/su-common.c log_syslog: "%s(to %s) %s on %s", the prefix "" on success,
+# "FAILED SU " or "FAILED RUNUSER " on failure, then the target, the caller ("" when unknown) and the terminal
+# ("none"). shadow-utils lib/sulog.c: "Successful su for <target> by <caller>" and "FAILED su for <target> by <caller>";
+# its su.c also logs "+ <tty> <caller>:<target>" / "- ..." for the same attempt, counted as a recognized skip.
+# polkit src/programs/pkexec.c log_message: "<caller>: <message> [USER=<target>] [TTY=<tty>] [CWD=<cwd>] [COMMAND=<cmd>]".
+_SU_UTIL = re.compile(r"(FAILED (SU|RUNUSER) )?\(to ([^()\s]+)\) (\S*) on (\S+)")
+_SU_SHADOW = re.compile(r"(Successful|FAILED) su for (\S+) by (\S+)")
+_SU_SESSION = re.compile(r"[+-] \S+ \S*:\S*")
+# pkexec's refusals. The SHELL and environment messages are the checks CVE-2021-4034 exploitation trips; polkit 0.105
+# to 0.120 word them "was not found the /etc/shells file" and "contains suscipious content", later releases "was not
+# found in the /etc/shells file" and "contains suspicious content".
+_PKEXEC_SHELL = re.compile(r"The value for the SHELL variable was not found (?:in )?the /etc/shells file")
+_PKEXEC_ENV = re.compile(r"The value for environment variable ([A-Za-z_][A-Za-z0-9_]{0,63}) contains "
+                         r"(?:suspicious|suscipious) content")
+_PKEXEC = re.compile(r"([^\s:]+): (Executing command|Error executing command as another user: (?:Not authorized|"
+                     r"Request dismissed)|The value for the SHELL variable was not found (?:in )?the /etc/shells file|"
+                     r"The value for environment variable [A-Za-z_][A-Za-z0-9_]{0,63} contains "
+                     r"(?:suspicious|suscipious) content) \[USER=([^\]\s]+)\] \[TTY=([^\]]*)\] "
+                     r"\[CWD=([\s\S]*)\] \[COMMAND=([\s\S]*)\]")
+PRIVILEGE_TEXT_CAVEAT = "Privilege broker log line; the command and working directory are the invoking user's text"
+PKEXEC_REJECTION_CAVEAT = ("pkexec logs a rejected SHELL or environment value before it reports it and exits; whether "
+                           "it then refused, or code ran while it reported (CVE-2021-4034), is not shown")
+PKEXEC_AMBIGUOUS_CAVEAT = ("The pkexec record repeats its field framing inside the working directory or command text; "
+                           "neither is typed")
+
+
+def _privilege(program: str, message: str) -> ParsedLine | None:
+    if program in ("su", "runuser"):
+        match = _SU_UTIL.fullmatch(message)
+        if match and (match[2] is None or match[2].lower() == program):
+            fields: dict[str, object] = {"auth.service": program, "auth.target_user": match[3]}
+            if match[4]:
+                fields["user.name"] = match[4]
+            if match[5] != "none":
+                fields["process.tty"] = match[5]
+            if match[1]:
+                fields["privilege.denial_reason"] = match[1].strip()
+            return ParsedLine("privilege_use", fields, Outcome.failure if match[1] else Outcome.success)
+        match = _SU_SHADOW.fullmatch(message)
+        if match and program == "su":
+            fields = {"auth.service": "su", "auth.target_user": match[2], "user.name": match[3]}
+            if match[1] == "FAILED":
+                fields["privilege.denial_reason"] = "FAILED su"
+            return ParsedLine("privilege_use", fields, Outcome.failure if match[1] == "FAILED" else Outcome.success)
+        return None
+    if program == "pkexec":
+        match = _PKEXEC.fullmatch(message)
+        if not match:
+            return None
+        decision = match[2]
+        fields = {"auth.service": "pkexec", "user.name": match[1], "auth.target_user": match[3]}
+        if match[4] and match[4] != "unknown":
+            fields["process.tty"] = match[4]
+        caveats = [PRIVILEGE_TEXT_CAVEAT]
+        if (len(re.findall(r"\]\s*\[COMMAND=", message)) == 1 and not re.search(r"\]\s*\[CWD=", match[5])
+                and not re.search(r"\]\s*\[CWD=", match[6])):
+            fields["process.cwd"], fields["privilege.command"] = match[5], match[6]
+        else:
+            caveats.append(PKEXEC_AMBIGUOUS_CAVEAT)
+        if decision != "Executing command":
+            fields["privilege.denial_reason"] = decision
+            if _PKEXEC_SHELL.fullmatch(decision):
+                fields["privilege.rejected_variable"] = "SHELL"
+            elif env := _PKEXEC_ENV.fullmatch(decision):
+                fields["privilege.rejected_variable"] = env[1]
+        outcome = Outcome.success if decision == "Executing command" else Outcome.failure
+        if "privilege.rejected_variable" in fields:
+            # pkexec writes this line before it prints the same message and exits; that printing is where
+            # CVE-2021-4034 exploitation runs its code, so the line does not show that pkexec went on to refuse.
+            outcome = Outcome.unknown
+            caveats.append(PKEXEC_REJECTION_CAVEAT)
+        return ParsedLine("privilege_use", fields, outcome, tuple(caveats))
+    return None
+
+
+# Linux kernel/module/main.c module_augment_kernel_taints and module_sig_check: the notes the kernel prints while it
+# loads a module that taints it. Each is printed only while that taint is not yet set (pr_notice_once for the
+# signature note), so a boot shows at most one of each kind: the first module of that kind, never the later ones.
+_KERNEL_TAINTS = (
+    ("loading out-of-tree module taints kernel.", "out_of_tree"),
+    ("module verification failed: signature and/or required key missing - tainting kernel", "unsigned"),
+    ("loading test module taints kernel.", "test"),
+    ("module license taints kernel.", "license"),
+    ("module is from the staging directory, the quality is unknown, you have been warned.", "staging"),
+    ("tainting kernel with TAINT_LIVEPATCH", "livepatch"),
+)
+KERNEL_MODULE_NAME_CAVEAT = "The module name holds characters kernel module names do not normally carry"
+_KERNEL_LICENSE = re.compile(r"module license '([^'\r\n]{0,128})' taints kernel\.")
+KERNEL_TAINT_CAVEAT = ("Kernel taint notice: the kernel prints it for the first module of its kind after boot only, "
+                       "names no loading process or file, and does not show that the module's initialization "
+                       "succeeded")
+
+
+def _kernel(message: str) -> ParsedLine | None:
+    message = re.sub(r"^\[\s*\d+(?:\.\d+)?\] ", "", message)
+    name, sep, note = message.partition(": ")
+    if not sep or not re.fullmatch(r"\S{1,256}", name):
+        return None
+    taint = next((kind for text, kind in _KERNEL_TAINTS if note == text), None)
+    fields: dict[str, object] = {"module.name": name, "module.op": "load"}
+    if taint is None and (license_note := _KERNEL_LICENSE.fullmatch(note)):
+        taint = "proprietary_license"
+        fields["module.license"] = license_note[1]
+    if taint is None:
+        return None
+    fields["module.taint"] = taint
+    caveats = (KERNEL_TAINT_CAVEAT,) if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name) else (
+        KERNEL_TAINT_CAVEAT, KERNEL_MODULE_NAME_CAVEAT)
+    return ParsedLine("kernel_module", fields, Outcome.unknown, caveats)
+
+
+def privilege_skip_reason(program: str, message: str) -> str | None:
+    if program == "su" and _SU_SESSION.fullmatch(message):
+        return "su attempt line repeating its Successful/FAILED su record"
+    return None
 
 
 def parse_service(program: str, message: str) -> ParsedLine | None:
     """Return only documented action records for an identified daemon, or None."""
     if (not isinstance(message, str) or len(message) > MAX_LINE
             or len(message.encode("utf-8", errors="replace")) > MAX_LINE
-            or any(char in message for char in "\r\n\x00")):
+            or "\x00" in message):
         return None
     program = program.lower()
+    if program == "pkexec":
+        # pkexec logs the caller's working directory and command verbatim, newlines included; its decision text
+        # comes before both
+        return _privilege(program, message)
+    # a statement written with its own trailing newline (shadow-utils userdel and groupdel) keeps it in the message
+    message = message.removesuffix("\n")
+    if "\r" in message or "\n" in message:
+        return None
     if program in ("exim", "exim4"):
         return _exim(message)
     if program.startswith("postfix/"):
@@ -691,18 +962,20 @@ def parse_service(program: str, message: str) -> ParsedLine | None:
         return _bind(message)
     if program == "unbound":
         return _unbound(message)
-    if program == "openvpn" or program.startswith("openvpn-"):
+    if openvpn_identifier(program):
         return _openvpn(message)
     if program in ("charon", "charon-systemd", "strongswan"):
         return _strongswan(message)
     if program in ("squid", "squid3"):
         return _squid(message)
     if program in ("kernel", "iptables", "ip6tables", "ufw"):
-        return _firewall(message)
+        return _firewall(message) or (_kernel(message) if program == "kernel" else None)
     if program in ("cron", "crond", "crontab"):
         return _cron(program, message)
-    if program in ("usermod", "userdel", "passwd", "chpasswd"):
+    if program in ACCOUNT_TOOLS:
         return _account(program, message)
+    if program in ("su", "runuser", "pkexec"):
+        return _privilege(program, message)
     return None
 
 

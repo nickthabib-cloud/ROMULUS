@@ -36,8 +36,10 @@ UNKNOWN_REASON = "text line in no recognized format: custom.unknown"
 # rule-cell digests move.
 # The mention sweep: stats and the sweep summary audit record gain the mention pool's coverage (the unknown line is
 # offered to it, not scanned: tests load no shipped pattern), and the manifest gains its mentions section.
+# Evidence version 21 rehashes the event ids; the new privilege-broker rules add cells, and host.kernel_module_load
+# now reads a text family (kernel taint notices), so its cells follow the text partition's coverage.
 GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a6dadaa59988bdf81e',
- 'audit': '759ae503e51e82bcc34e771ba12875d617ee36bbff34b75fe2e7b269900386d9',
+ 'audit': 'caeecb16c4bf63c70d6c115e4b3ea120a6374d01a26da0963e79674d0b2e7737',
  'baseline_counts': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_hunt_exclusions': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_observations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
@@ -47,16 +49,16 @@ GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a
  'baseline_window_counts': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_window_event_hours': 'dbbcb75b0e5ad202089e3eeaf84801202f5f1b8b3fcfb214f42edbdd7e007f47',
  'baseline_window_scope_hours': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
- 'candidates': 'bd2c82cd1b13a41d83a6aa32c47ef939a84f58a45d3d8bcb8fd1e4f015524c78',
+ 'candidates': 'ae43a582a37d78da56668235ab1894ff694078abb594432bd43a00d90e68a293',
  'entities': '9e629528fba70d33c17e231aabf743f914b553fe3bc737669e3b8c0e33da6183',
  'event_citations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
- 'event_entities': 'b2920d670e6504809c2e89deb86ffdfeae00db460ba1049e2e48d5a158e7bf6b',
- 'events': 'bd5435aef6b275df8abbeb11240c6ab00cff8cfa39fbba70fc1f6acccadf23bb',
+ 'event_entities': '5cc7c7bb876d535b9b3d6ec7300995aa8056163c19d08e9fcf7497e56ac308d5',
+ 'events': 'f0d612c20f67d030a43e835b8ef639a78c824b51fff59c169d3d5219700de383',
  'expansion': 'dae7cbd7929a4cb94bb232a7343d4d70f62885a979b52714b87bd3641a92169b',
- 'links': '8abe2a07c083a1ea68a7cb03ccfa539e9e071fc67b2af99a555e04f4badc5928',
- 'manifest': '81f767b25f08ec419468850410bdee91dc4856765c0dcd52dd43d6e79e661138',
+ 'links': 'd9f0da030bf1447f35601910ec18eb012f4a55a0a8feef7262ab6e745319890e',
+ 'manifest': 'd7eee59854e647bbff8400b1055887cb94d7eaae2f06512a99d94ffe15273c82',
  'raw': '64be31e697a32f93b1a71657560af514b2d430469cb3be19f44b8827985a7775',
- 'rule_cells': '745d0029db5e210729c2b542d0542646322406a475eafb41fce9cc1682edfd87',
+ 'rule_cells': 'ea79843a8700b925e62daa6d49eedd454afa615775a2e1bb8c1f0768901e9eb5',
  'stats': 'e7d40465da77f85df2ab649392225bdfb16e5b75834447cd6d3a625129032b54',
  'tasks': '31db5bad23dca3ba0a6c4114135053177ece1b46af44576b3198b8967c6762bb'}
 
@@ -165,7 +167,8 @@ def _assert_text_result(snapshot, trace, docs):
         assert any(row["target"] == tf.HOST_TARGET and row["partition"] != "window"
                    and row["state"] == "evaluated_partial" for row in cells)
         assert any(UNKNOWN_REASON in str(row["detail"]) for row in cells)
-    unrelated = [row for row in snapshot["rule_cells"] if row["rule_id"] == "host.kernel_module_load"]
+    # a rule that reads no text family (process_exec only) is not made partial by an unrecognized text line
+    unrelated = [row for row in snapshot["rule_cells"] if row["rule_id"] == "host.masquerading_binary"]
     assert unrelated and not any(UNKNOWN_REASON in str(row["detail"]) for row in unrelated)
     assert not any(row["state"] in {"evaluated_partial", "match_on_partial", "executed_failed"} for row in unrelated)
 
@@ -179,7 +182,7 @@ def test_linux_text_whole_stack_retrieval_findings_and_partial_coverage(tmp_path
 def test_the_text_stack_candidates_moved_only_by_rule_versions(tmp_path, monkeypatch):
     snapshot, _trace, _docs = run_text_stack(tmp_path / "prior", monkeypatch)
     assert tf.deterministic_golden_digests(tf.with_prior_versions(snapshot))["candidates"] == (
-        "bd2c82cd1b13a41d83a6aa32c47ef939a84f58a45d3d8bcb8fd1e4f015524c78")
+        "ae43a582a37d78da56668235ab1894ff694078abb594432bd43a00d90e68a293")
 
 
 def test_linux_text_whole_stack_snapshot_is_deterministic(tmp_path, monkeypatch):
