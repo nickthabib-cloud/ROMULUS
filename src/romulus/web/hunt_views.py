@@ -25,6 +25,7 @@ from romulus.web.finding_order import (
 
 # (key, label, path suffix). Every tab is its own URL, so links, the back button and pages without scripts work.
 TABS = (("overview", "Overview", ""), ("findings", "Findings", "/findings"),
+        ("mentions", "Mentions", "/mentions"),
         ("assessment", "AI assessment", "/assessment"), ("triage", "Triage", "/triage"),
         ("timeline", "Timeline", "/timeline"), ("coverage", "Coverage", "/coverage"), ("run", "Run details", "/run"))
 LANES = ("urgent", "high", "lead", "context", "suppressed")

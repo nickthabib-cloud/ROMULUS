@@ -24,6 +24,10 @@ RAW_LABEL_PLURAL = ("raw records, not normalized: no typed fields were extracted
 MAX_RAW_TEXT_BYTES = 16_384
 MAX_RAW_QUERY_CHARS = 2_000
 MAX_TIME_TEXT = 64
+# a raw record the deterministic mention sweep kept as a mention's citation (agent_raw_record.origin)
+MENTION_ORIGIN = "mention_sweep"
+RAW_MENTION_LABEL = ("raw record, not normalized, kept by the mention sweep as a mention's citation: a curated pattern "
+                     "matched its text; no typed fields were extracted and no detection rule ran on it")
 RAW_ID_PREFIX = "rr-"
 # the admission-gate key an AI finding lists its cited raw record ids under (never in its typed event ids)
 RAW_GATE = "_agent_raw_records"
@@ -124,8 +128,10 @@ def raw_record_view(row: dict, *, text: bool = True) -> dict:
     ts = row.get("ts")
     if isinstance(ts, datetime):
         ts = (ts.replace(tzinfo=UTC) if ts.tzinfo is None else ts.astimezone(UTC)).isoformat().replace("+00:00", "Z")
+    mention = row.get("origin") == MENTION_ORIGIN
     view = {
-        "id": row["id"], "kind": "raw_record", "label": RAW_LABEL,
+        "id": row["id"], "kind": "raw_record", "label": RAW_MENTION_LABEL if mention else RAW_LABEL,
+        "origin": row.get("origin") or "agent",
         "source_kind": row["source_kind"], "target": row["target"], "native_id": row["native_id"],
         "time": ts, "time_field": row.get("time_field"), "time_text": row.get("time_text"),
         "digest": row["digest"], "text_bytes": row["text_bytes"], "text_cut": bool(row["text_cut"]),

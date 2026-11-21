@@ -86,7 +86,9 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # dnsmasq reverse-lookup replies, numeric reply codes, auth questions and DHCP acknowledgements are
                    # typed, its extra-mode forwarded line names the requester apart from the client, and OpenVPN's own
                    # log file is typed; every other record normalizes as before.
-                   20: "e4b62d90ed180fd105b39cb2dd7590162794fd3f9906db15d0fd1cce02561eda",
+                   # Then normalize_hits gained an optional report of the records no normalizer read (for the
+                   # mention sweep): no output changed.
+                   20: "e6b6482b7465bf1f900a5c0f605e7217fc674456979cdf5964f11f400de11cf9",
                    # su, runuser and pkexec lines, sudo's optional fields and refusal reasons, every shadow-utils
                    # account statement (in the account audit records' actions and operations, with the writer's pid),
                    # kernel module taint notices, BIND transfer lines and the ovpn-<instance> OpenVPN identifier are
@@ -96,7 +98,8 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # that journald says another program wrote carry the mismatch caveat; split sudo records are joined
                    # per batch (a first part before a complete record, never on the id hash, never with a piece
                    # journald says another program wrote); journald's kernel transport verifies a kernel writer.
-                   21: "eb0eea16d6faa0f0c2dbd450a1509f5dfb70b541d60ace8e2f1accc70ba47533"}
+                   # Merged with the report of unread records (version 20's last pin): no output of it changed.
+                   21: "4bc42f52c36ac9d0cccf25bc81c2d3cfad0cd71b31bff684f589e8a3064fd07f"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py", "rpc_catalog.py")
 PINNED_WINDOWS = {
     # A record's host addresses stand beside its stable source identifier, so clones that share the identifier
@@ -166,9 +169,10 @@ ARKIME_EVIDENCE_FILES = ("normalize.py", "arkime_protocols.py", "raw_scrub.py", 
 # typing of text alert lines and the evidence version that types them: EVE and Arkime records are read as before.
 # Nor do the Linux daemon families (privilege brokers, account tools, kernel taint notices, BIND transfers) and the
 # evidence version that types them.
-PINNED_SURICATA = {"suricata-eve@2": "f85dbf971c76684d42979a29bc6767401390a7519efaacf0514d84af1b3c7747",
+# Nor does the dispatcher's optional report of the records no normalizer read.
+PINNED_SURICATA = {"suricata-eve@2": "8da31641e54822d776fb17d298a8bf9fec1568b28356c2db2f548d86fdca094c",
                    "suricata-eve@1": "8aba0c3bbb2061eef70c0c9dd77e5ab49a42bbed9a68b01ba4b4eeffad181e38"}
-PINNED_ARKIME = {"arkime@1": "3071388e8eed39871fd4e842fb549810b111f0931f81ab56d9312917af8e6ab8"}
+PINNED_ARKIME = {"arkime@1": "b8d461973ea532bf50bbbe5a5b81c398c9f6369bc2c9bd47d44a743de3097e65"}
 
 
 # The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events, and TCP connections rebuilt

@@ -51,6 +51,8 @@ The Arkime viewer can sit behind a proxy under a path prefix (`ARKIME_BASE_PATH`
 
 Nothing that might be attacker activity is dropped: noise is handled by grouping similar records into one finding, never by hiding them.
 
+**Mentions.** Text that no parser reads is still looked at. The sweep matches curated, sourced patterns (literal strings and a linear-time subset of regular expressions, loaded from `content/mentions/*.yaml`) against the raw message text of every record it reads but cannot normalize. A match is a **mention**: text a record contains, never an action. Mentions have their own lane between context and lead, so they never reach a reportable lane on their own. They are listed apart from findings, with their pattern, host, line count and the raw line as a citation, in the report, the web *Mentions* tab and the AI agent's starting brief. A pattern's ATT&CK tags are shown as the pattern's metadata, not as an observed technique. Only typed evidence makes an action-level finding. The pool is bounded per pattern, per host and per hunt, and its coverage says what was not scanned or not kept.
+
 ## Requirements
 
 - Currently A Linux host for ROMULUS (it is developed on Ubuntu)

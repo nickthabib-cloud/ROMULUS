@@ -391,12 +391,15 @@ from tests import throughput_fixture as tf
 # links, citations and the non-baseline semantic projection are unchanged.
 # Every coverage cell then gains the rule's cost (records offered and rows selected; wall times are volatile): only
 # rule-cell digests move.
+# The mention sweep: the sweep's stats and its summary audit record gain the mention pool's coverage (not_scanned here,
+# as tests load no shipped pattern), and the manifest gains its mentions section under schema report-manifest@2.
+# Every other digest is unchanged.
 # Evidence version 21 rehashes every event id; sudo records gain process.tty; host.account_or_group_change 6->7 and
 # the two privilege-broker rules (pack@61, their cells are new rows) move only rule versions and cells. With the
 # evidence version set back to 20 and the prior versions restored the candidates digest is the earlier one; the
 # candidate count, lanes and claims are unchanged.
 GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
- 'audit': '620b70336aad7fb31120c4a34a4b9a10e27939d3a237e81ed5222a08f17345fd',
+ 'audit': '8271edcfc6c48298d5634ac9b8a34cfb40d22d1abfeb2647ed5042bdfbcdfe9f',
  'baseline_counts': 'be05fabb25336f21341b46eae7d8c2627828f7a7a7e8fdb24f4eb58576099354',
  'baseline_hunt_exclusions': 'c91eefda01c512d6d63e892dc9696016b01a71d44e4abcc429d954bd51864852',
  'baseline_observations': 'ca094cd8cd080e826679198c590e07aa2b8d8d80e465ad016ccb89c8c3e28c25',
@@ -413,15 +416,15 @@ GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe55
  'events': '9b9544ad6f24d002f3f71d874518df5ecee3d968e12ec1fd5c9dce2345d7a87f',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
  'links': '5fa22b4162492394955b6b1873f566f427a58dfd7529c0df73e87a6da8daa76f',
- 'manifest': '523e1d07ddb6a98d085ca343105a1c2e3adb369476e10c3f5bec85aebc6abd03',
+ 'manifest': '46b99a4f9ba64da5f4e87171cef24a1428962dcfcc8cea2c10c817269e6a3540',
  'raw': 'd924f62eebd5ee88c8142c690333924450c3344b18210ddfe87b8e486127dd35',
  'rule_cells': 'ef5931b9402c0f851be82d8103703226b8d8027e909ac42b10ef8d7a1646585f',
- 'stats': 'be588e34e14e570c11a47fc9b3953e564d8f6026d909d9ae7f9c7ef561c99c5a',
+ 'stats': '3cab287a0e842808a55545533e3005e8ebaf22bebf7af112b62598c7bd3c3ca6',
  'tasks': '1e1eeb69d05da151bec8f6dff43c1863a4eb43a288f84c1ba35168311b303360'}
 # The rule-estimate stack's digests (expansion seeded by the urgent and high lanes, as before evidence ranking;
 # the manifest's moved only with the incident tactics above).
 GOLDEN_STACK_BY_RULE_ESTIMATE = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
- 'audit': 'fe7f715551936e8434574ecf88f94b34535e794a04ea3cb31505b345d5179ad9',
+ 'audit': 'b29762994b4385fa5f6d9f6173e872f2fd9efb7305efc7573ca5fa16eb66efe3',
  'baseline_counts': 'be05fabb25336f21341b46eae7d8c2627828f7a7a7e8fdb24f4eb58576099354',
  'baseline_hunt_exclusions': 'c91eefda01c512d6d63e892dc9696016b01a71d44e4abcc429d954bd51864852',
  'baseline_observations': 'ca094cd8cd080e826679198c590e07aa2b8d8d80e465ad016ccb89c8c3e28c25',
@@ -438,10 +441,10 @@ GOLDEN_STACK_BY_RULE_ESTIMATE = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e
  'events': '9b9544ad6f24d002f3f71d874518df5ecee3d968e12ec1fd5c9dce2345d7a87f',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
  'links': '5fa22b4162492394955b6b1873f566f427a58dfd7529c0df73e87a6da8daa76f',
- 'manifest': 'eb0e496504d58a0a287482e6d26e385f7163384893d2dfbeecb7be9d4fe56f38',
+ 'manifest': '7b8cc193e6d3cfea8fc0908ced87708cb2a9203200e8934839a64d57083eee70',
  'raw': 'd924f62eebd5ee88c8142c690333924450c3344b18210ddfe87b8e486127dd35',
  'rule_cells': 'ef5931b9402c0f851be82d8103703226b8d8027e909ac42b10ef8d7a1646585f',
- 'stats': 'be588e34e14e570c11a47fc9b3953e564d8f6026d909d9ae7f9c7ef561c99c5a',
+ 'stats': '3cab287a0e842808a55545533e3005e8ebaf22bebf7af112b62598c7bd3c3ca6',
  'tasks': '1e1eeb69d05da151bec8f6dff43c1863a4eb43a288f84c1ba35168311b303360'}
 GOLDEN_CANDIDATES_BY_RULE_ESTIMATE = GOLDEN_STACK_BY_RULE_ESTIMATE['candidates']
 GOLDEN_NON_BASELINE_SEMANTICS_BY_RULE_ESTIMATE = {'candidates': {'all_fields': '7c7845e9969d4e689d3d288610a4412878c08eb00706739305fe5d39181798d2',

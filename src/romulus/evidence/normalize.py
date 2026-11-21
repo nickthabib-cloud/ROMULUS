@@ -3908,6 +3908,7 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                    surrogate_free: bool = False,
                    shapes: dict[str, int] | None = None,
                    windows_records: dict[str, str] | None = None,
+                   unread: list[tuple[dict, str, bool]] | None = None,
                    ) -> tuple[list[TypedEvent], dict[str, int], list[tuple[str, str]]]:
     """Normalize a batch. Returns (events, skip_counts, errors[(raw_id, error)]). `audit_parse` is passed to
     `group_audit`.
@@ -3937,7 +3938,12 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
     of its records when that copy is in the same batch. With `boots` (a hunt's boot-interval map), the batch's boot
     observations are added to the map, and an audit event still without a boot id takes the boot the map places
     its audit header time in (an incremental placement, see `BootIntervals`). Otherwise it stays unknown: never
-    guessed."""
+    guessed.
+
+    `unread`, when given, receives each record no normalizer read, with why and whether it is a Windows event record:
+    a record of a dataset or event class no normalizer reads, text in no recognized format (or too long to parse),
+    and a record a normalizer failed on (the record as cleaned of lone surrogates). A duplicate copy of a record that
+    was read, and an audit record (read in its group), are never listed."""
     events, skips, errors = [], defaultdict(int), []
     windows_events: dict[tuple[tuple[str, ...], str], TypedEvent] = {}
     windows_signatures: dict[tuple[str, ...], set[str]] = defaultdict(set)
@@ -3955,8 +3961,9 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
             h = {**h, "_source": clean}
             unclean[f"{h['_index']}/{h['_id']}"] = found
         ds = _get(h["_source"], "event.dataset") or ""
+        windows = False
         try:
-            if is_windows_source(h["_source"]):
+            if windows := is_windows_source(h["_source"]):
                 if contract is not None and contract.role == "network":
                     reason = "Windows event records on a network target: not evaluated"
                     skips[reason] += 1
@@ -4077,6 +4084,8 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
             else:
                 reason = f"dataset:{ds or document_dataset(h['_source'])} is not normalized"
                 skips[reason] += 1
+                if unread is not None:
+                    unread.append((h, reason, windows))
                 if skip_families is not None:
                     # Linux host telemetry of a module we read hides only its dataset's families; anything else
                     # could hold any behavior
@@ -4090,6 +4099,8 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                 audit_copies.append((*found, h["_id"]))
         except WindowsNotNormalized as unsupported:
             skips[unsupported.reason] += 1
+            if unread is not None:
+                unread.append((h, unsupported.reason, windows))
             if skip_families is not None and unsupported.reason.startswith(NXLOG_CHANNEL_SKIP):
                 known = skip_families.get(unsupported.reason, frozenset())
                 fed = nxlog_class_families(h["_source"])
@@ -4097,21 +4108,29 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
         except EcarSkip as unsupported:
             reason = str(unsupported)
             skips[reason] += 1
+            if unread is not None:
+                unread.append((h, reason, windows))
             if skip_families is not None:
                 skip_families[reason] = (skip_families.get(reason) or frozenset()) | frozenset(unsupported.families)
         except ZeekNotNormalized as uncatalogued:
             skips[uncatalogued.reason] += 1
+            if unread is not None:
+                unread.append((h, uncatalogued.reason, windows))
             if skip_families is not None:
                 fed = zeek_skip_families(zeek.names)
                 known = skip_families.get(uncatalogued.reason, frozenset())
                 skip_families[uncatalogued.reason] = None if known is None else known | fed
         except Skip as s:
             skips[s.reason] += 1
+            if unread is not None:
+                unread.append((h, s.reason, windows))
             if isinstance(s, TextSkip) and skip_families is not None:
                 fed = CONTENT_TEXT_FAMILIES | (unmatched_families(h["_source"]) or frozenset())
                 skip_families[s.reason] = (skip_families.get(s.reason) or frozenset()) | fed
         except (ValueError, KeyError, TypeError, AttributeError, OverflowError) as e:   # malformed: an error, not a crash
             errors.append((h["_id"], f"{ds}: {e}"))
+            if unread is not None:
+                unread.append((h, "normalization error", windows))
     superseded = superseded_interim(list(zeek_events.values())) if zeek_events else []
     if superseded:
         dropped = {id(event) for event in superseded}

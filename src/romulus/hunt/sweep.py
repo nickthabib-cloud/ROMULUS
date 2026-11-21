@@ -20,6 +20,7 @@ from romulus.baseline.carry import HourParents
 from romulus.baseline.playbook import BaselineCell, BaselinePlaybook
 from romulus.baseline.reasons import summarize
 from romulus.baseline.spec import KeyContext, exec_serial
+from romulus.content.mention_patterns import load_mention_patterns
 from romulus.content.sigma_coverage import (
     bounded_details,
     coverage_view,
@@ -83,6 +84,7 @@ from romulus.evidence.windows_reassembly import SCRIPT_FINALIZE_BATCH_SIZE, Scri
 from romulus.evidence.zeek import ZEEK_INTERIM_SUPERSEDED, ZEEK_NORMALIZER
 from romulus.evidence.zeek_catalog import MALCOLM, SHAPES, ZEEK_LOGS, lookup_log
 from romulus.hunt.controls import HuntStopped
+from romulus.hunt.mentions import MentionScanner
 from romulus.hunt.publish import (
     LineageCitationFetcher,
     SourceCitationFetcher,
@@ -370,6 +372,8 @@ class Sweep:
             for pb in self.pack:                # a live spill is never mistaken for a killed process's leftover
                 if pb._spill is not None:
                     pb._spill.touch()
+            if getattr(self, "mentions", None) is not None:
+                self.mentions.touch()
         self.heartbeat = heartbeat_and_touch
         self.stage_dir = stage_dir
         # One state budget for the hunt: the disk every playbook's spill may use (and the free space left on the
@@ -438,6 +442,11 @@ class Sweep:
         self._rule_timing: dict[str, list] = {}
         self.stats = {"partitions": 0, "records": 0, "events": 0, "candidates": 0, "skips": {}, "errors": 0,
                       "boot": {"recorded": 0, "from_interval": 0, "unknown": 0}}
+        # The mention sweep over the raw text of records no normalizer read (romulus.hunt.mentions): its pool is a
+        # separate lane, never findings, and its coverage is its own (it never makes the detection result partial).
+        self.mentions = MentionScanner(hunt_id, load_mention_patterns(settings=settings), stage_dir=stage_dir,
+                                       budget=self.budget, settings=settings, window=(window.start, window.end),
+                                       pinned=manifest.get("mention_patterns"))
 
     # -------------------------------------------------------------------------------------
     def _sources_for(self, m: Match, raw_sources: dict[str, dict]) -> dict[str, dict]:
@@ -2144,6 +2153,7 @@ class Sweep:
             self._note_zeek_inventory_gap(target,contract,[reason])
             self.partial_reasons.append(f"{target}: {reason}")
             self._mark_all(target, f"plan:{self.window.key()}", "executed_failed", {"error": reason})
+            self._mention_unscanned(target, f"plan:{self.window.key()}", reason)
             return
         if not parts and contract.temporal_gaps:
             self.repo.set_rule_cells(self.hunt_id, [self._cell(pb, target, "temporal:"+self.window.key(),
@@ -2289,15 +2299,30 @@ class Sweep:
             self.partial_reasons.append(f"{target} {pkey}: {out.error}")
             self._mark_all(target, pkey, "executed_failed", {"error": out.error})
             self.repo.update_task(tid, "failed", error=out.error)
+            self._mention_unscanned(target, pkey, f"retrieval failed: {out.error}")
             return
+        if out.completeness != Completeness.complete and not partition_tag:
+            # capped and not splittable, timed out, or shard-partial: some records were never offered to the scan
+            self._mention_unscanned(target, pkey, "retrieval incomplete: " + ("; ".join(out.reasons)
+                                                                            or out.error or "partial"))
         malformed_text: dict[str, list[str]] = {}
         skip_families: dict[str, frozenset[str] | None] = {}
         shapes: dict[str, int] = {}
         windows_records: dict[str, str] = {}
+        unread: list[tuple[dict, str]] = []
         events, skips, errors = normalize_hits(out.records, self.boots, malformed_text=malformed_text,
                                                skip_families=skip_families, rpc_remote_only=True, contract=contract,
                                                surrogate_free=out.surrogate_free, shapes=shapes,
-                                               windows_records=windows_records)
+                                               windows_records=windows_records, unread=unread)
+        if unread and not partition_tag and getattr(self, "mentions", None) is not None:
+            # the text of records no normalizer read, matched against the curated mention patterns (a tagged
+            # partition reads records again for another purpose: they were scanned when first read). A scan that
+            # raises costs the pool this partition, never the partition's detection.
+            try:
+                self.mentions.scan(target, contract, unread, tid)
+            except Exception as exc:  # noqa: BLE001 - the mention pool never ends the sweep
+                self.mentions.note_scan_failure(target, pkey, exc)
+        unread = []
         if shapes:
             # the shipper shapes read, by target: Linux host shapes, the EVE event types an Elastic shipper indexed
             # without their line, and NXLog's flat Windows records with their collector clock offsets (one count
@@ -3287,7 +3312,69 @@ class Sweep:
                                           "floor": self.budget.floor, "shared": self.budget.pool,
                                           "shared_used": self.budget.pool_used,
                                           "stores_without_new_keys": sorted(self.budget.full)}
+        self.publish_mentions()
         self.close_stage()
+
+    def _mention_unscanned(self, target: str, partition: str, reason: str) -> None:
+        scanner = getattr(self, "mentions", None)
+        if scanner is not None:
+            scanner.note_unscanned(target, partition, reason)
+
+    def _mention_left_out(self, scanner) -> None:
+        """Name, per target, every source the fetch leaves out, so its text is never offered to the scan:
+        - Linux text datasets not retrieved, and the dataset reconciliation's shortfalls (selected datasets the query
+          did not return, window datasets no normalizer reads, records naming no dataset), or the reconciliation
+          itself when it was never performed;
+        - Linux and Windows shipper shapes the target cannot search;
+        - Windows event classes not read: on a target the sweep reads by class, every class it does not select;
+          otherwise the classes of channels outside the catalog's; and when the class inventory itself is
+          unavailable, every channel outside the catalog's, not inventoried."""
+        from romulus.evidence.windows_catalog import WINDOWS_CHANNELS
+        scanner.left_out = []
+        for target, datasets in sorted((self.stats.get("linux_text_not_retrieved") or {}).items()):
+            for name, reason in sorted(datasets.items()):
+                scanner.note_left_out(target, "dataset", name, None, reason)
+        for target, rows in sorted((self.stats.get("dataset_reconciliation") or {}).items()):
+            for row in rows:
+                if row.get("records") == 0:
+                    continue                 # none of its records falls in the window: nothing there was left out
+                scanner.note_left_out(target, "dataset", row.get("dataset"), row.get("records"),
+                                      f"{row.get('reason')} ({row.get('count_scope')})")
+        for stat in ("linux_shapes_not_assessed", "windows_shapes_not_assessed"):
+            for target, notes in sorted((self.stats.get(stat) or {}).items()):
+                for note in notes:
+                    shape, _sep, why = str(note).partition(": ")
+                    scanner.note_left_out(target, "shape", shape, None, why or str(note))
+        channels = {channel.casefold() for channel in WINDOWS_CHANNELS if channel}
+        for target, classes in sorted((self.stats.get("windows_unassessed") or {}).items()):
+            selective = target in getattr(self, "_windows_selective", set())
+            by_channel: dict[str, int] = {}
+            for item in classes:
+                channel = str(item.get("channel") or "(several channels)")
+                if selective or item.get("overflow") or channel.casefold() not in channels:
+                    by_channel[channel] = by_channel.get(channel, 0) + int(item.get("records") or 0)
+            for channel, records in sorted(by_channel.items()):
+                reason = ("event classes the sweep does not select on this target" if selective
+                          else "a channel outside the ones the sweep reads")
+                scanner.note_left_out(target, "channel", channel, records, reason)
+        for target, reasons in sorted((getattr(self, "_windows_inventory_reasons", None) or {}).items()):
+            for state in ("unavailable", "incomplete"):
+                if any(str(reason).startswith(f"event class inventory {state}") for reason in reasons):
+                    scanner.note_left_out(
+                        target, "channel", "any channel outside the catalog's", None,
+                        "not offered: the sweep reads only the catalog's channels here, and the event class "
+                        f"inventory is {state}, so the channels left out are not all named or counted")
+                    break
+
+    def publish_mentions(self, stopped: str = "") -> None:
+        """Rank the mention pool and replace the hunt's stored pool with it (every exit that keeps the sweep's
+        findings: the end of the sweep, or an analyst's stop during it)."""
+        scanner = getattr(self, "mentions", None)
+        if scanner is None or self.repo is None:
+            return
+        scanner.stopped = stopped
+        self._mention_left_out(scanner)
+        self.stats["mentions"] = scanner.publish(self.repo)
 
     @staticmethod
     def _finalize_rule(pb: Playbook):
@@ -3340,3 +3427,6 @@ class Sweep:
                     self.budget.release_physical_account(store.account)
         for pb in getattr(self, "pack", ()):
             pb.close_spill()
+        scanner = getattr(self, "mentions", None)
+        if scanner is not None:
+            scanner.close()

