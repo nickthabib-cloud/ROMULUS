@@ -3,7 +3,7 @@
 # Linux audit and logging shutdown, and history suppression. Sources are SigmaHQ rules and the procedure text of the
 # cited ATT&CK techniques (vendored Enterprise 20.0).
 
-- id: mention.impact.vssadmin_delete_shadows
+- id: mention.impact_vssadmin_delete_shadows
   title: Volume shadow copies deleted with vssadmin
   match:
     anchored: 'vssadmin(?:\.exe)?["'']? {1,3}delete {1,3}shadows'
@@ -26,7 +26,7 @@
       - 'vssadmin list shadows'
       - 'vssadmin create shadow /for=C:'
 
-- id: mention.impact.wmic_shadowcopy_delete
+- id: mention.impact_wmic_shadowcopy_delete
   title: Volume shadow copies deleted with WMIC or WMI
   match:
     anchored: 'shadowcopy {1,3}delete'
@@ -49,7 +49,7 @@
       - 'wmic shadowcopy list brief'
       - 'wmic process where name="notepad.exe" delete'
 
-- id: mention.impact.wmi_shadowcopy_delete_method
+- id: mention.impact_wmi_shadowcopy_delete_method
   title: Win32_ShadowCopy objects deleted through PowerShell
   match:
     anchored: 'Win32_ShadowCopy[^\n]{0,120}\.Delete\(\)'
@@ -72,7 +72,7 @@
       - 'powershell -c "Get-WmiObject Win32_ShadowCopy | Select-Object ID,InstallDate"'
       - 'powershell -c "Get-CimInstance Win32_ShadowStorage"'
 
-- id: mention.impact.wbadmin_delete
+- id: mention.impact_wbadmin_delete
   title: Windows backup catalog or backups deleted
   match:
     anchored: 'wbadmin(?:\.exe)?["'']? {1,3}delete {1,3}(?:catalog|systemstatebackup|backup)'
@@ -96,7 +96,7 @@
       - 'wbadmin get versions'
       - 'wbadmin start backup -backupTarget:E: -include:C: -quiet'
 
-- id: mention.impact.bcdedit_recovery_disabled
+- id: mention.impact_bcdedit_recovery_disabled
   title: Boot recovery disabled with bcdedit
   match:
     anchored: 'bcdedit(?:\.exe)?["'']?[^\n]{0,40}/set {1,3}\{default\} {1,3}(?:recoveryenabled {1,3}no|bootstatuspolicy {1,3}ignoreallfailures)'
@@ -120,7 +120,7 @@
       - 'bcdedit /enum all'
       - 'bcdedit /set {current} description "Windows Server 2022"'
 
-- id: mention.impact.wevtutil_clear
+- id: mention.impact_wevtutil_clear
   title: Windows event log cleared with wevtutil
   match:
     anchored: 'wevtutil(?:\.exe)?["'']? {1,3}(?:cl|clear-log) '
@@ -144,7 +144,7 @@
       - 'wevtutil qe Security /c:5 /f:text'
       - 'wevtutil gl Application'
 
-- id: mention.impact.powershell_clear_eventlog
+- id: mention.impact_powershell_clear_eventlog
   title: Windows event log cleared or removed with PowerShell
   match:
     literal: ['Clear-EventLog ', 'Remove-EventLog ']
@@ -167,7 +167,7 @@
       - 'powershell -c "Get-EventLog -LogName System -Newest 20"'
       - 'powershell -c "New-EventLog -LogName Application -Source CorpApp"'
 
-- id: mention.impact.defender_disable
+- id: mention.impact_defender_disable
   title: Microsoft Defender protection switched off with Set-MpPreference
   match:
     anchored: 'Set-MpPreference[^\n]{0,80}-Disable(?:RealtimeMonitoring|BehaviorMonitoring|IOAVProtection|BlockAtFirstSeen|ArchiveScanning|ScriptScanning|CatchupFullScan|CatchupQuickScan) {1,3}(?:\$true|1)\b'
@@ -190,7 +190,7 @@
       - 'powershell Set-MpPreference -DisableRealtimeMonitoring $false'
       - 'powershell Get-MpPreference | Select DisableRealtimeMonitoring'
 
-- id: mention.impact.defender_exclusion
+- id: mention.impact_defender_exclusion
   title: Microsoft Defender exclusion added
   match:
     anchored: 'Add-MpPreference[^\n]{0,40}-Exclusion(?:Path|Process|Extension|IpAddress)'
@@ -214,7 +214,7 @@
       - 'powershell -c "Get-MpPreference | Select-Object -ExpandProperty ExclusionPath"'
       - 'powershell -c "Update-MpSignature"'
 
-- id: mention.impact.auditctl_delete_rules
+- id: mention.impact_auditctl_delete_rules
   title: All Linux audit rules deleted
   match:
     anchored: 'auditctl {1,3}-D\b'
@@ -238,7 +238,7 @@
       - 'Nov 20 15:00:01 web01 bash[951]: HISTORY: auditctl -l'
       - 'Nov 20 15:00:02 web01 bash[952]: HISTORY: auditctl -w /etc/passwd -p wa -k identity'
 
-- id: mention.impact.auditctl_disable
+- id: mention.impact_auditctl_disable
   title: Linux auditing disabled with auditctl -e 0
   match:
     anchored: 'auditctl {1,3}-e {0,1}0\b'
@@ -261,7 +261,7 @@
       - 'Nov 20 15:01:01 web01 bash[954]: HISTORY: auditctl -e 2'
       - 'Nov 20 15:01:02 web01 bash[955]: HISTORY: auditctl -s'
 
-- id: mention.impact.logging_service_stop
+- id: mention.impact_logging_service_stop
   title: Audit, syslog or security agent stopped with systemctl
   match:
     anchored: 'systemctl {1,3}(?:stop|disable|mask|kill) {1,3}(?:auditd|rsyslog|syslog-ng|systemd-journald|falcon-sensor|wazuh-agent|osqueryd|filebeat|auditbeat|elastic-agent|cbagentd|sentinelone|ossec)\b'
@@ -270,7 +270,7 @@
   attack: [T1685, T1685.004]
   telemetry: [linux_text]
   source:
-    name: 'SigmaHQ: Disabling Security Tools - Builtin (Omer Gunal, Alejandro Ortuno, oscd.community)'
+    name: 'SigmaHQ: Disabling Security Tools - Builtin (Ömer Günal, Alejandro Ortuno, oscd.community)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/syslog/lnx_syslog_security_tools_disabling_syslog.yml
     license: DRL-1.1
     upstream_id: 49f5dfc1-f92e-4d34-96fa-feba3f6acf36
@@ -285,7 +285,7 @@
       - 'Nov 20 15:02:01 web01 bash[957]: HISTORY: systemctl restart rsyslog'
       - 'Nov 20 15:02:02 web01 bash[958]: HISTORY: systemctl status auditd'
 
-- id: mention.impact.login_records_truncated
+- id: mention.impact_login_records_truncated
   title: Login record files truncated by redirection
   match:
     literal: ['> /var/log/wtmp', '>/var/log/wtmp', '> /var/log/btmp', '>/var/log/btmp', '> /var/log/lastlog', '>/var/log/lastlog', '> /var/run/utmp', '>/var/run/utmp']
@@ -308,7 +308,7 @@
       - 'Nov 20 15:03:01 web01 bash[960]: HISTORY: last -f /var/log/wtmp | head'
       - 'Nov 20 15:03:02 web01 bash[961]: HISTORY: lastlog -u alice'
 
-- id: mention.impact.var_log_shred
+- id: mention.impact_var_log_shred
   title: Files under /var/log shredded
   match:
     anchored: 'shred [^\n]{0,60}/var/log/'
@@ -317,7 +317,7 @@
   attack: [T1685.006, T1070.004]
   telemetry: [linux_text]
   source:
-    name: 'SigmaHQ: Linux Logs Clearing Attempts (Omer Gunal, oscd.community)'
+    name: 'SigmaHQ: Linux Logs Clearing Attempts (Ömer Günal, oscd.community)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_clear_logs.yml
     license: DRL-1.1
     upstream_id: 80915f59-9b56-4616-9de0-fd0dea6c12fe
@@ -331,7 +331,7 @@
       - 'Nov 20 15:04:01 web01 bash[963]: HISTORY: shred -u /home/alice/old-key.pem'
       - 'Nov 20 15:04:02 web01 bash[964]: HISTORY: ls /var/log/'
 
-- id: mention.impact.histfile_disabled
+- id: mention.impact_histfile_disabled
   title: Shell history redirected to /dev/null or sized to zero
   match:
     literal: ['HISTFILE=/dev/null', 'HISTSIZE=0', 'set +o history']
@@ -355,7 +355,7 @@
       - 'Nov 20 15:05:02 web01 bash[967]: HISTORY: export HISTSIZE=10000'
       - 'Nov 20 15:05:03 web01 bash[968]: HISTORY: set -o vi'
 
-- id: mention.impact.unset_histfile
+- id: mention.impact_unset_histfile
   title: HISTFILE unset
   match:
     literal: ['unset HISTFILE']

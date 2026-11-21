@@ -6,7 +6,7 @@
 # Persistence edits by configuration management look similar, so the strong entries require what such tools do not
 # do: a downloader or socket inside the persisted command, a temp-directory payload, or a root-equivalent grant.
 
-- id: mention.persist.authorized_keys_echo_append
+- id: mention.persist_authorized_keys_echo_append
   title: SSH public key appended to authorized_keys with echo
   match:
     anchored: 'echo {1,3}["'']?(?:ssh-(?:rsa|ed25519|dss)|ecdsa-sha2-nistp[0-9]{3}) [A-Za-z0-9+/]{40,1000}={0,3}[^\n]{0,120}>> {0,2}[^\n]{0,80}authorized_keys'
@@ -30,7 +30,7 @@
       - 'Nov 20 13:00:01 web01 sshd[801]: Authentication refused: bad ownership or modes for file /home/alice/.ssh/authorized_keys'
       - 'Nov 20 13:00:02 web01 bash[802]: HISTORY: ssh-copy-id -i ~/.ssh/id_ed25519.pub alice@web02'
 
-- id: mention.persist.root_authorized_keys_append
+- id: mention.persist_root_authorized_keys_append
   title: SSH public key appended to root's authorized_keys
   match:
     anchored: 'ssh-(?:rsa|ed25519|dss) [A-Za-z0-9+/]{40,1000}={0,3}[^\n]{0,120}>> {0,2}/root/\.ssh/authorized_keys'
@@ -53,7 +53,7 @@
       - 'Nov 20 13:01:01 web01 sshd[804]: Accepted publickey for root from 10.0.4.12 port 50122 ssh2: RSA SHA256:3q2+7w'
       - 'Nov 20 13:01:02 web01 bash[805]: HISTORY: cat /root/.ssh/authorized_keys'
 
-- id: mention.persist.authorized_keys_immutable
+- id: mention.persist_authorized_keys_immutable
   title: authorized_keys made immutable or append-only
   match:
     anchored: 'chattr {1,3}\+[aiu]{1,3} {1,3}[^\n]{0,80}authorized_keys'
@@ -62,13 +62,13 @@
   attack: [T1098.004, T1222.002]
   telemetry: [linux_text]
   source:
-    name: MITRE ATT&CK Enterprise 20.0, T1098.004 SSH Authorized Keys
-    url: https://attack.mitre.org/techniques/T1098/004
+    name: MITRE ATT&CK Enterprise 20.0, T1222.002 Linux and Mac File and Directory Permissions Modification (TeamTNT procedure)
+    url: https://attack.mitre.org/techniques/T1222/002
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
-    upstream_id: T1098.004
+    upstream_id: T1222.002
   rationale: >-
-    Locking authorized_keys with chattr after planting a key stops the owner and other malware from removing it, a
-    documented cloud-worm habit. Administrators have no reason to freeze the file.
+    TeamTNT's documented chattr use, applied to the SSH key file of T1098.004: locking authorized_keys after planting
+    a key stops the owner and other malware from removing it. Administrators have no reason to freeze the file.
   examples:
     positive:
       - 'Nov 20 13:02:00 web01 sh[806]: chattr +ia /root/.ssh/authorized_keys'
@@ -76,7 +76,7 @@
       - 'Nov 20 13:02:01 web01 bash[807]: HISTORY: chattr +i /etc/resolv.conf'
       - 'Nov 20 13:02:02 web01 bash[808]: HISTORY: chmod 600 ~/.ssh/authorized_keys'
 
-- id: mention.persist.cron_every_minute_downloader
+- id: mention.persist_cron_every_minute_downloader
   title: Cron schedule running a downloader piped into a shell
   match:
     anchored: '\* \* \* \* [^\n]{0,60}(?:curl|wget)[^\n]{1,200}\| {0,3}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b'
@@ -101,7 +101,7 @@
       - 'Nov 20 13:03:01 web01 CRON[810]: (root) CMD (   cd / && run-parts --report /etc/cron.hourly)'
       - '*/5 * * * * root /usr/local/bin/backup.sh > /dev/null 2>&1'
 
-- id: mention.persist.cron_reboot_payload
+- id: mention.persist_cron_reboot_payload
   title: '@reboot cron entry running a downloader, socket or decoder'
   match:
     anchored: '@reboot[^\n]{1,200}(?:curl |wget |/dev/tcp/|nc -e|base64 -d)'
@@ -115,7 +115,8 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1053.003
   rationale: >-
-    An @reboot job that downloads, opens a socket or decodes base64 restores an implant at every boot. Services start
+    An @reboot job that downloads, opens a socket or decodes base64 restores an implant at every boot; the
+    technique's procedure examples include @reboot persistence (GoldMax, The Gentlemen ransomware). Services start
     from systemd, not from a cron reboot line that reaches out to the network.
   examples:
     positive:
@@ -124,7 +125,7 @@
       - '@reboot /usr/local/bin/start-dashboard.sh'
       - 'Nov 20 13:04:00 web01 cron[700]: (CRON) INFO (Running @reboot jobs)'
 
-- id: mention.persist.crontab_from_echo_downloader
+- id: mention.persist_crontab_from_echo_downloader
   title: Crontab installed from echo text that contains a downloader or socket
   match:
     anchored: 'echo [^\n]{1,300}(?:curl|wget|/dev/tcp/)[^\n]{0,200}\| {0,2}crontab {1,3}-'
@@ -147,7 +148,7 @@
       - 'Nov 20 13:05:01 web01 bash[812]: HISTORY: echo "0 2 * * * /usr/local/bin/backup.sh" | crontab -'
       - 'Nov 20 13:05:02 web01 bash[813]: HISTORY: crontab -l'
 
-- id: mention.persist.crontab_append_pipeline
+- id: mention.persist_crontab_append_pipeline
   title: Crontab rewritten by appending an echoed line
   match:
     anchored: 'crontab {1,3}-l[^\n]{0,20}; {0,2}echo [^\n]{1,300}\| {0,2}crontab {1,3}-'
@@ -170,7 +171,7 @@
       - 'Nov 20 13:06:01 web01 bash[815]: HISTORY: crontab -l > /tmp/cron.bak'
       - 'Nov 20 13:06:02 web01 bash[816]: HISTORY: crontab -e'
 
-- id: mention.persist.cron_file_echo
+- id: mention.persist_cron_file_echo
   title: Text echoed into a system cron file or directory
   match:
     anchored: 'echo [^\n]{1,300}>{1,2} {0,2}/etc/cron(?:tab|\.d/|\.hourly/|\.daily/|\.weekly/|\.monthly/)'
@@ -193,7 +194,7 @@
       - 'Nov 20 13:07:01 web01 bash[818]: HISTORY: ls -l /etc/cron.d/'
       - 'Nov 20 13:07:02 web01 bash[819]: HISTORY: echo "cron jobs reviewed" >> /var/log/audit-notes.txt'
 
-- id: mention.persist.ld_preload_temp_library
+- id: mention.persist_ld_preload_temp_library
   title: LD_PRELOAD set to a library in a temp or current directory
   match:
     anchored: 'LD_PRELOAD= {0,2}["'']?(?:/tmp/|/dev/shm/|/var/tmp/|\./)'
@@ -217,7 +218,7 @@
       - 'Nov 20 13:08:01 web01 systemd[1]: app.service: Environment LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2'
       - 'Nov 20 13:08:02 web01 bash[821]: HISTORY: echo $LD_LIBRARY_PATH'
 
-- id: mention.persist.ld_so_preload_write
+- id: mention.persist_ld_so_preload_write
   title: Text written into /etc/ld.so.preload
   match:
     anchored: 'echo [^\n]{1,200}>{1,2} {0,2}/etc/ld\.so\.preload'
@@ -240,7 +241,7 @@
       - 'Nov 20 13:09:01 web01 bash[823]: HISTORY: cat /etc/ld.so.preload'
       - 'Nov 20 13:09:02 web01 bash[824]: HISTORY: echo /opt/lib > /etc/ld.so.conf.d/opt.conf'
 
-- id: mention.persist.setuid_in_temp
+- id: mention.persist_setuid_in_temp
   title: setuid or setgid bit set on a file in a temp directory
   match:
     anchored: 'chmod {1,3}(?:u\+s|g\+s|\+s|[2467][0-7]{3}) {1,3}[^\n]{0,60}(?:/tmp/|/dev/shm/|/var/tmp/)'
@@ -249,7 +250,7 @@
   attack: [T1548.001]
   telemetry: [linux_text]
   source:
-    name: 'SigmaHQ: Setuid and Setgid (Omer Gunal)'
+    name: 'SigmaHQ: Setuid and Setgid (Ömer Günal)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_setgid_setuid.yml
     license: DRL-1.1
     upstream_id: c21c4eaa-ba2e-419a-92b2-8371703cbe21
@@ -265,7 +266,7 @@
       - 'Nov 20 13:10:02 web01 bash[827]: HISTORY: chmod 1777 /tmp'
       - 'Nov 20 13:10:03 web01 bash[828]: HISTORY: chmod 755 /tmp/build/run.sh'
 
-- id: mention.persist.setuid_system_shell
+- id: mention.persist_setuid_system_shell
   title: setuid bit set on a system shell
   match:
     anchored: 'chmod {1,3}(?:u\+s|\+s|[2467][0-7]{3}) {1,3}(?:/usr)?/bin/(?:ba|da|z|k|a)?sh\b'
@@ -288,7 +289,7 @@
       - 'Nov 20 13:11:01 web01 bash[830]: HISTORY: chmod 755 /bin/backup-wrapper'
       - 'Nov 20 13:11:02 web01 bash[831]: HISTORY: ls -l /bin/bash'
 
-- id: mention.persist.shell_copied_to_temp
+- id: mention.persist_shell_copied_to_temp
   title: System shell copied into a temp directory
   match:
     anchored: 'cp /(?:usr/)?bin/(?:ba|da|z|k|a)?sh {1,3}(?:/tmp/|/dev/shm/|/var/tmp/)'
@@ -311,7 +312,7 @@
       - 'Nov 20 13:12:01 web01 bash[833]: HISTORY: cp /bin/ls /tmp/ls.bak'
       - 'Nov 20 13:12:02 web01 bash[834]: HISTORY: cp /etc/bash.bashrc /tmp/bashrc.orig'
 
-- id: mention.persist.sudoers_nopasswd_append
+- id: mention.persist_sudoers_nopasswd_append
   title: Passwordless sudo-to-everything appended to sudoers
   match:
     anchored: 'echo [^\n]{1,160}NOPASSWD: {0,2}ALL[^\n]{0,80}>> {0,2}/etc/sudoers'
@@ -335,7 +336,7 @@
       - 'Nov 20 13:13:01 web01 sudo[836]: alice : TTY=pts/0 ; PWD=/home/alice ; USER=root ; COMMAND=/usr/sbin/visudo'
       - 'Nov 20 13:13:02 web01 bash[837]: HISTORY: grep NOPASSWD /etc/sudoers.d/*'
 
-- id: mention.persist.useradd_duplicate_uid0
+- id: mention.persist_useradd_duplicate_uid0
   title: useradd creating a non-unique UID 0 account
   match:
     anchored: 'useradd [^\n]{0,100}(?:-o {1,3}-u {1,3}0|-u {1,3}0 {1,3}-o)\b'
@@ -358,7 +359,7 @@
       - 'Nov 20 13:14:01 web01 bash[839]: HISTORY: useradd -m -u 1005 -s /bin/bash carol'
       - 'Nov 20 13:14:02 web01 bash[840]: HISTORY: useradd -r -u 999 svc_app'
 
-- id: mention.persist.passwd_uid0_append
+- id: mention.persist_passwd_uid0_append
   title: UID 0 line appended to /etc/passwd
   match:
     anchored: 'echo [^\n]{1,120}:0:0:[^\n]{0,120}>> {0,2}/etc/passwd'
@@ -381,10 +382,10 @@
       - 'Nov 20 13:15:01 web01 bash[842]: HISTORY: getent passwd alice'
       - 'Nov 20 13:15:02 web01 bash[843]: HISTORY: echo "alice:x:1001:1001::/home/alice:/bin/bash" > /tmp/passwd.test'
 
-- id: mention.persist.systemd_execstart_temp
+- id: mention.persist_systemd_execstart_temp
   title: systemd ExecStart pointing into a temp directory
   match:
-    anchored: 'ExecStart= {0,2}[^\n]{0,40}(?:/tmp/|/dev/shm/|/var/tmp/)'
+    anchored: 'ExecStart= {0,2}[-@+!:]{0,3}(?:/tmp/|/dev/shm/|/var/tmp/)'
   case_sensitive: true
   strength: strong
   attack: [T1543.002]
@@ -395,8 +396,10 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1543.002
   rationale: >-
-    A unit whose ExecStart runs from /tmp, /dev/shm or /var/tmp persists a dropped payload as a service. Packaged and
-    in-house services run from /usr, /opt or application directories.
+    A unit whose ExecStart executable (after systemd's optional '-@+!:' prefixes) lives in /tmp, /dev/shm or
+    /var/tmp persists a dropped payload as a service. Packaged and in-house services run from /usr, /opt or
+    application directories; a temp path that is only an argument (a docker volume, a cache directory) is not
+    matched.
   examples:
     positive:
       - 'Nov 20 13:16:00 web01 sh[844]: printf "[Service]\nExecStart=/dev/shm/.kworker\nRestart=always\n" > /etc/systemd/system/kworker.service'
@@ -404,7 +407,7 @@
       - 'Nov 20 13:16:01 web01 systemd[1]: nginx.service: ExecStart=/usr/sbin/nginx -g daemon on; master_process on;'
       - 'Nov 20 13:16:02 web01 systemd[1]: systemd-tmpfiles-clean.service: Cleaning up temporary directories /tmp'
 
-- id: mention.persist.systemd_execstart_downloader
+- id: mention.persist_systemd_execstart_downloader
   title: systemd ExecStart running a downloader piped into a shell
   match:
     anchored: 'ExecStart=[^\n]{0,80}(?:curl|wget)[^\n]{0,200}\| {0,2}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b'
@@ -427,7 +430,7 @@
       - 'ExecStart=/usr/bin/curl -fsS -o /var/lib/app/feed.json https://feeds.example.org/latest'
       - 'ExecStart=/opt/app/bin/server --port 8080'
 
-- id: mention.persist.shell_rc_payload
+- id: mention.persist_shell_rc_payload
   title: Shell startup file appended with a downloader or socket command
   match:
     anchored: 'echo [^\n]{0,200}(?:curl |wget |/dev/tcp/|nc -e)[^\n]{0,200}>> {0,2}[^\n]{0,40}\.(?:bashrc|bash_profile|profile|zshrc)\b'
@@ -450,7 +453,7 @@
       - 'Nov 20 13:17:01 web01 bash[846]: HISTORY: echo ''export PATH=$PATH:/opt/tools/bin'' >> ~/.bashrc'
       - 'Nov 20 13:17:02 web01 bash[847]: HISTORY: echo "alias ll=''ls -la''" >> ~/.zshrc'
 
-- id: mention.persist.rc_local_payload
+- id: mention.persist_rc_local_payload
   title: rc.local appended with a downloader or socket command
   match:
     anchored: 'echo [^\n]{1,200}(?:curl|wget|/dev/tcp/)[^\n]{0,200}>> {0,2}/etc/rc\.local'
@@ -473,7 +476,7 @@
       - 'Nov 20 13:18:01 web01 bash[849]: HISTORY: echo "/usr/local/bin/fan-control &" >> /etc/rc.local'
       - 'Nov 20 13:18:02 web01 bash[850]: HISTORY: cat /etc/rc.local'
 
-- id: mention.persist.insmod_from_temp
+- id: mention.persist_insmod_from_temp
   title: Kernel module loaded from a temp directory
   match:
     anchored: 'insmod {1,3}(?:/tmp/|/dev/shm/|/var/tmp/)[^\n]{1,80}\.ko\b'
@@ -482,13 +485,14 @@
   attack: [T1547.006, T1014]
   telemetry: [linux_text]
   source:
-    name: MITRE ATT&CK Enterprise 20.0, T1547.006 Kernel Modules and Extensions
-    url: https://attack.mitre.org/techniques/T1547/006
-    license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
-    upstream_id: T1547.006
+    name: 'SigmaHQ: Loading of Kernel Module via Insmod (Pawel Mazur)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/auditd/syscall/lnx_auditd_load_module_insmod.yml
+    license: DRL-1.1
+    upstream_id: 106d7cbd-80ff-4985-b682-a7043e5acb72
   rationale: >-
-    Loading a kernel module straight out of /tmp or /dev/shm is how LKM rootkits (Diamorphine, Reptile) are installed
-    by hand; DKMS and vendor drivers load from /lib/modules.
+    The rule flags any insmod (auditd comm=insmod); this text form narrows it to a module loaded straight out of /tmp,
+    /var/tmp or /dev/shm, which is how LKM rootkits are installed by hand. DKMS and vendor drivers load from
+    /lib/modules.
   examples:
     positive:
       - 'Nov 20 13:19:00 web01 bash[851]: HISTORY: insmod /tmp/.d/diamorphine.ko'
@@ -496,7 +500,7 @@
       - 'Nov 20 13:19:01 web01 bash[852]: HISTORY: modprobe nvidia'
       - 'Nov 20 13:19:02 web01 bash[853]: HISTORY: insmod /lib/modules/6.8.0-45-generic/extra/vboxdrv.ko'
 
-- id: mention.persist.sticky_keys_cmd_copy
+- id: mention.persist_sticky_keys_cmd_copy
   title: cmd.exe copied over an accessibility binary
   match:
     anchored: 'copy {1,3}/y {1,3}C:\\windows\\system32\\cmd\.exe {1,3}C:\\windows\\system32\\(?:sethc|utilman|osk|magnify|narrator|displayswitch|atbroker)\.exe'
@@ -519,7 +523,7 @@
       - 'copy /y C:\Temp\report.xlsx \\fileserver\reports\'
       - 'sfc /scannow'
 
-- id: mention.persist.ifeo_accessibility
+- id: mention.persist_ifeo_accessibility
   title: Image File Execution Options key on an accessibility binary
   match:
     anchored: 'Image File Execution Options\\(?:sethc|utilman|osk|magnify|narrator|displayswitch|atbroker)\.exe'
@@ -542,7 +546,7 @@
       - 'reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\chrome.exe"'
       - 'reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v AutoRestartShell /t REG_DWORD /d 1'
 
-- id: mention.persist.run_key_suspicious_target
+- id: mention.persist_run_key_suspicious_target
   title: Run or RunOnce key pointing at a script host, LOLBin or temp path
   match:
     anchored: 'CurrentVersion\\Run(?:Once)?\b[^\n]{1,300}(?:powershell|mshta|rundll32 [^\n]{0,40}javascript|regsvr32|wscript|cscript|\\AppData\\Local\\Temp\\|\\Users\\Public\\|%TEMP%)'
@@ -566,7 +570,7 @@
       - 'reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v OneDrive /d "C:\Users\alice\AppData\Local\Microsoft\OneDrive\OneDrive.exe /background"'
       - 'reg query HKLM\Software\Microsoft\Windows\CurrentVersion\Run'
 
-- id: mention.persist.schtasks_suspicious_action
+- id: mention.persist_schtasks_suspicious_action
   title: Scheduled task created with an encoded, hidden or download command
   match:
     anchored: 'schtasks(?:\.exe)?["'']? [^\n]{0,40}/create [^\n]{1,400}(?: -enc | -w hidden | bypass |\.DownloadString|\.DownloadFile|\.DownloadData|FromBase64String|mshta(?:\.exe)? http| IEX|/c start /min | -decode )'
@@ -590,7 +594,7 @@
       - 'schtasks /create /tn "Corp\Inventory" /tr "C:\Program Files\Corp\inventory.exe" /sc daily /st 02:00'
       - 'schtasks /query /fo LIST /v'
 
-- id: mention.persist.service_binpath_shell
+- id: mention.persist_service_binpath_shell
   title: Service binary path that runs cmd, PowerShell or a user-writable path
   match:
     anchored: 'binpath= {0,2}["'']?[^\n]{0,40}(?:cmd(?:\.exe)? {1,3}/c|powershell|%COMSPEC%|\\Users\\Public\\|\\AppData\\|\\Windows\\Temp\\)'
@@ -613,7 +617,7 @@
       - 'sc create CorpAgent binpath= "C:\Program Files\Corp\agent.exe" start= auto'
       - 'sc query state= all'
 
-- id: mention.persist.wmi_script_consumer
+- id: mention.persist_wmi_script_consumer
   title: WMI ActiveScriptEventConsumer
   match:
     literal: ['ActiveScriptEventConsumer']
@@ -622,10 +626,10 @@
   attack: [T1546.003]
   telemetry: [windows_text]
   source:
-    name: MITRE ATT&CK Enterprise 20.0, T1546.003 Windows Management Instrumentation Event Subscription
-    url: https://attack.mitre.org/techniques/T1546/003
-    license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
-    upstream_id: T1546.003
+    name: Microsoft Learn, ActiveScriptEventConsumer class (WMI standard consumer)
+    url: https://learn.microsoft.com/en-us/windows/win32/wmisdk/activescripteventconsumer
+    license: Microsoft Learn terms of use
+    upstream_id: ActiveScriptEventConsumer
   rationale: >-
     A WMI consumer that runs VBScript or JScript when an event fires is fileless persistence used by several APT and
     miner families. Very few products register script consumers, so it is medium.
@@ -636,7 +640,7 @@
       - 'Get-WmiObject -Namespace root\subscription -Class __EventFilter'
       - 'Get-CimInstance Win32_Service | Where-Object State -eq Running'
 
-- id: mention.persist.net_user_add
+- id: mention.persist_net_user_add
   title: Local account created with net user /add
   match:
     anchored: 'net user [^\n]{1,100}/add\b'
@@ -659,7 +663,7 @@
       - 'net user alice /domain'
       - 'net use Z: \\fileserver\share /persistent:no'
 
-- id: mention.persist.local_admins_add
+- id: mention.persist_local_admins_add
   title: Account added to the local Administrators group
   match:
     anchored: 'localgroup {1,3}administrators {1,3}[^\n]{1,80}/add\b'
@@ -668,13 +672,13 @@
   attack: [T1098]
   telemetry: [windows_text]
   source:
-    name: MITRE ATT&CK Enterprise 20.0, T1098 Account Manipulation
-    url: https://attack.mitre.org/techniques/T1098
-    license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
-    upstream_id: T1098
+    name: 'SigmaHQ: User Added to Local Administrators Group (Florian Roth, Nasreddine Bencherchali, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_susp_add_user_local_admin_group.yml
+    license: DRL-1.1
+    upstream_id: ad720b90-25ad-43ff-9b5e-5c841facc8e5
   rationale: >-
-    Granting local admin from the command line follows backdoor-account creation; desktop support does it too, so it
-    is medium.
+    The rule's net localgroup form ('localgroup', 'administrators', '/add', in the order net requires). Granting local
+    admin from the command line follows backdoor-account creation; desktop support does it too, so it is medium.
   examples:
     positive:
       - 'net localgroup administrators support_tmp /add'

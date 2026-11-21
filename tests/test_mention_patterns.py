@@ -45,7 +45,7 @@ KEYS_OPTIONAL = {"attack"}
 STRENGTHS = {"strong", "medium", "weak"}
 TELEMETRY = {"linux_text", "windows_text", "any"}
 SOURCE_KEYS = {"name", "url", "license", "upstream_id"}
-ID_RE = re.compile(r"^mention\.[a-z0-9]+(?:[._][a-z0-9]+)*$")
+ID_RE = re.compile(r"^mention\.[a-z0-9]+(?:_[a-z0-9]+)*$")
 ATTACK_RE = re.compile(r"^T\d{4}(?:\.\d{3})?$")
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 SIGMA_COMMIT = "698f0912f571d5fac3bf8c51f5421139834a011c"
@@ -115,7 +115,32 @@ BENIGN_CORPUS = [
     "curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc",
     "pip install --upgrade requests==2.32.3 urllib3==2.2.3",
     "git clone https://git.example.org/platform/deploy-scripts.git /opt/deploy-scripts",
+    # Vendor bootstrap scripts are fetched, made executable and run from the current directory.
+    "curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 && chmod 700 get_helm.sh && ./get_helm.sh",
+    "wget -q https://get.example.org/install.sh && chmod +x install.sh && ./install.sh --prefix /opt/tool",
+    "ExecStart=/usr/bin/docker run --rm -v /tmp/cache:/cache registry.example.org/img:1.2",
+    "ExecStart=/usr/bin/tmpreaper 7d /tmp",
+    "IyEvYmluL2Jhc2ggLWV4Cg==",
+    "Nov 20 07:30:00 app01 kernel: [ 3001.1] br-3f2a: port 2(veth9a1b2c3) entered promiscuous mode",
+    "Nov 20 07:31:00 app01 systemd[1]: Stopping firewalld.service - firewalld - dynamic firewall daemon...",
+    "Nov 20 07:32:00 app01 bash[4000]: HISTORY: kubectl get secret db -o jsonpath='{.data.password}' | base64 -d",
+    "Nov 20 07:33:00 app01 bash[4001]: HISTORY: python3 -m http.server 8000 --directory ./site",
 ]
+
+# Everyday lines that a medium pattern is known to match, with the pattern ids allowed to match them. These are the
+# documented benign look-alikes of medium entries (strength medium exists for exactly this); any other strong or
+# medium match on these lines fails the test.
+KNOWN_BENIGN_MEDIUM_MATCHES = {
+    # Configuration-management agents launch PowerShell with an encoded command ($ProgressPreference='SilentlyContinue').
+    "powershell.exe -NoProfile -NonInteractive -EncodedCommand JABQAHIAbwBnAHIAZQBzAHMAUAByAGUAZgBlAHIAZQBuAGMAZQA9ACcAUwBpAGwAZQBuAHQAbAB5AEMAbwBuAHQAaQBuAHUAZQAnAA==": {
+        "mention.encoded_powershell_encodedcommand"
+    },
+    # The Chocolatey installer is a classic download cradle.
+    "powershell -c \"iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))\"": {
+        "mention.cradle_ps_webclient_download",
+        "mention.cradle_ps_iex_download_prefix",
+    },
+}
 
 
 def _mention_files() -> list[Path]:
@@ -378,25 +403,53 @@ def test_strong_and_medium_patterns_stay_quiet_on_everyday_lines() -> None:
         matches = matcher(entry)
         for line in BENIGN_CORPUS:
             assert not matches(line), f"{filename}:{entry['id']}: fires on everyday line {line!r}"
+        for line, allowed in KNOWN_BENIGN_MEDIUM_MATCHES.items():
+            if entry["id"] in allowed:
+                assert entry["strength"] == "medium", f"{entry['id']}: a known benign match is allowed only at medium"
+                continue
+            assert not matches(line), f"{filename}:{entry['id']}: fires on everyday line {line!r}"
+
+
+def test_known_benign_medium_matches_are_real() -> None:
+    """The allow-list documents real matches; an entry that no longer matches its listed line must be removed."""
+    by_id = {entry["id"]: entry for _f, entry in _corpus()}
+    for line, allowed in KNOWN_BENIGN_MEDIUM_MATCHES.items():
+        for pattern_id in allowed:
+            assert pattern_id in by_id, f"unknown pattern id {pattern_id}"
+            assert matcher(by_id[pattern_id])(line), f"{pattern_id} no longer matches {line!r}"
+
+
+def _adversarial_lines(pattern: str, flags: int, positives: list[str]) -> list[str]:
+    """Long single lines built to make a backtracking engine work hard: the literal prefix followed by filler, and
+    each positive example cut short (so every gap is explored but the final element never matches) and repeated."""
+    parsed = sre_parse.parse(pattern, flags)
+    prefix = "".join(chr(av) for op, av in parsed[: _literal_prefix_length(parsed)] if op is sre_c.LITERAL)
+    lines = [(prefix + "A1/+ x" * 40) * 400 + "Z" * 65536]
+    for positive in positives:
+        for keep in (0.5, 0.75, 0.9):
+            near = positive[: max(1, int(len(positive) * keep))]
+            lines.append((near + " ") * max(1, 200_000 // (len(near) + 1)))
+    return lines
 
 
 def test_anchored_patterns_stay_fast_on_large_adversarial_lines() -> None:
-    """Python's backtracking engine is the worst case: a long line full of near-misses must still scan quickly."""
-    budget_seconds = 1.0
+    """Python's backtracking engine is the worst case: a long line full of near-misses must still scan quickly.
+    Lines are about 200 KB; the budget is per line and generous for slow CI hosts."""
+    budget_seconds = 2.0
+    slowest = (0.0, "")
     for filename, entry in _corpus():
         pattern = entry["match"].get("anchored")
         if pattern is None:
             continue
         flags = 0 if entry["case_sensitive"] else re.IGNORECASE
         compiled = re.compile(pattern, flags)
-        parsed = sre_parse.parse(pattern, flags)
-        prefix = "".join(chr(av) for op, av in parsed[: _literal_prefix_length(parsed)] if op is sre_c.LITERAL)
-        filler = "A1/+ x" * 40
-        line = (prefix + filler) * 400 + "Z" * 65536
-        started = time.perf_counter()
-        compiled.search(line)
-        elapsed = time.perf_counter() - started
-        assert elapsed < budget_seconds, f"{filename}:{entry['id']}: {elapsed:.2f}s on a {len(line)}-char line"
+        for line in _adversarial_lines(pattern, flags, entry["examples"]["positive"]):
+            started = time.perf_counter()
+            compiled.search(line)
+            elapsed = time.perf_counter() - started
+            slowest = max(slowest, (elapsed, entry["id"]))
+            assert elapsed < budget_seconds, f"{filename}:{entry['id']}: {elapsed:.2f}s on a {len(line)}-char line"
+    print(f"slowest anchored search on adversarial lines: {slowest[0]:.3f}s ({slowest[1]})")
 
 
 def test_validator_rejects_unsafe_regex_features() -> None:

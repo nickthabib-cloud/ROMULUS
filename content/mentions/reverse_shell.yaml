@@ -7,7 +7,7 @@
 # A match says the text was present. It does not prove the shell ran or connected; that takes typed process and
 # network evidence.
 
-- id: mention.revshell.dev_tcp_stdio
+- id: mention.revshell_dev_tcp_stdio
   title: Shell standard streams wired to a bash /dev/tcp or /dev/udp socket
   match:
     anchored: '/dev/(?:tcp|udp)/[A-Za-z0-9.:_-]{1,253}/[0-9]{1,5} {0,3}(?:0>&1|0<&1|<&1|>&0)'
@@ -33,7 +33,7 @@
       - 'Nov 20 10:01:05 web01 healthcheck: bash -c "echo > /dev/tcp/127.0.0.1/5432 2>&1" && echo db up'
       - 'Nov 20 10:01:06 web01 entrypoint.sh: timeout 1 bash -c "</dev/tcp/db/5432" 2>/dev/null || sleep 1'
 
-- id: mention.revshell.dev_tcp_any
+- id: mention.revshell_dev_tcp_any
   title: bash /dev/tcp or /dev/udp socket path with a host and port
   match:
     anchored: '/dev/(?:tcp|udp)/[A-Za-z0-9.:_-]{1,253}/[0-9]{1,5}'
@@ -56,7 +56,7 @@
       - 'Nov 20 10:02:01 web01 bash[5014]: HISTORY: ls -l /dev/tty1'
       - 'Nov 20 10:02:02 web01 kernel: [ 12.0] tcp: last ACK of /dev/null ignored'
 
-- id: mention.revshell.fifo_shell_to_client
+- id: mention.revshell_fifo_shell_to_client
   title: Named pipe feeding a shell whose output goes to a network client
   match:
     anchored: 'mkfifo [^\n]{0,120}(?:/|\b)(?:ba|da|z|k|a)?sh(?: -i)?\b[^\n|]{0,60}\| {0,2}(?:nc|ncat|netcat|telnet|openssl)\b'
@@ -81,7 +81,7 @@
       - 'Nov 20 10:03:02 db01 bash[5102]: HISTORY: mkfifo /tmp/pgpipe; pg_dump app | gzip > /tmp/pgpipe &'
       - 'Nov 20 10:03:03 db01 bash[5103]: HISTORY: mkfifo /tmp/f; ssh backup01 "cat > /srv/dump" < /tmp/f'
 
-- id: mention.revshell.fifo_client_to_shell
+- id: mention.revshell_fifo_client_to_shell
   title: Named pipe with a network client whose output feeds a shell
   match:
     anchored: 'mkfifo [^\n]{0,120}(?:telnet|nc|ncat|openssl s_client) [^\n|]{0,120}\| {0,2}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b'
@@ -104,7 +104,7 @@
       - 'Nov 20 10:04:01 web01 bash[5105]: HISTORY: mkfifo /tmp/q && nc -l 9000 > /tmp/q &'
       - 'Nov 20 10:04:02 web01 bash[5106]: HISTORY: mkfifo /var/run/app.fifo; chmod 600 /var/run/app.fifo'
 
-- id: mention.revshell.mknod_backpipe
+- id: mention.revshell_mknod_backpipe
   title: mknod pipe chained to netcat or telnet
   match:
     anchored: 'mknod [^\n]{1,80} p {0,2}(?:&&|;)[^\n]{0,120}\b(?:nc|ncat|telnet)\b'
@@ -128,7 +128,7 @@
       - 'Nov 20 10:05:01 web01 bash[5108]: HISTORY: mknod /dev/loop8 b 7 8'
       - 'Nov 20 10:05:02 web01 bash[5109]: HISTORY: mknod /tmp/ctl p; chmod 600 /tmp/ctl'
 
-- id: mention.revshell.netcat_exec_first_flag
+- id: mention.revshell_netcat_exec_first_flag
   title: netcat executing a shell (exec flag in the first option group)
   match:
     anchored: 'nc -[a-zA-Z]{0,6}[ec] {0,2}(?:(?:/usr)?(?:/bin/)?(?:ba|da|z|k|c|tc|a)?sh\b|cmd(?:\.exe)?\b|powershell(?:\.exe)?\b)'
@@ -154,7 +154,7 @@
       - 'Nov 20 10:06:03 web01 bash[5113]: HISTORY: rsync -avz -e ssh /srv/ backup01:/srv/'
       - 'Nov 20 10:06:04 web01 bash[5114]: HISTORY: nc -zv db01 5432'
 
-- id: mention.revshell.netcat_exec_later_flag
+- id: mention.revshell_netcat_exec_later_flag
   title: netcat executing a shell (exec flag after the host or port)
   match:
     anchored: ' nc [^|;&\n]{1,80} -[a-zA-Z]{0,5}[ec] {0,2}(?:(?:/usr)?(?:/bin/)?(?:ba|da|z|k|c|tc|a)?sh\b|cmd(?:\.exe)?\b|powershell(?:\.exe)?\b)'
@@ -178,7 +178,7 @@
       - 'Nov 20 10:07:02 web01 bash[5116]: HISTORY: echo stats | nc -q1 graphite 2003'
       - 'Nov 20 10:07:03 web01 bash[5117]: HISTORY: tar cf - /srv | nc 10.0.0.9 9000 -q 1'
 
-- id: mention.revshell.netcat_exec_line_start
+- id: mention.revshell_netcat_exec_line_start
   title: netcat executing a shell (line starts with nc)
   match:
     anchored: '^nc [^|;&\n]{1,80} -[a-zA-Z]{0,5}[ec] {0,2}(?:(?:/usr)?(?:/bin/)?(?:ba|da|z|k|c|tc|a)?sh\b|cmd(?:\.exe)?\b|powershell(?:\.exe)?\b)'
@@ -200,7 +200,7 @@
       - 'nc -zv 10.0.0.5 22-25'
       - 'nc 10.0.0.9 9000 < /srv/backup.tar'
 
-- id: mention.revshell.ncat_exec
+- id: mention.revshell_ncat_exec
   title: ncat executing a shell
   match:
     anchored: 'ncat(?:\.exe)? [^|;&\n]{0,80}(?:-[a-zA-Z]{0,5}[ec]|--exec|--sh-exec) {0,2}["'']?(?:(?:/usr)?(?:/bin/)?(?:ba|da|z|k|c|tc|a)?sh\b|cmd(?:\.exe)?\b|powershell(?:\.exe)?\b)'
@@ -224,7 +224,7 @@
       - 'Nov 20 10:08:01 web01 bash[5119]: HISTORY: ncat --listen --keep-open 8443 --ssl'
       - 'Nov 20 10:08:02 web01 bash[5120]: HISTORY: ncat -v --proxy 10.0.0.1:3128 example.org 443'
 
-- id: mention.revshell.netcat_long_name_exec
+- id: mention.revshell_netcat_long_name_exec
   title: netcat (long name) executing a shell
   match:
     anchored: 'netcat [^|;&\n]{0,80}-[a-zA-Z]{0,5}[ec] {0,2}(?:(?:/usr)?(?:/bin/)?(?:ba|da|z|k|c|tc|a)?sh\b|cmd(?:\.exe)?\b)'
@@ -247,7 +247,7 @@
       - 'Start-Date: 2026-11-20  10:09:01  Commandline: apt-get -y install netcat-openbsd'
       - 'Nov 20 10:09:02 web01 bash[5122]: HISTORY: netcat -zv 10.0.0.5 443'
 
-- id: mention.revshell.netcat_windows_exec
+- id: mention.revshell_netcat_windows_exec
   title: Windows netcat binary executing cmd or PowerShell
   match:
     anchored: 'nc\.exe["'']? [^|&\n]{0,80}-[a-zA-Z]{0,5}e {0,2}["'']?(?:cmd|powershell)(?:\.exe)?\b'
@@ -271,7 +271,7 @@
       - 'C:\Tools\nc.exe -zv 10.0.0.5 3389'
       - 'C:\Windows\system32\cmd.exe /c ipconfig /all'
 
-- id: mention.revshell.netcat64_windows_exec
+- id: mention.revshell_netcat64_windows_exec
   title: Windows 64-bit netcat binary executing cmd or PowerShell
   match:
     anchored: 'nc64\.exe["'']? [^|&\n]{0,80}-[a-zA-Z]{0,5}e {0,2}["'']?(?:cmd|powershell)(?:\.exe)?\b'
@@ -294,7 +294,7 @@
       - 'C:\Tools\nc.exe -zv 10.0.0.5 3389'
       - 'C:\Windows\system32\cmd.exe /c ipconfig /all'
 
-- id: mention.revshell.socat_exec_shell
+- id: mention.revshell_socat_exec_shell
   title: socat binding a shell to a socket
   match:
     anchored: 'socat [^\n]{0,120}(?:exec|system):["'']?(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b'
@@ -318,7 +318,7 @@
       - 'Nov 20 10:10:02 gw01 bash[5125]: HISTORY: socat PTY,link=/dev/ttyV0 EXEC:''/usr/sbin/pppd call isp'''
       - 'Nov 20 10:10:03 gw01 bash[5126]: HISTORY: socat TCP-LISTEN:8080,fork TCP:10.0.0.8:80'
 
-- id: mention.revshell.socat_full_tty
+- id: mention.revshell_socat_full_tty
   title: socat full-TTY options used for interactive remote shells
   match:
     literal: ['pty,stderr,setsid,sigint,sane']
@@ -341,7 +341,7 @@
       - 'Nov 20 10:11:01 gw01 bash[5128]: HISTORY: socat PTY,link=/dev/ttyS10,raw,echo=0 PTY,link=/dev/ttyS11,raw,echo=0'
       - 'Nov 20 10:11:02 gw01 bash[5129]: HISTORY: socat - UNIX-CONNECT:/run/app.sock'
 
-- id: mention.revshell.python_socket_shell
+- id: mention.revshell_python_socket_shell
   title: Python socket connect followed by fd duplication or a spawned shell
   match:
     anchored: 'socket\.socket\([^\n]{0,200}\.connect\(\([^\n]{0,300}(?:dup2|pty\.spawn|subprocess\.(?:call|Popen|run|check_output)\()'
@@ -366,7 +366,7 @@
       - 'Nov 20 10:12:02 web01 app[700]: s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.connect((host, 443)); s.sendall(payload)'
       - 'Nov 20 10:12:03 web01 bash[5132]: HISTORY: python3 -c "import socket; print(socket.gethostname())"'
 
-- id: mention.revshell.python_dup2_fileno
+- id: mention.revshell_python_dup2_fileno
   title: Python dup2 of an object's descriptor onto stdin, stdout or stderr
   match:
     anchored: 'dup2\( {0,2}[A-Za-z_]{1,16}\.fileno\(\) {0,2}, {0,2}[0-2] {0,2}\)'
@@ -389,7 +389,7 @@
       - 'Nov 20 10:13:01 web01 app[700]: os.dup2(devnull.fileno(), sys.stdout.fileno())'
       - 'Nov 20 10:13:02 web01 app[700]: os.dup2(fd, 1)'
 
-- id: mention.revshell.python_pty_spawn_shell
+- id: mention.revshell_python_pty_spawn_shell
   title: Python pty.spawn of a shell
   match:
     anchored: 'pty\.spawn\( {0,2}["''](?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh["'']'
@@ -413,7 +413,7 @@
       - 'Nov 20 10:14:01 web01 app[700]: pty.spawn(argv, master_read)'
       - 'Nov 20 10:14:02 web01 bash[5135]: HISTORY: python3 -c "import pty; print(pty.STDIN_FILENO)"'
 
-- id: mention.revshell.perl_socket_stdin
+- id: mention.revshell_perl_socket_stdin
   title: Perl Socket one-liner that reopens STDIN onto the socket
   match:
     anchored: 'use Socket;[^\n]{0,300}open\( {0,2}STDIN {0,2}, {0,2}["'']>&'
@@ -436,7 +436,7 @@
       - 'Nov 20 10:15:01 mon01 check_tcp.pl[800]: use Socket; connect to 10.0.0.5:443 ok'
       - 'Nov 20 10:15:02 web01 bash[5137]: HISTORY: perl -e ''open(STDIN, "<", "/tmp/input.txt")'''
 
-- id: mention.revshell.perl_io_socket_exec
+- id: mention.revshell_perl_io_socket_exec
   title: Perl IO::Socket::INET client that hands the socket to a shell
   match:
     anchored: 'IO::Socket::INET\( {0,2}PeerAddr[^\n]{0,200}(?:fdopen|system|exec)'
@@ -460,7 +460,7 @@
       - 'Nov 20 10:16:01 mon01 check_smtp[801]: IO::Socket::INET(PeerAddr => "mail01:25") connected'
       - 'Nov 20 10:16:02 web01 bash[5139]: HISTORY: perldoc IO::Socket::INET'
 
-- id: mention.revshell.php_fsockopen_exec
+- id: mention.revshell_php_fsockopen_exec
   title: PHP fsockopen followed by command execution
   match:
     anchored: 'fsockopen\([^\n]{1,200}\);[^\n]{0,80}(?:exec|shell_exec|system|passthru|popen|proc_open)\('
@@ -484,7 +484,7 @@
       - 'Nov 20 10:17:01 web01 php-fpm[880]: PHP Warning: fsockopen(): unable to connect to mail01:25 (Connection refused)'
       - 'Nov 20 10:17:02 web01 php-fpm[880]: PHP Notice: exec() has been disabled for security reasons'
 
-- id: mention.revshell.php_proc_open_shell
+- id: mention.revshell_php_proc_open_shell
   title: PHP proc_open of a shell with socket descriptors
   match:
     anchored: 'proc_open\( {0,2}["''](?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh["''] {0,2}, {0,2}(?:\[|array\() {0,2}\$'
@@ -507,7 +507,7 @@
       - 'Nov 20 10:18:01 web01 php-fpm[880]: proc_open("/usr/bin/convert", [["pipe","r"],["pipe","w"]], $pipes)'
       - 'Nov 20 10:18:02 web01 php-fpm[880]: PHP Warning: proc_open(): fork failed - Cannot allocate memory'
 
-- id: mention.revshell.fd_triple_redirect
+- id: mention.revshell_fd_triple_redirect
   title: Shell with stdin, stdout and stderr all on one numbered descriptor
   match:
     literal: ['<&3 >&3 2>&3', '<&196 >&196 2>&196', '0<&5 1>&5 2>&5', '<&%d >&%d 2>&%d']
@@ -532,7 +532,7 @@
       - 'Nov 20 10:19:02 web01 bash[5144]: HISTORY: exec 3>&1 4>&2'
       - 'Nov 20 10:19:03 web01 bash[5145]: HISTORY: ./build.sh 2>&1 | tee build.log'
 
-- id: mention.revshell.ruby_rsocket
+- id: mention.revshell_ruby_rsocket
   title: Ruby one-liner loading the socket library
   match:
     anchored: 'ruby {1,3}-rsocket {0,3}-e'
@@ -555,7 +555,7 @@
       - 'Nov 20 10:20:01 web01 bash[5147]: HISTORY: ruby -rjson -e ''puts JSON.parse(File.read("a.json"))'''
       - 'Nov 20 10:20:02 web01 bash[5148]: HISTORY: ruby -v'
 
-- id: mention.revshell.ruby_spawn_tcpsocket
+- id: mention.revshell_ruby_spawn_tcpsocket
   title: Ruby spawn of a shell with standard streams on a TCPSocket
   match:
     literal: ['[:in,:out,:err]=>TCPSocket']
@@ -578,7 +578,7 @@
       - 'Nov 20 10:21:01 web01 app[702]: spawn("convert", [:out, :err] => "/tmp/convert.log")'
       - 'Nov 20 10:21:02 web01 app[702]: TCPSocket.new("redis01", 6379) connected'
 
-- id: mention.revshell.telnet_shell_relay
+- id: mention.revshell_telnet_shell_relay
   title: Two telnet sessions with a shell between them
   match:
     anchored: 'telnet [^\n|]{1,80}\| {0,2}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh {0,2}\| {0,2}telnet '
@@ -601,7 +601,7 @@
       - 'Nov 20 10:22:01 web01 bash[5151]: HISTORY: telnet mail01 25'
       - 'Nov 20 10:22:02 web01 bash[5152]: HISTORY: echo quit | telnet 10.0.0.5 110 | grep +OK'
 
-- id: mention.revshell.openssl_client_to_shell
+- id: mention.revshell_openssl_client_to_shell
   title: openssl s_client output piped into a shell
   match:
     anchored: 'openssl s_client [^\n|]{0,120}\| {0,2}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b'
@@ -624,7 +624,7 @@
       - 'Nov 20 10:23:01 web01 bash[5154]: HISTORY: openssl s_client -connect www.example.org:443 </dev/null | openssl x509 -noout -dates'
       - 'Nov 20 10:23:02 web01 bash[5155]: HISTORY: openssl s_client -connect ldap01:636 -showcerts'
 
-- id: mention.revshell.curl_telnet_shell
+- id: mention.revshell_curl_telnet_shell
   title: curl telnet:// stream wired to a shell
   match:
     anchored: 'curl [^\n]{0,20}telnet://[^\n]{1,100}\| {0,2}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b'
@@ -647,7 +647,7 @@
       - 'Nov 20 10:24:01 web01 bash[5157]: HISTORY: curl -v telnet://mail01:25'
       - 'Nov 20 10:24:02 web01 bash[5158]: HISTORY: curl -fsS https://status.example.org/health | jq .'
 
-- id: mention.revshell.zsh_ztcp
+- id: mention.revshell_zsh_ztcp
   title: zsh ztcp connection handed to a shell
   match:
     anchored: 'ztcp [^\n]{1,80}(?:ba|da|z|k)?sh >&\$REPLY'
@@ -670,7 +670,7 @@
       - 'Nov 20 10:25:01 mac01 zsh[5160]: HISTORY: zmodload zsh/complist'
       - 'Nov 20 10:25:02 mac01 zsh[5161]: HISTORY: echo $REPLY'
 
-- id: mention.revshell.lua_socket_execute
+- id: mention.revshell_lua_socket_execute
   title: Lua socket connect followed by os.execute
   match:
     anchored: 'require\(["'']socket["'']\)[^\n]{0,200}:connect\([^\n]{0,200}os\.execute\('
@@ -693,7 +693,7 @@
       - 'Nov 20 10:26:01 rtr02 uhttpd[401]: lua: require("socket") loaded for luci-rpc'
       - 'Nov 20 10:26:02 rtr02 sh[402]: lua -e "print(os.date())"'
 
-- id: mention.revshell.node_child_process_shell
+- id: mention.revshell_node_child_process_shell
   title: Node.js child_process used with netcat or a socket
   match:
     anchored: 'require\(["'']child_process["'']\)[^\n]{0,200}(?:nc -e|nc [^\n]{1,60} -e|/dev/tcp/|new net\.Socket)'
@@ -717,7 +717,7 @@
       - '2026-11-20T10:27:01Z app[703]: const { execFile } = require("child_process"); execFile("git", ["rev-parse", "HEAD"])'
       - '2026-11-20T10:27:02Z app[703]: Error: Cannot find module ''child_process_helper'''
 
-- id: mention.revshell.node_pipe_sh_stdin
+- id: mention.revshell_node_pipe_sh_stdin
   title: Node.js socket piped into a spawned shell
   match:
     literal: ['.pipe(sh.stdin)']
@@ -740,7 +740,7 @@
       - '2026-11-20T10:28:00Z app[704]: req.pipe(fs.createWriteStream("/tmp/upload"))'
       - '2026-11-20T10:28:01Z app[704]: proc.stdout.pipe(process.stdout)'
 
-- id: mention.revshell.go_dial_exec_shell
+- id: mention.revshell_go_dial_exec_shell
   title: Go program dialing TCP and running a shell
   match:
     anchored: 'net\.Dial\( {0,2}["'']tcp["''][^\n]{1,160}exec\.Command\( {0,2}["''](?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh'
@@ -763,7 +763,7 @@
       - '2026-11-20T10:29:01Z svc[705]: net.Dial("tcp", "redis01:6379") ok'
       - '2026-11-20T10:29:02Z svc[705]: exec.Command("git", "pull") finished'
 
-- id: mention.revshell.powershell_tcpclient_iex
+- id: mention.revshell_powershell_tcpclient_iex
   title: PowerShell TCP client stream fed to Invoke-Expression
   match:
     anchored: 'Sockets\.TCPClient\([^\n]{1,200}\.GetStream\(\)[^\n]{0,900}(?:\biex\b|Invoke-Expression)'
@@ -786,7 +786,7 @@
       - '$t = New-Object System.Net.Sockets.TcpClient(''sql01'',1433); $t.Connected; $t.Close()'
       - '$c = New-Object Net.Sockets.TCPClient(''mail01'',25); $s = $c.GetStream(); $s.Write($hello,0,$hello.Length)'
 
-- id: mention.revshell.java_exec_dev_tcp
+- id: mention.revshell_java_exec_dev_tcp
   title: Java Runtime.exec of a /dev/tcp command
   match:
     anchored: 'getRuntime\(\)\.exec\([^\n]{0,200}/dev/(?:tcp|udp)/'
@@ -809,7 +809,7 @@
       - '2026-11-20 10:30:01 INFO  [exec-9] Runtime.getRuntime().exec("/usr/bin/convert in.png out.jpg") finished'
       - '2026-11-20 10:30:02 INFO  [main] Runtime.getRuntime().availableProcessors() = 8'
 
-- id: mention.revshell.xterm_remote_display
+- id: mention.revshell_xterm_remote_display
   title: xterm opened on a remote IP display
   match:
     anchored: 'xterm {1,3}-display {1,3}[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}:[0-9]{1,2}'
@@ -833,7 +833,7 @@
       - 'Nov 20 10:31:01 web01 bash[5164]: HISTORY: xterm -display :0'
       - 'Nov 20 10:31:02 web01 bash[5165]: HISTORY: xterm -display ws01.corp.example.org:0'
 
-- id: mention.revshell.gawk_inet_tcp
+- id: mention.revshell_gawk_inet_tcp
   title: gawk network special file
   match:
     literal: ['/inet/tcp/0/', '/inet/udp/0/']

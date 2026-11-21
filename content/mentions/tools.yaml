@@ -4,7 +4,7 @@
 # strong because an authorized test is the only realistic benign source; scanners and tunnels are medium because
 # administrators and authorized testers use them.
 
-- id: mention.tool.mimikatz_modules
+- id: mention.tool_mimikatz_modules
   title: Mimikatz module commands
   match:
     literal:
@@ -48,7 +48,7 @@
       - '2026-11-20 16:00:00 ERROR [worker] boost::process::child exited with code 1'
       - '2026-11-20 16:00:01 WARN  [main] crypto::hash: sha256 backend selected'
 
-- id: mention.tool.mimikatz_name
+- id: mention.tool_mimikatz_name
   title: Mimikatz name or banner
   match:
     literal: ['mimikatz', 'gentilkiwi', 'Benjamin DELPY', 'DumpCreds']
@@ -71,7 +71,7 @@
       - 'Nov 20 16:01:00 ws01 MsMpEng: Scan completed, 0 threats found'
       - 'C:\Windows\System32\lsass.exe started'
 
-- id: mention.tool.rubeus_commands
+- id: mention.tool_rubeus_commands
   title: Rubeus Kerberos abuse commands
   match:
     literal:
@@ -111,7 +111,7 @@
       - 'klist purge'
       - 'setspn -L svc_sql'
 
-- id: mention.tool.impacket_scripts
+- id: mention.tool_impacket_scripts
   title: Impacket example script names
   match:
     literal:
@@ -157,7 +157,7 @@
       - 'Setting up impacket-scripts (0.12.0-1) ...'
       - 'Nov 20 16:02:02 lnx02 bash[992]: HISTORY: python3 -m pip install impacket'
 
-- id: mention.tool.impacket_wmiexec_output
+- id: mention.tool_impacket_wmiexec_output
   title: Impacket wmiexec output file on the ADMIN$ share
   match:
     anchored: '\\\\127\.0\.0\.1\\ADMIN\$\\__[0-9]{10}\.[0-9]{1,7}'
@@ -181,7 +181,7 @@
       - 'net use \\127.0.0.1\ADMIN$ /user:corp\admin'
       - 'copy C:\Temp\agent.msi \\fileserver\ADMIN$\Temp\'
 
-- id: mention.tool.impacket_smbexec_artifacts
+- id: mention.tool_impacket_smbexec_artifacts
   title: Impacket smbexec service command and output name
   match:
     literal: ['%COMSPEC% /Q /c ', '\__output_']
@@ -205,7 +205,7 @@
       - 'A service was installed in the system. Service Name: CorpAgent Service File Name: "C:\Program Files\Corp\agent.exe"'
       - 'C:\Windows\system32\cmd.exe /c echo backup complete'
 
-- id: mention.tool.netexec_pwned_label
+- id: mention.tool_netexec_pwned_label
   title: NetExec/CrackMapExec admin-access banner
   match:
     literal: ['Pwn3d!']
@@ -228,7 +228,7 @@
       - 'SMB  10.0.0.12  445  WS012  [-] corp\svc_backup:Summer2026! STATUS_LOGON_FAILURE'
       - 'Nov 20 16:03:00 ws01 app[700]: user pwned the leaderboard'
 
-- id: mention.tool.netexec_names
+- id: mention.tool_netexec_names
   title: NetExec or CrackMapExec invoked
   match:
     literal: ['crackmapexec', 'netexec']
@@ -251,7 +251,7 @@
       - 'Nov 20 16:04:01 lnx02 bash[994]: HISTORY: smbclient -L //fileserver -U alice'
       - 'Nov 20 16:04:02 lnx02 bash[995]: HISTORY: net ads info'
 
-- id: mention.tool.netexec_short_cli
+- id: mention.tool_netexec_short_cli
   title: NetExec nxc command with a protocol
   match:
     anchored: 'nxc (?:smb|winrm|ldap|mssql|ssh|rdp|wmi|ftp|vnc|nfs) '
@@ -274,7 +274,7 @@
       - 'Nov 20 16:05:01 lnx02 bash[997]: HISTORY: nxcli --version'
       - 'Nov 20 16:05:02 lnx02 bash[998]: HISTORY: ls ~/.nxc'
 
-- id: mention.tool.powershell_offensive_cmdlets
+- id: mention.tool_powershell_offensive_cmdlets
   title: Offensive PowerShell cmdlets for credential theft, injection and lateral movement
   match:
     literal:
@@ -333,7 +333,7 @@
       - 'powershell -c "Invoke-Command -ComputerName srv01 -ScriptBlock { Get-Service }"'
       - 'powershell -c "Get-Credential | Export-Clixml cred.xml"'
 
-- id: mention.tool.powershell_recon_cmdlets
+- id: mention.tool_powershell_recon_cmdlets
   title: Offensive PowerShell reconnaissance and spraying cmdlets
   match:
     literal:
@@ -378,7 +378,7 @@
       - 'powershell -c "Get-ADUser -Filter * -Properties LastLogonDate"'
       - 'C:\Program Files\PowerUpdate\updater.exe /silent'
 
-- id: mention.tool.nishang_cmdlets
+- id: mention.tool_nishang_cmdlets
   title: Nishang PowerShell attack functions
   match:
     literal:
@@ -420,7 +420,7 @@
       - 'powershell -c "Test-NetConnection srv01 -Port 443"'
       - 'powershell -c "Get-NetTCPConnection -State Listen"'
 
-- id: mention.tool.powercat_shell
+- id: mention.tool_powercat_shell
   title: powercat client or listener executing a shell
   match:
     anchored: 'powercat {1,3}-(?:c|l)[^\n]{1,120}-e {1,3}(?:cmd|powershell)'
@@ -443,7 +443,7 @@
       - 'powershell -c "powercat -l -p 8000 -of C:\Temp\recv.bin"'
       - 'powershell -c "Get-Help about_Remote"'
 
-- id: mention.tool.metasploit_terms
+- id: mention.tool_metasploit_terms
   title: Metasploit payload and console terms
   match:
     literal: ['meterpreter', 'msfvenom', 'msfconsole', 'exploit/multi/handler', 'shell_reverse_tcp', 'shell/reverse_tcp', 'cmd/unix/reverse']
@@ -452,14 +452,15 @@
   attack: [T1059, T1071.001, T1095, T1105]
   telemetry: [any]
   source:
-    name: 'SigmaHQ: Malicious PowerShell Keywords (Sean Metcalf, Florian Roth)'
-    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/powershell/powershell_script/posh_ps_malicious_keywords.yml
-    license: DRL-1.1
-    upstream_id: f62176f3-8128-4faa-bf6c-83261322e5eb
+    name: Metasploit Framework (Rapid7) module and tool names
+    url: https://github.com/rapid7/metasploit-framework/tree/fa68d9cca90702cb1ae86dbae72d53d0738f7a12
+    license: BSD-3-Clause (framework LICENSE; bundled components vary)
+    upstream_id: modules/exploits/multi/handler.rb
   rationale: >-
-    Extends the rule's 'Metasploit' keyword to the framework's payload, generator and handler names. Meterpreter
-    payload names and handler paths appear in staged payloads, generator output and operator history; the benign
-    source is an authorized test or training range.
+    The framework's own names: the msfvenom and msfconsole tools, the multi/handler module, Meterpreter, and the
+    shell_reverse_tcp, shell/reverse_tcp and cmd/unix/reverse payload paths (verified in the repository at the pinned
+    commit). They appear in staged payloads, generator output and operator history; the benign source is an
+    authorized test or training range.
   examples:
     positive:
       - 'Nov 20 16:06:00 lnx02 bash[999]: HISTORY: msfvenom -p linux/x64/meterpreter/reverse_tcp LHOST=203.0.113.7 LPORT=4444 -f elf -o /tmp/u'
@@ -467,7 +468,7 @@
       - 'Nov 20 16:06:01 lnx02 bash[1000]: HISTORY: metasploitable-check --help'
       - 'Nov 20 16:06:02 lnx02 bash[1001]: HISTORY: msfs-config validate'
 
-- id: mention.tool.cobalt_strike_msse_pipe
+- id: mention.tool_cobalt_strike_msse_pipe
   title: Cobalt Strike artifact-kit default pipe (MSSE-<n>-server)
   match:
     anchored: '\\MSSE-[0-9]{1,5}-server\b'
@@ -491,7 +492,7 @@
       - 'Pipe Created: PipeName: \MsFteWds Image: C:\Windows\System32\SearchIndexer.exe'
       - 'Pipe Created: PipeName: \MSSQL$SQLEXPRESS\sql\query Image: C:\Program Files\Microsoft SQL Server\sqlservr.exe'
 
-- id: mention.tool.cobalt_strike_postex_pipe
+- id: mention.tool_cobalt_strike_postex_pipe
   title: Cobalt Strike post-exploitation default pipe (postex_)
   match:
     anchored: '\\postex_(?:ssh_)?[0-9a-f]{4}\b'
@@ -514,7 +515,7 @@
       - 'Pipe Created: PipeName: \mojo.5544.8812.12345678901234567 Image: C:\Program Files\Google\Chrome\Application\chrome.exe'
       - 'Pipe Created: PipeName: \PSHost.133012345678901234.4412.DefaultAppDomain.powershell Image: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 
-- id: mention.tool.cobalt_strike_msagent_pipe
+- id: mention.tool_cobalt_strike_msagent_pipe
   title: Cobalt Strike SMB beacon default pipe (msagent_)
   match:
     anchored: '\\msagent_[0-9a-f]{2,4}\b'
@@ -537,7 +538,7 @@
       - 'Pipe Created: PipeName: \wkssvc Image: C:\Windows\System32\svchost.exe'
       - 'Pipe Created: PipeName: \msagentupdate_status Image: C:\Program Files\Vendor\agent.exe'
 
-- id: mention.tool.sliver_powershell_pattern
+- id: mention.tool_sliver_powershell_pattern
   title: Sliver implant PowerShell launch pattern
   match:
     literal: ['-NoExit -Command [Console]::OutputEncoding=[Text.UTF8Encoding]::UTF8']
@@ -560,7 +561,7 @@
       - 'powershell.exe -NoExit -Command Set-Location C:\Projects'
       - 'powershell.exe -NoProfile -Command [Console]::OutputEncoding'
 
-- id: mention.tool.sliver_service_name
+- id: mention.tool_sliver_service_name
   title: Sliver default service name
   match:
     anchored: 'Service Name: {0,2}Sliver(?: implant)?\b'
@@ -583,7 +584,7 @@
       - 'A service was installed in the system. Service Name: Silverlight Updater Service File Name: C:\Program Files\Microsoft Silverlight\agent.exe'
       - 'A service was installed in the system. Service Name: CorpAgent Service File Name: C:\Program Files\Corp\agent.exe'
 
-- id: mention.tool.responder_hash_capture
+- id: mention.tool_responder_hash_capture
   title: Responder or Inveigh captured hash output
   match:
     anchored: '\] NTLMv[12](?:-SSP)? Hash {1,10}: '
@@ -606,7 +607,7 @@
       - '[*] [LLMNR]  Poisoned answer sent to 10.0.0.15 for name fileserv'
       - 'Nov 20 16:07:00 dc01 lsass: NTLM authentication succeeded for alice'
 
-- id: mention.tool.bloodhound_collectors
+- id: mention.tool_bloodhound_collectors
   title: BloodHound collector options and names
   match:
     literal:
@@ -636,7 +637,7 @@
       - 'powershell -c "Get-ADGroupMember -Identity ''Domain Admins''"'
       - 'C:\Tools\adexplorer.exe -snapshot "" C:\Temp\snap.dat'
 
-- id: mention.tool.seatbelt_checks
+- id: mention.tool_seatbelt_checks
   title: Seatbelt host-survey commands
   match:
     literal:
@@ -668,7 +669,7 @@
       - 'C:\Program Files\Corp\agent.exe --report credentials-policy'
       - 'gpresult /r'
 
-- id: mention.tool.sharpup_checks
+- id: mention.tool_sharpup_checks
   title: SharpUp privilege-escalation checks
   match:
     literal: ['HijackablePaths', 'UnquotedServicePath', 'ModifiableServiceBinaries', 'ModifiableScheduledTask', 'DomainGPPPassword', 'CachedGPPPassword', 'SharpUp.exe']
@@ -692,7 +693,7 @@
       - 'sc qc CorpAgent'
       - 'icacls "C:\Program Files\Corp"'
 
-- id: mention.tool.certify_adcs_abuse
+- id: mention.tool_certify_adcs_abuse
   title: Certify AD CS abuse command
   match:
     anchored: 'Certify\.exe {1,3}(?:find|request|cas|pkiobjects|download)\b[^\n]{0,200}(?:/vulnerable|/template:|/altname:|/ca:)'
@@ -716,7 +717,7 @@
       - 'certutil -ca.cert C:\Temp\ca.cer'
       - 'certreq -submit -attrib "CertificateTemplate:WebServer" req.csr'
 
-- id: mention.tool.certipy_adcs_abuse
+- id: mention.tool_certipy_adcs_abuse
   title: Certipy AD CS abuse command
   match:
     anchored: 'certipy {1,3}(?:find|req|auth|shadow|template|forge|relay|account|cert|ptt)\b[^\n]{0,200}(?:-vulnerable|-template|-upn |-pfx |-ca |-dc-ip |-target|-bloodhound|-kirbi)'
@@ -739,7 +740,7 @@
       - 'Nov 20 16:08:01 lnx02 bash[1003]: HISTORY: openssl x509 -in ca.pem -noout -subject'
       - 'Nov 20 16:08:02 lnx02 bash[1004]: HISTORY: pip show certifi'
 
-- id: mention.tool.chisel_tunnel
+- id: mention.tool_chisel_tunnel
   title: chisel tunnel client or server with reverse or SOCKS options
   match:
     anchored: 'chisel(?:\.exe)? {1,3}(?:client|server) [^\n]{0,200}(?:-socks5|--socks5|-reverse|--reverse| R:|:socks\b)'
@@ -763,7 +764,7 @@
       - 'Nov 20 16:09:01 web01 bash[1004]: HISTORY: chisel --version'
       - 'Nov 20 16:09:02 web01 bash[1005]: HISTORY: chisel server --port 9000 --authfile users.json'
 
-- id: mention.tool.chisel_protocol
+- id: mention.tool_chisel_protocol
   title: chisel protocol version string
   match:
     literal: ['chisel-v3']
@@ -786,7 +787,7 @@
       - '10.0.3.30 - - [20/Nov/2026:16:10:01 +0000] "GET /ws HTTP/1.1" 101 0 "-" "Mozilla/5.0" sec-websocket-protocol="graphql-ws"'
       - 'Nov 20 16:10:02 web01 bash[1006]: HISTORY: chisel --help'
 
-- id: mention.tool.frp_config
+- id: mention.tool_frp_config
   title: Fast Reverse Proxy client or server configuration file
   match:
     literal: ['frpc.ini', 'frps.ini', 'frpc.toml', 'frps.toml']
@@ -810,7 +811,7 @@
       - 'Nov 20 16:11:00 web01 bash[1007]: HISTORY: cat /etc/frpd.conf'
       - 'C:\Program Files\Corp\agent.exe -c C:\ProgramData\Corp\agent.ini'
 
-- id: mention.tool.ngrok_exposure
+- id: mention.tool_ngrok_exposure
   title: ngrok exposing SMB, RDP or WinRM, or registering an auth token
   match:
     anchored: 'ngrok(?:\.exe)? {1,3}(?:tcp {1,3}(?:139|445|3389|5985|5986|22)\b|authtoken |config add-authtoken )'
@@ -835,7 +836,7 @@
       - 'ngrok http 3978'
       - 'Nov 20 16:12:01 web01 bash[1009]: HISTORY: ngrok version'
 
-- id: mention.tool.rclone_exfil_options
+- id: mention.tool_rclone_exfil_options
   title: rclone copy with an explicit config and no certificate check
   match:
     anchored: 'rclone(?:\.exe)? [^\n]{0,200}--config [^\n]{0,200}--no-check-certificate'
@@ -859,7 +860,7 @@
       - 'Nov 20 16:13:00 bk01 rclone[700]: INFO  : backup.tar.gz: Copied (new) to s3:corp-backups'
       - 'Nov 20 16:13:01 bk01 bash[1010]: HISTORY: rclone listremotes'
 
-- id: mention.tool.lazagne
+- id: mention.tool_lazagne
   title: LaZagne credential recovery tool
   match:
     literal: ['lazagne', 'The LaZagne Project']
@@ -883,7 +884,7 @@
       - 'C:\Program Files\KeePass\KeePass.exe C:\Users\alice\db.kdbx'
       - 'Nov 20 16:14:00 ws01 chrome.exe: password manager sync complete'
 
-- id: mention.tool.peass_enumeration
+- id: mention.tool_peass_enumeration
   title: PEASS-ng privilege-escalation enumeration scripts
   match:
     literal: ['linpeas', 'winpeas', 'PEASS-ng']
@@ -907,7 +908,7 @@
       - 'Nov 20 16:15:01 web01 bash[1012]: HISTORY: sudo -l'
       - 'Nov 20 16:15:02 web01 bash[1013]: HISTORY: find / -perm -4000 -type f 2>/dev/null | head'
 
-- id: mention.tool.hydra_form_brute
+- id: mention.tool_hydra_form_brute
   title: Hydra brute force with login and password placeholders
   match:
     anchored: '\^USER\^[^\n]{0,200}\^PASS\^'
@@ -930,7 +931,7 @@
       - 'Nov 20 16:16:01 lnx02 bash[1015]: HISTORY: curl -d "user=alice&pass=secret" https://intranet.example.org/login'
       - 'Nov 20 16:16:02 lnx02 bash[1016]: HISTORY: echo ^C pressed'
 
-- id: mention.tool.hydra_banner
+- id: mention.tool_hydra_banner
   title: THC Hydra banner
   match:
     literal: ['van Hauser/THC']
@@ -953,7 +954,7 @@
       - 'Nov 20 16:17:00 lnx02 sshd[1017]: Failed password for invalid user admin from 203.0.113.9 port 4022 ssh2'
       - 'Nov 20 16:17:01 lnx02 fail2ban.actions[700]: NOTICE [sshd] Ban 203.0.113.9'
 
-- id: mention.tool.attack_tool_user_agents
+- id: mention.tool_attack_tool_user_agents
   title: Attack and scanning tool user agents
   match:
     literal:
@@ -1017,7 +1018,7 @@
       - '10.0.3.8 - - [20/Nov/2026:16:18:01 +0000] "GET / HTTP/1.1" 200 812 "-" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"'
       - '10.0.3.9 - - [20/Nov/2026:16:18:02 +0000] "GET /health HTTP/1.1" 200 2 "-" "kube-probe/1.29"'
 
-- id: mention.tool.recon_tool_user_agents
+- id: mention.tool_recon_tool_user_agents
   title: Web reconnaissance tool user agents
   match:
     literal:
@@ -1052,7 +1053,7 @@
       - '10.0.3.8 - - [20/Nov/2026:16:19:01 +0000] "GET /api/v1/health HTTP/1.1" 200 17 "-" "kube-probe/1.29"'
       - '10.0.3.8 - - [20/Nov/2026:16:19:02 +0000] "GET / HTTP/1.1" 200 812 "-" "curl/8.5.0"'
 
-- id: mention.tool.internet_scanner_user_agent
+- id: mention.tool_internet_scanner_user_agent
   title: zgrab internet-scanner user agent
   match:
     literal: ['zgrab/']
@@ -1075,7 +1076,7 @@
       - '10.0.3.8 - - [20/Nov/2026:16:20:01 +0000] "GET / HTTP/1.1" 200 812 "-" "Wget/1.21.4"'
       - '10.0.3.8 - - [20/Nov/2026:16:20:02 +0000] "GET / HTTP/1.1" 200 812 "-" "python-requests/2.31.0"'
 
-- id: mention.tool.cryptominer_user_agent
+- id: mention.tool_cryptominer_user_agent
   title: Cryptominer user agent
   match:
     literal: ['"XMRig/', '"ccminer']
@@ -1099,7 +1100,7 @@
       - '10.0.3.8 - - [20/Nov/2026:16:21:01 +0000] "GET / HTTP/1.1" 200 812 "-" "Mozilla/5.0 (X11; Linux x86_64)"'
       - '10.0.3.8 - - [20/Nov/2026:16:21:02 +0000] "GET /mining-faq HTTP/1.1" 404 0 "-" "curl/8.5.0"'
 
-- id: mention.tool.mining_pool_url
+- id: mention.tool_mining_pool_url
   title: Stratum mining pool URL
   match:
     literal: ['stratum+tcp://', 'stratum+ssl://', 'stratum+tls://', 'stratum1+tcp://', 'stratum2+tcp://']
@@ -1123,7 +1124,7 @@
       - 'Nov 20 16:22:01 web01 bash[1019]: HISTORY: curl -s https://api.example.org/strata/v1'
       - 'Nov 20 16:22:02 web01 app[700]: connected to tcp://mq01:5672'
 
-- id: mention.tool.xmrig_options
+- id: mention.tool_xmrig_options
   title: XMRig name or donation option
   match:
     literal: ['xmrig', '--donate-level']
@@ -1146,7 +1147,7 @@
       - 'Nov 20 16:23:01 web01 bash[1021]: HISTORY: nice -n 10 ./build.sh --level 3'
       - 'Nov 20 16:23:02 web01 top: 1022 www-data 20 0 kworker/u8:2'
 
-- id: mention.tool.monero_pool_hosts
+- id: mention.tool_monero_pool_hosts
   title: Monero mining pool host names
   match:
     literal:
@@ -1189,7 +1190,7 @@
       - 'Nov 20 16:24:01 ns01 named[880]: client 10.0.5.17#40212 (pool.ntp.org): query: pool.ntp.org IN A +'
       - 'Nov 20 16:24:02 ns01 named[880]: client 10.0.5.17#40213 (api.example.org): query: api.example.org IN AAAA +'
 
-- id: mention.tool.mirai_loader_tokens
+- id: mention.tool_mirai_loader_tokens
   title: Mirai loader shell tokens
   match:
     literal: ['/bin/busybox ECCHI', 'ECCHI: applet not found', '/bin/busybox IHCCE', '/bin/busybox wget; /bin/busybox tftp;']
@@ -1214,7 +1215,7 @@
       - 'Nov 20 16:25:00 cam01 sh[300]: /bin/busybox --help'
       - 'Nov 20 16:25:01 cam01 sh[300]: busybox: applet ifconfig started'
 
-- id: mention.tool.onion_address
+- id: mention.tool_onion_address
   title: Tor onion service address
   match:
     anchored: '\.onion\b'
