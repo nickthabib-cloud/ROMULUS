@@ -69,6 +69,8 @@ class Settings(BaseModel):
 
     # Evaluation ground truth, if this install has any: doctor refuses source paths that overlap it.
     eval_root: Path | None = None
+    # the mention pattern directory (content/mentions when unset)
+    mention_dir: Path | None = None
 
     es_url: str = "http://127.0.0.1:9200"
     es_flavor: str = "elasticsearch"
@@ -350,6 +352,7 @@ class Settings(BaseModel):
 
 ENV_MAP = {
     "ROMULUS_HOME": "home", "ROMULUS_SITE": "site", "ROMULUS_EVAL_ROOT": "eval_root",
+    "ROMULUS_MENTION_DIR": "mention_dir",
     "ROMULUS_WEB_BIND": "web_bind", "ROMULUS_SECRET_KEY": "secret_key",
     "ROMULUS_WEB_TLS_CERT": "web_tls_cert", "ROMULUS_WEB_TLS_KEY": "web_tls_key",
     "OLLAMA_URL": "ollama_url", "OLLAMA_MODEL_TRIAGE": "ollama_model_triage",

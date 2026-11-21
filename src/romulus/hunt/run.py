@@ -131,6 +131,9 @@ def create_hunt(s: Settings, start: datetime, end: datetime, created_by: str, st
     manifest['indicator_lists'] = IndicatorLists(repo).pin()
     from romulus.content.sigma_store import SigmaRules
     manifest['sigma_rules'] = SigmaRules(repo).pin()
+    from romulus.content.mention_patterns import load_mention_patterns, pattern_pin
+    # the mention pattern set the hunt is created with: its sweep names every file that differs when it runs
+    manifest['mention_patterns'] = pattern_pin(load_mention_patterns(settings=s))
     hid = new_hunt_id()
     repo.create_hunt(hid, manifest, digest(manifest), created_by)
     arkime = arkime_profile_fields(s, [target for target in targets

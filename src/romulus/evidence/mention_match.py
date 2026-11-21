@@ -10,9 +10,11 @@ Literals are found in time linear in the line:
 
 An anchored expression runs only where its literal prefix occurs (at most `MAX_PREFIX_TRIES` places per line, each over
 at most `REGEX_WINDOW` characters), or at the line's start for one that begins with `^`. The pattern loader admits only
-a linear-time subset of expressions whose backtracking is bounded (`content.mention_patterns`).
+a subset of expressions whose backtracking is bounded (`content.mention_patterns`).
 
-A line is scanned up to `MAX_SCAN_CHARS` characters; the rest is counted as not scanned.
+The literal pass reads a line up to `MAX_SCAN_CHARS` characters (256 KiB of text): its work grows with the line only
+where the gate finds an anchor, since the automaton runs only around each gate match. The rest of a longer line is
+counted as not scanned. Each match also gives the offset where it starts, so every view can show the text around it.
 """
 from __future__ import annotations
 
@@ -22,8 +24,8 @@ from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-# the characters of a line the matcher reads; the rest of a longer line is counted as not scanned
-MAX_SCAN_CHARS = 8_192
+# the characters of a line the literal pass reads; the rest of a longer line is counted as not scanned
+MAX_SCAN_CHARS = 262_144
 # an anchored expression sees at most this many characters from where it is tried
 REGEX_WINDOW = 512
 # and is tried at most at this many occurrences of its literal prefix in one line
@@ -110,26 +112,38 @@ class LiteralSet:
         self._goto, self._fail, self._out = goto, fail, out
 
     def find(self, text: str, positions: int = MAX_PREFIX_TRIES) -> dict[int, list[int]]:
-        """{literal index: its first `positions` start offsets in `text`} for every literal that occurs."""
+        """{literal index: its first `positions` start offsets in `text`} for every literal that occurs.
+
+        The automaton runs only over the spans around the gate's matches: every literal occurrence has its anchor
+        character either at a gate match or inside one (the gate finds the leftmost anchor each time it resumes), so
+        it lies within the longest literal's length of that match."""
         if self.gate is None:
             return {}
-        first = self.gate.search(text)
-        if first is None:
+        spans: list[list[int]] = []
+        reach = self.longest
+        for hit in self.gate.finditer(text):
+            low, high = max(0, hit.start() - reach), min(len(text), hit.end() + reach)
+            if spans and low <= spans[-1][1]:
+                spans[-1][1] = max(spans[-1][1], high)
+            else:
+                spans.append([low, high])
+        if not spans:
             return {}
         goto, fail, out = self._goto, self._fail, self._out
         found: dict[int, list[int]] = {}
-        state = 0
-        # no literal occurrence can start before the first anchor match less the longest literal
-        start = max(0, first.start() - self.longest)
-        for offset in range(start, len(text)):
-            char = text[offset]
-            while state and char not in goto[state]:
-                state = fail[state]
-            state = goto[state].get(char, 0)
-            for index in out[state]:
-                starts = found.setdefault(index, [])
-                if len(starts) < positions:
-                    starts.append(offset - len(self.literals[index]) + 1)
+        for low, high in spans:
+            state = 0
+            for offset in range(low, high):
+                char = text[offset]
+                while state and char not in goto[state]:
+                    state = fail[state]
+                state = goto[state].get(char, 0)
+                for index in out[state]:
+                    starts = found.setdefault(index, [])
+                    if len(starts) < positions:
+                        begin = offset - len(self.literals[index]) + 1
+                        if begin not in starts:
+                            starts.append(begin)
         return found
 
 
@@ -184,7 +198,9 @@ class MentionMatcher:
     @staticmethod
     def _try(pattern: CompiledPattern, view: str, start: int, cut: bool, unresolved: set[str]) -> bool:
         """Whether the expression matches at `start`, over its window. A window that ends before the line does (or,
-        for an end anchor, a line whose real end the matcher cannot see) is noted when nothing matched."""
+        for an end anchor, a line whose real end the matcher cannot see) is noted when nothing matched. The window
+        reads one character past its bound, and a match that reaches the window's end inside a longer line is not
+        a hit (a trailing \\b or end-like test there would read the window's edge as the line's): it is noted."""
         end = len(view)
         fits = pattern.max_width is not None and pattern.max_width <= REGEX_WINDOW
         if pattern.end_anchored:
@@ -197,16 +213,22 @@ class MentionMatcher:
                 unresolved.add(WINDOW_CUT)                # the line's real end was past the scan bound
                 return False
             return pattern.regex.match(view, start, end) is not None
-        if pattern.regex.match(view, start, min(end, start + REGEX_WINDOW)) is not None:
+        stop = min(end, start + REGEX_WINDOW + 1)
+        found = pattern.regex.match(view, start, stop)
+        if found is not None and (found.end() < stop or stop == end):
             return True
-        if start + REGEX_WINDOW < end and not fits:
+        if (found is not None or start + REGEX_WINDOW < end) and not fits:
             unresolved.add(WINDOW_CUT)
         return False
 
     def match(self, text: str, *, cut: bool = False, unresolved: set[str] | None = None) -> list[int]:
         """The indexes of the patterns whose text occurs in `text` (a line `bound_text` returned; `cut` when it cut
         the line). `unresolved` receives why an anchored expression could not be ruled out on this line."""
-        matched: set[int] = set()
+        return sorted(self.locate(text, cut=cut, unresolved=unresolved))
+
+    def locate(self, text: str, *, cut: bool = False, unresolved: set[str] | None = None) -> dict[int, int]:
+        """{pattern index: the offset in `text` where its first match starts} for every pattern that matches."""
+        matched: dict[int, int] = {}
         notes: set[str] = set() if unresolved is None else unresolved
         lowered = None
         for sensitive, literals, owners, at_start in self._views:
@@ -216,14 +238,16 @@ class MentionMatcher:
                 view = lowered = text.lower() if lowered is None else lowered
             for slot, starts in literals.find(view, MAX_PREFIX_TRIES + 1).items():
                 for index, gated in owners[slot]:
+                    if not gated:
+                        matched[index] = min(matched.get(index, starts[0]), starts[0])
+                        continue
                     if index in matched:
                         continue
-                    if not gated:
-                        matched.add(index)
-                        continue
                     pattern = self._by_index[index]
-                    if any(self._try(pattern, view, start, cut, notes) for start in starts[:MAX_PREFIX_TRIES]):
-                        matched.add(index)
+                    hit = next((start for start in starts[:MAX_PREFIX_TRIES]
+                                if self._try(pattern, view, start, cut, notes)), None)
+                    if hit is not None:
+                        matched[index] = hit
                     elif len(starts) > MAX_PREFIX_TRIES:
                         notes.add(TRIES_EXHAUSTED)
             for pattern in at_start:
@@ -233,5 +257,7 @@ class MentionMatcher:
                 if lead and not view.startswith(lead):
                     continue                                     # it cannot match this line at all
                 if self._try(pattern, view, 0, cut, notes):
-                    matched.add(pattern.index)
-        return sorted(matched)
+                    matched[pattern.index] = 0
+        # an offset in the lower-cased view can drift from the original text by a character or two in rare
+        # scripts: it only places a snippet, so it is clamped, never trusted as exact
+        return {index: min(max(0, offset), max(0, len(text) - 1)) for index, offset in matched.items()}

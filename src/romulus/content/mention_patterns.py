@@ -1,6 +1,7 @@
 """Mention patterns: curated, sourced text patterns the mention sweep looks for in unparsed text.
 
-Each file in the mention directory (`content/mentions/*.yaml`, or `ROMULUS_MENTION_DIR`) is a YAML list of patterns:
+Each file in the mention directory (`content/mentions/*.yaml`, or the settings' `ROMULUS_MENTION_DIR`) is a YAML
+list of patterns:
 
     - id: mention.<slug>            # unique across every file; slug: lowercase words joined by _
       title: str
@@ -26,7 +27,10 @@ that prefix occurs).
 A literal is 3 to 512 characters. An anchored expression must stay fast on attacker-written text. It is at most 512
 characters and uses only literals, character classes, `.`, groups, alternation, repeats and the anchors `^`, `$`,
 `\\A`, `\\Z`, `\\b` and `\\B`: no back references, lookaround, conditionals, atomic groups, possessive repeats or inline
-flags. No repeat may hold another repeat, an optional group included (`(?:x+)?` is refused like `(?:x+)+`); a repeat
+flags. Two wide repeats of positive classes (each able to take more than 16 characters) that can take the same
+characters may not follow each other unless a mandatory item neither takes stands between them (`a[e-w]*[e-w]*X` is
+refused; open gaps are bounded by the open-gap budget instead). No repeat may
+hold another repeat, an optional group included (`(?:x+)?` is refused like `(?:x+)+`); a repeat
 that can match more than once may not hold an alternation either (an optional group may), and at most four repeats may each match more than 16 characters. The upper bounds of its open gaps
 (`.`, a negated class such as `[^\\n]`, or a negated character, each repeated) along any path sum to at most
 MAX_GAP_SUM: an unbounded open gap is refused. Each expression is then timed at
@@ -38,7 +42,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -194,9 +197,23 @@ class PatternSet:
                 "refused": list(self.refused)}
 
 
-def mention_dir() -> Path:
-    override = os.environ.get("ROMULUS_MENTION_DIR")
-    return Path(override) if override else Path(__file__).resolve().parents[3] / "content" / "mentions"
+# the shipped corpus; a deployment names another directory through its settings (ROMULUS_MENTION_DIR)
+SHIPPED_DIR = Path(__file__).resolve().parents[3] / "content" / "mentions"
+
+
+def mention_dir(settings=None) -> Path:
+    """The pattern directory a hunt reads: the settings' ROMULUS_MENTION_DIR, else the shipped corpus."""
+    chosen = getattr(settings, "mention_dir", None)
+    return Path(chosen) if chosen else SHIPPED_DIR
+
+
+def pattern_pin(patterns: PatternSet) -> dict:
+    """What a hunt pins of its pattern set at creation: the set's digest and each file's digest (the sweep names every
+    file that differs when it runs)."""
+    return {"digest": patterns.digest, "patterns": len(patterns.patterns),
+            "files": [{"name": item["name"], "digest": item["digest"], "patterns": item["patterns"]}
+                      for item in patterns.files],
+            "refused": [item["name"] for item in patterns.refused]}
 
 
 # ---- anchored expressions -------------------------------------------------------------------------------------------
@@ -244,6 +261,109 @@ def _check(items, multiplies: bool, repeated: bool = False) -> int:
     return wide
 
 
+# the characters the overlap rule and the load probe test a class against: printable ASCII, tab, and a few others
+_UNIVERSE = tuple(chr(code) for code in range(32, 127)) + ("\t", "\u00e9", "\u0416", "\u4e2d", "\u00a0")
+_CATEGORIES = {
+    _sre.CATEGORY_DIGIT: str.isdigit, _sre.CATEGORY_NOT_DIGIT: lambda c: not c.isdigit(),
+    _sre.CATEGORY_SPACE: str.isspace, _sre.CATEGORY_NOT_SPACE: lambda c: not c.isspace(),
+    _sre.CATEGORY_WORD: lambda c: c.isalnum() or c == "_", _sre.CATEGORY_NOT_WORD: lambda c: not (c.isalnum() or c == "_"),
+}
+
+
+def _in_atom(char: str, op, arg) -> bool:
+    """Whether a one-character item (a literal, a negated literal, '.', a class) can match `char`."""
+    if op == _sre.LITERAL:
+        return char == chr(arg)
+    if op == _sre.NOT_LITERAL:
+        return char != chr(arg)
+    if op == _sre.ANY:
+        return char != "\n"
+    if op == _sre.IN:
+        negate, hit = False, False
+        for kind, value in arg:
+            if kind == _sre.NEGATE:
+                negate = True
+            elif kind == _sre.LITERAL:
+                hit = hit or char == chr(value)
+            elif kind == _sre.RANGE:
+                hit = hit or value[0] <= ord(char) <= value[1]
+            elif kind == _sre.CATEGORY:
+                test = _CATEGORIES.get(value)
+                hit = hit or (test(char) if test is not None else True)
+        return hit != negate
+    return True
+
+
+def _chars(items, fold: bool) -> frozenset[str]:
+    """The characters of the universe a parsed sequence can consume (case folded when `fold`)."""
+    out = set()
+    for op, arg in items:
+        if op in _ATOMS:
+            out.update(c for c in _UNIVERSE if _in_atom(c, op, arg) or (fold and _in_atom(c.swapcase(), op, arg)))
+        elif op == _sre.SUBPATTERN:
+            out |= _chars(arg[3], fold)
+        elif op == _sre.BRANCH:
+            for alternative in arg[1]:
+                out |= _chars(alternative, fold)
+        elif op in _REPEATS:
+            out |= _chars(arg[2], fold)
+    return frozenset(out)
+
+
+def _overlaps(items, fold: bool) -> None:
+    """Refuse two wide repeats of positive classes (each able to take more than WIDE_REPEAT characters) that can take
+    the same characters, unless a mandatory item whose characters neither can take stands between them: the engine
+    would try every way of splitting a run between them (`a[e-w]*[e-w]*X`). A short repeat multiplies the work by a
+    small constant only, and an open gap ('.', a negated class) is bounded by the open-gap budget: both are left to
+    that budget, the wide-repeat count and the load probe. Groups that are not repeated are read as part of the sequence around them; an
+    alternation is a separator when every character any of its branches takes is outside both repeats, and each of
+    its branches is checked on its own."""
+    flat = []
+
+    def spread(sequence):
+        for op, arg in sequence:
+            if op == _sre.SUBPATTERN:
+                spread(arg[3])
+            else:
+                flat.append((op, arg))
+    spread(items)
+    # each repeat still open: its characters, and the character sets of the mandatory items after it
+    open_repeats: list[tuple[frozenset[str], list[frozenset[str]]]] = []
+
+    def separate(chars: frozenset[str]) -> None:
+        for _earlier, separators in open_repeats:
+            separators.append(chars)
+
+    for op, arg in flat:
+        if op in _REPEATS:
+            low, high, body = arg
+            if high != _sre.MAXREPEAT and int(high) * max(1, _width(body)) <= WIDE_REPEAT:
+                # a short repeat (at most WIDE_REPEAT characters) multiplies the work by a small constant, which
+                # the wide-repeat count and the load probe bound; it is a mandatory item when it must match
+                if int(low) >= 1:
+                    separate(_chars(body, fold))
+                continue
+            if _open_gap(list(body)):
+                # an open gap ('.', a negated class): its width is bounded by the open-gap budget, and it is no
+                # separator either
+                continue
+            chars = _chars(body, fold)
+            for earlier, separators in open_repeats:
+                if earlier & chars and not any(not (sep & earlier) and not (sep & chars) for sep in separators):
+                    raise ValueError("two repeats that can take the same characters follow each other with no "
+                                     "mandatory item between them that neither takes (it can backtrack "
+                                     "polynomially)")
+            if int(low) >= 1:
+                separate(chars)
+            open_repeats.append((chars, []))
+        elif op in _ATOMS:
+            separate(_chars([(op, arg)], fold))
+        elif op == _sre.BRANCH:
+            for alternative in arg[1]:
+                _overlaps(alternative, fold)
+            separate(_chars([(op, arg)], fold))
+
+
 def _open_gap(body) -> bool:
     """A repeat body that matches almost any character: `.`, a negated class, or a negated character."""
     if len(body) != 1:
@@ -275,27 +395,53 @@ def _width(items) -> int:
     return min(int(widest), MAX_SCAN_CHARS)
 
 
-def _probe_lines(examples: list[str]) -> list[str]:
-    """Lines built to make an expression backtrack: each example cut before its last character and repeated, and
-    each example with a run of each of its own characters inserted after each of its first characters."""
+_PROBE_CHARS = 4 * REGEX_WINDOW
+
+
+def _repeat_samples(items, fold: bool) -> list[str]:
+    """One character each repeat of the expression can take (a class's own characters, not only the examples')."""
+    samples = []
+    for op, arg in items:
+        if op in _REPEATS:
+            chars = sorted(_chars(arg[2], fold))
+            samples.extend(chars[:1] + chars[len(chars) // 2:len(chars) // 2 + 1] + chars[-1:])
+        elif op == _sre.SUBPATTERN:
+            samples.extend(_repeat_samples(arg[3], fold))
+        elif op == _sre.BRANCH:
+            for alternative in arg[1]:
+                samples.extend(_repeat_samples(alternative, fold))
+    return list(dict.fromkeys(samples))
+
+
+def _probe_lines(examples: list[str], prefix: str = "", samples: list[str] = ()) -> list[str]:
+    """Lines built to make an expression backtrack: each example cut before its last character and repeated; each
+    example with a run of each of its own characters inserted after each of its first characters; and the literal
+    prefix followed by runs (and alternations) of the characters each repeat can take."""
     lines = []
     for example in examples[:5]:
         if not example:
             continue
         cut = example[:-1] or example
-        lines.append(cut * (MAX_SCAN_CHARS // len(cut) + 1))
+        lines.append(cut * (_PROBE_CHARS // len(cut) + 1))
         for split in range(1, min(len(example), 24)):
             head, tail = example[:split], example[split:]
             for char in sorted(set(example))[:24]:
                 lines.append(head + char * REGEX_WINDOW + tail[:-1])
-    return [line[:MAX_SCAN_CHARS] for line in lines]
+    for char in samples:
+        lines.append(prefix + char * _PROBE_CHARS)
+    if samples:
+        mixed = "".join(samples)
+        lines.append(prefix + mixed * (_PROBE_CHARS // len(mixed) + 1))
+        for char in samples:
+            lines.append(prefix + (char + mixed) * (_PROBE_CHARS // (len(mixed) + 1) + 1))
+    return [line[:_PROBE_CHARS] for line in lines]
 
 
-def probe(regex: re.Pattern, examples: list[str]) -> float:
+def probe(regex: re.Pattern, examples: list[str], prefix: str = "", samples: list[str] = ()) -> float:
     """The longest time the expression takes over one hostile probe line, searched over its window: for each line
     the fastest of PROBE_RUNS runs, so a busy machine's pauses are not counted against the expression."""
     worst = 0.0
-    for line in _probe_lines(examples):
+    for line in _probe_lines(examples, prefix, samples):
         fastest = None
         for _ in range(PROBE_RUNS):
             began = time.perf_counter()
@@ -326,6 +472,7 @@ def _ends(items) -> bool:
 class Anchored:
     regex: re.Pattern
     prefix: str | None              # None: it starts with ^
+    samples: tuple[str, ...]        # one character each repeat can take, for the load probe
     end_anchored: bool
     max_width: int | None           # the longest text it can match; None when unbounded
     lead: str = ""                  # for one that starts with ^: the literal text right after it
@@ -344,11 +491,13 @@ def compile_anchored(expression: str, case_sensitive: bool) -> Anchored:
         raise ValueError("inline flags are refused: case is set by case_sensitive")
     items = list(parsed)
     _check(items, False)
+    _overlaps(items, not case_sensitive)
     if (gaps := _gap_sum(items)) > MAX_GAP_SUM:
         shown = "unbounded" if gaps >= _sre.MAXREPEAT else str(gaps)
         raise ValueError(f"its open gaps ('.', negated classes) sum to {shown} characters, above {MAX_GAP_SUM}")
     widest = parsed.getwidth()[1]
-    shape = {"end_anchored": _ends(items), "max_width": None if widest >= _sre.MAXREPEAT else int(widest)}
+    shape = {"end_anchored": _ends(items), "max_width": None if widest >= _sre.MAXREPEAT else int(widest),
+             "samples": tuple(_repeat_samples(items, not case_sensitive))}
     if items and items[0][0] == _sre.AT and items[0][1] in {_sre.AT_BEGINNING, _sre.AT_BEGINNING_STRING}:
         lead = []
         for op, arg in items[1:]:
@@ -376,7 +525,8 @@ def compile_anchored(expression: str, case_sensitive: bool) -> Anchored:
 def compile_pattern(index: int, pattern: MentionPattern) -> CompiledPattern:
     if pattern.match.anchored is not None:
         built = compile_anchored(pattern.match.anchored, pattern.case_sensitive)
-        took = probe(built.regex, [*pattern.examples.positive, *pattern.examples.negative])
+        took = probe(built.regex, [*pattern.examples.positive, *pattern.examples.negative],
+                     built.prefix or built.lead, list(built.samples))
         if took > PROBE_LIMIT_SECONDS:
             raise ValueError(f"the expression took {took * 1000:.0f} ms on one hostile probe line (the limit is "
                              f"{PROBE_LIMIT_SECONDS * 1000:.0f} ms): it can backtrack too far")
@@ -437,10 +587,10 @@ def load_pattern_file(path: Path, *, taken: set[str] | frozenset[str] = frozense
     return patterns, compiled
 
 
-def load_mention_patterns(directory: Path | None = None) -> PatternSet:
+def load_mention_patterns(directory: Path | None = None, settings=None) -> PatternSet:
     """Every valid pattern file of the directory, in file-name order; a refused file is listed with its error. A
     missing directory or one without files gives an empty set, which the sweep reports as not scanned."""
-    root = directory or mention_dir()
+    root = directory or mention_dir(settings)
     out = PatternSet(directory=str(root))
     files = sorted(root.glob("*.yaml")) if root.is_dir() else []
     taken: set[str] = set()
