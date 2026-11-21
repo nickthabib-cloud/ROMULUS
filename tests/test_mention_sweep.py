@@ -1307,6 +1307,11 @@ LEFT_OUT_CASES = {
     "windows inventory unavailable": ({}, {"logs-win": [
         "event class inventory unavailable: channel/provider/event id fields are not searchable"]},
         {("logs-win", "channel", "any channel outside the catalog's")}),
+    "windows inventory incomplete": ({}, {"logs-win": [
+        ("event class inventory incomplete: 12 Windows record(s) have missing or invalid channel/provider/event id "
+         "across 3 bucket(s)"),
+        "event class inventory incomplete: aggregation bucket limit reached"]},
+        {("logs-win", "channel", "any channel outside the catalog's")}),
 }
 
 
@@ -1370,3 +1375,47 @@ def test_an_event_original_that_is_a_document_is_never_scanned_as_a_line(tmp_pat
     scanner.scan(TARGET, CONTRACT, [(plain, "x")], None)
     assert scanner.summary()["lines_matched"] == 1
     scanner.close()
+
+
+# ---- doctor: the pattern set a hunt would load ----------------------------------------------------------------------
+
+def _doctor_check(tmp_path, monkeypatch, shipped, **settings):
+    import romulus.content.mention_patterns as patterns_module
+    from romulus.doctor import check_mention_patterns
+    monkeypatch.setattr(patterns_module, "SHIPPED_DIR", shipped)
+    return check_mention_patterns(Settings(home=tmp_path, **settings))
+
+
+def test_doctor_reports_the_shipped_corpus_loaded(tmp_path, monkeypatch):
+    from tests.conftest import SHIPPED_MENTION_DIR
+    check = _doctor_check(tmp_path, monkeypatch, SHIPPED_MENTION_DIR)
+    assert check.name == "mentions.patterns" and check.status == "ok", check.detail
+    expected = load_mention_patterns(SHIPPED_MENTION_DIR)
+    assert check.data["patterns"] == len(expected.patterns) and check.data["files"] == len(expected.files) > 0
+    assert check.data["shipped"] and check.data["refused_total"] == 0 and "the shipped corpus" in check.detail
+
+
+@pytest.mark.parametrize("state", ["empty", "missing"])
+def test_doctor_warns_when_the_shipped_directory_is_empty_or_missing(tmp_path, monkeypatch, state):
+    # an empty directory where the corpus is looked for first shadows it: nothing loads
+    shadow = tmp_path / "romulus" / "content" / "mentions"
+    if state == "empty":
+        shadow.mkdir(parents=True)
+    check = _doctor_check(tmp_path, monkeypatch, shadow)
+    assert check.status == "warn" and check.data["patterns"] == 0
+    assert ("holds no pattern files" if state == "empty" else "is missing") in check.detail
+    assert "will not scan unparsed text" in check.detail
+
+
+def test_doctor_warns_on_a_refused_pattern_and_names_it(tmp_path, monkeypatch):
+    _file(tmp_path / "p", "mixed.yaml", [_pattern(), _pattern(id="mention.t_bad", strength="urgent")])
+    check = _doctor_check(tmp_path, monkeypatch, tmp_path / "missing", mention_dir=tmp_path / "p")
+    assert check.status == "warn" and check.data["patterns"] == 1 and check.data["refused_total"] == 1
+    assert "mention.t_bad" in check.detail and "ROMULUS_MENTION_DIR" in check.detail
+    assert check.data["refused"][0]["pattern"] == "mention.t_bad"
+
+
+def test_doctor_runs_the_mention_check_as_a_warning_step(tmp_path):
+    from romulus.doctor import doctor_steps
+    step = next(step for step in doctor_steps(Settings(home=tmp_path)) if step.name == "mentions.patterns")
+    assert step.critical is False
