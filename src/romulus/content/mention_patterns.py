@@ -26,8 +26,8 @@ that prefix occurs).
 A literal is 3 to 512 characters. An anchored expression must stay fast on attacker-written text. It is at most 512
 characters and uses only literals, character classes, `.`, groups, alternation, repeats and the anchors `^`, `$`,
 `\\A`, `\\Z`, `\\b` and `\\B`: no back references, lookaround, conditionals, atomic groups, possessive repeats or inline
-flags. A repeat that can match more than once may hold neither another repeat nor an alternation (an optional group
-may hold both), and at most four repeats may each match more than 16 characters. The upper bounds of its open gaps
+flags. No repeat may hold another repeat, an optional group included (`(?:x+)?` is refused like `(?:x+)+`); a repeat
+that can match more than once may not hold an alternation either (an optional group may), and at most four repeats may each match more than 16 characters. The upper bounds of its open gaps
 (`.`, a negated class such as `[^\\n]`, or a negated character, each repeated) along any path sum to at most
 MAX_GAP_SUM: an unbounded open gap is refused. Each expression is then timed at
 load against lines built to make it backtrack (from its own examples), and refused when one takes longer than
@@ -207,9 +207,9 @@ _END_AT = {_sre.AT_END, _sre.AT_END_STRING}
 _REPEATS = {_sre.MAX_REPEAT, _sre.MIN_REPEAT}
 
 
-def _check(items, multiplies: bool) -> int:
+def _check(items, multiplies: bool, repeated: bool = False) -> int:
     """The number of wide repeats in a parsed sequence; ValueError on anything outside the subset. `multiplies`: the
-    sequence sits inside a repeat that can match more than once."""
+    sequence sits inside a repeat that can match more than once; `repeated`: inside any repeat, an optional one too."""
     wide = 0
     for op, arg in items:
         if op in _ATOMS:
@@ -222,17 +222,18 @@ def _check(items, multiplies: bool) -> int:
             _group, add_flags, del_flags, body = arg
             if add_flags or del_flags:
                 raise ValueError("inline flags are refused: case is set by case_sensitive")
-            wide += _check(body, multiplies)
+            wide += _check(body, multiplies, repeated)
         elif op == _sre.BRANCH:
             if multiplies:
                 raise ValueError("an alternation inside a repeat is refused (it can backtrack exponentially)")
-            wide += max((_check(alt, multiplies) for alt in arg[1]), default=0)
+            wide += max((_check(alt, multiplies, repeated) for alt in arg[1]), default=0)
         elif op in _REPEATS:
             _low, high, body = arg
             unbounded = high == _sre.MAXREPEAT
-            if multiplies:
+            if repeated:
+                # an optional group holding a quantifier too: (?:x+)? is refused like (?:x+)+
                 raise ValueError("a repeat inside a repeat is refused (nested quantifiers)")
-            wide += _check(body, multiplies or unbounded or int(high) > 1)
+            wide += _check(body, multiplies or unbounded or int(high) > 1, True)
             if unbounded or int(high) * max(1, _width(body)) > WIDE_REPEAT:
                 wide += 1
         else:

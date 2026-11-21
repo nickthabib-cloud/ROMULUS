@@ -94,6 +94,7 @@ REFUSALS = [
     ({"match": {"anchored": "(abcd)\\1"}}, "refused"),
     ({"match": {"anchored": "abcd(?=x)"}}, "refused"),
     ({"match": {"anchored": "abcd(?:e+)+"}}, "nested"),
+    ({"match": {"anchored": "abcd(?: {0,3}e)?"}}, "nested"),
     ({"match": {"anchored": "abcd(?:ef|gh)*"}}, "alternation inside a repeat"),
     ({"match": {"anchored": "abcd\\S*e\\S*f\\S*g\\S*h\\S*i"}}, "more than 4 repeats"),
     ({"match": {"anchored": "abcd.*x"}}, "open gaps"),
