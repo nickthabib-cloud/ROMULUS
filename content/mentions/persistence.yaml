@@ -162,7 +162,7 @@
 - id: mention.persist_crontab_from_echo_downloader
   title: 'echo of a downloader-and-shell-pipe line into crontab -'
   match:
-    anchored: 'echo [^\n]{1,120}(?:curl|wget) [^\n|]{1,150}\| {0,3}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b[\w ."''&>/)-]{0,60}\| {0,2}crontab {1,3}-'
+    anchored: 'echo [^\n]{1,120}(?:curl|wget) [^\n|]{1,150}\| {0,3}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b[\w ."''&>/);-]{0,60}\| {0,2}crontab {1,3}-'
   case_sensitive: false
   strength: strong
   attack: [T1053.003, T1105]
@@ -175,7 +175,7 @@
   rationale: >-
     Author-composed shape from the technique text (crontab). Replacing a user's crontab with echoed text whose command
     pipes remote content into a shell installs scheduled re-infection in one command, the usual exploit-payload
-    persistence. Between the shell and the pipe into crontab only quotes, redirections and '&' may stand. Health-check
+    persistence. Between the shell and the pipe into crontab only quotes, paths, redirections, '&' and ';' may stand. Health-check
     pings without a shell pipe are not matched; the bash socket form is the separate entry.
   examples:
     positive:
@@ -578,7 +578,7 @@
 - id: mention.persist_shell_rc_payload
   title: 'echo of a socket or netcat -e command into a shell startup file'
   match:
-    anchored: 'echo [^\n]{0,80}(?:/dev/tcp/|nc -e )[^\n]{0,60}>> {0,2}[\w.~/${}-]{0,40}\.(?:bashrc|bash_profile|profile|zshrc)\b'
+    anchored: 'echo [^\n]{0,80}(?:/dev/tcp/|nc -e )[^\n]{0,60}>> {0,2}[\w.~/${}*"''-]{0,40}\.(?:bashrc|bash_profile|profile|zshrc)\b'
   case_sensitive: true
   strength: strong
   attack: [T1546.004]
@@ -603,7 +603,7 @@
 - id: mention.persist_shell_rc_downloader
   title: 'echo of a downloader-and-shell-pipe command into a shell startup file'
   match:
-    anchored: 'echo [^\n]{0,80}(?:curl|wget) [^\n|]{1,150}\| {0,3}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b[\w ."''&/)-]{0,60}>> {0,2}[\w.~/${}-]{0,40}\.(?:bashrc|bash_profile|profile|zshrc)\b'
+    anchored: 'echo [^\n]{0,80}(?:curl|wget) [^\n|]{1,150}\| {0,3}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b[\w ."''&>/);-]{0,60}>> {0,2}["'']?(?:(?:~|\$HOME|\$\{HOME\}|/root|/home/[\w.$*-]{1,16})/|/etc/bash)\.(?:bashrc|bash_profile|profile|zshrc)\b'
   case_sensitive: true
   strength: strong
   attack: [T1546.004, T1105]
@@ -615,7 +615,8 @@
     upstream_id: T1546.004
   rationale: >-
     Author-composed shape from T1546.004: appending a command that pipes remote content into a shell to .bashrc or
-    .profile fetches and runs it at every login. Between the shell and the append only quotes and '&' may stand.
+    .profile fetches and runs it at every login. Between the shell and the append only quotes, paths, redirections,
+    '&' and ';' may stand, and the startup file is named under a home directory or /etc/bash.
     Echoed proxy settings or plain curl calls are not matched; the socket and netcat form is the separate entry.
   examples:
     positive:
@@ -628,7 +629,7 @@
 - id: mention.persist_rc_local_payload
   title: 'echo of a plain-http downloader-with-shell command into rc.local'
   match:
-    anchored: 'echo [^\n]{1,100}(?:curl|wget) [\w ./=''"-]{0,60}http://[^\n|]{0,100}(?:\| {0,3}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b|&& {0,2}(?:sh|bash) )[\w ."''&/)-]{0,60}>> {0,2}/etc/rc\.local'
+    anchored: 'echo [^\n]{1,100}(?:curl|wget) [\w ./=''"-]{0,60}http://[^\n|]{0,100}(?:\| {0,3}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b|&& {0,2}(?:sh|bash) )[\w ."''&>/);-]{0,60}>> {0,2}/etc/rc\.local'
   case_sensitive: true
   strength: strong
   attack: [T1037.004, T1105]
@@ -640,8 +641,8 @@
     upstream_id: T1037.004
   rationale: >-
     Author-composed shape from T1037.004: rc.local runs as root at boot; appending a plain-HTTP fetch that a shell
-    then runs is boot persistence used by botnets. Between the shell and the append only quotes, a path and '&' may
-    stand. The raw-IP HTTPS form and the bash socket form are separate strong entries; a vendor agent installed with
+    then runs is boot persistence used by botnets. Between the shell and the append only quotes, paths,
+    redirections, '&' and ';' may stand. The raw-IP HTTPS form and the bash socket form are separate strong entries; a vendor agent installed with
     'curl https://<vendor host>/... | bash' into rc.local is the separate medium entry.
   examples:
     positive:
@@ -655,7 +656,7 @@
 - id: mention.persist_rc_local_https_raw_ip
   title: 'echo of a raw-IP https downloader-with-shell command into rc.local'
   match:
-    anchored: 'echo [^\n]{1,100}(?:curl|wget) [\w ./=''"-]{0,60}https://[0-9]{1,3}\.[^\n|]{0,100}(?:\| {0,3}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b|&& {0,2}(?:sh|bash) )[\w ."''&/)-]{0,60}>> {0,2}/etc/rc\.local'
+    anchored: 'echo [^\n]{1,100}(?:curl|wget) [\w ./=''"-]{0,60}https://[0-9]{1,3}\.[^\n|]{0,100}(?:\| {0,3}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b|&& {0,2}(?:sh|bash) )[\w ."''&>/);-]{0,60}>> {0,2}/etc/rc\.local'
   case_sensitive: true
   strength: strong
   attack: [T1037.004, T1105]
@@ -668,7 +669,8 @@
   rationale: >-
     Author-composed shape from T1037.004: rc.local runs as root at boot; appending an HTTPS fetch from a raw IP
     address that a shell then runs is boot persistence used by botnets, since vendor agents are fetched from a named
-    host. Between the shell and the append only quotes, a path and '&' may stand. The named-host form is the separate
+    host. Between the shell and the append only quotes, paths, redirections, '&' and ';' may stand. The named-host
+    form is the separate
     medium entry.
   examples:
     positive:
@@ -704,7 +706,7 @@
 - id: mention.persist_rc_local_https_installer
   title: echo of an https downloader-with-shell command into rc.local
   match:
-    anchored: 'echo [^\n]{1,100}(?:curl|wget) [^\n|]{1,150}(?:\| {0,3}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b|&& {0,2}(?:sh|bash) )[\w ."''&/)-]{0,60}>> {0,2}/etc/rc\.local'
+    anchored: 'echo [^\n]{1,100}(?:curl|wget) [^\n|]{1,150}(?:\| {0,3}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b|&& {0,2}(?:sh|bash) )[\w ."''&>/);-]{0,60}>> {0,2}/etc/rc\.local'
   case_sensitive: true
   strength: medium
   attack: [T1037.004, T1105]
@@ -824,7 +826,7 @@
 - id: mention.persist_schtasks_suspicious_action
   title: 'schtasks /create text with an encoded, IEX, download or remote-HTA action'
   match:
-    anchored: 'schtasks(?:\.exe)?[\"'']? [\w ./\\:"''@$-]{0,40}/create [^\n]{1,240}(?: -enc |(?:powershell|pwsh)(?:\.exe)?[^\n]{0,60} -e [A-Za-z0-9+/]{20}|\.DownloadString|\.DownloadFile|\.DownloadData|FromBase64String|mshta(?:\.exe)? http| IEX)'
+    anchored: 'schtasks(?:\.exe)?[\"'']? [\w ./\\:"''@$!#%*+=,()-]{0,40}/create[^\n]{1,240}(?: -enc |(?:powershell|pwsh)(?:\.exe)?[^\n]{0,60} -e [A-Za-z0-9+/]{20}|\.DownloadString|\.DownloadFile|\.DownloadData|FromBase64String|mshta(?:\.exe)? http| IEX)'
   case_sensitive: false
   strength: strong
   attack: [T1053.005]

@@ -131,7 +131,7 @@
 - id: mention.cradle_curl_chmod_run
   title: 'curl, chmod and temp-directory execution text in one command line'
   match:
-    anchored: 'curl [^\n]{1,200}(?:;|&&) {0,2}chmod {1,3}(?:\+x|[ua]\+x|[0-7]{3,4}) {1,3}[^\n]{0,40}(?:/tmp/|/var/tmp/|/dev/shm/)[\w./+-]{0,100}["'']? {0,2}(?:;|&&) {0,2}(?:nohup )?(?:/tmp/|/var/tmp/|/dev/shm/)'
+    anchored: 'curl [^\n]{1,200}(?:;|&&) {0,2}chmod {1,3}(?:\+x|[ua]\+x|[0-7]{3,4}) {1,3}[^\n]{0,40}(?:/tmp/|/var/tmp/|/dev/shm/)[\w ./+*$>{}"''-]{0,100}(?:;|&&) {0,2}(?:nohup )?(?:/tmp/|/var/tmp/|/dev/shm/)'
   case_sensitive: false
   strength: strong
   attack: [T1105, T1222.002, T1059.004]
@@ -156,7 +156,7 @@
 - id: mention.cradle_wget_chmod_run
   title: 'wget, chmod and temp-directory execution text in one command line'
   match:
-    anchored: 'wget [^\n]{1,200}(?:;|&&) {0,2}chmod {1,3}(?:\+x|[ua]\+x|[0-7]{3,4}) {1,3}[^\n]{0,40}(?:/tmp/|/var/tmp/|/dev/shm/)[\w./+-]{0,100}["'']? {0,2}(?:;|&&) {0,2}(?:nohup )?(?:/tmp/|/var/tmp/|/dev/shm/)'
+    anchored: 'wget [^\n]{1,200}(?:;|&&) {0,2}chmod {1,3}(?:\+x|[ua]\+x|[0-7]{3,4}) {1,3}[^\n]{0,40}(?:/tmp/|/var/tmp/|/dev/shm/)[\w ./+*$>{}"''-]{0,100}(?:;|&&) {0,2}(?:nohup )?(?:/tmp/|/var/tmp/|/dev/shm/)'
   case_sensitive: false
   strength: strong
   attack: [T1105, T1222.002, T1059.004]

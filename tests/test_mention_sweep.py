@@ -1,5 +1,6 @@
 """The mention sweep: curated patterns over the raw text of records no normalizer read, labelled as mentions in their
-own lane. Pattern files are validated strictly and refused whole; the matcher finds every pattern a line holds; the
+own lane. Patterns are validated strictly and a bad one is refused on its own (an unreadable file whole); the matcher
+finds every pattern a line holds; the
 pool is disk-backed, grouped and bounded with exact remainders; a mention never becomes a finding, an entity, an
 ATT&CK fact or a hypothesis decision, and its text stays inert in every renderer."""
 from __future__ import annotations
