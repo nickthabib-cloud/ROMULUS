@@ -70,29 +70,29 @@
     positive:
       - 'Nov 20 17:01:00 web01 modsecurity: Matched "Operator Rx" against ARGS:file: <?php system($_GET[''cmd'']); ?>'
       - '<?=`$_GET[0]`?>'
-      - 'Nov 21 09:05:02 waf01 modsec: ARGS:file contains <?php system($_post[''cmd'']); ?>'
-      - 'Nov 21 09:05:03 waf01 modsec: ARGS:file contains <?php system($_request[''cmd'']); ?>'
-      - 'Nov 21 09:05:04 waf01 modsec: ARGS:file contains <?php system($_cookie[''cmd'']); ?>'
-      - 'Nov 21 09:05:05 waf01 modsec: ARGS:file contains <?php passthru($_get[''cmd'']); ?>'
-      - 'Nov 21 09:05:06 waf01 modsec: ARGS:file contains <?php passthru($_post[''cmd'']); ?>'
-      - 'Nov 21 09:05:07 waf01 modsec: ARGS:file contains <?php passthru($_request[''cmd'']); ?>'
-      - 'Nov 21 09:05:08 waf01 modsec: ARGS:file contains <?php shell_exec($_get[''cmd'']); ?>'
-      - 'Nov 21 09:05:09 waf01 modsec: ARGS:file contains <?php shell_exec($_post[''cmd'']); ?>'
-      - 'Nov 21 09:05:10 waf01 modsec: ARGS:file contains <?php shell_exec($_request[''cmd'']); ?>'
-      - 'Nov 21 09:05:11 waf01 modsec: ARGS:file contains <?php assert($_get[''cmd'']); ?>'
-      - 'Nov 21 09:05:12 waf01 modsec: ARGS:file contains <?php assert($_post[''cmd'']); ?>'
-      - 'Nov 21 09:05:13 waf01 modsec: ARGS:file contains <?php assert($_request[''cmd'']); ?>'
-      - 'Nov 21 09:05:14 waf01 modsec: ARGS:file contains <?php popen($_get[''cmd'']); ?>'
-      - 'Nov 21 09:05:15 waf01 modsec: ARGS:file contains <?php popen($_post[''cmd'']); ?>'
-      - 'Nov 21 09:05:16 waf01 modsec: ARGS:file contains <?php popen($_request[''cmd'']); ?>'
-      - 'Nov 21 09:05:17 waf01 modsec: ARGS:file contains <?php `$_post[''cmd'']); ?>'
-      - 'Nov 21 09:05:18 waf01 modsec: ARGS:file contains <?php `$_request[''cmd'']); ?>'
+      - 'Nov 21 09:02:52 web01 aide: added /var/www/html/up/s.php content: <?php system($_POST[''cmd'']); ?>'
+      - 'Nov 21 09:02:53 web01 aide: added /var/www/html/up/s.php content: <?php system($_REQUEST[''cmd'']); ?>'
+      - 'Nov 21 09:02:54 web01 aide: added /var/www/html/up/s.php content: <?php system($_COOKIE[''cmd'']); ?>'
+      - 'Nov 21 09:02:55 web01 aide: added /var/www/html/up/s.php content: <?php passthru($_GET[''cmd'']); ?>'
+      - 'Nov 21 09:02:56 web01 aide: added /var/www/html/up/s.php content: <?php passthru($_POST[''cmd'']); ?>'
+      - 'Nov 21 09:02:57 web01 aide: added /var/www/html/up/s.php content: <?php passthru($_REQUEST[''cmd'']); ?>'
+      - 'Nov 21 09:02:58 web01 aide: added /var/www/html/up/s.php content: <?php shell_exec($_GET[''cmd'']); ?>'
+      - 'Nov 21 09:02:59 web01 aide: added /var/www/html/up/s.php content: <?php shell_exec($_POST[''cmd'']); ?>'
+      - 'Nov 21 09:03:00 web01 aide: added /var/www/html/up/s.php content: <?php shell_exec($_REQUEST[''cmd'']); ?>'
+      - 'Nov 21 09:03:01 web01 aide: added /var/www/html/up/s.php content: <?php assert($_GET[''cmd'']); ?>'
+      - 'Nov 21 09:03:02 web01 aide: added /var/www/html/up/s.php content: <?php assert($_POST[''cmd'']); ?>'
+      - 'Nov 21 09:03:03 web01 aide: added /var/www/html/up/s.php content: <?php assert($_REQUEST[''cmd'']); ?>'
+      - 'Nov 21 09:03:04 web01 aide: added /var/www/html/up/s.php content: <?php popen($_GET[''cmd'']); ?>'
+      - 'Nov 21 09:03:05 web01 aide: added /var/www/html/up/s.php content: <?php popen($_POST[''cmd'']); ?>'
+      - 'Nov 21 09:03:06 web01 aide: added /var/www/html/up/s.php content: <?php popen($_REQUEST[''cmd'']); ?>'
+      - 'Nov 21 09:03:07 web01 aide: added /var/www/html/up/s.php content: <?=`$_POST[''c'']`?>'
+      - 'Nov 21 09:03:08 web01 aide: added /var/www/html/up/s.php content: <?=`$_REQUEST[''c'']`?>'
     negative:
       - 'Nov 20 17:01:01 web01 php-fpm[880]: PHP Warning: system(): Unable to fork [/usr/bin/convert in.png out.jpg]'
       - 'Nov 20 17:01:02 web01 php-fpm[880]: $page = htmlspecialchars($_GET[''page''])'
 
 - id: mention.webshell_php_eval_decoder
-  title: 'PHP eval of a decoding or decompression call'
+  title: 'PHP eval around base64_decode, gzinflate, gzuncompress, gzdecode or str_rot13'
   match:
     anchored: 'eval {0,3}\( {0,3}(?:base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13) {0,3}\('
   case_sensitive: false
@@ -184,6 +184,30 @@
     negative:
       - 'Nov 20 17:04:04 waf01 modsec: ARGS:token = c2Vzc2lvbi1pZA=='
       - 'Nov 20 17:04:05 web01 app[700]: blob=ZXhhbXBsZS5vcmc='
+
+- id: mention.webshell_base64_eval_request
+  title: Base64 of 'eval($_POST', 'eval($_REQUEST' or 'eval($_GET' at any byte alignment
+  match:
+    literal: ['ZXZhbCgkX1BPU1Rb', 'V2YWwoJF9QT1NUW', 'ldmFsKCRfUE9TVF', 'ZXZhbCgkX1JFUVVFU1Rb', 'V2YWwoJF9SRVFVRVNUW', 'ldmFsKCRfUkVRVUVTVF', 'ZXZhbCgkX0dFVF', 'V2YWwoJF9HRVRb', 'ldmFsKCRfR0VUW']
+  case_sensitive: true
+  strength: medium
+  attack: [T1505.003, T1027.010]
+  telemetry: [any]
+  source:
+    name: php-malware-finder, DodgyPhp and b64 rules (jvoisin)
+    url: https://github.com/jvoisin/php-malware-finder/blob/87b6d7faa4829b1e1c7c8895ef33d2b84d00b11f/data/php.yar
+    license: LGPL-3.0
+    upstream_id: b64
+  rationale: >-
+    The rule's eval-of-request-input pattern in base64 (computed at the three byte alignments, fully determined
+    characters only): an encoded one-line web shell inside an upload, a POST body or a WAF log. Benign uses of this
+    exact encoded text are rare; it is medium because base64 text can still collide by chance.
+  examples:
+    positive:
+      - 'Nov 20 17:04:06 waf01 modsec: ARGS:upload = PD9waHAgQGV2YWwoJF9QT1NUWyJ4Il0pOz8+'
+    negative:
+      - 'Nov 20 17:04:07 waf01 modsec: ARGS:token = c2Vzc2lvbi1pZA=='
+      - 'Nov 20 17:04:08 web01 app[700]: blob=ZXhhbXBsZS5vcmc='
 
 - id: mention.webshell_php_shell_names
   title: Classic PHP web shell names
@@ -277,24 +301,24 @@
     positive:
       - 'Nov 20 17:06:00 web02 av-agent: Threat detected: Backdoor.ASP.Chopper in C:\inetpub\wwwroot\aspnet_client\x.aspx'
       - 'Nov 20 17:06:01 web01 savd[700]: Found Troj/PHP-AB in /var/www/html/up/1.php'
-      - 'Nov 21 09:05:19 web01 av-agent: Threat detected: C99shell.Generic in /var/www/html/up/x.php'
-      - 'Nov 21 09:05:20 web01 av-agent: Threat detected: ASPXSpy.Generic in /var/www/html/up/x.php'
-      - 'Nov 21 09:05:21 web01 av-agent: Threat detected: PHPShell.Generic in /var/www/html/up/x.php'
-      - 'Nov 21 09:05:22 web01 av-agent: Threat detected: PShlSpy.Generic in /var/www/html/up/x.php'
-      - 'Nov 21 09:05:23 web01 av-agent: Threat detected: SinoChoper.Generic in /var/www/html/up/x.php'
-      - 'Nov 21 09:05:24 web01 av-agent: Threat detected: Aspdoor.Generic in /var/www/html/up/x.php'
-      - 'Nov 21 09:05:25 web01 av-agent: Threat detected: Backdoor.PHP.Generic in /var/www/html/up/x.php'
-      - 'Nov 21 09:05:26 web01 av-agent: Threat detected: Backdoor.JSP.Generic in /var/www/html/up/x.php'
-      - 'Nov 21 09:05:27 web01 av-agent: Threat detected: Backdoor/PHP.Generic in /var/www/html/up/x.php'
-      - 'Nov 21 09:05:28 web01 av-agent: Threat detected: Backdoor/ASP.Generic in /var/www/html/up/x.php'
-      - 'Nov 21 09:05:29 web01 av-agent: Threat detected: Backdoor/JSP.Generic in /var/www/html/up/x.php'
-      - 'Nov 21 09:05:30 web01 av-agent: Threat detected: Trojan.PHP.Generic in /var/www/html/up/x.php'
-      - 'Nov 21 09:05:31 web01 av-agent: Threat detected: Trojan.ASP.Generic in /var/www/html/up/x.php'
-      - 'Nov 21 09:05:32 web01 av-agent: Threat detected: Trojan.JSP.Generic in /var/www/html/up/x.php'
-      - 'Nov 21 09:05:33 web01 av-agent: Threat detected: IIS/BackDoor.Generic in /var/www/html/up/x.php'
-      - 'Nov 21 09:05:34 web01 av-agent: Threat detected: JAVA/Backdoor.Generic in /var/www/html/up/x.php'
-      - 'Nov 21 09:05:35 web01 av-agent: Threat detected: Troj/ASP.Generic in /var/www/html/up/x.php'
-      - 'Nov 21 09:05:36 web01 av-agent: Threat detected: Troj/JSP.Generic in /var/www/html/up/x.php'
+      - 'Nov 21 09:03:09 web01 savd[700]: Found C99shell.Agent in /var/www/html/up/x.php'
+      - 'Nov 21 09:03:10 web01 savd[700]: Found ASPXSpy.Agent in /var/www/html/up/x.php'
+      - 'Nov 21 09:03:11 web01 savd[700]: Found PHPShell.Agent in /var/www/html/up/x.php'
+      - 'Nov 21 09:03:12 web01 savd[700]: Found PShlSpy.Agent in /var/www/html/up/x.php'
+      - 'Nov 21 09:03:13 web01 savd[700]: Found SinoChoper.Agent in /var/www/html/up/x.php'
+      - 'Nov 21 09:03:14 web01 savd[700]: Found Aspdoor.Agent in /var/www/html/up/x.php'
+      - 'Nov 21 09:03:15 web01 savd[700]: Found Backdoor.PHP.Agent in /var/www/html/up/x.php'
+      - 'Nov 21 09:03:16 web01 savd[700]: Found Backdoor.JSP.Agent in /var/www/html/up/x.php'
+      - 'Nov 21 09:03:17 web01 savd[700]: Found Backdoor/PHP-AB in /var/www/html/up/x.php'
+      - 'Nov 21 09:03:18 web01 savd[700]: Found Backdoor/ASP-AB in /var/www/html/up/x.php'
+      - 'Nov 21 09:03:19 web01 savd[700]: Found Backdoor/JSP-AB in /var/www/html/up/x.php'
+      - 'Nov 21 09:03:20 web01 savd[700]: Found Trojan.PHP.Agent in /var/www/html/up/x.php'
+      - 'Nov 21 09:03:21 web01 savd[700]: Found Trojan.ASP.Agent in /var/www/html/up/x.php'
+      - 'Nov 21 09:03:22 web01 savd[700]: Found Trojan.JSP.Agent in /var/www/html/up/x.php'
+      - 'Nov 21 09:03:23 web01 savd[700]: Found IIS/BackDoor-AB in /var/www/html/up/x.php'
+      - 'Nov 21 09:03:24 web01 savd[700]: Found JAVA/Backdoor-AB in /var/www/html/up/x.php'
+      - 'Nov 21 09:03:25 web01 savd[700]: Found Troj/ASP-AB in /var/www/html/up/x.php'
+      - 'Nov 21 09:03:26 web01 savd[700]: Found Troj/JSP-AB in /var/www/html/up/x.php'
     negative:
       - 'Nov 20 17:06:02 web01 savd[700]: Scan completed, no threats found in /var/www/html'
       - 'Nov 20 17:06:03 web02 w3wp: Request to /api/php/handler.asp completed 200'
@@ -319,10 +343,10 @@
   examples:
     positive:
       - 'cmd.exe /c cd /d "c:\inetpub\wwwroot\"&whoami&echo [S]&cd&echo [E]'
-      - 'cmd.exe /c cd /d "c:\inetpub\wwwroot\"&ipconfig&echo'
-      - 'cmd.exe /c cd /d "c:\inetpub\wwwroot\"&quser&echo'
-      - 'cmd.exe /c cd /d "c:\inetpub\wwwroot\"&c:&echo'
-      - 'cmd.exe /c cd /d "c:\inetpub\wwwroot\"&dir&echo'
+      - 'cmd.exe /c cd /d "c:\inetpub\wwwroot\"&ipconfig&echo [S]&cd&echo [E]'
+      - 'cmd.exe /c cd /d "c:\inetpub\wwwroot\"&quser&echo [S]&cd&echo [E]'
+      - 'cmd.exe /c cd /d "c:\inetpub\wwwroot\"&c:&echo [S]&cd&echo [E]'
+      - 'cmd.exe /c cd /d "c:\inetpub\wwwroot\"&dir&echo [S]&cd&echo [E]'
     negative:
       - 'cmd.exe /c echo backup started & robocopy C:\data D:\data'
       - 'cmd.exe /c dir C:\inetpub\logs'

