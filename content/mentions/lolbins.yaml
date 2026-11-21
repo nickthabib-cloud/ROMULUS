@@ -220,7 +220,7 @@
 - id: mention.lolbin_gup_unzipto_temp_destination
   title: Notepad++ GUP -unzipTo text with a URL and a temp, Public, ProgramData or AppData destination
   match:
-    anchored: 'GUP\.exe["'']? {1,3}-unzipTo (?:-clean )?"[^"\n]{0,120}" {1,3}"(?:[A-Za-z]:\\Temp|[A-Za-z]:\\Users\\Public|[A-Za-z]:\\ProgramData|%TEMP%|%APPDATA%|%PUBLIC%|[A-Za-z]:\\Windows\\Temp|[^"\n]{0,60}\\AppData\\)[^"\n]{0,60}" {1,3}"[^"\n]{0,80}(?:https?|ftp)://'
+    anchored: 'GUP\.exe["'']? {1,3}-unzipTo (?:-clean )?"[^"\n]{0,120}" {1,3}"(?:[A-Za-z]:\\Temp|[A-Za-z]:\\Users\\Public|[A-Za-z]:\\ProgramData|%TEMP%|%APPDATA%|%PUBLIC%|[A-Za-z]:\\Windows\\Temp|(?:[A-Za-z]:\\Users\\[\w .$-]{1,60}|%USERPROFILE%|%HOMEDRIVE%%HOMEPATH%)\\AppData\\)[^"\n]{0,60}" {1,3}"\S{0,80} {0,3}(?:https?|ftp)://'
   case_sensitive: false
   strength: strong
   attack: [T1105, T1218]
