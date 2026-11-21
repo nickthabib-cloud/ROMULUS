@@ -392,6 +392,9 @@ class Sweep:
             pb.budget = self.budget
             pb.window_start = window.start
             pb.window_end = window.end
+            # the hunt's source targets, read one after another: a rule holding state across targets keeps it until
+            # every target has read past it
+            pb.sweep_targets = tuple(contracts)
             if pb.id == "host.telemetry_gap_after_tamper":
                 pb.persisted_loader = lambda ids: [
                     TypedEvent.model_validate(row["event"]) for row in repo.citation_events(hunt_id, ids)]

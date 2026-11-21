@@ -39,8 +39,8 @@ def test_routine_monitoring_sudo_is_one_folded_lead():
 
 @pytest.mark.parametrize("actor,command,tty,why", [
     ("nagios", "/bin/bash", "pts/2", "it ran from terminal pts/2"),
-    ("zabbix", "/usr/bin/python3 -c x", "unknown", "a shell, interpreter or account switch"),
-    ("jenkins", "/bin/su - root", "unknown", "a shell, interpreter or account switch"),
+    ("zabbix", "/usr/bin/python3 -c x", "unknown", "a shell or interpreter"),
+    ("jenkins", "/bin/su - root", "unknown", "an account switch"),
     ("postgres", "/usr/bin/id", "pts/1", "it ran from terminal pts/1"),
 ])
 def test_application_account_success_with_what_a_job_never_shows_is_high(actor, command, tty, why):
@@ -90,8 +90,10 @@ def test_a_success_is_reported_again_only_when_its_judgment_changes():
     rule = PrivilegeBrokerSuspiciousSuccess()
     try:
         assert len(rule.consume([refused(0, "1 incorrect password attempt"), allowed(60)])) == 1   # a lead
-        [raised] = rule.consume([refused(10, "2 incorrect password attempts")])                    # now 3: high
+        raised, revised = rule.consume([refused(10, "2 incorrect password attempts")])            # now 3: high
         assert raised.proposed_lane == "high"
+        # the lead stays, revised with a note naming the high finding that superseded it
+        assert revised.proposed_lane == "lead" and any("raised to high" in note for note in revised.notes)
         assert rule.consume([refused(20, "1 incorrect password attempt")]) == []                  # still high
     finally:
         rule.close_spill()

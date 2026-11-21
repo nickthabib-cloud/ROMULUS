@@ -498,26 +498,31 @@ class FoldedLinuxDirect(LinuxDirect):
             if isinstance(state, Match):
                 out.append(state)
                 continue
-            first, last = state.first, state.last
-            witnesses = list({event.id: event for match in (first, last) for event in match.events}.values())
-            context = set(first.context_ids) | set(last.context_ids)
-            subjects = [event for event in witnesses if event.id not in context]
-            summary = {"count": state.count, "peak": state.count, "episodes": 1,
-                       "first": first.ts.timestamp(), "last": last.ts.timestamp()}
-            claim = (f"First observation: {first.claim} {state.count} matching record(s) from "
-                     f"{first.ts.isoformat()} to {last.ts.isoformat()}; "
-                     f"{len(subjects)} cited, including the first and last.")
-            out.append(replace(first, claim=claim, events=witnesses,
-                               predicate=[*first.predicate, *([] if first is last else last.predicate)],
-                               entities=list(dict.fromkeys([*first.entities, *last.entities])),
-                               context_ids=context,
-                               notes=list(first.notes), raw_copies={**first.raw_copies, **last.raw_copies},
-                               revision_reason="Updated the group's count and first/latest witnesses."
-                               if state.published else "", bounded_revision=True, aggregate_summary=summary))
-            state.published = True
-            self.folds.put(key, state)
+            out.append(self.fold_publication(key, state, "Updated the group's count and first/latest witnesses."))
         self.folds.trim()
         return out
+
+    def fold_publication(self, key, state: _DirectFold, revision: str) -> Match:
+        """The published form of a fold group (its count and first/latest witnesses); a revision once published."""
+        first, last = state.first, state.last
+        witnesses = list({event.id: event for match in (first, last) for event in match.events}.values())
+        context = set(first.context_ids) | set(last.context_ids)
+        subjects = [event for event in witnesses if event.id not in context]
+        summary = {"count": state.count, "peak": state.count, "episodes": 1,
+                   "first": first.ts.timestamp(), "last": last.ts.timestamp()}
+        claim = (f"First observation: {first.claim} {state.count} matching record(s) from "
+                 f"{first.ts.isoformat()} to {last.ts.isoformat()}; "
+                 f"{len(subjects)} cited, including the first and last.")
+        published = replace(first, claim=claim, events=witnesses,
+                            predicate=[*first.predicate, *([] if first is last else last.predicate)],
+                            entities=list(dict.fromkeys([*first.entities, *last.entities])),
+                            context_ids=context,
+                            notes=list(first.notes), raw_copies={**first.raw_copies, **last.raw_copies},
+                            revision_reason=revision if state.published else "", bounded_revision=True,
+                            aggregate_summary=summary)
+        state.published = True
+        self.folds.put(key, state)
+        return published
 
     def match_each(self, events, judged_ids) -> list[Match]:
         """Each judged record's own matches, unfolded, after every record was read for context (lineage): for a
