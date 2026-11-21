@@ -6,7 +6,8 @@ duplicate copy of a normalized record) to `MentionScanner.scan`. The scanner rea
 (`message`, else `event.original`), never a serialized record, bounds it (`evidence.mentions.MAX_SCAN_CHARS`), and runs
 the hunt's patterns for the record's telemetry class over it.
 
-Every match is grouped by (pattern, host, normalized line) in a private SQLite stage under the hunt's stage directory,
+Each matching line is grouped once, under the strongest pattern it matches (the others it matches are kept on the
+group as labelled metadata), by (pattern, host, normalized line) in a private SQLite stage under the hunt's stage directory,
 charged to the hunt's state budget, so memory stays bounded however many lines match. A group keeps its count, first
 and last time, and its first record as the citation: the record cleaned, redacted and bounded the way the raw-record
 path keeps a record (`evidence.raw_citation`), and the matched line, redacted and bounded.
@@ -242,7 +243,8 @@ class MentionScanner:
             db.execute("CREATE TABLE grp (key TEXT PRIMARY KEY, pattern INTEGER NOT NULL, host TEXT NOT NULL, "
                        "strength INTEGER NOT NULL, n INTEGER NOT NULL, first_ts TEXT, last_ts TEXT, "
                        "seq INTEGER NOT NULL, telemetry TEXT NOT NULL, raw TEXT NOT NULL, line TEXT NOT NULL, "
-                       "line_chars INTEGER NOT NULL, line_cut INTEGER NOT NULL, suspicious INTEGER NOT NULL)")
+                       "line_chars INTEGER NOT NULL, line_cut INTEGER NOT NULL, suspicious INTEGER NOT NULL, "
+                       "others TEXT NOT NULL)")
             db.execute("CREATE INDEX grp_weak ON grp (strength, pattern, seq)")
             db.execute("CREATE INDEX grp_host ON grp (host, strength, seq)")
             db.execute("CREATE TABLE gone (key TEXT PRIMARY KEY, pattern INTEGER NOT NULL, host TEXT NOT NULL) "
@@ -344,7 +346,11 @@ class MentionScanner:
         host = record_host(hit["_source"])
         normalized = line_digest(text)
         when: tuple | None = None
-        for index in matched:
+        # one group per line, under its strongest pattern (the earliest loaded among equals); the rest are metadata
+        patterns = self.patterns.patterns
+        ordered = sorted(matched, key=lambda i: (-STRENGTH_RANK[patterns[i].strength], i))
+        others = json.dumps(ordered[1:])
+        for index in ordered[:1]:
             pattern = self.patterns.patterns[index]
             key = hashlib.sha256(json.dumps([pattern.id, host, normalized]).encode()).hexdigest()[:32]
             if when is None:
@@ -393,10 +399,10 @@ class MentionScanner:
             shown = line[:MAX_LINE_CHARS]
             self._seq += 1
             try:
-                db.execute("INSERT INTO grp VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (
+                db.execute("INSERT INTO grp VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (
                     key, index, host, strength, ts_text, ts_text, self._seq, telemetry,
                     json.dumps(raw, ensure_ascii=False, default=str), shown, len(line), int(len(line) > len(shown)),
-                    int(bool(injection_flags(line)))))
+                    int(bool(injection_flags(line))), others))
                 db.execute("INSERT INTO host VALUES (?, 1) ON CONFLICT (host) DO UPDATE SET kept = kept + 1",
                            (host,))
                 db.execute("INSERT INTO pat VALUES (?, 1) ON CONFLICT (pattern) DO UPDATE SET kept = kept + 1",
@@ -422,7 +428,7 @@ class MentionScanner:
                 self.db.execute("UPDATE rarity SET lines = lines + ? WHERE pattern = ?", (count, pattern))
         yield from self.db.execute(
             "SELECT g.key, g.pattern, g.host, g.n, g.first_ts, g.last_ts, g.telemetry, g.raw, g.line, g.line_chars, "
-            "g.line_cut, g.suspicious, r.hosts, r.lines FROM grp g JOIN rarity r USING (pattern) "
+            "g.line_cut, g.suspicious, r.hosts, r.lines, g.others FROM grp g JOIN rarity r USING (pattern) "
             "ORDER BY g.strength DESC, r.hosts, r.lines, g.first_ts IS NULL, g.first_ts, g.key")
 
     def _cap_view(self, name: str, limit: int) -> dict | None:
@@ -514,7 +520,7 @@ class MentionScanner:
 
         def rows():
             for rank, (key, index, host, count, first_ts, last_ts, telemetry, raw, line, line_chars, line_cut,
-                       suspicious, hosts, lines) in enumerate(self.ranked() or (), start=1):
+                       suspicious, hosts, lines, others) in enumerate(self.ranked() or (), start=1):
                 pattern = patterns[index]
                 record = json.loads(raw)
                 record["ts"] = _parse(record.get("ts"))
@@ -523,6 +529,8 @@ class MentionScanner:
                     "hunt_id": self.hunt_id, "rank": rank, "pattern_id": pattern.id,
                     "pattern_title": pattern.title, "strength": pattern.strength,
                     "pattern_attack": list(pattern.attack),
+                    "also_matched": [{"id": patterns[other].id, "title": patterns[other].title,
+                                      "strength": patterns[other].strength} for other in json.loads(others)],
                     "pattern_source": pattern.source.model_dump(), "telemetry": telemetry, "host": host,
                     "target": record["target"], "native_id": record["native_id"],
                     "raw_id": raw_record_id(self.hunt_id, record["target"], record["native_id"]),

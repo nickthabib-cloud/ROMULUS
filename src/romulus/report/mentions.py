@@ -44,6 +44,8 @@ def mention_item(row: dict, *, line_chars: int = MANIFEST_LINE_CHARS) -> dict:
         "pattern": {"id": row["pattern_id"], "title": row["pattern_title"], "strength": row["strength"],
                     "attack": {"techniques": list(row["pattern_attack"] or []), "label": PATTERN_ATTACK_LABEL},
                     "source": row["pattern_source"]},
+        # other patterns the same line matches: metadata of this one mention, never mentions of their own
+        "also_matched": list(row.get("also_matched") or []),
         "telemetry": row["telemetry"], "host": row["host"] or None, "count": row["count"],
         "first_seen": _when(row["first_ts"]), "last_seen": _when(row["last_ts"]),
         "rarity": {"pattern_hosts": row["pattern_hosts"], "pattern_lines": row["pattern_lines"]},

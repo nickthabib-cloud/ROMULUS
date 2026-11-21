@@ -23,6 +23,7 @@
 <pre class="raw">{{ m.line }}</pre>{% if m.line_cut %}<p class="help small">Line cut here ({{ m.line_chars }} characters); the raw record keeps the record.</p>{% endif %}</td>
 <td><a href="{{ head.hunt_url(h.id, '/mentions', pattern=m.pattern.id) }}">{{ m.pattern.title }}</a><br><span class="mono small">{{ m.pattern.id }}</span>
 {% if m.pattern.attack.techniques %}<br><span class="small" title="{{ m.pattern.attack.label }}">Pattern ATT&amp;CK (metadata): {{ m.pattern.attack.techniques | join(', ') }}</span>{% endif %}
+{% if m.also_matched %}<br><span class="small">Also matches (metadata): {% for o in m.also_matched %}<span class="mono">{{ o.id }}</span>{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}
 <br><span class="small">{{ m.rarity.pattern_hosts }} host(s), {{ m.rarity.pattern_lines }} line(s) for this pattern</span></td>
 <td>{% if m.host %}<a class="mono" href="{{ head.hunt_url(h.id, '/mentions', host=m.host) }}">{{ m.host }}</a>{% else %}<span class="small">no host</span>{% endif %}</td>
 <td class="n">{{ m.count }}</td>

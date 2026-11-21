@@ -30,6 +30,7 @@ def upgrade():
         sa.Column("strength", sa.String(), nullable=False),
         sa.Column("pattern_attack", sa.JSON(), nullable=False),
         sa.Column("pattern_source", sa.JSON(), nullable=False),
+        sa.Column("also_matched", sa.JSON(), nullable=False),
         sa.Column("telemetry", sa.String(), nullable=False),
         sa.Column("host", sa.String(), nullable=False),
         sa.Column("target", sa.String(), nullable=False),

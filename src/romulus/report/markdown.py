@@ -154,8 +154,11 @@ def _mentions_section(m: dict) -> list[str]:
         line = item["line"][:MENTION_LINE_CHARS]
         cut = "…" if item["line_cut"] or len(item["line"]) > len(line) else ""
         flag = " (flagged: possible prompt injection)" if item.get("suspicious_content") else ""
+        also = item.get("also_matched") or []
+        also_text = f"; also matches {', '.join(other['id'] for other in also)}" if also else ""
         out.append(f"| {item['rank']} | {cell(pattern['strength'])} | {cell(pattern['title'])} "
-                   f"(`{cell(pattern['id'])}`) | {cell(', '.join(pattern['attack']['techniques']) or 'none')} | "
+                   f"(`{cell(pattern['id'])}`{cell(also_text)}) | "
+                   f"{cell(', '.join(pattern['attack']['techniques']) or 'none')} | "
                    f"{cell(item['host'] or '(no host)')} | {item['count']} | {cell(item['first_seen'] or 'not recorded')} | "
                    f"{cell(item['raw_id'])} | {cell(line)}{cut}{flag} |")
     rest = view["total"] - min(len(items), MARKDOWN_MENTIONS)

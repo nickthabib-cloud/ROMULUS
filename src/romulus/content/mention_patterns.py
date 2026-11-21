@@ -2,13 +2,13 @@
 
 Each file in the mention directory (`content/mentions/*.yaml`, or `ROMULUS_MENTION_DIR`) is a YAML list of patterns:
 
-    - id: mention.<slug>            # unique across every file
+    - id: mention.<slug>            # unique across every file; slug: lowercase words joined by _
       title: str
       match: {literal: [str, ...]} | {anchored: str}
       case_sensitive: bool
       strength: strong | medium | weak
       attack: [T1059.004, ...]      # optional: the pattern's own metadata, never an observed technique
-      telemetry: [linux_text, windows_text, any]
+      telemetry: [linux_text, windows_text] | [any]            # any stands alone
       source: {name: str, url: str, license: str, upstream_id: str | null}   # upstream_id may be left out
       rationale: str
       examples: {positive: [str, ...], negative: [str, ...]}                 # one positive at least
@@ -18,14 +18,18 @@ id, an expression outside the admitted subset, or an example that does not behav
 and no negative may) refuses the whole file, with an error naming the file, the pattern and the reason. A refused file
 is reported (its patterns did not run); it never makes a hunt read as having no mentions.
 
-A literal is 3 to 512 characters. An anchored expression must be linear-time to run on attacker-written text. It
-must start with `^` or with a literal prefix of at least four characters (the matcher runs it only where that prefix
-occurs), be at most 512 characters, and use only literals, character classes, `.`, groups, alternation, repeats and
-the anchors `^`, `$`, `\\A`, `\\Z`, `\\b` and `\\B`. It may not use back references, lookaround, conditionals, atomic
-groups, possessive repeats or inline flags. No repeat may hold another repeat or an alternation, and the backtracking
-product of its repeats and alternations must stay within the matcher's bound (two unbounded repeats at most). The
-matcher reads an expression over at most 512 characters from where it is tried; a line it could not rule out there is
-counted in the pool's coverage.
+A literal matches as a substring, under the pattern's case flag. An anchored expression runs as a regular-expression
+search (case-insensitive unless case_sensitive): it must start with `^`, or with a literal prefix of at least four
+characters, which may occur anywhere in the line (the matcher runs the expression only where that prefix occurs).
+
+A literal is 3 to 512 characters. An anchored expression must stay fast on attacker-written text. It is at most 512
+characters and uses only literals, character classes, `.`, groups, alternation, repeats and the anchors `^`, `$`,
+`\\A`, `\\Z`, `\\b` and `\\B`: no back references, lookaround, conditionals, atomic groups, possessive repeats or inline
+flags. A repeat that can match more than once may hold neither another repeat nor an alternation (an optional group
+may hold both), and at most three repeats may each match more than 16 characters. Each expression is then timed at
+load against lines built to make it backtrack (from its own examples), and refused when one takes longer than
+`PROBE_LIMIT_SECONDS`. The matcher reads an expression over at most 512 characters from where it is tried; a line it
+could not rule out there is counted in the pool's coverage.
 """
 from __future__ import annotations
 
@@ -33,6 +37,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -41,7 +46,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from romulus.evidence.mention_match import (
-    BACKTRACK_BOUND,
+    MAX_SCAN_CHARS,
     REGEX_WINDOW,
     CompiledPattern,
     MentionMatcher,
@@ -62,7 +67,12 @@ MAX_LITERAL_CHARS = 512
 MAX_LITERALS = 256
 MAX_EXAMPLE_CHARS = 4_096
 MAX_FILE_BYTES = 4_000_000
-_ID = r"^mention\.[a-z0-9][a-z0-9_.-]{0,126}$"
+_ID = r"^mention\.[a-z0-9]+(?:_[a-z0-9]+)*$"
+# repeats that may each match more than WIDE_REPEAT characters, at most this many per expression
+WIDE_REPEAT = 16
+MAX_WIDE_REPEATS = 3
+# the longest one hostile probe line may take an anchored expression at load (a real one takes well under 1 ms)
+PROBE_LIMIT_SECONDS = 0.02
 _TECHNIQUE = r"^T[0-9]{4}(?:\.[0-9]{3})?$"
 
 
@@ -114,7 +124,7 @@ class Examples(_Strict):
 
 
 class MentionPattern(_Strict):
-    id: str = Field(pattern=_ID)
+    id: str = Field(pattern=_ID, max_length=128)
     title: str = Field(min_length=1, max_length=200)
     match: MatchSpec
     case_sensitive: bool
@@ -140,6 +150,8 @@ class MentionPattern(_Strict):
     def _telemetry(cls, values: list[str]) -> list[str]:
         if len(set(values)) != len(values):
             raise ValueError("telemetry repeats a class")
+        if "any" in values and len(values) > 1:
+            raise ValueError("telemetry: any stands alone")
         return values
 
 
@@ -172,9 +184,10 @@ _END_AT = {_sre.AT_END, _sre.AT_END_STRING}
 _REPEATS = {_sre.MAX_REPEAT, _sre.MIN_REPEAT}
 
 
-def _ways(items, in_repeat: bool) -> int:
-    """The backtracking product of a parsed sequence; raises ValueError on anything outside the subset."""
-    product = 1
+def _check(items, multiplies: bool) -> int:
+    """The number of wide repeats in a parsed sequence; ValueError on anything outside the subset. `multiplies`: the
+    sequence sits inside a repeat that can match more than once."""
+    wide = 0
     for op, arg in items:
         if op in _ATOMS:
             continue
@@ -186,27 +199,56 @@ def _ways(items, in_repeat: bool) -> int:
             _group, add_flags, del_flags, body = arg
             if add_flags or del_flags:
                 raise ValueError("inline flags are refused: case is set by case_sensitive")
-            product *= _ways(body, in_repeat)
+            wide += _check(body, multiplies)
         elif op == _sre.BRANCH:
-            if in_repeat:
+            if multiplies:
                 raise ValueError("an alternation inside a repeat is refused (it can backtrack exponentially)")
-            alternatives = arg[1]
-            product *= max(1, sum(_ways(alt, in_repeat) for alt in alternatives))
+            wide += max((_check(alt, multiplies) for alt in arg[1]), default=0)
         elif op in _REPEATS:
-            low, high, body = arg
-            if in_repeat:
-                raise ValueError("a repeat inside a repeat is refused (nested quantifiers)")
+            _low, high, body = arg
             unbounded = high == _sre.MAXREPEAT
-            _ways(body, True)
-            # the ways a repeat can stop inside the window: never more than the window's characters
-            product *= REGEX_WINDOW if unbounded else max(1, min(int(high) - int(low) + 1, REGEX_WINDOW))
+            if multiplies:
+                raise ValueError("a repeat inside a repeat is refused (nested quantifiers)")
+            wide += _check(body, multiplies or unbounded or int(high) > 1)
+            if unbounded or int(high) * max(1, _width(body)) > WIDE_REPEAT:
+                wide += 1
         else:
             raise ValueError(f"{str(op).lower()} is refused (back references, lookaround, conditionals, atomic "
                              "groups and possessive repeats are outside the admitted subset)")
-        if product > BACKTRACK_BOUND:
-            raise ValueError(f"the expression may backtrack more than {BACKTRACK_BOUND} ways from one place "
-                             "(at most two unbounded repeats)")
-    return product
+    if wide > MAX_WIDE_REPEATS:
+        raise ValueError(f"more than {MAX_WIDE_REPEATS} repeats may each match more than {WIDE_REPEAT} characters")
+    return wide
+
+
+def _width(items) -> int:
+    widest = _sre_parse.SubPattern(_sre_parse.State(), list(items)).getwidth()[1]
+    return min(int(widest), MAX_SCAN_CHARS)
+
+
+def _probe_lines(examples: list[str]) -> list[str]:
+    """Lines built to make an expression backtrack: each example cut before its last character and repeated, and
+    each example with a run of each of its own characters inserted after each of its first characters."""
+    lines = []
+    for example in examples[:5]:
+        if not example:
+            continue
+        cut = example[:-1] or example
+        lines.append(cut * (MAX_SCAN_CHARS // len(cut) + 1))
+        for split in range(1, min(len(example), 24)):
+            head, tail = example[:split], example[split:]
+            for char in sorted(set(example))[:24]:
+                lines.append(head + char * REGEX_WINDOW + tail[:-1])
+    return [line[:MAX_SCAN_CHARS] for line in lines]
+
+
+def probe(regex: re.Pattern, examples: list[str]) -> float:
+    """The longest time the expression takes over one hostile probe line, searched over its window."""
+    worst = 0.0
+    for line in _probe_lines(examples):
+        began = time.perf_counter()
+        regex.search(line, 0, REGEX_WINDOW)
+        worst = max(worst, time.perf_counter() - began)
+    return worst
 
 
 def _ends(items) -> bool:
@@ -244,7 +286,7 @@ def compile_anchored(expression: str, case_sensitive: bool) -> Anchored:
     if parsed.state.flags & ~(_sre.SRE_FLAG_UNICODE):
         raise ValueError("inline flags are refused: case is set by case_sensitive")
     items = list(parsed)
-    _ways(items, False)
+    _check(items, False)
     widest = parsed.getwidth()[1]
     shape = {"end_anchored": _ends(items), "max_width": None if widest >= _sre.MAXREPEAT else int(widest)}
     if items and items[0][0] == _sre.AT and items[0][1] in {_sre.AT_BEGINNING, _sre.AT_BEGINNING_STRING}:
@@ -269,6 +311,10 @@ def compile_anchored(expression: str, case_sensitive: bool) -> Anchored:
 def compile_pattern(index: int, pattern: MentionPattern) -> CompiledPattern:
     if pattern.match.anchored is not None:
         built = compile_anchored(pattern.match.anchored, pattern.case_sensitive)
+        took = probe(built.regex, [*pattern.examples.positive, *pattern.examples.negative])
+        if took > PROBE_LIMIT_SECONDS:
+            raise ValueError(f"the expression took {took * 1000:.0f} ms on one hostile probe line (the limit is "
+                             f"{PROBE_LIMIT_SECONDS * 1000:.0f} ms): it can backtrack too far")
         return CompiledPattern(index=index, id=pattern.id, case_sensitive=pattern.case_sensitive, regex=built.regex,
                                prefix=built.prefix, end_anchored=built.end_anchored, max_width=built.max_width,
                                lead=built.lead)

@@ -938,6 +938,7 @@ class Toolbox:
                 "rank": item["rank"], "label": item["label"], "pattern": item["pattern"]["id"],
                 "pattern_title": _bounded_text(item["pattern"]["title"]), "strength": item["pattern"]["strength"],
                 "pattern_attack_metadata": item["pattern"]["attack"]["techniques"],
+                "also_matched": [other["id"] for other in item["also_matched"]],
                 "host": item["host"], "count": item["count"], "first_seen": item["first_seen"],
                 "last_seen": item["last_seen"], "rarity": item["rarity"],
                 "line": item["line"], "line_cut": item["line_cut"],

@@ -28,9 +28,6 @@ MAX_SCAN_CHARS = 8_192
 REGEX_WINDOW = 512
 # and is tried at most at this many occurrences of its literal prefix in one line
 MAX_PREFIX_TRIES = 4
-# the backtracking bound an anchored expression may have: the product, over its repeats and alternations, of how many
-# ways each can match (an unbounded repeat counts REGEX_WINDOW ways); two unbounded repeats fit, three do not
-BACKTRACK_BOUND = REGEX_WINDOW * REGEX_WINDOW
 
 # Characters from most to least common in log text: a literal is anchored at the character of it latest in this order
 # (one not listed counts as rarest). Digits, separators and common letters come first, so the gate's anchor characters

@@ -204,6 +204,8 @@ mention = Table(
     Column("strength", String, nullable=False),
     Column("pattern_attack", JSON, nullable=False),
     Column("pattern_source", JSON, nullable=False),
+    # the other patterns the same line matches, weaker or loaded later: metadata of the mention, never a second one
+    Column("also_matched", JSON, nullable=False),
     Column("telemetry", String, nullable=False),
     Column("host", String, nullable=False),
     Column("target", String, nullable=False),
