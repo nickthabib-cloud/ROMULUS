@@ -117,7 +117,8 @@ def test_records_without_the_payload_of_a_selected_dataset_are_stated_with_count
     cells = _reconciliation_cells(snapshot)
     assert cells and all(cell["state"] == "evaluated_partial" and cell["target"] == tf.HOST_TARGET for cell in cells)
     assert {"auth.password_guessing", "net.dns_nxdomain_burst"} <= {cell["rule_id"] for cell in cells}
-    assert "host.kernel_module_load" not in {cell["rule_id"] for cell in cells}   # reads no text family
+    assert "host.masquerading_binary" not in {cell["rule_id"] for cell in cells}   # reads no text family
+    assert "host.kernel_module_load" in {cell["rule_id"] for cell in cells}   # reads the kernel's taint notices
     from romulus.detect.registry import fresh_pack
     oses = {pb.id: set(pb.os_families) for pb in fresh_pack()}
     # a Linux target's shortfall leaves no Windows-only rule partial

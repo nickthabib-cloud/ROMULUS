@@ -52,6 +52,7 @@ from romulus.detect.linux_argv import (
     shell_segments,
     write_targets,
 )
+from romulus.detect.log_writer import writer_sentence
 from romulus.evidence.shellparse import SHELLS
 from romulus.evidence.typed import Outcome, TypedEvent
 
@@ -1078,6 +1079,21 @@ def _record_privilege(e: TypedEvent) -> str:
     group, op = e.get("account.group"), str(e.get("account.op") or "")
     if group in PRIVILEGED_GROUPS and (_GRANT_OPS.search(op) or e.get("account.action") == "create_user"):
         return f"membership of privileged group {group}"
+    # gpasswd -M / -A replace a group's member or administrator list: whoever is on it now holds the group
+    if group in PRIVILEGED_GROUPS and op in ("set-group-members", "set-group-administrators"):
+        return f"the {op.rsplit('-', 1)[-1]} of privileged group {group} set"
+    # account.new_id is a value the tool says it assigned (usermod's "change user 'u' UID from 'a' to '0'"); a
+    # modification record's account.id only names the account it changed, so it is never read as an assignment. A
+    # creation record's id is the new account's (useradd's "new user: ... UID=n", ADD_USER id=n).
+    if e.get("account.action") == "modify_user" and str(e.get("account.new_id")) == "0":
+        return "assignment of user id 0"
+    if e.get("account.action") == "create_user" and str(e.get("account.id")) == "0":
+        return "a new account with user id 0"
+    # usermod's primary group change to gid 0, and groupmod's new gid 0
+    if e.get("account.action") == "modify_user" and op == "change-gid" and str(e.get("account.group_id")) == "0":
+        return "primary group id 0 (root's group)"
+    if e.get("account.action") == "modify_group" and str(e.get("account.new_id")) == "0":
+        return "group id 0 given to a group"
     return ""
 
 
@@ -1089,7 +1105,8 @@ def _record_mention(e: TypedEvent) -> str:
 
 
 def _record_text(e: TypedEvent) -> str:
-    parts = [str(e.get("audit.record_type"))]
+    kind = e.get("audit.record_type")
+    parts = [str(kind) if kind else f"account tool log line action={e.get('account.action')}"]
     for name, label in (("account.op", "op"), ("account.name", "acct"), ("account.group", "grp")):
         if e.has(name):
             parts.append(f"{label}={e.get(name)}")
@@ -1100,7 +1117,7 @@ def _record_text(e: TypedEvent) -> str:
 class AccountOrGroupChange(Playbook):
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.account_or_group_change"
-    version = "6"
+    version = "7"
     title = "Account or group created, deleted or modified (command or account-management audit record)"
     anchor_class = "persistence"
     kind = "aggregate"
@@ -1149,7 +1166,16 @@ class AccountOrGroupChange(Playbook):
         "adds": "no earlier rule covers account or group changes",
         "research_basis": "ATT&CK Enterprise 20.0 T1136.001, T1098, T1098.007, T1531 (procedure: useradd/usermod); "
                           "shadow-utils and Debian adduser option grammars; libaudit audit_log_acct_message record "
-                          "format",
+                          "format; shadow-utils SYSLOG statements (src/useradd.c, usermod.c, userdel.c, groupadd.c, "
+                          "groupdel.c, groupmod.c, gpasswd.c, chage.c, passwd.c on master) and the Elastic System "
+                          "integration's auth pipeline test logs (test-gpasswd, test-usermod-group, test-userdel)",
+        "text_records": "the tools' own syslog lines (any Linux shipper shape) are account_change records with the "
+                        "same actions and operations as the audit records and the writer's pid (journald _PID, the "
+                        "shipper's process.pid or the syslog header's), so a line joins the exec of its process like "
+                        "an audit record; usermod's UID change to 0 (account.new_id) and a created account with user id 0 "
+                        "(useradd's line or ADD_USER id=0) are user id 0 grants; gpasswd -M/-A onto a root-equivalent group, "
+                        "usermod's GID change to 0 and groupmod's new gid 0 are high too; a high claim resting on the "
+                        "tools' own lines names their writer when journald does not confirm it",
         "lanes": "high for a web-service account in the exec lineage, or a request for user/group id 0 or "
                  "membership of a root-equivalent group; package/cloud-init lineage is one grouped lead per host; "
                  "unprivileged audit records with no exec record of their process and no login uid, from 2 minutes "
@@ -1432,12 +1458,14 @@ class AccountOrGroupChange(Playbook):
                      f"{_argv_summary(commands[0].get('process.argv'), 120)}); {_outcome_tally(commands)}.")
         else:
             exe = records[0].get("process.executable")
-            claim = (f"On {host}, {len(records)} account-management audit record(s) report that "
+            noun = ("account-management audit record(s)" if all(r.has("audit.record_type") for r in records)
+                    else "account-management record(s) (audit records or the tool's own log lines)")
+            claim = (f"On {host}, {len(records)} {noun} report that "
                      f"{first.detail}" + (f" (account '{first.accounts[0]}')" if first.accounts else "")
                      + (f" (group '{first.groups[0]}')" if first.groups else "")
                      + f", written by '{exe or 'an unrecorded program'}' as {first.actor}.")
         if commands and records:
-            claim += (f" {len(records)} audit record(s) from the same process(es) report the change: "
+            claim += (f" {len(records)} account-management record(s) from the same process(es) report the change: "
                       f"{'; '.join(_record_text(r) for r in records[:4])}.")
         elif commands:
             claim += (" No account-management audit record from the same process was retrieved, so whether the "
@@ -1477,6 +1505,11 @@ class AccountOrGroupChange(Playbook):
                                                                                for r in records))):
             lane = "lead"
             notes.append("lane lowered: every recorded exec or tool result failed")
+        if lane == "high":
+            # a high claim resting on the tools' own log lines says what is known about who wrote them
+            claim += writer_sentence([r for r in records if not r.has("audit.record_type")],
+                                     lambda r: str(r.get("log.identifier") or r.get("journal.identifier")
+                                                   or "the account tool"))
         if marker is not None:
             # one record for every distinct change, so no account in the group goes uncited
             distinct: dict[tuple, TypedEvent] = {}

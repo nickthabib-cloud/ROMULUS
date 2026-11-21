@@ -592,7 +592,7 @@ class _ZoneGroup:
     """One (client, server, transfer zone or ANY) group of the zone-transfer rule."""
 
     __slots__ = ("any_names", "asked_by_flow", "deciding", "ends", "examples", "named", "records", "replies",
-                 "requests", "server_from", "span", "transports")
+                 "requests", "server_from", "span", "transfers", "transports")
 
     def __init__(self):
         self.ends = Ends()                          # the records bounding the span
@@ -608,11 +608,12 @@ class _ZoneGroup:
         self.asked_by_flow: dict = {}
         self.examples = _Examples()
         self.server_from: set[str] = set()          # where a host server's name came from (SERVER_FROM keys)
+        self.transfers: Counter = Counter()         # (qtype, result) of the server's own transfer decision lines
 
 
 class DnsZoneTransferOrAnyRequest(_DnsAggregate):
     id = "net.dns_zone_transfer_or_any_request"
-    version = "7"
+    version = "8"
     title = "DNS zone-transfer (AXFR/IXFR) or ANY question sent by one client to one server"
     required_fields = ()
     severity, lane = "medium", "lead"
@@ -625,8 +626,9 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
                    ("every answer record from the server to the client for the zone, and the transport (TCP for "
                     "a transfer that carried data)"),
                    "other reconnaissance from the client: port scans, reverse-lookup sweeps, web scans")
-    REQUEST_TYPES = ("AXFR", "IXFR", "ANY")
-    TRANSFER_TYPES = ("AXFR", "IXFR")
+    # "AXFR/IXFR": a server's transfer decision line that does not say which (BIND's DLZ denial)
+    REQUEST_TYPES = ("AXFR", "IXFR", "AXFR/IXFR", "ANY")
+    TRANSFER_TYPES = ("AXFR", "IXFR", "AXFR/IXFR")
     card: ClassVar[dict] = {
         "behavior": "a client asked a DNS server for a full or incremental zone transfer (AXFR/IXFR) or for ANY "
                     "records of a name; answer records, where typed, show whether the server answered NOERROR or "
@@ -634,9 +636,11 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
         "telemetry": "dns_query: dns.type, dns.question.name, dns.question.type, dns.response_code, source and "
                      "destination ip and port (the server is the endpoint on the DNS port) (Suricata EVE dns: present "
                      "and normalized in the lab profile; a session indexer's DNS block reads the same typed fields "
-                     "once it is normalized). A DNS server's own query log (dnsmasq, unbound) names no server "
+                     "once it is normalized). A DNS server's own query log (dnsmasq, unbound, BIND) names no server "
                      "address: its question's server is the logging host (dns.server_logged), which never takes the "
-                     "high lane",
+                     "high lane. BIND's own transfer lines (dns.transfer.result denied or started, logged by default "
+                     "where its query log is off) are the server's decisions on a transfer request, counted apart from "
+                     "questions so a transfer whose question was also logged is one question",
         "fidelity": "direct observation of the question type in a typed field: 'requested' is proven by a query "
                     "record; 'answered' only by an answer record with rcode NOERROR, which does not show how many "
                     "zone records were sent; nothing here proves the zone's content left the server",
@@ -647,7 +651,8 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
         "next_pivot": "the server's transfer allow-list and the answer records' rcode and transport",
         "adds": "the only rule that reads the question type; enumeration rules count names, not transfer requests",
         "research_basis": "ATT&CK Enterprise 20.0 T1590.002 (DNS; zone transfer with query type AXFR); RFC 5936 "
-                          "(AXFR), RFC 1995 (IXFR), RFC 8482 (ANY minimisation)",
+                          "(AXFR), RFC 1995 (IXFR), RFC 8482 (ANY minimisation); BIND 9 lib/ns/xfrout.c and "
+                          "client.c (the transfer started and denied log lines)",
         "retrieval": "the sweep retrieves every record of a network target in each partition with no field "
                      "filter, a superset of what this evaluator reads",
         "lane_policy": "lead; high when an external client's AXFR/IXFR to a server on an internal address got a "
@@ -680,6 +685,8 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
             if server is None and client is not None and record_role in ("query", "transaction"):
                 server, server_from = logging_server(event) or (None, None)
             question_type = qtype(event.get("dns.question.type"))
+            if question_type is None and event.has("dns.transfer.result"):
+                question_type = "AXFR/IXFR"
             if record_role is None or client is None or server is None or question_type is None:
                 why = self._unread(event, record_role) if client is None else None
                 if why is None and record_role == "answer" and question_type is None:
@@ -720,7 +727,11 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
                 self.note_limit("names", f"an ANY-question group passed {NAME_CAP:,} distinct names held; its name "
                                          f"count is a lower bound")
         transport = str(event.get("network.transport") or "").lower()
-        if record_role in ("query", "transaction"):
+        if event.has("dns.transfer.result"):
+            # the server's own decision on a transfer (BIND's denied or started line), not another question: the same
+            # transfer's query-log question, when logged, is counted once as the question
+            group.transfers[(question_type, str(event.get("dns.transfer.result")))] += 1
+        elif record_role in ("query", "transaction"):
             group.requests[question_type] += 1
             flow = flow_key(event)
             flows = group.asked_by_flow if question_type in self.TRANSFER_TYPES else None
@@ -753,7 +764,7 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
                 group = self.groups.peek(key)
                 client, server, kind, zone = key
                 asked, replies = group.requests, group.replies
-                types = sorted(set(asked) | {t for t, _c in replies})
+                types = sorted(set(asked) | {t for t, _c in replies} | {t for t, _r in group.transfers})
                 transfer = kind == "transfer"
                 if transfer:
                     subject = f"for zone '{zone}'" if zone else "for a zone whose name is not recorded"
@@ -772,10 +783,18 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
                                   f"the DNS server's own log recorded the questions, names no server address and "
                                   f"writes its answers without their question type, so the answers are not tied to "
                                   f"these questions.")
+                elif group.transfers:
+                    claim = (f"{server} ({' and '.join(SERVER_FROM[k] for k in sorted(group.server_from))}) logged "
+                             f"{sum(group.transfers.values())} zone-transfer decision(s) on requests from {client} "
+                             f"{subject} ({group.span.text()}).")
                 else:
                     claim = (f"{client} received {sum(replies.values())} answer record(s) from {server} to "
                              f"{'/'.join(types)} question(s) {subject} ({group.span.text()}); the question records "
                              f"themselves were not retrieved.")
+                if group.transfers:
+                    decisions = Counter({f"{t} {result}": n for (t, result), n in group.transfers.items()})
+                    claim += (f" The server's own transfer log: {_tally(decisions)} (denied: the server refused the "
+                              "request; started: the server began sending the zone, whose records are not shown).")
                 accepted = sum(n for (t, code), n in replies.items() if code == "NOERROR" and t in self.TRANSFER_TYPES)
                 if replies:
                     by_code = Counter({f"{t} {c}": n for (t, c), n in replies.items()})
@@ -785,6 +804,8 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
                                   "answer records do not show how many zone records were sent.")
                     elif all(c in ("REFUSED", "NOTAUTH", "NOTIMP") for (_t, c) in replies):
                         claim += " The server refused or did not implement every answered question."
+                elif group.transfers:
+                    pass                            # the server's transfer decisions above say what it did
                 elif group.server_from:
                     claim += " Whether the server answered is not established."
                 else:

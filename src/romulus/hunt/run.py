@@ -131,6 +131,9 @@ def create_hunt(s: Settings, start: datetime, end: datetime, created_by: str, st
     manifest['indicator_lists'] = IndicatorLists(repo).pin()
     from romulus.content.sigma_store import SigmaRules
     manifest['sigma_rules'] = SigmaRules(repo).pin()
+    from romulus.content.mention_patterns import load_mention_patterns, pattern_pin
+    # the mention pattern set the hunt is created with: its sweep names every file that differs when it runs
+    manifest['mention_patterns'] = pattern_pin(load_mention_patterns(settings=s))
     hid = new_hunt_id()
     repo.create_hunt(hid, manifest, digest(manifest), created_by)
     arkime = arkime_profile_fields(s, [target for target in targets
@@ -452,7 +455,12 @@ def _stopped_in_sweep(repo: Repo, hunt_id: str, sweep, targets: list[str], start
                       watch: StopWatch, owner_token: str) -> dict:
     """End a hunt an analyst stopped during its sweep: keep every finding it stored, finalize nothing (an aggregate
     over part of the window could report what the rest would contradict), and leave it partial and resumable. Its
-    sweep summary says the sweep did not finish and why; ending the hunt narrows every whole-window answer."""
+    sweep summary says the sweep did not finish and why; ending the hunt narrows every whole-window answer. The
+    mention pool of the partitions read is kept too, its coverage partial for the stop."""
+    try:
+        sweep.publish_mentions(stopped=f"stopped by analyst ({stop.detail})")
+    except Exception as exc:  # noqa: BLE001 - the stop must end the hunt even when the pool cannot be stored
+        sweep.stats["mentions"] = {"status": "not_scanned", "reasons": [f"the mention pool was not stored: {exc}"]}
     sweep.close_stage()
     current = started[-1] if started else None
     not_started = [target for target in targets if target not in started]

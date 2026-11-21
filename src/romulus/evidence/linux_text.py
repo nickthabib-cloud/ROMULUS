@@ -67,6 +67,7 @@ class TextLine:
     hostname: str | None = None
     timestamp: str | None = None
     fields: dict[str, object] = field(default_factory=dict)
+    pid: str | None = None              # the syslog header's process id, as the writer chose it
 
 
 def classify(line: str, *, openvpn_file: bool = False) -> TextLine:
@@ -89,10 +90,11 @@ def classify(line: str, *, openvpn_file: bool = False) -> TextLine:
     if match := _RFC.fullmatch(line):
         body = _structured_body(match["rest"])
         if body is not None:
-            return TextLine("syslog", match["program"], body, match["host"], match["time"])
+            return TextLine("syslog", match["program"], body, match["host"], match["time"],
+                            pid=match["pid"] if match["pid"].isdigit() else None)
         return TextLine("unknown")
     if match := _BSD.fullmatch(line):
-        return TextLine("syslog", match["program"], match["body"], match["host"], match["time"])
+        return TextLine("syslog", match["program"], match["body"], match["host"], match["time"], pid=match["pid"])
     if match := _ACCESS.fullmatch(line):
         fields = {"http.response.status_code": int(match["status"])}
         request = match["request"].split(" ")

