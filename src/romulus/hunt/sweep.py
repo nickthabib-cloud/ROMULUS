@@ -3353,11 +3353,13 @@ class Sweep:
                           else "a channel outside the ones the sweep reads")
                 scanner.note_left_out(target, "channel", channel, records, reason)
         for target, reasons in sorted((getattr(self, "_windows_inventory_reasons", None) or {}).items()):
-            if any(str(reason).startswith("event class inventory unavailable") for reason in reasons):
-                scanner.note_left_out(
-                    target, "channel", "any channel outside the catalog's", None,
-                    "not offered: the sweep reads only the catalog's channels here, and the event class inventory is "
-                    "unavailable, so the channels left out are not named or counted")
+            for state in ("unavailable", "incomplete"):
+                if any(str(reason).startswith(f"event class inventory {state}") for reason in reasons):
+                    scanner.note_left_out(
+                        target, "channel", "any channel outside the catalog's", None,
+                        "not offered: the sweep reads only the catalog's channels here, and the event class "
+                        f"inventory is {state}, so the channels left out are not all named or counted")
+                    break
 
     def publish_mentions(self, stopped: str = "") -> None:
         """Rank the mention pool and replace the hunt's stored pool with it (every exit that keeps the sweep's
