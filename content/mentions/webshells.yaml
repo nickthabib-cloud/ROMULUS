@@ -70,12 +70,29 @@
     positive:
       - 'Nov 20 17:01:00 web01 modsecurity: Matched "Operator Rx" against ARGS:file: <?php system($_GET[''cmd'']); ?>'
       - '<?=`$_GET[0]`?>'
+      - 'Nov 21 09:05:02 waf01 modsec: ARGS:file contains <?php system($_post[''cmd'']); ?>'
+      - 'Nov 21 09:05:03 waf01 modsec: ARGS:file contains <?php system($_request[''cmd'']); ?>'
+      - 'Nov 21 09:05:04 waf01 modsec: ARGS:file contains <?php system($_cookie[''cmd'']); ?>'
+      - 'Nov 21 09:05:05 waf01 modsec: ARGS:file contains <?php passthru($_get[''cmd'']); ?>'
+      - 'Nov 21 09:05:06 waf01 modsec: ARGS:file contains <?php passthru($_post[''cmd'']); ?>'
+      - 'Nov 21 09:05:07 waf01 modsec: ARGS:file contains <?php passthru($_request[''cmd'']); ?>'
+      - 'Nov 21 09:05:08 waf01 modsec: ARGS:file contains <?php shell_exec($_get[''cmd'']); ?>'
+      - 'Nov 21 09:05:09 waf01 modsec: ARGS:file contains <?php shell_exec($_post[''cmd'']); ?>'
+      - 'Nov 21 09:05:10 waf01 modsec: ARGS:file contains <?php shell_exec($_request[''cmd'']); ?>'
+      - 'Nov 21 09:05:11 waf01 modsec: ARGS:file contains <?php assert($_get[''cmd'']); ?>'
+      - 'Nov 21 09:05:12 waf01 modsec: ARGS:file contains <?php assert($_post[''cmd'']); ?>'
+      - 'Nov 21 09:05:13 waf01 modsec: ARGS:file contains <?php assert($_request[''cmd'']); ?>'
+      - 'Nov 21 09:05:14 waf01 modsec: ARGS:file contains <?php popen($_get[''cmd'']); ?>'
+      - 'Nov 21 09:05:15 waf01 modsec: ARGS:file contains <?php popen($_post[''cmd'']); ?>'
+      - 'Nov 21 09:05:16 waf01 modsec: ARGS:file contains <?php popen($_request[''cmd'']); ?>'
+      - 'Nov 21 09:05:17 waf01 modsec: ARGS:file contains <?php `$_post[''cmd'']); ?>'
+      - 'Nov 21 09:05:18 waf01 modsec: ARGS:file contains <?php `$_request[''cmd'']); ?>'
     negative:
       - 'Nov 20 17:01:01 web01 php-fpm[880]: PHP Warning: system(): Unable to fork [/usr/bin/convert in.png out.jpg]'
       - 'Nov 20 17:01:02 web01 php-fpm[880]: $page = htmlspecialchars($_GET[''page''])'
 
 - id: mention.webshell_php_eval_decoder
-  title: PHP eval of decoded or decompressed content
+  title: 'PHP eval of a decoding or decompression call'
   match:
     anchored: 'eval {0,3}\( {0,3}(?:base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13) {0,3}\('
   case_sensitive: false
@@ -121,9 +138,10 @@
       - 'Nov 20 17:03:00 web01 app[700]: evaluation complete'
 
 - id: mention.webshell_base64_php_markers
-  title: Base64 of 'eval(' or 'base64_decode' inside text
+  title: 'Base64 of ''base64_decode'' inside text'
   match:
-    literal: ['ZXZhbCg', 'YmFzZTY0X2RlY29kZ']
+    literal:
+      - 'YmFzZTY0X2RlY29kZ'
   case_sensitive: true
   strength: medium
   attack: [T1505.003, T1027.010]
@@ -139,15 +157,40 @@
     chance only rarely; WAF and request-body logs are where they appear.
   examples:
     positive:
-      - 'Nov 20 17:04:00 waf01 modsec: ARGS:z0 = ZXZhbCgkX1BPU1RbInoxIl0pOw=='
+      - 'Nov 20 17:04:00 waf01 modsec: ARGS:z0 = QGV2YWwoYmFzZTY0X2RlY29kZSgkX1BPU1RbejFdKSk7'
     negative:
       - 'Nov 20 17:04:01 waf01 modsec: ARGS:token = c2Vzc2lvbi1pZA=='
       - 'Nov 20 17:04:02 web01 app[700]: blob=ZXhhbXBsZS5vcmc='
 
+- id: mention.webshell_base64_eval_marker
+  title: Base64 of 'eval(' inside text
+  match:
+    literal: ['ZXZhbCg']
+  case_sensitive: true
+  strength: weak
+  attack: [T1505.003, T1027.010]
+  telemetry: [any]
+  source:
+    name: php-malware-finder, b64 rule (jvoisin)
+    url: https://github.com/jvoisin/php-malware-finder/blob/87b6d7faa4829b1e1c7c8895ef33d2b84d00b11f/data/php.yar
+    license: LGPL-3.0
+    upstream_id: b64
+  rationale: >-
+    Base64 of 'eval(' at one alignment. Seven characters can occur in unrelated base64 data, so it is a weak
+    candidate on its own; with a PHP context or the base64_decode marker it supports a web shell lead.
+  examples:
+    positive:
+      - 'Nov 20 17:04:03 waf01 modsec: ARGS:z0 = ZXZhbCgkX1BPU1RbInoxIl0pOw=='
+    negative:
+      - 'Nov 20 17:04:04 waf01 modsec: ARGS:token = c2Vzc2lvbi1pZA=='
+      - 'Nov 20 17:04:05 web01 app[700]: blob=ZXhhbXBsZS5vcmc='
+
 - id: mention.webshell_php_shell_names
   title: Classic PHP web shell names
   match:
-    literal: ['r57shell', 'fx29shell', 'b374k']
+    literal:
+      - 'r57shell'
+      - 'fx29shell'
   case_sensitive: false
   strength: medium
   attack: [T1505.003]
@@ -163,10 +206,33 @@
     antivirus-family entry.
   examples:
     positive:
-      - '203.0.113.62 - - [20/Nov/2026:17:05:00 +0000] "POST /images/b374k.php HTTP/1.1" 200 5120 "-" "Mozilla/5.0"'
+      - '203.0.113.62 - - [20/Nov/2026:17:05:00 +0000] "POST /images/r57shell.php HTTP/1.1" 200 5120 "-" "Mozilla/5.0"'
     negative:
       - '10.0.3.8 - - [20/Nov/2026:17:05:01 +0000] "GET /images/banner.png HTTP/1.1" 200 5120 "-" "Mozilla/5.0"'
       - 'Nov 20 17:05:02 web01 app[700]: r57 cache shard ready'
+
+- id: mention.webshell_b374k_name
+  title: b374k web shell name as a whole word
+  match:
+    anchored: '\bb374k\b'
+  case_sensitive: false
+  strength: medium
+  attack: [T1505.003]
+  telemetry: [any]
+  source:
+    name: php-malware-finder, DodgyStrings and Websites rules (jvoisin)
+    url: https://github.com/jvoisin/php-malware-finder/blob/87b6d7faa4829b1e1c7c8895ef33d2b84d00b11f/data/php.yar
+    license: LGPL-3.0
+    upstream_id: DodgyStrings
+  rationale: >-
+    The b374k PHP web shell by name (the rule matches it as a full word). As with the other shell names, access-log
+    hits are often scanners probing for an existing copy, so it is medium.
+  examples:
+    positive:
+      - '203.0.113.62 - - [20/Nov/2026:17:05:00 +0000] "POST /images/b374k.php HTTP/1.1" 200 5120 "-" "Mozilla/5.0"'
+    negative:
+      - 'Nov 20 17:05:03 web01 app[700]: cache key ab374kx rotated'
+      - '10.0.3.8 - - [20/Nov/2026:17:05:04 +0000] "GET /images/banner.png HTTP/1.1" 200 5120 "-" "Mozilla/5.0"'
 
 - id: mention.webshell_antivirus_families
   title: Antivirus web shell family names
@@ -211,6 +277,24 @@
     positive:
       - 'Nov 20 17:06:00 web02 av-agent: Threat detected: Backdoor.ASP.Chopper in C:\inetpub\wwwroot\aspnet_client\x.aspx'
       - 'Nov 20 17:06:01 web01 savd[700]: Found Troj/PHP-AB in /var/www/html/up/1.php'
+      - 'Nov 21 09:05:19 web01 av-agent: Threat detected: C99shell.Generic in /var/www/html/up/x.php'
+      - 'Nov 21 09:05:20 web01 av-agent: Threat detected: ASPXSpy.Generic in /var/www/html/up/x.php'
+      - 'Nov 21 09:05:21 web01 av-agent: Threat detected: PHPShell.Generic in /var/www/html/up/x.php'
+      - 'Nov 21 09:05:22 web01 av-agent: Threat detected: PShlSpy.Generic in /var/www/html/up/x.php'
+      - 'Nov 21 09:05:23 web01 av-agent: Threat detected: SinoChoper.Generic in /var/www/html/up/x.php'
+      - 'Nov 21 09:05:24 web01 av-agent: Threat detected: Aspdoor.Generic in /var/www/html/up/x.php'
+      - 'Nov 21 09:05:25 web01 av-agent: Threat detected: Backdoor.PHP.Generic in /var/www/html/up/x.php'
+      - 'Nov 21 09:05:26 web01 av-agent: Threat detected: Backdoor.JSP.Generic in /var/www/html/up/x.php'
+      - 'Nov 21 09:05:27 web01 av-agent: Threat detected: Backdoor/PHP.Generic in /var/www/html/up/x.php'
+      - 'Nov 21 09:05:28 web01 av-agent: Threat detected: Backdoor/ASP.Generic in /var/www/html/up/x.php'
+      - 'Nov 21 09:05:29 web01 av-agent: Threat detected: Backdoor/JSP.Generic in /var/www/html/up/x.php'
+      - 'Nov 21 09:05:30 web01 av-agent: Threat detected: Trojan.PHP.Generic in /var/www/html/up/x.php'
+      - 'Nov 21 09:05:31 web01 av-agent: Threat detected: Trojan.ASP.Generic in /var/www/html/up/x.php'
+      - 'Nov 21 09:05:32 web01 av-agent: Threat detected: Trojan.JSP.Generic in /var/www/html/up/x.php'
+      - 'Nov 21 09:05:33 web01 av-agent: Threat detected: IIS/BackDoor.Generic in /var/www/html/up/x.php'
+      - 'Nov 21 09:05:34 web01 av-agent: Threat detected: JAVA/Backdoor.Generic in /var/www/html/up/x.php'
+      - 'Nov 21 09:05:35 web01 av-agent: Threat detected: Troj/ASP.Generic in /var/www/html/up/x.php'
+      - 'Nov 21 09:05:36 web01 av-agent: Threat detected: Troj/JSP.Generic in /var/www/html/up/x.php'
     negative:
       - 'Nov 20 17:06:02 web01 savd[700]: Scan completed, no threats found in /var/www/html'
       - 'Nov 20 17:06:03 web02 w3wp: Request to /api/php/handler.asp completed 200'
@@ -222,7 +306,7 @@
   case_sensitive: false
   strength: strong
   attack: [T1505.003, T1059.003]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: 'SigmaHQ: Chopper Webshell Process Pattern (Florian Roth, MSTI)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_webshell_chopper.yml
@@ -235,6 +319,10 @@
   examples:
     positive:
       - 'cmd.exe /c cd /d "c:\inetpub\wwwroot\"&whoami&echo [S]&cd&echo [E]'
+      - 'cmd.exe /c cd /d "c:\inetpub\wwwroot\"&ipconfig&echo'
+      - 'cmd.exe /c cd /d "c:\inetpub\wwwroot\"&quser&echo'
+      - 'cmd.exe /c cd /d "c:\inetpub\wwwroot\"&c:&echo'
+      - 'cmd.exe /c cd /d "c:\inetpub\wwwroot\"&dir&echo'
     negative:
       - 'cmd.exe /c echo backup started & robocopy C:\data D:\data'
       - 'cmd.exe /c dir C:\inetpub\logs'
@@ -300,9 +388,10 @@
     license: DRL-1.1
     upstream_id: 818f7b24-0fba-4c49-a073-8b755573b9c7
   rationale: >-
-    The rule lists the recon commands (whoami, id, uname, ifconfig, hostname, cat, pwd) web shells run as children of
-    the web server; this entry catches them on the request side, passed in a cmd parameter. Internet scanners send
-    the same probes to guessed shell paths, so it is medium; a 200 response from an unexpected script decides.
+    Author-composed request-side shape. The cited rule detects these recon commands (whoami, id, uname, ifconfig,
+    hostname, cat, pwd) as children of a web server process; this entry looks for the same commands passed in a cmd
+    parameter. Internet scanners send the same probes to guessed shell paths, so it is medium; a 200 response from an
+    unexpected script decides.
   examples:
     positive:
       - '203.0.113.65 - - [20/Nov/2026:17:10:00 +0000] "GET /uploads/x.php?cmd=whoami HTTP/1.1" 200 9 "-" "curl/8.0"'
@@ -335,7 +424,7 @@
       - '10.0.3.8 - - [20/Nov/2026:17:11:02 +0000] "GET /docs/php.html HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
 
 - id: mention.webshell_rtlo_filename
-  title: Right-to-left override in a requested or uploaded name
+  title: 'Right-to-left override in a request or upload name'
   match:
     literal: ['%E2%80%AE']
   case_sensitive: false

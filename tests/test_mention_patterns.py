@@ -22,7 +22,9 @@ ROOT = Path(__file__).resolve().parents[1]
 MENTIONS = ROOT / "content" / "mentions"
 THEME_FILES = {
     "cradles.yaml",
+    "credential_access.yaml",
     "encoded.yaml",
+    "evasion_impact.yaml",
     "persistence.yaml",
     "reverse_shell.yaml",
     "sigma_keywords.yaml",
@@ -54,6 +56,13 @@ MAX_ANCHORED_CHARS = 512
 MIN_LITERAL_PREFIX = 4
 MIN_LITERAL_CHARS = 4
 MAX_REPEAT_BOUND = 1024
+# Sum of the upper bounds of the open gaps ('.' or a negated class such as [^\n]) along any path through an anchored
+# pattern. Each gap is where a backtracking engine re-scans; keeping their sum small keeps the per-start work small.
+MAX_GAP_SUM = 360
+# Titles describe text, never an executed action: no past-tense or participle verbs outside quoted text.
+TITLE_VERB_RE = re.compile(r"\b(?:[a-z]+ed|set|made|written|sent|run|ran|shut|put|built|done|taken|shown)\b", re.I)
+TITLE_ALLOWED_ED = {"encoded", "embedded", "based", "privileged", "numbered", "compressed", "obfuscated", "need",
+                    "speed", "feed", "seed", "red", "shared", "unparsed", "related", "shred"}
 
 _FORBIDDEN_OPS = {
     sre_c.GROUPREF: "backreference",
@@ -125,6 +134,18 @@ BENIGN_CORPUS = [
     "Nov 20 07:31:00 app01 systemd[1]: Stopping firewalld.service - firewalld - dynamic firewall daemon...",
     "Nov 20 07:32:00 app01 bash[4000]: HISTORY: kubectl get secret db -o jsonpath='{.data.password}' | base64 -d",
     "Nov 20 07:33:00 app01 bash[4001]: HISTORY: python3 -m http.server 8000 --directory ./site",
+    # Review probes: admin idioms that strong patterns must not match.
+    "Nov 20 07:34:00 app01 bash[4002]: HISTORY: curl -s http://10.0.0.5:9200/_cluster/health | python3 -m json.tool",
+    "Nov 20 07:35:00 app01 bash[4003]: HISTORY: curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/app | python -c 'import sys,json; print(json.load(sys.stdin)[\"Expiration\"])'",
+    "Nov 20 07:36:00 app01 bash[4004]: HISTORY: echo 'deploy ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/deploy",
+    "Nov 20 07:37:00 app01 bash[4005]: HISTORY: echo 'ops ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers.d/ops",
+    "*/5 * * * * curl -fsS -m 10 --retry 5 -o /dev/null https://hc-ping.example.org/eb095278-f28d-448d-87fb-7b75c171a6aa",
+    "@reboot curl -fsS https://hc-ping.example.org/eb095278 > /dev/null",
+    "Nov 20 07:38:00 app01 bash[4006]: HISTORY: echo '*/5 * * * * curl -fsS https://hc-ping.example.org/eb095278' | crontab -",
+    "Nov 20 07:39:00 app01 bash[4007]: HISTORY: echo 'export http_proxy=http://proxy:3128' >> ~/.bashrc; curl -s https://status.example.org/",
+    "Nov 20 07:40:00 app01 bash[4008]: HISTORY: chmod 2775 /tmp/shared",
+    "Nov 20 07:41:00 app01 bash[4009]: HISTORY: chmod 4755 /usr/local/bin/tool && cp build.log /tmp/",
+    "Nov 20 07:42:00 app01 bash[4010]: HISTORY: echo \"wget -q https://mirror.example.org/motd -O /etc/motd\" >> /etc/rc.local",
 ]
 
 # Everyday lines that a medium pattern is known to match, with the pattern ids allowed to match them. These are the
@@ -134,6 +155,25 @@ KNOWN_BENIGN_MEDIUM_MATCHES = {
     # Configuration-management agents launch PowerShell with an encoded command ($ProgressPreference='SilentlyContinue').
     "powershell.exe -NoProfile -NonInteractive -EncodedCommand JABQAHIAbwBnAHIAZQBzAHMAUAByAGUAZgBlAHIAZQBuAGMAZQA9ACcAUwBpAGwAZQBuAHQAbAB5AEMAbwBuAHQAaQBuAHUAZQAnAA==": {
         "mention.encoded_powershell_encodedcommand"
+    },
+    # Benign look-alikes kept as negatives of stronger entries; the medium entry matching them is expected.
+    '$s=[Convert]::FromBase64String("SGVsbG8gV29ybGQ=")': {"mention.encoded_frombase64string"},
+    'powershell -c "[Convert]::FromBase64String($cert)"': {"mention.encoded_frombase64string"},
+    "Nov 20 13:09:01 web01 bash[823]: HISTORY: cat /etc/ld.so.preload": {"mention.sigma_ld_so_preload"},
+    '2026-11-20 10:30:01 INFO  [exec-9] Runtime.getRuntime().exec("/usr/bin/convert in.png out.jpg") finished': {
+        "mention.sigma_java_payload_short"
+    },
+    # Configuration-management bootstrap from an internal server by IP over HTTPS (Puppet's documented installer).
+    "Nov 20 07:43:00 app01 bash[4011]: HISTORY: curl -k https://10.0.0.20:8140/packages/current/install.bash | sudo bash": {
+        "mention.cradle_raw_ip_https_to_interpreter"
+    },
+    # SCCM, Intune and Group Policy tasks run PowerShell with an execution-policy bypass.
+    'schtasks /create /tn "Corp\\Inventory" /tr "powershell.exe -ExecutionPolicy Bypass -File C:\\ProgramData\\Corp\\inv.ps1" /sc daily /ru system': {
+        "mention.persist_schtasks_bypass_hidden_action"
+    },
+    # Vagrant and Packer base images append a passwordless grant for the build user.
+    'Nov 20 07:44:00 app01 bash[4012]: HISTORY: echo "vagrant ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers': {
+        "mention.persist_sudoers_nopasswd_append"
     },
     # The Chocolatey installer is a classic download cradle.
     "powershell -c \"iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))\"": {
@@ -187,9 +227,42 @@ def _walk(items, inside_repeat: bool, where: str) -> None:
                 _walk(alternative, inside_repeat, where)
 
 
+def _strip_leading_boundary(parsed):
+    """A leading \\b is zero-width; the literal prefix starts after it."""
+    items = list(parsed)
+    if items and items[0][0] is sre_c.AT and items[0][1] is sre_c.AT_BOUNDARY:
+        return items[1:]
+    return items
+
+
+def _is_open_gap(sub) -> bool:
+    if len(sub) != 1:
+        return False
+    op, av = sub[0]
+    if op is sre_c.ANY or op is sre_c.NOT_LITERAL:
+        return True
+    return op is sre_c.IN and any(item[0] is sre_c.NEGATE for item in av)
+
+
+def _gap_sum(items) -> int:
+    total = 0
+    for op, av in items:
+        if op in _REPEAT_OPS:
+            _low, high, sub = av
+            if _is_open_gap(list(sub)):
+                total += high
+            else:
+                total += high * _gap_sum(sub) if _gap_sum(sub) else 0
+        elif op is sre_c.SUBPATTERN:
+            total += _gap_sum(av[3])
+        elif op is sre_c.BRANCH:
+            total += max(_gap_sum(alt) for alt in av[1])
+    return total
+
+
 def _literal_prefix_length(parsed) -> int:
     count = 0
-    for op, _av in parsed:
+    for op, _av in _strip_leading_boundary(parsed):
         if op is not sre_c.LITERAL:
             break
         count += 1
@@ -203,7 +276,7 @@ def _textual_literal_prefix_length(pattern: str) -> int:
     """Leading characters written as plain literals (or escaped punctuation); a scanner can read these without a
     regex parser. A literal followed by a quantifier is optional and does not count."""
     count = 0
-    index = 0
+    index = 2 if pattern.startswith("\\b") else 0
     while index < len(pattern):
         char = pattern[index]
         if char == "\\":
@@ -233,6 +306,8 @@ def check_anchored(pattern: str, case_sensitive: bool, where: str) -> re.Pattern
     baseline_flags = sre_parse.parse("x", flags).state.flags
     assert parsed.state.flags == baseline_flags, f"{where}: inline flags are not allowed"
     _walk(parsed, False, where)
+    gaps = _gap_sum(parsed)
+    assert gaps <= MAX_GAP_SUM, f"{where}: open gaps sum to {gaps}, above {MAX_GAP_SUM}"
     first = parsed[0] if len(parsed) else None
     starts_caret = first is not None and first[0] is sre_c.AT and first[1] is sre_c.AT_BEGINNING
     prefix = min(_literal_prefix_length(parsed), _textual_literal_prefix_length(pattern))
@@ -385,14 +460,36 @@ def test_positives_match_and_negatives_do_not() -> None:
             assert not matches(line), f"{where}: benign negative matches: {line!r}"
 
 
-def test_strong_patterns_do_not_fire_on_other_patterns_negatives() -> None:
+def test_titles_describe_text_not_actions() -> None:
+    for filename, entry in _corpus():
+        unquoted = re.sub(r"'[^']*'|\"[^\"]*\"", " ", entry["title"])
+        verbs = [w for w in TITLE_VERB_RE.findall(unquoted) if w.lower() not in TITLE_ALLOWED_ED]
+        assert not verbs, f"{filename}:{entry['id']}: title reads as an action ({verbs}): {entry['title']!r}"
+
+
+def test_strong_literals_each_have_a_positive_example() -> None:
+    for filename, entry in _corpus():
+        if entry["strength"] != "strong" or "literal" not in entry["match"]:
+            continue
+        positives = entry["examples"]["positive"]
+        for literal in entry["match"]["literal"]:
+            if entry["case_sensitive"]:
+                hit = any(literal in line for line in positives)
+            else:
+                hit = any(literal.lower() in line.lower() for line in positives)
+            assert hit, f"{filename}:{entry['id']}: literal {literal!r} has no positive example"
+
+
+def test_strong_and_medium_patterns_do_not_fire_on_other_patterns_negatives() -> None:
     corpus = _corpus()
     negatives = [(entry["id"], line) for _f, entry in corpus for line in entry["examples"]["negative"]]
     for filename, entry in corpus:
-        if entry["strength"] != "strong":
+        if entry["strength"] == "weak":
             continue
         matches = matcher(entry)
         for owner, line in negatives:
+            if entry["id"] in KNOWN_BENIGN_MEDIUM_MATCHES.get(line, ()):
+                continue
             assert not matches(line), f"{filename}:{entry['id']}: matches benign negative of {owner}: {line!r}"
 
 
@@ -419,12 +516,32 @@ def test_known_benign_medium_matches_are_real() -> None:
             assert matcher(by_id[pattern_id])(line), f"{pattern_id} no longer matches {line!r}"
 
 
+def _literal_runs(parsed) -> list[str]:
+    runs, current = [], ""
+    for op, av in _strip_leading_boundary(parsed):
+        if op is sre_c.LITERAL:
+            current += chr(av)
+        else:
+            if current:
+                runs.append(current)
+            current = ""
+    if current:
+        runs.append(current)
+    return runs
+
+
 def _adversarial_lines(pattern: str, flags: int, positives: list[str]) -> list[str]:
-    """Long single lines built to make a backtracking engine work hard: the literal prefix followed by filler, and
-    each positive example cut short (so every gap is explored but the final element never matches) and repeated."""
+    """Long single lines built to make a backtracking engine work hard: the literal prefix followed by filler; dense
+    near-misses that repeat every literal run of the pattern except the last, back to back, so each start position
+    explores every gap; and each positive example cut short and repeated."""
     parsed = sre_parse.parse(pattern, flags)
-    prefix = "".join(chr(av) for op, av in parsed[: _literal_prefix_length(parsed)] if op is sre_c.LITERAL)
+    runs = _literal_runs(parsed)
+    prefix = runs[0] if runs else ""
     lines = [(prefix + "A1/+ x" * 40) * 400 + "Z" * 65536]
+    if len(runs) > 1:
+        dense = " ".join(runs[:-1]) + " "
+        lines.append(dense * max(1, 200_000 // len(dense)))
+        lines.append((prefix + " ") * max(1, 200_000 // (len(prefix) + 1)))
     for positive in positives:
         for keep in (0.5, 0.75, 0.9):
             near = positive[: max(1, int(len(positive) * keep))]
