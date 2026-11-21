@@ -185,6 +185,11 @@ CASES: dict[str, list[tuple[dict, bool]]] = {
         ({"handle": "E1"}, False), ({"handle": "R0"}, False), ({"handle": "R" + "1" * 12}, False), ({}, False),
         ({"handle": "R1", "extra": 1}, False),
     ],
+    "list_mentions": [
+        ({}, True), ({"after": 25}, True), ({"after": 0, "pattern": "mention.x", "host": "web1"}, True),
+        ({"pattern": None, "host": None}, True), ({"after": -1}, False), ({"pattern": "p" * 129}, False),
+        ({"host": "h" * 256}, False), ({"page": 2}, False),
+    ],
     "open_hypothesis": [
         ({"statement": "s" * 10}, True),
         ({"statement": "s" * 600, "techniques": ["T1059.001"] * 20, "entities": ["N1"] * 40,
