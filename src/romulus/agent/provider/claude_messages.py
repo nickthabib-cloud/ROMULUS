@@ -7,7 +7,9 @@ here (no environment proxy, no redirects, every request pinned to the classified
 headers rebuilt from the request) and no retries of its own, so the port's one retry policy applies. Credentials,
 endpoints, headers, logging and tracing the SDK would otherwise read from the environment are not used. Each call
 reports every attempt the API billed, with the model that served it (a refusal-fallback answer, or an attempt that
-broke off mid-reply at its full output allowance), so budgets price each attempt by its own model.
+broke off mid-reply at its full output allowance), so budgets price each attempt by its own model. A reply the
+refusal fallback took over is the fallback model's alone: what the declined model wrote is dropped, and a reply in
+which the fallback model only continued the declined model's text is asked once more, never joined to it.
 
 Translation: leading system messages become the top-level system prompt and later ones mid-conversation system
 messages, placed where the API accepts them (after a user turn, last or before an assistant turn; anything else is a
@@ -127,6 +129,71 @@ DESCRIBED_KEYS = {"minLength": "at least {} character(s)", "maxLength": "at most
 def refusal_category(value) -> str | None:
     """A refusal category the API documents, else None: the value is recorded and shown, so nothing else passes."""
     return value if isinstance(value, str) and value in REFUSAL_CATEGORIES else None
+
+
+# ---- the refusal fallback's switches ---------------------------------------------------------------------------
+#
+# When the server-side refusal fallback takes over a streamed reply, the reply keeps what the declined model had
+# written, a `fallback` block marks the switch, and the fallback model's own blocks follow. Only the declined model's
+# text is passed on, as context for the fallback model to continue from: its words after the switch are then the tail
+# of a reply another model began, not an answer of their own (a structured answer may even restart, so the two halves
+# do not join into one). Such a reply is set aside and the call asked once more; tool calls made after the switch are
+# whole calls and stand. A switch with no declined text before it leaves the fallback model answering from the start.
+
+def _boundary(blocks: list) -> int:
+    """The index of the last switch to a fallback model (-1 when there is none)."""
+    return max((i for i, b in enumerate(blocks) if b.type == "fallback"), default=-1)
+
+
+def _declined_text(blocks: list) -> str:
+    """The visible text the declined models wrote before the last switch."""
+    return "".join(b.text for b in blocks[:max(_boundary(blocks), 0)] if b.type == "text").strip()
+
+
+def _switches(blocks: list) -> list[dict]:
+    """Each hop where a model declined and another took over, with the category of that refusal: the API states it
+    on the switch itself (stop_details describes only a reply that ended refused, so it is empty after a switch)."""
+    return [{"from": b.from_.model, "to": b.to.model,
+             "category": refusal_category(getattr(getattr(b, "trigger", None), "category", None))}
+            for b in blocks if b.type == "fallback"]
+
+
+def _served_by_fallback(message) -> bool:
+    return any(it.type == "fallback_message" for it in (getattr(message.usage, "iterations", None) or []))
+
+
+def _continued_switch(message) -> str:
+    """Why a reply is the fallback model continuing text a declined model began, and so no complete answer (empty
+    when it is not). Only a reply that says it is complete is judged: a refusal, a truncation or a stream cut short
+    is reported as such."""
+    blocks = list(message.content or [])
+    if message.stop_reason not in ("end_turn", "tool_use") or not _declined_text(blocks):
+        return ""
+    after = blocks[_boundary(blocks) + 1:]
+    if message.stop_reason == "tool_use" and any(b.type == "tool_use" for b in after):
+        return ""
+    return "the refusal fallback continued a reply the configured model had begun and declined"
+
+
+def _discarded_counts(blocks: list) -> dict:
+    """What the declined models wrote before the last switch, as counts: never their words."""
+    before = blocks[:max(_boundary(blocks), 0)]
+    return {"text_chars": len("".join(b.text for b in before if b.type == "text")),
+            "tool_calls": sum(b.type == "tool_use" for b in before),
+            "thinking_blocks": sum(b.type in ("thinking", "redacted_thinking") for b in before)}
+
+
+def _switch_record(message, problem: str) -> dict:
+    """A reply set aside for a continued switch, as the call's record keeps it: the models, the switches with their
+    categories, and counts of what was dropped."""
+    blocks = list(message.content or [])
+    return {"served_by": message.model, "switches": _switches(blocks), "discarded": _discarded_counts(blocks),
+            "reason": problem}
+
+
+def _set_aside_category(discarded: list[dict]) -> str | None:
+    """The first refusal category the switches of replies set aside name."""
+    return next((s["category"] for d in discarded for s in d["switches"] if s["category"]), None)
 
 
 class EgressViolation(Exception):
@@ -811,6 +878,7 @@ class ClaudeMessagesProvider(ChatProvider):
         raw_inputs: dict[int, str] = {}
         attempts = [0]
         broken: list[dict] = []          # attempts that broke off after their reply began: billed all the same
+        discarded: list[dict] = []       # replies set aside because the fallback continued a declined one
         loosened = ""
 
         def once():
@@ -818,7 +886,7 @@ class ClaudeMessagesProvider(ChatProvider):
             raw_inputs.clear()
             began: dict = {}
             try:
-                return self._stream(body, raw_inputs, began)
+                message = self._stream(body, raw_inputs, began)
             except (TransientFailure, _Failed) as exc:
                 if not began:
                     raise
@@ -828,6 +896,15 @@ class ClaudeMessagesProvider(ChatProvider):
                     raise _Failed("error", f"the reply broke off after it began and was billed ({exc.detail}); not "
                                            "retried, as a cost budget is set") from None
                 raise
+            problem = _continued_switch(message)
+            if not problem or discarded:
+                return message           # complete, or already retried once: _result never splices it
+            # the reply is set aside whole, its billed attempts kept, and the call is asked once more
+            broken.extend(self._billed_attempts(message, max_out))
+            discarded.append(_switch_record(message, problem))
+            if self.s.agent_max_cost_usd and request.attempt_guard is None:
+                raise _Failed("error", f"{problem}; not retried, as a cost budget is set")
+            raise TransientFailure(problem)
 
         t0 = time.monotonic()
         while True:
@@ -848,11 +925,14 @@ class ClaudeMessagesProvider(ChatProvider):
                 result = failed(exc.status, exc.error, int((time.monotonic() - t0) * 1000), attempts[0])
                 if broken:
                     result.details = {"billed": broken}
+                if discarded:
+                    result.details["fallback_set_aside"] = discarded
                 return result
             except ProviderUnavailable as exc:
                 exc.billed = broken      # for AgentBudget.charge_failure: the provider billed these attempts
                 raise
-        result = self._result(request, message, raw_inputs, required, est, ms, attempts[0], broken, max_out, strict)
+        result = self._result(request, message, raw_inputs, required, est, ms, attempts[0], broken, max_out, strict,
+                              discarded)
         if loosened:
             result.details["strict_tools_refused"] = loosened
         return result
@@ -873,6 +953,26 @@ class ClaudeMessagesProvider(ChatProvider):
             parts.append({"model": began["switched_to"], "prompt": prompt, "completion": max_out, "cache_read": 0,
                           "cache_write": read + write, "worst_case": True})
         return parts
+
+    def _billed_attempts(self, message, max_out: int) -> list[dict]:
+        """Every attempt the API billed for one reply, each with the model that served it (the declined ones, and a
+        reply the fallback model served outright, included)."""
+        usage = message.usage
+        iterations = [it for it in (getattr(usage, "iterations", None) or [])
+                      if it.type in ("message", "fallback_message")]
+        if message.stop_reason is None:
+            # the stream ended before it reported a stop or its output: charged as an attempt that broke off
+            switches = _switches(list(message.content or []))
+            return self._broken_attempt({"model": switches[0]["from"] if switches else message.model, "usage": usage,
+                                         "switched_to": switches[-1]["to"] if switches else None}, max_out)
+        served_by_fallback = any(it.type == "fallback_message" for it in iterations)
+        read, write = (usage.cache_read_input_tokens or 0), (usage.cache_creation_input_tokens or 0)
+        return [{"model": it.model or ("" if served_by_fallback else message.model),
+                 "prompt": it.input_tokens + it.cache_creation_input_tokens + it.cache_read_input_tokens,
+                 "completion": it.output_tokens, "cache_read": it.cache_read_input_tokens,
+                 "cache_write": it.cache_creation_input_tokens} for it in iterations] or [
+            {"model": message.model, "prompt": usage.input_tokens + read + write, "completion": usage.output_tokens,
+             "cache_read": read, "cache_write": write}]
 
     def _stream(self, body: dict, raw_inputs: dict[int, str], began: dict):
         """One streamed request and its final message, with each tool input's raw JSON as it arrived. `began` gets
@@ -1081,19 +1181,21 @@ class ClaudeMessagesProvider(ChatProvider):
     # ---- reply ------------------------------------------------------------------------------------------------
     def _result(self, request: ChatRequest, message, raw_inputs: dict[int, str], required: list[str], est: int,
                 ms: int, attempts: int, broken: list[dict], max_out: int,
-                strict: dict[str, dict] | None = None) -> ChatResult:
+                strict: dict[str, dict] | None = None, discarded: list[dict] | None = None) -> ChatResult:
         strict = strict or {}
         blocks = list(message.content or [])
-        # after a fallback, only text from before the last switch carries over; the declined model's thinking and
-        # tool calls are dropped, and the switch marker itself is an audit record the API ignores
-        boundary = max((i for i, b in enumerate(blocks) if b.type == "fallback"), default=-1)
+        # after a fallback, the answer is the fallback model's alone: everything the declined models wrote before the
+        # last switch (text, thinking and tool calls) is dropped, never joined to it, and the switch marker itself is
+        # an audit record the API ignores
+        boundary = _boundary(blocks)
+        problem = _continued_switch(message)
         kept: list[dict] = []
         texts: list[str] = []
         calls: list[ToolCall] = []
         tool_inputs: dict[str, str] = {}
         foreign: list[str] = []
         for i, block in enumerate(blocks):
-            if block.type == "fallback" or (i < boundary and block.type != "text"):
+            if i <= boundary:
                 continue
             if block.type not in BLOCK_KEYS:
                 foreign.append(block.type)      # no server tools are offered: nothing else belongs in a reply
@@ -1119,36 +1221,25 @@ class ClaudeMessagesProvider(ChatProvider):
             refusal = (f"the model declined to answer (category: {category or 'none given'})"
                        + (f": {stop.explanation}" if getattr(stop, "explanation", None) else ""))
             calls = []      # a refusal can cut a tool call off mid-input; never run one
-        # each hop where a model declined and another took over, with the category of that refusal: the API states it
-        # on the switch itself (stop_details describes only a reply that ended refused, so it is empty here)
-        switches = [{"from": b.from_.model, "to": b.to.model,
-                     "category": refusal_category(getattr(getattr(b, "trigger", None), "category", None))}
-                    for b in blocks if b.type == "fallback"]
+        switches = _switches(blocks)
         usage = message.usage
-        iterations = [it for it in (getattr(usage, "iterations", None) or [])
-                      if it.type in ("message", "fallback_message")]
-        served_by_fallback = any(it.type == "fallback_message" for it in iterations)
-        if switches or served_by_fallback:
+        if switches or _served_by_fallback(message):
             # a fallback that served the call outright (no model ran and declined first) carries no switch, and so
             # no category
             details["fallback"] = {"served_by": message.model, "switches": switches,
                                    "category": switches[0]["category"] if switches else None}
+        if switches and _declined_text(blocks):
+            # what the declined model had written when it was switched: counted, never kept
+            details["fallback"]["discarded"] = _discarded_counts(blocks)
+        if discarded:
+            # an earlier reply of this call was set aside because the fallback continued a declined one; a retry the
+            # fallback model then serves outright carries no switch of its own, so that switch's category stands
+            details["fallback_set_aside"] = discarded
+            if details.get("fallback") and details["fallback"].get("category") is None:
+                details["fallback"]["category"] = _set_aside_category(discarded)
         read, write = (usage.cache_read_input_tokens or 0), (usage.cache_creation_input_tokens or 0)
         tokens = Usage(usage.input_tokens + read + write, usage.output_tokens, read, write)
-        # every attempt the API billed for this call, each with the model that served it (the declined ones, and a
-        # call the fallback model serves outright, included), after any attempt that broke off before this one
-        attempts_billed = [{"model": it.model or ("" if served_by_fallback else message.model),
-                            "prompt": it.input_tokens + it.cache_creation_input_tokens + it.cache_read_input_tokens,
-                            "completion": it.output_tokens, "cache_read": it.cache_read_input_tokens,
-                            "cache_write": it.cache_creation_input_tokens} for it in iterations] or [
-            {"model": message.model, "prompt": tokens.prompt_tokens, "completion": tokens.completion_tokens,
-             "cache_read": read, "cache_write": write}]
-        if native is None:
-            # the stream ended before it reported a stop or its output: charged as an attempt that broke off
-            attempts_billed = self._broken_attempt(
-                {"model": switches[0]["from"] if switches else message.model, "usage": usage,
-                 "switched_to": switches[-1]["to"] if switches else None}, max_out)
-        details["billed"] = [*broken, *attempts_billed]
+        details["billed"] = [*broken, *self._billed_attempts(message, max_out)]
         finish = CLAUDE_STOP_REASONS.get(native, native) if native else None
         result = self._finish(finish_reason=finish, content=content, tool_calls=calls, usage=tokens, est=est,
                               model_reported=str(message.model or ""), ms=ms,
@@ -1171,8 +1262,20 @@ class ClaudeMessagesProvider(ChatProvider):
             if problems:
                 result.status, result.parsed = "invalid_json", None
                 result.error = "the reply does not match the requested schema: " + "; ".join(problems[:5])
+        if problem and result.status != "truncated_input":
+            # the retry also ended in a continued switch: what the fallback model wrote is only the tail of a reply
+            # another model began, so it is no answer: no text a caller could parse, and no tool call to run
+            result.status, result.error = "error", f"{problem}, and again on the retry: no complete answer"
+            result.content, result.parsed, result.tool_calls = "", None, []
         result.details = details
-        if result.status != "refused" and not foreign:
+        if result.status != "refused" and not foreign and not problem:
+            if switches and _declined_text(blocks):
+                # the fallback model's thinking was produced after the declined text it continued, which the turn no
+                # longer holds: replayed without it, as a turn whose thinking was removed
+                kept = [block for block in kept if block["type"] not in THINKING_BLOCKS]
+                if not kept:
+                    kept = [{"type": "text", "text": NO_VISIBLE_REPLY}]
+                    result.content = NO_VISIBLE_REPLY
             state: dict = {"provider": self.name, "model": message.model, "content": kept, "tool_inputs": tool_inputs}
             if required:
                 state["required_tools"] = required

@@ -561,12 +561,14 @@ def test_the_model_that_answered_is_recorded_when_the_fallback_served(tmp_path):
     # the refusal's category comes from the switch itself: stop_details is empty on a reply the fallback served
     assert result.details["fallback"] == {"served_by": "claude-fallback-model", "category": "cyber",
                                           "switches": [{"from": MODEL, "to": "claude-fallback-model",
-                                                        "category": "cyber"}]}
+                                                        "category": "cyber"}],
+                                          "discarded": {"text_chars": 11, "tool_calls": 0, "thinking_blocks": 1}}
     assert "refusal" not in result.details
-    # the declined model's thinking before the switch is dropped; its text carries over; the marker is not replayed
+    # everything the declined model wrote before the switch is dropped, never joined to the fallback model's answer;
+    # the fallback's thinking followed text the turn no longer holds, so it is not replayed; nor is the marker
     kept = result.provider_state["content"]
-    assert [b["type"] for b in kept] == ["text", "thinking", "text", "tool_use"]
-    assert result.content == "Looking at the beacon."
+    assert [b["type"] for b in kept] == ["text", "tool_use"]
+    assert result.content == "the beacon."
     # every billed attempt is charged, at the prices of the model that served it
     charged = AgentBudget(BudgetLimits.from_settings(s), clock=lambda: 0.0).charge(result)
     assert (charged["prompt_tokens"], charged["completion_tokens"]) == (240, 30)
@@ -710,6 +712,182 @@ def test_with_a_cost_budget_a_billed_break_is_not_retried():
                   reply([text("hi")]))
     p, _ = provider(s, ep)
     assert p.chat(ask()).ok and len(ep.calls) == 2
+
+
+# ---- a switch in the middle of a reply: one model's answer, never two joined ---------------------------------
+
+FALLBACK = "claude-fallback-model"
+# a structured answer of the shape the triage pass asks for: a list of verdicts, which may be empty
+GROUPS = {"type": "object", "additionalProperties": False, "required": ["groups"], "properties": {"groups": {
+    "type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["group_id", "rationale"],
+                               "properties": {"group_id": {"type": "string"}, "rationale": {"type": "string"}}}}}}
+VERDICTS = json.dumps({"groups": [{"group_id": f"G{n}", "rationale": "beacon to a rare host " * 6}
+                                  for n in range(1, 40)]})
+DECLINED_PART = VERDICTS[:4694]          # the declined model's reply, cut where its classifier stopped it
+
+
+def _hops(declined_out=1200, fallback_out=5):
+    """usage.iterations of a reply switched mid-stream: the declined attempt, then the fallback model's."""
+    return [{"type": "message", "model": MODEL, "input_tokens": 100, "cache_creation_input_tokens": 0,
+             "cache_read_input_tokens": 900, "output_tokens": declined_out},
+            {"type": "fallback_message", "model": FALLBACK, "input_tokens": 100, "cache_creation_input_tokens": 900,
+             "cache_read_input_tokens": 0, "output_tokens": fallback_out}]
+
+
+def _continued(tail: str, *, before=None) -> bytes:
+    """A streamed reply whose model declined part-way through, continued by the fallback model with `tail`."""
+    blocks = [*(before if before is not None else [THINKING, text(DECLINED_PART)]), SWITCH, text(tail)]
+    return reply(blocks, model=FALLBACK, usage={**COLD, "output_tokens": 5}, iterations=_hops())
+
+
+# the retry, which the API's routing sends straight to the fallback model: no switch, one fallback attempt
+OUTRIGHT = reply([THINKING, text(VERDICTS)], model=FALLBACK, usage={**COLD, "output_tokens": 1300},
+                 iterations=[{"type": "fallback_message", "model": FALLBACK, "input_tokens": 100,
+                              "cache_creation_input_tokens": 0, "cache_read_input_tokens": 900,
+                              "output_tokens": 1300}])
+
+
+@pytest.mark.parametrize("tail", ['{"groups":[]}', '"rare host "}]}'], ids=["fresh-empty-answer", "continuation"])
+def test_a_reply_the_fallback_continued_is_set_aside_and_asked_once_more(tail):
+    # the fallback model's words after a mid-reply switch are never joined to the declined model's partial text: an
+    # answer that would be valid on its own (13 characters of empty verdicts) is no more complete than a fragment
+    s = claude_settings(**PRICES)
+    ep = Endpoint(_continued(tail), OUTRIGHT)
+    p, sleeps = provider(s, ep)
+    result = p.chat(ask(response_schema=GROUPS))
+    assert result.ok and result.attempts == 2 and len(ep.calls) == 2 and len(sleeps) == 1
+    assert result.content == VERDICTS and result.parsed == json.loads(VERDICTS)
+    assert DECLINED_PART not in result.raw and tail not in result.raw
+    # the switch is recorded as fallbacks are: the model that answered and the refusal's category, with what was
+    # set aside counted, never quoted
+    assert result.details["fallback"] == {"served_by": FALLBACK, "switches": [], "category": "cyber"}
+    assert result.details["fallback_set_aside"] == [{
+        "served_by": FALLBACK, "switches": [{"from": MODEL, "to": FALLBACK, "category": "cyber"}],
+        "discarded": {"text_chars": 4694, "tool_calls": 0, "thinking_blocks": 1},
+        "reason": "the refusal fallback continued a reply the configured model had begun and declined"}]
+    assert json.dumps(result.details).count("beacon") == 0
+    # the stored turn is the fallback model's answer alone
+    assert [b["type"] for b in result.provider_state["content"]] == ["thinking", "text"]
+    assert result.provider_state["content"][1]["text"] == VERDICTS
+
+
+def test_every_attempt_of_a_set_aside_reply_is_charged():
+    s = claude_settings(**PRICES)
+    limits = BudgetLimits.from_settings(s)
+    p, _ = provider(s, Endpoint(_continued('{"groups":[]}'), OUTRIGHT))
+    result = p.chat(ask(response_schema=GROUPS))
+    hops = [(b["model"], b["prompt"], b["completion"], b["cache_read"], b["cache_write"])
+            for b in result.details["billed"]]
+    assert hops == [(MODEL, 1000, 1200, 900, 0), (FALLBACK, 1000, 5, 0, 900), (FALLBACK, 1000, 1300, 900, 0)]
+    charged = AgentBudget(limits, clock=lambda: 0.0).charge(result)
+    assert (charged["prompt_tokens"], charged["completion_tokens"]) == (3000, 1200 + 5 + 1300)
+    assert charged["estimated"] is False and charged["worst_case"] is False
+    assert charged["cost_usd"] == pytest.approx((100 * 4 + 900 * 0.2 + 1200 * 20) / 1e6
+                                                + (100 * 5 + 900 * 6.25 + 5 * 25) / 1e6
+                                                + (100 * 5 + 900 * 0.5 + 1300 * 25) / 1e6)
+
+
+def test_a_fallback_answer_that_starts_from_nothing_declined_is_used_as_it_is():
+    # the declined model wrote only thinking: the fallback model was given no text to continue, so it answered whole
+    p, _ = provider(claude_settings(**PRICES), ep := Endpoint(_continued(VERDICTS, before=[THINKING])))
+    result = p.chat(ask(response_schema=GROUPS))
+    assert result.ok and len(ep.calls) == 1 and result.content == VERDICTS
+    assert "fallback_set_aside" not in result.details and "discarded" not in result.details["fallback"]
+    assert result.details["fallback"]["category"] == "cyber"
+    # its own thinking after the switch is kept for replay; the declined model's is not
+    assert [b["type"] for b in result.provider_state["content"]] == ["text"]
+    p, _ = provider(claude_settings(**PRICES), Endpoint(reply(
+        [THINKING, SWITCH, {**THINKING, "signature": "fallback-sig"}, text(VERDICTS)], iterations=_hops())))
+    kept = p.chat(ask(response_schema=GROUPS)).provider_state["content"]
+    assert kept == [{"type": "thinking", "thinking": "", "signature": "fallback-sig"}, text(VERDICTS)]
+
+
+def test_a_reply_the_fallback_continues_again_on_the_retry_is_no_answer():
+    s = claude_settings(**PRICES)
+    ep = Endpoint(_continued('{"groups":[]}'), _continued('"rare host "}]}'), OUTRIGHT)
+    p, _ = provider(s, ep)
+    result = p.chat(ask(response_schema=GROUPS))
+    # one retry only: never a third call, never the halves joined, never a parsed answer or a replayable turn
+    assert result.status == "error" and "again on the retry" in result.error and len(ep.calls) == 2
+    assert result.parsed is None and result.provider_state is None and result.content == ""
+    assert len(result.details["fallback_set_aside"]) == 1 and result.details["fallback"]["category"] == "cyber"
+    assert [b["model"] for b in result.details["billed"]] == [MODEL, FALLBACK, MODEL, FALLBACK]
+    # a free-text reply continued twice is no answer either: its words cannot be told from a fragment
+    p, _ = provider(s, Endpoint(_continued("the rest."), _continued("the rest.")))
+    result = p.chat(ask())
+    assert result.status == "error" and result.content == "" and result.provider_state is None
+
+
+def test_a_set_aside_reply_follows_the_budget_rules_for_a_retry():
+    # with a cost budget and no attempt guard, a billed reply is never asked again
+    s = claude_settings(**PRICES, agent_max_cost_usd=50)
+    ep = Endpoint(_continued('{"groups":[]}'), OUTRIGHT)
+    p, sleeps = provider(s, ep)
+    result = p.chat(ask(response_schema=GROUPS))
+    assert result.status == "error" and "not retried" in result.error and len(ep.calls) == 1 and sleeps == []
+    assert result.parsed is None and [b["model"] for b in result.details["billed"]] == [MODEL, FALLBACK]
+    assert result.details["fallback_set_aside"][0]["switches"][0]["category"] == "cyber"
+    # an attempt guard decides, and is shown both billed attempts; when it refuses, they travel on the exception
+    seen = []
+
+    def guard(info):
+        seen.append([b["model"] for b in info["billed"]])
+        return False
+    ep = Endpoint(_continued('{"groups":[]}'), OUTRIGHT)
+    p, _ = provider(s, ep)
+    with pytest.raises(ProviderUnavailable) as exc:
+        p.chat(ask(response_schema=GROUPS, attempt_guard=guard))
+    assert seen == [[MODEL, FALLBACK]] and len(ep.calls) == 1
+    assert [b["model"] for b in exc.value.billed] == [MODEL, FALLBACK]
+    # an allowing guard gets the retry
+    p, _ = provider(s, Endpoint(_continued('{"groups":[]}'), OUTRIGHT))
+    assert p.chat(ask(response_schema=GROUPS, attempt_guard=lambda info: True)).ok
+
+
+def test_thinking_and_tool_calls_before_a_switch_are_dropped():
+    pivot = tool_use('{"entity": "10.0.0.5"}', name="pivot", call_id="toolu_declined")
+    blocks = [THINKING, text("Following the beacon "), pivot, SWITCH, {**THINKING, "signature": "fallback-sig"},
+              text("Checking the host."), tool_use('{"entity": "10.0.0.9"}', name="pivot", call_id="toolu_02")]
+    ep = Endpoint(reply(blocks, stop="tool_use", model=FALLBACK, iterations=_hops()))
+    p, _ = provider(claude_settings(**PRICES), ep)
+    result = p.chat(ask(tools=[PIVOT]))
+    # whole tool calls made after the switch stand: no retry
+    assert result.ok and len(ep.calls) == 1
+    assert [(c.id, c.arguments) for c in result.tool_calls] == [("toolu_02", {"entity": "10.0.0.9"})]
+    assert result.content == "Checking the host."
+    assert result.details["fallback"]["discarded"] == {"text_chars": 21, "tool_calls": 1, "thinking_blocks": 1}
+    state = result.provider_state
+    assert [b["type"] for b in state["content"]] == ["text", "tool_use"] and list(state["tool_inputs"]) == ["toolu_02"]
+    # the turn goes back as it was stored
+    history = [{"role": "user", "content": "go"}, result.assistant_message(),
+               {"role": "tool", "tool_call_id": "toolu_02", "content": "ok"}]
+    second = Endpoint(reply([text("done")]))
+    p2, _ = provider(claude_settings(**PRICES), second)
+    assert p2.chat(ChatRequest(history, tools=[PIVOT])).ok
+    assert second.body()["messages"][1]["content"] == [
+        {"type": "text", "text": "Checking the host."},
+        {"type": "tool_use", "id": "toolu_02", "name": "pivot", "input": {"entity": "10.0.0.9"}}]
+    # a tool stop whose only call came before the switch has no call of the fallback model's: asked once more
+    ep = Endpoint(reply([text("Following the beacon "), pivot, SWITCH, text("Checking.")], stop="tool_use",
+                        iterations=_hops()), reply([tool_use('{"entity": "10.0.0.9"}', name="pivot")],
+                                                   stop="tool_use"))
+    p, _ = provider(claude_settings(**PRICES), ep)
+    result = p.chat(ask(tools=[PIVOT]))
+    assert result.ok and len(ep.calls) == 2 and [c.id for c in result.tool_calls] == ["toolu_01"]
+
+
+def test_a_refused_or_truncated_reply_after_a_switch_is_reported_without_the_declined_text():
+    refused = reply([text(DECLINED_PART), SWITCH, text("partial")], stop="refusal", iterations=_hops(),
+                    stop_details={"type": "refusal", "category": "cyber", "explanation": None})
+    ep = Endpoint(refused)
+    p, _ = provider(claude_settings(**PRICES), ep)
+    result = p.chat(ask(response_schema=GROUPS))
+    assert result.status == "refused" and len(ep.calls) == 1 and result.content == "partial"
+    truncated = reply([text(DECLINED_PART), SWITCH, text('{"groups": [')], stop="max_tokens", iterations=_hops())
+    ep = Endpoint(truncated)
+    p, _ = provider(claude_settings(**PRICES), ep)
+    result = p.chat(ask(response_schema=GROUPS))
+    assert result.status == "truncated_output" and len(ep.calls) == 1 and result.content == '{"groups": ['
 
 
 # ---- thinking blocks round-trip, and history that cannot -----------------------------------------------------
