@@ -26,6 +26,7 @@ THEME_FILES = {
     "credential_access.yaml",
     "encoded.yaml",
     "evasion_impact.yaml",
+    "lolbins.yaml",
     "persistence.yaml",
     "reverse_shell.yaml",
     "sigma_keywords.yaml",
@@ -196,6 +197,19 @@ KNOWN_BENIGN_MEDIUM_MATCHES = {
     "Nov 20 11:00:04 cloud01 cloud-init[612]: curl -s http://169.254.169.254/latest/user-data | sh": {
         "mention.cradle_metadata_ip_to_shell"
     },
+    # Applications open web links in the default browser through url.dll.
+    "rundll32.exe url.dll,FileProtocolHandler https://intranet.example.org/": {"mention.lolbin_rundll32_url_dll"},
+    # Administrators download installers and archives to temp paths; driver INF installs; directory lookups.
+    "powershell -c \"$wc.DownloadFile('http://10.0.0.5/tools/agent.msi', 'C:\\Temp\\agent.msi')\"": {
+        "mention.lolbin_webclient_downloadfile"
+    },
+    'powershell -c "Invoke-WebRequest https://intranet.example.org/a.zip -OutFile C:\\Temp\\a.zip"': {
+        "mention.lolbin_invoke_webrequest_outfile_user_path"
+    },
+    "rundll32 syssetup.dll,SetupInfObjectInstallAction DefaultInstall 128 C:\\Drivers\\a.inf": {
+        "mention.lolbin_rundll32_syssetup_inf"
+    },
+    "finger alice@mail.corp.example.org": {"mention.lolbin_finger_user_at_host"},
     # The Chocolatey installer is a classic download cradle.
     "powershell -c \"iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))\"": {
         "mention.cradle_ps_webclient_download",

