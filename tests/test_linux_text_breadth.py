@@ -309,9 +309,11 @@ def test_refusal_is_a_lead_citing_the_brokers_fields(refusals):
     assert "sudo.command" in fields             # cited as the caller's text, never read as executed
 
 
-def test_web_service_account_refusal_is_high(refusals):
+def test_web_service_account_refusal_is_named_and_grouped_apart(refusals):
     [match] = refusals.consume([refusal("su", actor="www-data")])
-    assert match.proposed_lane == "high" and "web-service account" in match.claim
+    assert match.proposed_lane == "lead" and "web-service account" in match.claim
+    [other] = refusals.consume([refusal("su", actor="alice", nid="other")])
+    assert other.group_key != match.group_key and "web-service" not in other.claim
 
 
 def test_retries_fold_into_one_finding_with_their_count_across_partitions(refusals):
@@ -432,3 +434,98 @@ def test_kernel_audit_record_still_counts_as_module_auditing():
     rule = KernelModuleLoad()
     rule.consume([event, audited])
     assert rule.partition_coverage_notes() == []
+
+
+# ---------------------------------------------------------------------------------------------- review additions
+@pytest.mark.parametrize("shape", SHAPES)
+def test_sudo_in_every_shape_carries_the_writers_pid(shape):
+    event = one(shape, "sudo", SUDO_GROUP_ENV, pid=5150)
+    assert event.family == "privilege_use" and event.get("sudo.run_group") == "wheel"
+    assert event.get("process.pid") == 5150 and event.fields["process.pid"].origin.startswith("t-1:")
+
+
+def test_text_account_with_user_id_zero_is_high():
+    created = one("journal", "useradd", "new user: name=toor, UID=0, GID=0, home=/root, shell=/bin/bash, from=none",
+                  pid=9200)
+    [match] = _account_run([created])
+    assert match.proposed_lane == "high" and "a new account with user id 0" in match.claim
+    [lead] = _account_run([one("journal", "useradd", "new user: name=svc, UID=990, GID=990, home=/srv, "
+                               "shell=/usr/sbin/nologin, from=none", pid=9201, nid="t-2")])
+    assert lead.proposed_lane == "lead"
+
+
+def _zone_rule(events):
+    from romulus.detect.dns import DnsZoneTransferOrAnyRequest
+    rule = DnsZoneTransferOrAnyRequest()
+    stage = {}
+    out = list(rule.consume(events))
+    stage.update({event.id: event for event in rule.drain_staged()})
+    rule.bind_loader(lambda ids: [stage[i] for i in ids if i in stage])
+    try:
+        return rule, out + rule.finalize()
+    finally:
+        rule.close_spill()
+
+
+BIND_DENIED = "client @0x7f1 198.51.100.7#41346 (example.test): zone transfer 'example.test/AXFR/IN' denied"
+BIND_STARTED = ("client @0x7f1 198.51.100.7#41346 (example.test): transfer of 'example.test/IN': AXFR started "
+                "(serial 2026110901)")
+BIND_QUERY = "client @0x7f1 198.51.100.7#41346 (example.test): query: example.test IN AXFR -T (192.0.2.53)"
+
+
+def test_bind_denial_alone_reaches_the_zone_transfer_rule_as_the_servers_decision():
+    _rule, [match] = _zone_rule([one("journal", "named", BIND_DENIED, host="ns1")])
+    assert match.proposed_lane == "lead"
+    assert "host ns1" in match.claim and "198.51.100.7" in match.claim and "'example.test'" in match.claim
+    assert "1 zone-transfer decision(s)" in match.claim and "AXFR denied" in match.claim
+    assert "Whether the server answered is not established" not in match.claim
+
+
+def test_bind_started_alone_says_the_server_began_sending_the_zone():
+    _rule, [match] = _zone_rule([one("journal", "named", BIND_STARTED, host="ns1")])
+    assert "AXFR started" in match.claim and "began sending the zone" in match.claim
+
+
+def test_a_logged_question_and_its_started_line_are_never_two_questions():
+    # BIND's query log names the address the question arrived on, its transfer line only the logging host, so the
+    # two land in separate groups: one question to 192.0.2.53, one decision by host ns1, never two questions
+    question = one("journal", "named", BIND_QUERY, host="ns1", nid="q-1")
+    started = one("journal", "named", BIND_STARTED, host="ns1", nid="s-1")
+    _rule, matches = _zone_rule([question, started])
+    claims = sorted(match.claim for match in matches)
+    assert len(claims) == 2
+    assert any("sent 1 DNS question record(s)" in claim and "192.0.2.53" in claim for claim in claims)
+    assert any("1 zone-transfer decision(s)" in claim and "host ns1" in claim and "sent" not in claim.split(".")[0]
+               for claim in claims)
+
+
+def test_brokers_accounts_and_taint_notices_reach_findings_through_the_sweep(tmp_path, monkeypatch):
+    from tests import test_linux_text_stack_r2 as stack
+    from tests import throughput_fixture as tf
+
+    builder = tf.Builder(23)
+
+    def add(n, body):
+        when = tf.T0 + timedelta(seconds=n)
+        line = f"Nov 18 {when:%H:%M:%S} web1 {body}"
+        builder._doc("web1", when, "custom.auth", None, message=line)
+
+    add(1, "sudo[4100]: mallory : user NOT in sudoers ; TTY=pts/3 ; PWD=/home/mallory ; USER=root ; COMMAND=/bin/bash")
+    add(2, "pkexec[4101]: mallory: The value for the SHELL variable was not found the /etc/shells file [USER=root] "
+           "[TTY=/dev/pts/3] [CWD=/tmp/p] [COMMAND=GCONV_PATH=./pwnkit.so:. SHELL=/x CHARSET=PWNKIT]")
+    add(3, "gpasswd[4102]: user mallory added by root to group sudo")
+    add(4, "kernel: diamorphine: loading out-of-tree module taints kernel.")
+    monkeypatch.setattr(stack, "text_documents",
+                        lambda: {tf.HOST_TARGET: builder.host, tf.NETWORK_TARGET: [], tf.ARKIME_TARGET: []})
+    snapshot, _trace, _docs = stack.run_text_stack(tmp_path, monkeypatch)
+    assert snapshot["stats"]["errors"] == 0 and not snapshot["stats"].get("rule_failures")
+    found = {row["rule_id"]: row for row in snapshot["candidates"]}
+    assert {"host.privilege_broker_refusal", "host.pkexec_environment_rejection", "host.account_or_group_change",
+            "host.kernel_module_load"} <= set(found)
+    assert found["host.pkexec_environment_rejection"]["lane"] == "high"
+    assert found["host.account_or_group_change"]["lane"] == "high"
+    assert found["host.privilege_broker_refusal"]["lane"] == "lead"
+    assert found["host.kernel_module_load"]["lane"] == "lead"
+    # the module rule never takes a taint notice for module-load auditing
+    module_cells = [row for row in snapshot["rule_cells"] if row["rule_id"] == "host.kernel_module_load"]
+    assert any("No module-load auditing records" in str(row["detail"]) for row in module_cells)

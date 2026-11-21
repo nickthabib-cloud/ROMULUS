@@ -69,8 +69,8 @@ class PrivilegeBrokerRefusal(FoldedLinuxDirect):
         "research_basis": _RESEARCH + "ATT&CK Enterprise 20.0 T1548, T1548.003, T1110.001",
         "retrieval": "the sweep retrieves every record of the host datasets in each partition (dataset filter "
                      "only), a superset of what this evaluator reads",
-        "lanes": "high when the refused account is a web-service account (a web shell trying to escalate); lead "
-                 "otherwise. Never context",
+        "lanes": "lead: a refusal is a failed operation, which admission keeps at lead; a refused web-service account "
+                 "(a web shell trying to escalate) is named in the claim and grouped on its own. Never context",
     }
 
     def match(self, e):
@@ -86,13 +86,13 @@ class PrivilegeBrokerRefusal(FoldedLinuxDirect):
             return []
         reason = e.get("privilege.denial_reason")
         actor, target = e.get("user.name"), e.get("auth.target_user")
-        lane = "high" if actor in WEB_SERVICE_USERS else "lead"
+        web = actor in WEB_SERVICE_USERS
         claim = (f"On {e.host}, {service} logged that it refused {_quote(actor)} acting as {_quote(target)}"
                  + (f" ({reason})" if reason else "") + ".")
-        if lane == "high":
-            claim += " The refused account is a web-service account."
-        return [observed(self, e, claim, lane,
-                         group=json.dumps([e.host, service, actor, target, reason, lane]), names=_FIELDS)]
+        if web:
+            claim += " The refused account is a web-service account, which does not normally ask for another account."
+        return [observed(self, e, claim, "lead",
+                         group=json.dumps([e.host, service, actor, target, reason, web]), names=_FIELDS)]
 
 
 class PkexecEnvironmentRejection(FoldedLinuxDirect):
@@ -116,8 +116,9 @@ class PkexecEnvironmentRejection(FoldedLinuxDirect):
         "telemetry": "privilege_use from pkexec's own syslog or journal line (auth.service pkexec, "
                      "privilege.rejected_variable, user.name, auth.target_user, process.tty, process.cwd; "
                      "privilege.command is the caller's text). Present wherever pkexec's authpriv log is shipped",
-        "fidelity": "direct: pkexec's own record of the rejected value. It shows the check was tripped, not that "
-                    "an exploit ran its payload or succeeded",
+        "fidelity": "direct: pkexec's own record of the rejected value, typed with an unknown outcome because pkexec "
+                    "writes it before the report where exploitation runs its code. It shows the check was tripped, "
+                    "not that an exploit ran its payload or succeeded",
         "benign_and_cost": "rare: a login shell missing from /etc/shells, or a desktop environment value with "
                            "'..' or '%'; cheap to rule out by the caller's shell and the command text",
         "query_cost": "none beyond the sweep",

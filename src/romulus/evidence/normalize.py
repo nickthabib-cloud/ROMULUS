@@ -1560,6 +1560,10 @@ def _journal_event(hit: dict, j: dict, o: Callable[[str], str], boots_seen: list
                               ("sudo.env", "env"), ("sudo.chroot", "chroot")):
                 if g.get(key):
                     f[name] = fv(g[key], origin)
+            # the writer's pid: journald's own _PID, else the one the writer logged (syslog header or SYSLOG_PID)
+            spec = next((key for key in ("_PID", "SYSLOG_PID") if _pid_value(j.get(key)) is not None), None)
+            if spec is not None:
+                f["process.pid"] = fv(_pid_value(j[spec]), o(spec))
             outcome = Outcome.failure if g.get("fail") else Outcome.success
             ambiguous = msg.count(" ; USER=") > 1 or msg.count(" ; COMMAND=") > 1
             return TypedEvent(id=event_id("privilege_use", [ref]), family="privilege_use", ts=_ts(src["@timestamp"]),
@@ -1805,6 +1809,8 @@ def _shipper_syslog(hit: dict, ident, hostname) -> TypedEvent:
             f["privilege.denial_reason"] = fv(sudo["error"], f"{o}.error")
         if isinstance(sudo.get("tty"), str) and sudo["tty"]:
             f["process.tty"] = fv(sudo["tty"], f"{o}.tty")
+        if (pid := _pid_value(_get(src, "process.pid"))) is not None:
+            f["process.pid"] = fv(pid, f"{nid}:process.pid")
         outcome = Outcome.failure if sudo.get("error") else Outcome.success
         return TypedEvent(id=event_id("privilege_use", [ref]), family="privilege_use", ts=_ts(src["@timestamp"]),
                           host=host, outcome=outcome, fields=f, raw=[ref], normalizer=NORMALIZER_VERSION,
@@ -3611,7 +3617,11 @@ def normalize_text(hit: dict) -> list[TypedEvent]:
                 if not event.has("process.pid") and (header_pid := _pid_value(parsed.pid)):
                     event.fields["process.pid"] = fv(header_pid, origin.rsplit("~", 1)[0] + "#syslog-header:pid")
             else:
-                event = _journal_event(hit, journal, lambda _: origin, kind="text")
+                header = origin.rsplit("~", 1)[0] + "#syslog-header:pid"
+                if _pid_value(parsed.pid) is not None:
+                    journal["SYSLOG_PID"] = parsed.pid
+                event = _journal_event(hit, journal, lambda spec: header if spec == "SYSLOG_PID" else origin,
+                                       kind="text")
         except Skip as error:
             header_pid = _pid_value(parsed.pid)
             records = _program_events(hit, parsed.program, parsed.message, origin, journal=journal,

@@ -749,6 +749,7 @@ PRIOR_RULE_VERSIONS = {
     "net.long_external_connection": "6",
     "net.beaconing": "7",
     "host.account_or_group_change": "6",
+    "net.dns_zone_transfer_or_any_request": "7",
 }
 
 

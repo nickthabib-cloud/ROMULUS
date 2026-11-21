@@ -1548,7 +1548,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 <a id="rule-net-dns-zone-transfer-or-any-request"></a>
 ### `net.dns_zone_transfer_or_any_request` — DNS zone-transfer (AXFR/IXFR) or ANY question sent by one client to one server
 
-- Version: `7`; status: `active`
+- Version: `8`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **full-search**
 - ATT&CK: [`T1590.002`](https://attack.mitre.org/techniques/T1590/002/)

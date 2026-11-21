@@ -415,7 +415,7 @@ GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe55
  'links': '5fa22b4162492394955b6b1873f566f427a58dfd7529c0df73e87a6da8daa76f',
  'manifest': 'f7d472bf6f640c27aee98de8b607bf5834c5a6f119d46b9bef38e8e6f109e3d7',
  'raw': 'd924f62eebd5ee88c8142c690333924450c3344b18210ddfe87b8e486127dd35',
- 'rule_cells': '7e20b1c83328519961dec94164d09b1a02f1723aaaf58ba979a6657f71bed945',
+ 'rule_cells': '205fe55064aceda734f71916b3eee43df53479cc83f6d42d542879df108d4f08',
  'stats': 'be588e34e14e570c11a47fc9b3953e564d8f6026d909d9ae7f9c7ef561c99c5a',
  'tasks': '1e1eeb69d05da151bec8f6dff43c1863a4eb43a288f84c1ba35168311b303360'}
 # The rule-estimate stack's digests (expansion seeded by the urgent and high lanes, as before evidence ranking;
@@ -440,7 +440,7 @@ GOLDEN_STACK_BY_RULE_ESTIMATE = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e
  'links': '5fa22b4162492394955b6b1873f566f427a58dfd7529c0df73e87a6da8daa76f',
  'manifest': 'aaddf2603243f5e2f02e0d963718b8cf9e0e67266396b62c67ed56f94cb7539f',
  'raw': 'd924f62eebd5ee88c8142c690333924450c3344b18210ddfe87b8e486127dd35',
- 'rule_cells': '7e20b1c83328519961dec94164d09b1a02f1723aaaf58ba979a6657f71bed945',
+ 'rule_cells': '205fe55064aceda734f71916b3eee43df53479cc83f6d42d542879df108d4f08',
  'stats': 'be588e34e14e570c11a47fc9b3953e564d8f6026d909d9ae7f9c7ef561c99c5a',
  'tasks': '1e1eeb69d05da151bec8f6dff43c1863a4eb43a288f84c1ba35168311b303360'}
 GOLDEN_CANDIDATES_BY_RULE_ESTIMATE = GOLDEN_STACK_BY_RULE_ESTIMATE['candidates']
@@ -465,14 +465,14 @@ GOLDEN_NON_BASELINE_SEMANTICS_BY_RULE_ESTIMATE = {'candidates': {'all_fields': '
                 'severity': 'd8fb260b8a62f9175181cdba1356bfbd3dab9167f0965c5e7586e2202c62bcc3',
                 'source_presence': '31f6a55e225e04f5da96ef7f565969408d500a329be1bf37e463188763a5af16',
                 'ts': 'bfc0e0328d7a2b9fb224bc2791da7a13f533d4b8f03819ad9f65e7609fac08e0'},
- 'rule_cells': {'all_fields': '8b8f645fb62888c5da8311e1ac224af6fa87e34437ccbad18fe9e33340f7cb32',
+ 'rule_cells': {'all_fields': '8e6ad6d30cf2b9cbec71ee29077cc15719909986d69ba0d3fc7de464d23dd80d',
                 'count': 19031,
                 'detail': 'e9e0db85698cb92ca31e3a393968000bb5fe6fe80cd9c7b18823bf16970ccfb8',
                 'evaluated': '41fa1985774f1e3a04acf7640e0f950a5fc989f748dbbc9c7a8ec3d361b85a0f',
                 'matched': '4728b54f48c9958b6422d78fc53fe04bf19987dd25c962bc958ac728efcd24f7',
                 'partition': 'fb40b6c19e5cb9dd777b3a0dbf80f7c3bedceaf2a09eb608ecb9a95d3b6b4cda',
                 'rule_id': '07b71c0b9275fa5cc4c52fd4d84b6b9e4981dd58224c1a998ecd1ccfc1ec8e6c',
-                'rule_version': '141fd7156612f87b1cc4997150bd96669c903737810ec80e2f4ac831b534d250',
+                'rule_version': '24a33b0fd318728a87bd17112b35b54c3f7146bdbd0dc21753c49b7b933953c6',
                 'state': 'b4958950447914efaf4951e1462601a792aab4a6102ed20b4764c485709212fc',
                 'target': 'a590e41e24abacef0bed8fa103bb391ca09effbb4c5e7e32e1fc85437fa62e33'}}
 # Captured directly from the S7 fixture through _non_baseline_semantic_digests. Typed-event-derived hashes and
@@ -499,14 +499,14 @@ GOLDEN_NON_BASELINE_SEMANTICS = {'candidates': {'all_fields': '7c7845e9969d4e689
                 'severity': 'd8fb260b8a62f9175181cdba1356bfbd3dab9167f0965c5e7586e2202c62bcc3',
                 'source_presence': '31f6a55e225e04f5da96ef7f565969408d500a329be1bf37e463188763a5af16',
                 'ts': 'bfc0e0328d7a2b9fb224bc2791da7a13f533d4b8f03819ad9f65e7609fac08e0'},
- 'rule_cells': {'all_fields': '8b8f645fb62888c5da8311e1ac224af6fa87e34437ccbad18fe9e33340f7cb32',
+ 'rule_cells': {'all_fields': '8e6ad6d30cf2b9cbec71ee29077cc15719909986d69ba0d3fc7de464d23dd80d',
                 'count': 19031,
                 'detail': 'e9e0db85698cb92ca31e3a393968000bb5fe6fe80cd9c7b18823bf16970ccfb8',
                 'evaluated': '41fa1985774f1e3a04acf7640e0f950a5fc989f748dbbc9c7a8ec3d361b85a0f',
                 'matched': '4728b54f48c9958b6422d78fc53fe04bf19987dd25c962bc958ac728efcd24f7',
                 'partition': 'fb40b6c19e5cb9dd777b3a0dbf80f7c3bedceaf2a09eb608ecb9a95d3b6b4cda',
                 'rule_id': '07b71c0b9275fa5cc4c52fd4d84b6b9e4981dd58224c1a998ecd1ccfc1ec8e6c',
-                'rule_version': '141fd7156612f87b1cc4997150bd96669c903737810ec80e2f4ac831b534d250',
+                'rule_version': '24a33b0fd318728a87bd17112b35b54c3f7146bdbd0dc21753c49b7b933953c6',
                 'state': 'b4958950447914efaf4951e1462601a792aab4a6102ed20b4764c485709212fc',
                 'target': 'a590e41e24abacef0bed8fa103bb391ca09effbb4c5e7e32e1fc85437fa62e33'}}
 GOLDEN_NORMALIZED = {'arkime_sessions3-x': 'b4464dbf8fe8d697a71ef62d8c965b6ad2034f24e0fb055db657a71564d0061c',

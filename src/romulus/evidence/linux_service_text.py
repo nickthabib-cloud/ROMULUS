@@ -816,6 +816,8 @@ _PKEXEC = re.compile(r"([^\s:]+): (Executing command|Error executing command as 
                      r"(?:suspicious|suscipious) content) \[USER=([^\]\s]+)\] \[TTY=([^\]]*)\] \[CWD=(.*)\] "
                      r"\[COMMAND=(.*)\]")
 PRIVILEGE_TEXT_CAVEAT = "Privilege broker log line; the command and working directory are the invoking user's text"
+PKEXEC_REJECTION_CAVEAT = ("pkexec logs a rejected SHELL or environment value before it reports it and exits; whether "
+                           "it then refused, or code ran while it reported (CVE-2021-4034), is not shown")
 PKEXEC_AMBIGUOUS_CAVEAT = ("The pkexec record repeats its field framing inside the working directory or command text; "
                            "neither is typed")
 
@@ -859,6 +861,11 @@ def _privilege(program: str, message: str) -> ParsedLine | None:
             elif env := _PKEXEC_ENV.fullmatch(decision):
                 fields["privilege.rejected_variable"] = env[1]
         outcome = Outcome.success if decision == "Executing command" else Outcome.failure
+        if "privilege.rejected_variable" in fields:
+            # pkexec writes this line before it prints the same message and exits; that printing is where
+            # CVE-2021-4034 exploitation runs its code, so the line does not show that pkexec went on to refuse.
+            outcome = Outcome.unknown
+            caveats.append(PKEXEC_REJECTION_CAVEAT)
         return ParsedLine("privilege_use", fields, outcome, tuple(caveats))
     return None
 

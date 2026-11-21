@@ -1078,10 +1078,13 @@ def _record_privilege(e: TypedEvent) -> str:
     group, op = e.get("account.group"), str(e.get("account.op") or "")
     if group in PRIVILEGED_GROUPS and (_GRANT_OPS.search(op) or e.get("account.action") == "create_user"):
         return f"membership of privileged group {group}"
-    # account.new_id is a value the tool says it assigned (usermod's "change user 'u' UID from 'a' to '0'"); an audit
-    # record's account.id only names the account it changed, so it is never read as an assignment.
+    # account.new_id is a value the tool says it assigned (usermod's "change user 'u' UID from 'a' to '0'"); a
+    # modification record's account.id only names the account it changed, so it is never read as an assignment. A
+    # creation record's id is the new account's (useradd's "new user: ... UID=n", ADD_USER id=n).
     if e.get("account.action") == "modify_user" and str(e.get("account.new_id")) == "0":
         return "assignment of user id 0"
+    if e.get("account.action") == "create_user" and str(e.get("account.id")) == "0":
+        return "a new account with user id 0"
     return ""
 
 
@@ -1160,7 +1163,8 @@ class AccountOrGroupChange(Playbook):
         "text_records": "the tools' own syslog lines (any Linux shipper shape) are account_change records with the "
                         "same actions and operations as the audit records and the writer's pid (journald _PID, the "
                         "shipper's process.pid or the syslog header's), so a line joins the exec of its process like "
-                        "an audit record; usermod's UID change to 0 (account.new_id) is the user id 0 grant",
+                        "an audit record; usermod's UID change to 0 (account.new_id) and a created account with user id 0 "
+                        "(useradd's line or ADD_USER id=0) are user id 0 grants",
         "lanes": "high for a web-service account in the exec lineage, or a request for user/group id 0 or "
                  "membership of a root-equivalent group; package/cloud-init lineage is one grouped lead per host; "
                  "unprivileged audit records with no exec record of their process and no login uid, from 2 minutes "

@@ -90,8 +90,9 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # su, runuser and pkexec lines, sudo's optional fields and refusal reasons, every shadow-utils
                    # account statement (in the account audit records' actions and operations, with the writer's pid),
                    # kernel module taint notices, BIND transfer lines and the ovpn-<instance> OpenVPN identifier are
-                   # typed; journald-shaped useradd/groupadd lines are typed as the syslog ones were.
-                   21: "629e8743784c7417822a1614055dfda62af99b107eb58a3228371d77f5d284cc"}
+                   # typed; journald-shaped useradd/groupadd lines are typed as the syslog ones were; sudo records carry
+                   # the writer's pid; a pkexec SHELL or environment rejection has an unknown outcome.
+                   21: "5eb447e5d2bc5b661d2e33bab97109efd5927ca965cf8fc5a64baeac9b4bb2bd"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py", "rpc_catalog.py")
 PINNED_WINDOWS = {
     # A record's host addresses stand beside its stable source identifier, so clones that share the identifier
@@ -161,9 +162,9 @@ ARKIME_EVIDENCE_FILES = ("normalize.py", "arkime_protocols.py", "raw_scrub.py", 
 # typing of text alert lines and the evidence version that types them: EVE and Arkime records are read as before.
 # Nor do the Linux daemon families (privilege brokers, account tools, kernel taint notices, BIND transfers) and the
 # evidence version that types them.
-PINNED_SURICATA = {"suricata-eve@2": "6cf2a0a8a727a69d4cf8eb20803a7ff0ddc37edd89a27cd346e7a797a99f0474",
+PINNED_SURICATA = {"suricata-eve@2": "1e6e5827a0c041274ea26e0aa7ce0eb469155e98116bec9c7d38ac1d717159b0",
                    "suricata-eve@1": "8aba0c3bbb2061eef70c0c9dd77e5ab49a42bbed9a68b01ba4b4eeffad181e38"}
-PINNED_ARKIME = {"arkime@1": "9e3dd9a6b1322ce168637c74a37aedea83e2d399339c55bc841b34b3d2f3e423"}
+PINNED_ARKIME = {"arkime@1": "7d6a97987ea82bc45fd0ec99ace98c58d8fc45e22c94a495e954ff1fb3bf34e6"}
 
 
 # The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events, and TCP connections rebuilt
