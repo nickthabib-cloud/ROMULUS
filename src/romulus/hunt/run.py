@@ -452,7 +452,12 @@ def _stopped_in_sweep(repo: Repo, hunt_id: str, sweep, targets: list[str], start
                       watch: StopWatch, owner_token: str) -> dict:
     """End a hunt an analyst stopped during its sweep: keep every finding it stored, finalize nothing (an aggregate
     over part of the window could report what the rest would contradict), and leave it partial and resumable. Its
-    sweep summary says the sweep did not finish and why; ending the hunt narrows every whole-window answer."""
+    sweep summary says the sweep did not finish and why; ending the hunt narrows every whole-window answer. The
+    mention pool of the partitions read is kept too, its coverage partial for the stop."""
+    try:
+        sweep.publish_mentions(stopped=f"stopped by analyst ({stop.detail})")
+    except Exception as exc:  # noqa: BLE001 - the stop must end the hunt even when the pool cannot be stored
+        sweep.stats["mentions"] = {"status": "not_scanned", "reasons": [f"the mention pool was not stored: {exc}"]}
     sweep.close_stage()
     current = started[-1] if started else None
     not_started = [target for target in targets if target not in started]

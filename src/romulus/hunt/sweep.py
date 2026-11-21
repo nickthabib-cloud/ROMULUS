@@ -20,6 +20,7 @@ from romulus.baseline.carry import HourParents
 from romulus.baseline.playbook import BaselineCell, BaselinePlaybook
 from romulus.baseline.reasons import summarize
 from romulus.baseline.spec import KeyContext, exec_serial
+from romulus.content.mention_patterns import load_mention_patterns
 from romulus.content.sigma_coverage import (
     bounded_details,
     coverage_view,
@@ -83,6 +84,7 @@ from romulus.evidence.windows_reassembly import SCRIPT_FINALIZE_BATCH_SIZE, Scri
 from romulus.evidence.zeek import ZEEK_INTERIM_SUPERSEDED, ZEEK_NORMALIZER
 from romulus.evidence.zeek_catalog import MALCOLM, SHAPES, ZEEK_LOGS, lookup_log
 from romulus.hunt.controls import HuntStopped
+from romulus.hunt.mentions import MentionScanner
 from romulus.hunt.publish import (
     LineageCitationFetcher,
     SourceCitationFetcher,
@@ -370,6 +372,8 @@ class Sweep:
             for pb in self.pack:                # a live spill is never mistaken for a killed process's leftover
                 if pb._spill is not None:
                     pb._spill.touch()
+            if getattr(self, "mentions", None) is not None:
+                self.mentions.touch()
         self.heartbeat = heartbeat_and_touch
         self.stage_dir = stage_dir
         # One state budget for the hunt: the disk every playbook's spill may use (and the free space left on the
@@ -404,7 +408,8 @@ class Sweep:
         # Plan only detection stores. Citation owners have no floor and yield their optional cache bytes first.
         # Windows hunts additionally own id-only delivery, continuity and script assembly state.
         stage_owners = [pb for pb in self.pack if pb.staged and not hasattr(pb, "citation_fields")]
-        self.budget.plan(live_stores(self.pack) + 1 + (3 if self._has_windows else 0))
+        # one floor more for the mention pool's stage
+        self.budget.plan(live_stores(self.pack) + 2 + (3 if self._has_windows else 0))
         self._stage_account = self.budget.account("event_stage")
         self._stage_owner_accounts = {pb.id: self.budget.account("event_stage:"+pb.id,
                                                                strong=pb.state_slice == "strong", yields=True)
@@ -433,6 +438,10 @@ class Sweep:
         self._rule_timing: dict[str, list] = {}
         self.stats = {"partitions": 0, "records": 0, "events": 0, "candidates": 0, "skips": {}, "errors": 0,
                       "boot": {"recorded": 0, "from_interval": 0, "unknown": 0}}
+        # The mention sweep over the raw text of records no normalizer read (romulus.hunt.mentions): its pool is a
+        # separate lane, never findings, and its coverage is its own (it never makes the detection result partial).
+        self.mentions = MentionScanner(hunt_id, load_mention_patterns(), stage_dir=stage_dir, budget=self.budget,
+                                       settings=settings, window=(window.start, window.end))
 
     # -------------------------------------------------------------------------------------
     def _sources_for(self, m: Match, raw_sources: dict[str, dict]) -> dict[str, dict]:
@@ -2289,10 +2298,15 @@ class Sweep:
         skip_families: dict[str, frozenset[str] | None] = {}
         shapes: dict[str, int] = {}
         windows_records: dict[str, str] = {}
+        unread: list[tuple[dict, str]] = []
         events, skips, errors = normalize_hits(out.records, self.boots, malformed_text=malformed_text,
                                                skip_families=skip_families, rpc_remote_only=True, contract=contract,
                                                surrogate_free=out.surrogate_free, shapes=shapes,
-                                               windows_records=windows_records)
+                                               windows_records=windows_records, unread=unread)
+        if unread and getattr(self, "mentions", None) is not None:
+            # the text of records no normalizer read, matched against the curated mention patterns
+            self.mentions.scan(target, contract, unread, tid)
+        unread = []
         if shapes:
             # the shipper shapes read, by target: Linux host shapes, the EVE event types an Elastic shipper indexed
             # without their line, and NXLog's flat Windows records with their collector clock offsets (one count
@@ -3282,7 +3296,17 @@ class Sweep:
                                           "floor": self.budget.floor, "shared": self.budget.pool,
                                           "shared_used": self.budget.pool_used,
                                           "stores_without_new_keys": sorted(self.budget.full)}
+        self.publish_mentions()
         self.close_stage()
+
+    def publish_mentions(self, stopped: str = "") -> None:
+        """Rank the mention pool and replace the hunt's stored pool with it (every exit that keeps the sweep's
+        findings: the end of the sweep, or an analyst's stop during it)."""
+        scanner = getattr(self, "mentions", None)
+        if scanner is None or self.repo is None:
+            return
+        scanner.stopped = stopped
+        self.stats["mentions"] = scanner.publish(self.repo)
 
     @staticmethod
     def _finalize_rule(pb: Playbook):
@@ -3335,3 +3359,6 @@ class Sweep:
                     self.budget.release_physical_account(store.account)
         for pb in getattr(self, "pack", ()):
             pb.close_spill()
+        scanner = getattr(self, "mentions", None)
+        if scanner is not None:
+            scanner.close()

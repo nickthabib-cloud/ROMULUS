@@ -1,0 +1,41 @@
+{% extends "hunt_base.html" %}
+{% block tab_title %}Mentions · {% endblock %}
+{% block tab %}
+{# Mentions: text records contain, matched by curated patterns. Each line is untrusted telemetry, shown escaped in a
+   pre block, never as markup. A pattern's ATT&CK tags are the pattern's metadata, never an observed technique. #}
+<p class="warn">{{ mv.label }}. {{ mv.lane_note }}.</p>
+<section class="panel">
+  <div class="panel-head"><h2>Mention coverage <span class="chip">{{ mv.status }}</span></h2></div>
+  <div class="panel-body"><ul>{% for line in coverage %}<li>{{ line }}</li>{% endfor %}</ul></div>
+</section>
+<div class="toolbar">
+  <span>{{ mv.total }} mention(s) kept, in pool order: {{ mv.order }}.</span>
+  {% if pattern or host %}<span class="end">Filtered{% if pattern %} by pattern <span class="mono">{{ pattern }}</span>{% endif %}{% if host %} by host <span class="mono">{{ host }}</span>{% endif %} · <a href="{{ head.hunt_url(h.id, '/mentions') }}">clear</a></span>{% endif %}
+</div>
+<div class="table-wrap"><table class="grid">
+<thead><tr><th class="n">#</th><th>Mention</th><th>Pattern</th><th>Host</th><th class="n">Lines</th><th>First seen (UTC)</th><th>Raw record</th></tr></thead>
+<tbody>
+{% for m in items %}
+<tr>
+<td class="n">{{ m.rank }}</td>
+<td><span class="chip" title="{{ m.label }}">mention</span> <span class="small">{{ m.pattern.strength }}</span>
+{% if m.suspicious_content %}<p class="warn small"><b>Contains text flagged as possible prompt injection.</b></p>{% endif %}
+<pre class="raw">{{ m.line }}</pre>{% if m.line_cut %}<p class="help small">Line cut here ({{ m.line_chars }} characters); the raw record keeps the record.</p>{% endif %}</td>
+<td><a href="{{ head.hunt_url(h.id, '/mentions', pattern=m.pattern.id) }}">{{ m.pattern.title }}</a><br><span class="mono small">{{ m.pattern.id }}</span>
+{% if m.pattern.attack.techniques %}<br><span class="small" title="{{ m.pattern.attack.label }}">Pattern ATT&amp;CK (metadata): {{ m.pattern.attack.techniques | join(', ') }}</span>{% endif %}
+<br><span class="small">{{ m.rarity.pattern_hosts }} host(s), {{ m.rarity.pattern_lines }} line(s) for this pattern</span></td>
+<td>{% if m.host %}<a class="mono" href="{{ head.hunt_url(h.id, '/mentions', host=m.host) }}">{{ m.host }}</a>{% else %}<span class="small">no host</span>{% endif %}</td>
+<td class="n">{{ m.count }}</td>
+<td class="mono small">{{ m.first_seen or 'not recorded' }}{% if m.last_seen and m.last_seen != m.first_seen %}<br>to {{ m.last_seen }}{% endif %}</td>
+<td><a class="mono small" href="/hunts/{{ h.id | urlencode }}/raw-records/{{ m.raw_id | urlencode }}">{{ m.raw_id }}</a></td>
+</tr>
+{% else %}
+<tr><td colspan="7" class="empty">{% if mv.status == 'not_scanned' %}Unparsed text was not scanned: this is not a finding that no mention exists.{% else %}No mention on this page.{% endif %}</td></tr>
+{% endfor %}
+</tbody>
+</table></div>
+<div class="pager">
+  <span>Page limit: 50. {% if next_url %}More mentions follow.{% else %}No more mentions after this page.{% endif %}</span>
+  <span class="links">{% if items and items[0].rank > 1 %}<a class="btn ghost sm" href="{{ first_url }}">← First page</a>{% endif %}{% if next_url %}<a class="btn ghost sm" href="{{ next_url }}">Next mentions →</a>{% endif %}</span>
+</div>
+{% endblock %}
