@@ -34,8 +34,10 @@ UNKNOWN_REASON = "text line in no recognized format: custom.unknown"
 # links, citations and the non-baseline semantic projection are unchanged.
 # Every coverage cell then gains the rule's cost (records offered and rows selected; wall times are volatile): only
 # rule-cell digests move.
+# The mention sweep: stats and the sweep summary audit record gain the mention pool's coverage (the unknown line is
+# offered to it, not scanned: tests load no shipped pattern), and the manifest gains its mentions section.
 GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a6dadaa59988bdf81e',
- 'audit': '187b82e390f110430b5cc85ed691d2c627995a6ff19c1a5b6cb4a1ca87aa375a',
+ 'audit': 'd1421e8161284fe7321d2a86edaaceeebefcd7685dd729d9fc81b63e4ae3d3f9',
  'baseline_counts': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_hunt_exclusions': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_observations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
@@ -52,10 +54,10 @@ GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a
  'events': 'bd5435aef6b275df8abbeb11240c6ab00cff8cfa39fbba70fc1f6acccadf23bb',
  'expansion': 'dae7cbd7929a4cb94bb232a7343d4d70f62885a979b52714b87bd3641a92169b',
  'links': '8abe2a07c083a1ea68a7cb03ccfa539e9e071fc67b2af99a555e04f4badc5928',
- 'manifest': '033632b665a4567a017d22fa4433ecbe2a4cae45b472e9714d3b93abf08f464c',
+ 'manifest': 'b19671875e8eac665348064d5affb5e131378c300bf1d21c5341eff23f78f9d8',
  'raw': '64be31e697a32f93b1a71657560af514b2d430469cb3be19f44b8827985a7775',
  'rule_cells': '745d0029db5e210729c2b542d0542646322406a475eafb41fce9cc1682edfd87',
- 'stats': '360c94cf6f93e02aefee3a7da01eeeae2bba877f3d1e318af96992d9e75f2e92',
+ 'stats': '99912938eddef843162a91cd2581ace6a209418ea80f904bf37ce947661318cc',
  'tasks': '31db5bad23dca3ba0a6c4114135053177ece1b46af44576b3198b8967c6762bb'}
 
 

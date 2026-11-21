@@ -36,8 +36,10 @@ from romulus.store import schema as t
 from romulus.store.db import digest, utcnow, write_txn
 from romulus.store.repo import AGENT_MODEL_FORCED, Repo, raw_id
 
-# @2 adds the mention pool (`mentions`): its own lane, never findings
+# @2 adds the mention pool (`mentions`): its own lane, never findings. A hunt the mention sweep never ran on keeps
+# the manifest it had (@1, no `mentions`).
 MANIFEST_SCHEMA = "report-manifest@2"
+MANIFEST_SCHEMA_BEFORE_MENTIONS = "report-manifest@1"
 REPORTABLE_LANES = ("urgent", "high", "lead")
 CONCLUDED_CASE_STATUSES = {"closed", "parked", "escalated"}
 LEGACY_AGENT_MODE_KEY = "agent_mode"
@@ -902,9 +904,13 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
                          for pin in lists.get('excluded', [])],
         }
     # the mention pool: text records contain, in its own lane between context and lead (never a finding)
-    m["mentions"] = mentions_view(repo, hunt_id)
-    pattern_set = (m["mentions"]["coverage"].get("patterns") or {})
-    if pattern_set.get("digest"):
+    pattern_set = {}
+    if repo.mention_scan(hunt_id) is not None:
+        m["mentions"] = mentions_view(repo, hunt_id)
+        pattern_set = (m["mentions"]["coverage"].get("patterns") or {})
+    else:
+        m["schema"] = MANIFEST_SCHEMA_BEFORE_MENTIONS
+    if pattern_set.get("digest") and pattern_set["digest"] != "none":
         m["versions"]["mention_patterns"] = {"digest": pattern_set["digest"], "files": [
             {key: item.get(key) for key in ("name", "digest", "patterns")} for item in pattern_set.get("files") or []]}
     sigma = hm.get('sigma_rules') or {}
@@ -1437,7 +1443,7 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
             item["id"] = "M-" + digest({"pattern": item["pattern"]["id"], "host": item["host"],
                                         "line": item["line"]})[:20]
             item["raw_id"] = "RR-" + digest(item["source_ref"])[:20]
-    canonical["schema"] = "canonical-report-manifest@2"
+    canonical["schema"] = "canonical-report-manifest@2" if mentions else "canonical-report-manifest@1"
     canonical["hunt"].pop("id", None)
     graph = canonical["incident_graph"]
     for source, projected in zip(deterministic_graph["links"], graph["links"], strict=True):
