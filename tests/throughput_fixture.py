@@ -748,6 +748,7 @@ PRIOR_RULE_VERSIONS = {
     "host.kernel_module_load": "2",
     "net.long_external_connection": "6",
     "net.beaconing": "7",
+    "host.account_or_group_change": "6",
 }
 
 

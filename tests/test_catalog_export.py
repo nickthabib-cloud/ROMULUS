@@ -42,7 +42,7 @@ def test_catalog_export_contains_sorted_rules_techniques_strengths_and_telemetry
     assert guessing["strength"] == "positive-only"
     assert "host.ssh_password_guessing" in guessing["rule_ids"]
     # ntlm_tx returns with the registered Zeek rate rules
-    assert guessing["telemetry_families"] == ["auth", "database_audit", "net_alert", "ntlm_tx"]
+    assert guessing["telemetry_families"] == ["auth", "database_audit", "net_alert", "ntlm_tx", "privilege_use"]
     assert set(guessing) >= {
         "data_sources",
         "data_components",
