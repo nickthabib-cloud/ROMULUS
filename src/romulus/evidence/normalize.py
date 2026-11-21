@@ -51,7 +51,7 @@ from romulus.evidence.ecar import (
     normalize_ecar,
 )
 from romulus.evidence.ecar_catalog import lookup_ecar
-from romulus.evidence.linux_auth_text import parse_auth
+from romulus.evidence.linux_auth_text import openvpn_identifier, parse_auth
 from romulus.evidence.linux_catalog import (
     APACHE_ACCESS,
     APACHE_ERROR,
@@ -1465,9 +1465,19 @@ _SSHD_COMMS = ("sshd",)
 _UNIT_JOB_VERBS = {"Stopped": ("stop", "done"), "Stopping": ("stop", "begun"), "Started": ("start", "done"),
                    "Starting": ("start", "begun"), "Reached target": ("start", "done"),
                    "Stopped target": ("stop", "done")}
-_SUDO = re.compile(r"^\s*(?P<user>\S+) : (?:(?P<fail>.*?incorrect password attempts?|command not allowed|"
-                   r"user NOT in sudoers) ; )?TTY=(?P<tty>\S+) ; PWD=(?P<pwd>.*?) ; USER=(?P<target>\S+) ;"
-                   r"(?: COMMAND=(?P<cmd>.*))?$")
+# sudoers(5) EVENT LOGGING: "user : [reason ; ][HOST=h ; ][TTY=t ; ][CHROOT=c ; ]PWD=cwd ; USER=runas ; [GROUP=g ; ]
+# [TSID=id ; ][ENV=vars ; ]COMMAND=command". A reason marks a rejected command. TTY is absent when sudo has no
+# terminal; HOST appears in sudo 1.9 logs, GROUP with -g, TSID with I/O logging, ENV when variables were set on the
+# command line. The working directory and the command are the invoking user's own text.
+_SUDO_DENIALS = (r"(?:\d+ )?incorrect password attempts?|command not allowed|user NOT in sudoers|"
+                 r"user NOT authorized on host|a password is required|"
+                 r"sorry, you are not allowed to set the following environment variables: [^;]*")
+_SUDO = re.compile(r"^\s*(?P<user>\S+) : (?:(?P<fail>" + _SUDO_DENIALS + r") ; )?(?:HOST=(?P<host>[^\s;]+) ; )?"
+                   r"(?:TTY=(?P<tty>[^\s;]+) ; )?(?:CHROOT=(?P<chroot>.*?) ; )?PWD=(?P<pwd>.*?) ; "
+                   r"USER=(?P<target>[^\s;]+) ;(?: GROUP=(?P<group>[^\s;]+) ;)?(?: TSID=(?P<tsid>[^\s;]+) ;)?"
+                   r"(?: ENV=(?P<env>.*?) ;)?(?: COMMAND=(?P<cmd>.*))?$")
+SUDO_AMBIGUOUS_CAVEAT = ("The sudo record repeats a field separator inside its working directory or command text; the "
+                         "run-as account and the command are read at the first separator and may be misattributed")
 
 
 def normalize_journal(hit: dict, boots_seen: list | None = None) -> TypedEvent:
@@ -1539,15 +1549,22 @@ def _journal_event(hit: dict, j: dict, o: Callable[[str], str], boots_seen: list
         m = _SUDO.match(msg)
         if m:
             g = m.groupdict()
+            origin = o("MESSAGE~sudo")
             f = {**base,
                  "auth.service": fv("sudo", o("SYSLOG_IDENTIFIER")),
-                 "user.name": fv(g["user"], o("MESSAGE~sudo")),
-                 "auth.target_user": fv(g["target"], o("MESSAGE~sudo")),
-                 "sudo.command": fv(g.get("cmd"), o("MESSAGE~sudo")),
-                 "process.cwd": fv(g.get("pwd"), o("MESSAGE~sudo"))}
+                 "user.name": fv(g["user"], origin),
+                 "auth.target_user": fv(g["target"], origin),
+                 "sudo.command": fv(g.get("cmd"), origin),
+                 "process.cwd": fv(g.get("pwd"), origin)}
+            for name, key in (("privilege.denial_reason", "fail"), ("process.tty", "tty"), ("sudo.run_group", "group"),
+                              ("sudo.env", "env"), ("sudo.chroot", "chroot")):
+                if g.get(key):
+                    f[name] = fv(g[key], origin)
             outcome = Outcome.failure if g.get("fail") else Outcome.success
+            ambiguous = msg.count(" ; USER=") > 1 or msg.count(" ; COMMAND=") > 1
             return TypedEvent(id=event_id("privilege_use", [ref]), family="privilege_use", ts=_ts(src["@timestamp"]),
-                              host=host, outcome=outcome, fields=f, raw=[ref], normalizer=NORMALIZER_VERSION)
+                              host=host, outcome=outcome, fields=f, raw=[ref], normalizer=NORMALIZER_VERSION,
+                              caveats=[SUDO_AMBIGUOUS_CAVEAT] if ambiguous else [])
         raise Skip("sudo message not a command record")
     raise Skip(f"{kind} identifier {ident!r} is not normalized")
 
@@ -1784,6 +1801,10 @@ def _shipper_syslog(hit: dict, ident, hostname) -> TypedEvent:
              "auth.target_user": fv(sudo.get("user"), f"{o}.user"),
              "sudo.command": fv(sudo.get("command"), f"{o}.command"),
              "process.cwd": fv(sudo.get("pwd"), f"{o}.pwd")}
+        if isinstance(sudo.get("error"), str) and sudo["error"]:
+            f["privilege.denial_reason"] = fv(sudo["error"], f"{o}.error")
+        if isinstance(sudo.get("tty"), str) and sudo["tty"]:
+            f["process.tty"] = fv(sudo["tty"], f"{o}.tty")
         outcome = Outcome.failure if sudo.get("error") else Outcome.success
         return TypedEvent(id=event_id("privilege_use", [ref]), family="privilege_use", ts=_ts(src["@timestamp"]),
                           host=host, outcome=outcome, fields=f, raw=[ref], normalizer=NORMALIZER_VERSION,
@@ -3432,7 +3453,7 @@ def _new_writer_identity(program: str, journal: dict | None) -> tuple[str, list[
         units = names | {"ssh"}
     elif name == "smtpd" or name.startswith("postfix/"):
         names, units = frozenset({name, name.rsplit("/", 1)[-1]}), frozenset({"postfix"})
-    elif name == "openvpn" or name.startswith("openvpn-"):
+    elif openvpn_identifier(name):
         names, units = frozenset({name, "openvpn"}), frozenset({name, "openvpn", "openvpn-server", "openvpn-client"})
     elif name in ("dnsmasq-dhcp", "dnsmasq-tftp", "dnsmasq-script"):
         # dnsmasq tags its DHCP, TFTP and script messages itself; the writing process is dnsmasq
@@ -3472,8 +3493,19 @@ def _new_writer_identity(program: str, journal: dict | None) -> tuple[str, list[
     return writer, caveats
 
 
+# Families whose rules join a tool's own log line to the exec and audit records of the same process (host and pid).
+_PID_FAMILIES = frozenset({"account_change", "privilege_use"})
+
+
+def _pid_value(value) -> int | None:
+    text = _scalar_text(value)
+    return int(text) if text is not None and text.isascii() and text.isdigit() and 0 < len(text) <= 10 else None
+
+
 def _program_events(hit: dict, program: str, message: str, origin: str, *,
-                    journal: dict | None = None) -> list[TypedEvent]:
+                    journal: dict | None = None, pid: tuple[int, str] | None = None) -> list[TypedEvent]:
+    """`pid`: the writing process's id and its origin (journald's _PID, the shipper's process.pid or the syslog
+    header's), typed on account and privilege-broker events so their rules can join them to the process's exec."""
     # Preserve existing untyped-message skip reasons; validate a recognized
     # fallback action or a PAM message claiming the privileged SSH service.
     parsed_records = [parsed for parsed in (parse_auth(program, message), parse_service(program, message))
@@ -3488,11 +3520,17 @@ def _program_events(hit: dict, program: str, message: str, origin: str, *,
     parsed_records = [parsed for parsed in (parse_auth(writer, message), parse_service(program, message))
                       if parsed is not None]
     ref = _ref(hit)
-    return [TypedEvent(id=event_id(parsed.family, [ref]), family=parsed.family,
-                       ts=_ts(hit["_source"]["@timestamp"]), host=_get(hit["_source"], "host.name"),
-                       fields={key: fv(value, origin) for key, value in parsed.fields.items()},
-                       outcome=parsed.outcome, caveats=[*parsed.caveats, *caveats], raw=[ref], normalizer=NORMALIZER_VERSION)
-            for parsed in parsed_records]
+    events = [TypedEvent(id=event_id(parsed.family, [ref]), family=parsed.family,
+                         ts=_ts(hit["_source"]["@timestamp"]), host=_get(hit["_source"], "host.name"),
+                         fields={key: fv(value, origin) for key, value in parsed.fields.items()},
+                         outcome=parsed.outcome, caveats=[*parsed.caveats, *caveats], raw=[ref],
+                         normalizer=NORMALIZER_VERSION)
+              for parsed in parsed_records]
+    if pid is not None:
+        for event in events:
+            if event.family in _PID_FAMILIES:
+                event.fields["process.pid"] = fv(pid[0], pid[1])
+    return events
 
 
 def _linux_events(hit: dict, normalizer, *args) -> list[TypedEvent]:
@@ -3509,12 +3547,15 @@ def _linux_events(hit: dict, normalizer, *args) -> list[TypedEvent]:
         path = "message"
         boot_origin = None
         journal = _indexed_writer_fields(src)
+        pid = (number, f"{hit['_id']}:process.pid") if (number := _pid_value(_get(src, "process.pid"))) else None
         if normalizer is normalize_journal:
             journal = json.loads(_get(src, "event.original"))
             message = journal.get("MESSAGE") or message
             program = journal.get("SYSLOG_IDENTIFIER") or journal.get("_COMM")
             path = "event.original#journal:MESSAGE"
             boot_origin = f"{hit['_id']}:event.original#journal:_BOOT_ID"
+            spec = next((key for key in ("_PID", "SYSLOG_PID") if _pid_value(journal.get(key))), None)
+            pid = (_pid_value(journal[spec]), f"{hit['_id']}:event.original#journal:{spec}") if spec else None
         elif normalizer is normalize_journal_fields:
             journal, paths = journal_from_fields(src)
             journal.update(_indexed_writer_fields(src))
@@ -3522,8 +3563,11 @@ def _linux_events(hit: dict, normalizer, *args) -> list[TypedEvent]:
             program = journal.get("SYSLOG_IDENTIFIER") or journal.get("_COMM")
             path = paths.get("MESSAGE", "message")
             boot_origin = _indexed_origin(hit["_id"], paths)("_BOOT_ID")
+            spec = next((key for key in ("_PID", "SYSLOG_PID") if _pid_value(journal.get(key))), None)
+            pid = (_pid_value(journal[spec]), _indexed_origin(hit["_id"], paths)(spec)) if spec else None
         if isinstance(program, str) and isinstance(message, str):
-            events = _program_events(hit, program, message, f"{hit['_id']}:{path}~{program}", journal=journal)
+            events = _program_events(hit, program, message, f"{hit['_id']}:{path}~{program}", journal=journal,
+                                     pid=pid)
             if events:
                 if boot_origin is not None and (boot := _journal_boot(journal)) is not None:
                     for event in events:
@@ -3564,10 +3608,15 @@ def normalize_text(hit: dict) -> list[TypedEvent]:
         try:
             if parsed.program in {"useradd", "groupadd"}:
                 event = _syslog_account(hit, parsed.program, parsed.message, _get(src, "host.name"), origin)
+                if not event.has("process.pid") and (header_pid := _pid_value(parsed.pid)):
+                    event.fields["process.pid"] = fv(header_pid, origin.rsplit("~", 1)[0] + "#syslog-header:pid")
             else:
                 event = _journal_event(hit, journal, lambda _: origin, kind="text")
         except Skip as error:
-            records = _program_events(hit, parsed.program, parsed.message, origin, journal=journal)
+            header_pid = _pid_value(parsed.pid)
+            records = _program_events(hit, parsed.program, parsed.message, origin, journal=journal,
+                                      pid=(header_pid, origin.rsplit("~", 1)[0] + "#syslog-header:pid")
+                                      if header_pid else None)
             if not records:
                 detail = service_skip_reason(parsed.program, parsed.message)
                 # the detail precedes " is not normalized: ", after which the report reads the dataset

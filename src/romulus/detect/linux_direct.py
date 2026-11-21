@@ -10,6 +10,7 @@ import json
 import posixpath
 import re
 from dataclasses import dataclass, replace
+from typing import ClassVar
 from urllib.parse import urlsplit
 
 from romulus.detect.base import Match, Playbook, basename, pf
@@ -597,14 +598,44 @@ class MasqueradingBinary(FoldedLinuxDirect):
 
 
 class KernelModuleLoad(LinuxDirect):
-    version = "3"
+    version = "4"
     id = "host.kernel_module_load"
     title = "A kernel module load or an insmod command outside module package trees"
     families = ("kernel_module", "process_exec")
     attack = ("T1547.006",)
+    TAINTS: ClassVar[dict[str, str]] = {"out_of_tree": "an out-of-tree module (not built with the kernel tree)",
+              "unsigned": "a module whose signature failed or was missing",
+              "proprietary_license": "a module with a license that is not GPL-compatible",
+              "test": "a test module"}
+    card: ClassVar[dict] = {
+        "behavior": "a kernel module was loaded (audit init_module/finit_module record), the kernel logged that a "
+                    "loaded module tainted it (out-of-tree, unsigned, non-GPL license), or insmod/modprobe was run "
+                    "with a module file outside the module package trees",
+        "telemetry": "kernel_module from audit module syscalls (module.op, module.name, module.path, process "
+                     "identity) and from the kernel's own taint notices in kern.log or the journal (module.name, "
+                     "module.taint; no process or file); process_exec argv for insmod/modprobe. The lab profile has "
+                     "no module-load audit records",
+        "fidelity": "audit record: the load call and its result; taint notice: the kernel loaded the named module "
+                    "far enough to taint itself, printed for the first module of each kind after boot only; argv: "
+                    "the command was run (positive-only, the load not proved)",
+        "benign_and_cost": "DKMS and vendor drivers (GPU, virtualization guest tools, storage) are out-of-tree and "
+                           "often unsigned; one folded lead per shape, cheap to check against installed packages",
+        "query_cost": "none beyond the sweep",
+        "next_pivot": "the module file on disk (path, package ownership, signature) and the session that loaded it",
+        "adds": "the taint notice is the only module-load evidence on hosts without module-load auditing",
+        "research_basis": "ATT&CK Enterprise 20.0 T1547.006; Linux kernel/module/main.c "
+                          "(module_augment_kernel_taints, module_sig_check messages); Elastic detection-rules "
+                          "'Tainted Kernel Module Load' and 'Tainted Out-Of-Tree Kernel Module Load' (kern.log "
+                          "message match)",
+        "retrieval": "the sweep retrieves every record of the host datasets in each partition (dataset filter "
+                     "only), a superset of what this evaluator reads",
+        "lanes": "high for a module file outside the module trees or a web-service requester; context for packaged "
+                 "loaders with in-tree modules; lead otherwise, including every taint notice",
+    }
 
     def consume(self, events):
-        self._module_in_batch = any(e.family == "kernel_module" for e in events)
+        # Only an audit record shows module-load auditing is in place; a kernel taint notice does not.
+        self._module_in_batch = any(e.family == "kernel_module" and not e.has("module.taint") for e in events)
         return super().consume(events)
 
     def partition_coverage_notes(self):
@@ -642,6 +673,11 @@ class KernelModuleLoad(LinuxDirect):
             if e.outcome == Outcome.failure and lane == "context":
                 lane = "lead"
             text = "a kernel module load record" if e.outcome == Outcome.success else "a kernel module load attempt"
+            if e.has("module.taint"):
+                kind = self.TAINTS.get(str(e.get("module.taint")), f"a module ({e.get('module.taint')})")
+                text = (f"the kernel logged that it loaded module {str(e.get('module.name'))!r}, {kind}, and "
+                        "tainted itself (the kernel prints this for the first such module after boot only; it names "
+                        "no loading process)")
         else:
             if not p or p.name not in {"insmod", "modprobe"}:
                 return []

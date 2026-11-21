@@ -47,6 +47,13 @@ _CTIME = re.compile(
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)? (?P<body>.*)")
 
 
+def openvpn_identifier(program: str) -> bool:
+    """Whether a (lower-case) syslog identifier is one OpenVPN writes under: its own name, a name a unit gives it with
+    `--daemon openvpn-<name>`, or the `ovpn-<instance>` that Debian's and Ubuntu's openvpn@.service template sets
+    (`--daemon ovpn-%i`)."""
+    return program == "openvpn" or program.startswith(("openvpn-", "ovpn-"))
+
+
 def _bounded(text: str) -> bool:
     return len(text) <= 65536 and len(text.encode("utf-8", errors="surrogatepass")) <= 65536 and not any(
         c in text for c in ("\n", "\r", "\x00")
@@ -492,7 +499,7 @@ def parse_auth(program: str, message: str) -> ParsedLine | None:
         return _cyrus(message)
     if program == "saslauthd":
         return _saslauthd(message)
-    if program == "openvpn":
+    if openvpn_identifier(program):
         return _openvpn(message)
     if program in {"charon", "charon-systemd", "strongswan"}:
         return _charon(message)
