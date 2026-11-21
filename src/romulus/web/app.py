@@ -23,7 +23,7 @@ from starlette.concurrency import run_in_threadpool
 
 from romulus.agent.provider import agent_readiness, egress_banners
 from romulus.config import Settings
-from romulus.evidence.raw_citation import RAW_GATE, RAW_LABEL, RAW_LABEL_PLURAL, raw_record_view
+from romulus.evidence.raw_citation import RAW_GATE, RAW_LABEL_PLURAL, raw_record_view
 from romulus.hunt.run import open_repo
 from romulus.report.bundle import write_reports
 from romulus.report.manifest import publish_revision
@@ -264,8 +264,8 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         rows = repo.agent_raw_records(hunt_id, [rid]) if len(rid) <= 64 else []
         if not rows:
             raise HTTPException(404)
-        return page(request, "raw_record.html", u, hunt_id=hunt_id, raw=raw_record_view(rows[0]),
-                    raw_label=RAW_LABEL)
+        view = raw_record_view(rows[0])
+        return page(request, "raw_record.html", u, hunt_id=hunt_id, raw=view, raw_label=view["label"])
 
     @app.post("/findings/{cid}/disposition")
     def disposition(request: Request, cid: str, status: str = Form(...), note: str = Form(""),

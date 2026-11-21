@@ -181,10 +181,55 @@ agent_raw_record = Table(
     Column("query", Text, nullable=False),
     Column("suspicious_content", Boolean, nullable=False, default=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
+    # who kept it: the agent's own query ('agent'), or the deterministic mention sweep ('mention_sweep') as the
+    # citation of a mention. Only the agent's rows count toward AGENT_MAX_RAW_RECORDS.
+    Column("origin", String, nullable=False, default="agent", server_default="agent"),
     CheckConstraint("source_kind IN ('index','arkime_session')", name="ck_agent_raw_record_source_kind"),
     UniqueConstraint("hunt_id", "target", "native_id", name="uq_agent_raw_record_source"),
 )
 Index("ix_agent_raw_record_hunt", agent_raw_record.c.hunt_id, agent_raw_record.c.created_at)
+Index("ix_agent_raw_record_origin", agent_raw_record.c.hunt_id, agent_raw_record.c.origin)
+
+# The mention pool (romulus.hunt.mentions): one row per kept group of identical (pattern, host, normalized line), in
+# pool order (`rank` 1 is the top). A mention is text a record contains, never an action: it lives here, outside the
+# findings table, so no ranking, triage, expansion, entity or hypothesis path reads it. `raw_id` is its first record,
+# kept on agent_raw_record (origin 'mention_sweep'). The pattern's ATT&CK tags are the pattern's metadata.
+mention = Table(
+    "mention", metadata,
+    Column("id", String, primary_key=True),
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("rank", Integer, nullable=False),
+    Column("pattern_id", String, nullable=False),
+    Column("pattern_title", String, nullable=False),
+    Column("strength", String, nullable=False),
+    Column("pattern_attack", JSON, nullable=False),
+    Column("pattern_source", JSON, nullable=False),
+    Column("telemetry", String, nullable=False),
+    Column("host", String, nullable=False),
+    Column("target", String, nullable=False),
+    Column("native_id", String, nullable=False),
+    Column("raw_id", String, nullable=False),
+    Column("first_ts", DateTime(timezone=True)),
+    Column("last_ts", DateTime(timezone=True)),
+    Column("count", Integer, nullable=False),
+    Column("pattern_hosts", Integer, nullable=False),
+    Column("pattern_lines", Integer, nullable=False),
+    Column("line", Text, nullable=False),
+    Column("line_chars", Integer, nullable=False),
+    Column("line_cut", Boolean, nullable=False),
+    Column("suspicious_content", Boolean, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("strength IN ('strong','medium','weak')", name="ck_mention_strength"),
+    UniqueConstraint("hunt_id", "rank", name="uq_mention_rank"),
+)
+
+# The mention pool's coverage for a hunt: what was scanned and not, patterns loaded and refused, caps hit.
+mention_scan = Table(
+    "mention_scan", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id"), primary_key=True),
+    Column("summary", JSON, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
 
 agent_page_plan = Table(
     "agent_page_plan", metadata,

@@ -7,6 +7,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from romulus.evidence.raw_citation import RAW_LABEL_PLURAL
 from romulus.report.markdown import (
     BANNER,
+    MENTION_SECTION_TITLE,
     NARRATIVE_EMPTY,
     NARRATIVE_NOTE,
     NARRATIVE_TITLE,
@@ -26,6 +27,8 @@ from romulus.report.markdown import (
 
 _WORD = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 MUTED_COLOR = "6B7280"
+# the top of the mention pool the executive report names (pattern, host and count only)
+EXECUTIVE_MENTIONS = 10
 _XML_INVALID = re.compile(r"[^\x09\x0a\x0d\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
 
 
@@ -101,6 +104,16 @@ def write(m, path, technical_name):
                           f"See {technical_name}, Fleet host appendix, finding {finding['id']}, for every retained host.")
         for check in finding["next_checks"]:
             paragraph("Recommended check: "+check)
+    if mentions := m.get("mentions"):
+        # labelled as mentions, apart from the findings; the lines themselves stay in the technical report
+        paragraph(MENTION_SECTION_TITLE, bold=True)
+        paragraph(f"{mentions['label']}. {mentions['lane_note']}.", muted=True)
+        paragraph(f"{mentions['total']} mention(s) kept; coverage {mentions['status']}. Their lines and coverage "
+                  f"are in {technical_name}.")
+        for item in (mentions.get("items") or [])[:EXECUTIVE_MENTIONS]:
+            pattern = item["pattern"]
+            paragraph(f"{item['rank']}. {pattern['strength']} pattern: {pattern['title']} — "
+                      f"{item['host'] or 'no host'}, {item['count']} line(s) (mention, not an action)")
     if assessment := m.get("ai_assessment"):
         paragraph("AI assessment", bold=True)
         paragraph(assessment.get("header") or "Template narrative.")

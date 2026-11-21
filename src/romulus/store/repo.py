@@ -1024,7 +1024,8 @@ class Repo:
             c.execute(t.candidate.update().where(t.candidate.c.hunt_id == hunt_id).values(agent_hypothesis_id=None))
             for table in (t.agent_tool_call, t.agent_note, t.agent_rule_request, t.agent_link,
                           t.agent_hypothesis_cite, t.agent_hypothesis_event, t.agent_assessment,
-                          t.agent_raw_record, t.agent_session, t.agent_hypothesis, t.agent_run):
+                          t.agent_raw_record, t.agent_session, t.agent_hypothesis, t.agent_run,
+                          t.mention, t.mention_scan):
                 rm(table.name, table.delete().where(table.c.hunt_id == hunt_id))
 
             # The journal is disk-backed and may outgrow a bind list; remove one bounded page at a time.
@@ -5795,6 +5796,7 @@ class Repo:
             select(t.agent_note.c.id).where(t.agent_note.c.hunt_id == hunt_id, t.agent_note.c.created_at > at).exists(),
             select(t.agent_link.c.id).where(t.agent_link.c.hunt_id == hunt_id, t.agent_link.c.created_at > at).exists(),
             select(t.agent_raw_record.c.id).where(t.agent_raw_record.c.hunt_id == hunt_id,
+                                                  t.agent_raw_record.c.origin == "agent",
                                                   t.agent_raw_record.c.created_at > at).exists(),
         ]
         with self.engine.connect() as c:
@@ -6212,16 +6214,22 @@ class Repo:
         with write_txn(self.engine) as connection:
             self._fence_lease(connection, hunt_id, owner_token)
             count = int(connection.execute(select(func.count()).select_from(t.agent_raw_record).where(
-                t.agent_raw_record.c.hunt_id == hunt_id)).scalar_one())
+                t.agent_raw_record.c.hunt_id == hunt_id, t.agent_raw_record.c.origin == "agent")).scalar_one())
             now = utcnow()
             for row in rows:
                 if row["hunt_id"] != hunt_id:
                     raise ValueError("a raw record must belong to the hunt it is saved for")
-                stored = connection.execute(select(t.agent_raw_record.c.id).where(
+                stored = connection.execute(select(t.agent_raw_record.c.id, t.agent_raw_record.c.origin).where(
                     t.agent_raw_record.c.hunt_id == hunt_id, t.agent_raw_record.c.target == row["target"],
-                    t.agent_raw_record.c.native_id == row["native_id"])).scalar_one_or_none()
+                    t.agent_raw_record.c.native_id == row["native_id"])).first()
                 if stored is not None:
-                    kept.append(stored)
+                    if stored.origin != "agent":
+                        # the mention sweep kept this record as a mention's citation; the agent's own query returned
+                        # it too, so it becomes the agent's (a sweep run again replaces only its own rows)
+                        connection.execute(t.agent_raw_record.update().where(t.agent_raw_record.c.id == stored.id)
+                                           .values(origin="agent"))
+                        count += 1
+                    kept.append(stored.id)
                     continue
                 if count >= max_count:
                     refused += 1
@@ -6251,7 +6259,7 @@ class Repo:
         """How many raw records the hunt keeps, and how many returned rows its cap left unkept."""
         with self.engine.connect() as connection:
             stored = int(connection.execute(select(func.count()).select_from(t.agent_raw_record).where(
-                t.agent_raw_record.c.hunt_id == hunt_id)).scalar_one())
+                t.agent_raw_record.c.hunt_id == hunt_id, t.agent_raw_record.c.origin == "agent")).scalar_one())
             not_stored = 0
             for detail in connection.execute(select(t.audit_event.c.detail).where(
                     t.audit_event.c.hunt_id == hunt_id,
@@ -6259,6 +6267,69 @@ class Repo:
                 if isinstance(detail, dict) and isinstance(detail.get("not_stored"), int):
                     not_stored += detail["not_stored"]
         return {"stored": stored, "not_stored": not_stored}
+
+    # ---- the mention pool (romulus.hunt.mentions) -------------------------------------------------------------------
+    MENTION_PAGE_ROWS = 500
+
+    def replace_mentions(self, hunt_id: str, rows: Iterable[tuple[dict, dict]], summary: dict, *,
+                         owner_token: str | None = None) -> int:
+        """Replace the hunt's mention pool and its coverage with `rows` ((mention row, raw record row) pairs in pool
+        order) in one transaction. The raw record rows are the mentions' citations (origin 'mention_sweep'); a record
+        the hunt already keeps (the agent's own) is cited as it is. Returns the mentions stored."""
+        stored = 0
+        with write_txn(self.engine) as connection:
+            self._fence_lease(connection, hunt_id, owner_token)
+            connection.execute(t.mention.delete().where(t.mention.c.hunt_id == hunt_id))
+            connection.execute(t.agent_raw_record.delete().where(t.agent_raw_record.c.hunt_id == hunt_id,
+                                                                 t.agent_raw_record.c.origin == "mention_sweep"))
+            now = utcnow()
+            batch: list[dict] = []
+            raws: dict[str, dict] = {}
+
+            def flush():
+                if raws:
+                    connection.execute(insert(t.agent_raw_record).on_conflict_do_nothing(), [
+                        {**raw, "created_at": now} for raw in raws.values()])
+                    raws.clear()
+                if batch:
+                    connection.execute(t.mention.insert(), batch)
+                    batch.clear()
+
+            for mention, raw in rows:
+                if mention["hunt_id"] != hunt_id or raw["hunt_id"] != hunt_id:
+                    raise ValueError("a mention must belong to the hunt it is saved for")
+                batch.append(mention)
+                raws.setdefault(raw["id"], raw)
+                stored += 1
+                if len(batch) >= self.MENTION_PAGE_ROWS:
+                    flush()
+            flush()
+            connection.execute(t.mention_scan.delete().where(t.mention_scan.c.hunt_id == hunt_id))
+            connection.execute(t.mention_scan.insert().values(hunt_id=hunt_id, summary=summary, created_at=now))
+        return stored
+
+    def mention_scan(self, hunt_id: str) -> dict | None:
+        """The hunt's mention coverage summary; None for a hunt the mention sweep never ran on."""
+        with self.engine.connect() as connection:
+            return connection.execute(select(t.mention_scan.c.summary).where(
+                t.mention_scan.c.hunt_id == hunt_id)).scalar_one_or_none()
+
+    def mention_count(self, hunt_id: str) -> int:
+        with self.engine.connect() as connection:
+            return int(connection.execute(select(func.count()).select_from(t.mention).where(
+                t.mention.c.hunt_id == hunt_id)).scalar_one())
+
+    def mentions(self, hunt_id: str, *, after_rank: int = 0, limit: int = 50, pattern_id: str | None = None,
+                 host: str | None = None) -> list[dict]:
+        """One page of the pool in pool order, after `after_rank` (a keyset page), optionally of one pattern or host."""
+        query = select(t.mention).where(t.mention.c.hunt_id == hunt_id, t.mention.c.rank > after_rank)
+        if pattern_id is not None:
+            query = query.where(t.mention.c.pattern_id == pattern_id)
+        if host is not None:
+            query = query.where(t.mention.c.host == host)
+        with self.engine.connect() as connection:
+            return [dict(row) for row in connection.execute(
+                query.order_by(t.mention.c.rank).limit(max(0, int(limit)))).mappings()]
 
     def save_agent_assessment(self, row: dict, *, owner_token: str | None = None) -> bool:
         with write_txn(self.engine) as connection:

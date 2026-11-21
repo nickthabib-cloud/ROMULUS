@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import re
 
+from romulus.report.mentions import coverage_lines
+
 BANNER = "UNCLASSIFIED // FOR TRAINING USE"
 _MD_SPECIAL = re.compile(r"([\\`*_{}\[\]<>#|])")
 _CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\x1b\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
@@ -122,6 +124,45 @@ def _raw_records_section(m: dict) -> list[str]:
     if index["broken"]:
         out += [f"Cited raw records no longer kept: {cell(', '.join(index['broken'][:50]))}.", ""]
     return out
+
+
+MENTION_SECTION_TITLE = "Mentions (text a record contains, not an action)"
+# the mentions the Markdown report lists; the JSON manifest carries more, the web list pages through all
+MARKDOWN_MENTIONS = 50
+MENTION_LINE_CHARS = 200
+
+
+def _mentions_section(m: dict) -> list[str]:
+    """The mention pool: its label and lane, its coverage, and its top mentions with their lines as inert table text.
+    A pattern's ATT&CK tags are shown as the pattern's metadata, never as an observed technique."""
+    view = m.get("mentions")
+    if not view:
+        return []
+    out = [f"## {MENTION_SECTION_TITLE}", "", cell(view["label"]) + ".", "", cell(view["lane_note"]) + ".", "",
+           "**Mention coverage**", ""]
+    out += [f"- {cell(line)}" for line in coverage_lines(view)] + [""]
+    items = view.get("items") or []
+    if not items:
+        out += ["No mention was kept." if view.get("status") != "not_scanned" else
+                "Unparsed text was not scanned, so this is not a finding that no mention exists.", ""]
+        return out
+    out += [f"Order: {cell(view['order'])}.", "",
+            "| # | Strength | Pattern | Pattern ATT&CK (metadata) | Host | Lines | First seen (UTC) | Raw record | Line |",
+            "|---:|---|---|---|---|---:|---|---|---|"]
+    for item in items[:MARKDOWN_MENTIONS]:
+        pattern = item["pattern"]
+        line = item["line"][:MENTION_LINE_CHARS]
+        cut = "…" if item["line_cut"] or len(item["line"]) > len(line) else ""
+        flag = " (flagged: possible prompt injection)" if item.get("suspicious_content") else ""
+        out.append(f"| {item['rank']} | {cell(pattern['strength'])} | {cell(pattern['title'])} "
+                   f"(`{cell(pattern['id'])}`) | {cell(', '.join(pattern['attack']['techniques']) or 'none')} | "
+                   f"{cell(item['host'] or '(no host)')} | {item['count']} | {cell(item['first_seen'] or 'not recorded')} | "
+                   f"{cell(item['raw_id'])} | {cell(line)}{cut}{flag} |")
+    rest = view["total"] - min(len(items), MARKDOWN_MENTIONS)
+    if rest > 0:
+        out += ["", (f"_{rest} more mention(s): the JSON manifest carries the top {len(items)}, and the web "
+                     "Mentions list pages through all of them._")]
+    return out + [""]
 
 
 def _agent_note_line(note: dict) -> str:
@@ -723,6 +764,7 @@ def _render_body(m: dict, banner: str = BANNER) -> str:
             out += _raw_citation_table(f["raw_citations"])
 
     out += _raw_records_section(m)
+    out += _mentions_section(m)
     out += _triage_section(m)
     out += ["## Incidents", "",
             ("Incidents are connected only by observed typed links. Inferred links remain visible hypotheses and "
