@@ -1026,6 +1026,13 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                             session_id, REASONING_REJECTED_REASON, stripped)
                 cache_basis = None
                 continue
+            if result.status == "error":
+                # no usable reply (a provider error, an unexpected stop or block, a fallback that only continued a
+                # declined reply): the session ends here under the provider's reason, its recorded work kept, and no
+                # empty assistant turn is ever sent
+                why = redact_text(result.error or "the provider returned no usable reply", settings)[:300]
+                return finish("failed", f"Provider reply unusable: {why}. "
+                              + _deterministic_tool_summary(tool_history, hypothesis_changes), why)
             messages.append(result.assistant_message())
             if not result.tool_calls:
                 if context_wrap_sent:

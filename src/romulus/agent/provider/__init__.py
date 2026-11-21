@@ -279,12 +279,20 @@ def record_failure(repo, provider: ChatProvider, *, hunt_id: str, purpose: str, 
     call_id = call_id or "mc-" + uuid.uuid4().hex[:20]
     charge = charge_parts(parts_of(getattr(error, "billed", None)))
     described = provider.describe()
+    options = {"attempts": len(charge.parts), "usage_estimated": False,
+               "billed_failure": type(error).__name__, "billed": [part.__dict__ for part in charge.parts],
+               "budget_tokens": limits.budget_tokens(charge)}
+    set_aside = getattr(error, "set_aside", None)
+    if set_aside:
+        # a reply set aside before the retry that did not happen: its switch, category, counts, reason and raw
+        # response, with any configured secret's text removed as from every stored response
+        settings = getattr(provider, "s", None)
+        options["provider_details"] = {"fallback_set_aside": redact_value(set_aside, settings)
+                                       if isinstance(settings, Settings) else set_aside}
     repo.save_model_call({
         "id": call_id, "hunt_id": hunt_id, "case_id": None, "session_id": session_id,
         "purpose": purpose, "model": provider.model,
-        "options": {"attempts": len(charge.parts), "usage_estimated": False,
-                    "billed_failure": type(error).__name__, "billed": [part.__dict__ for part in charge.parts],
-                    "budget_tokens": limits.budget_tokens(charge)},
+        "options": options,
         "prompt_digest": digest({"messages": request.messages, "tools": [tool.__dict__ for tool in request.tools],
                                  "schema": request.response_schema}),
         "prompt_tokens_est": 0, "prompt_eval_count": charge.prompt, "eval_count": charge.completion,

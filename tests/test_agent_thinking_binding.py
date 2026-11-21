@@ -121,6 +121,25 @@ def test_a_second_binding_refusal_ends_the_session_under_its_own_reason(tmp_path
     assert outcome["reason"] != "no_tool_call_twice" and len(provider.requests) == 4
 
 
+def test_an_unusable_reply_ends_the_session_under_its_reason_and_sends_no_empty_turn(tmp_path):
+    error = ("the refusal fallback continued a reply the configured model had begun and declined, and again on the "
+             "retry: no complete answer")
+
+    def script(anchor, evidence, hypothesis):
+        steps = _queries(4)(anchor, evidence, hypothesis)
+        steps.insert(2, response(status="error", error=error))
+        return steps
+    repo, provider, outcome, *_ = _run(tmp_path, script, provider_class=ThinkingProvider)
+    assert outcome["state"] == "failed" and outcome["reason"] == error
+    assert error in outcome["summary"]
+    # nothing more is sent: no empty assistant turn follows the unusable reply
+    assert len(provider.requests) == 3
+    assert all(m.get("content") or m.get("tool_calls") or m.get(PROVIDER_STATE)
+               for m in provider.requests[-1].messages if m.get("role") == "assistant")
+    # the work recorded before it stays
+    assert [row["status"] for row in repo.model_calls("h1")] == ["ok", "ok", "error"]
+
+
 def test_another_providers_error_is_not_taken_for_a_binding_refusal():
     assert thinking_rejected(response(status="error", error=REFUSAL))
     assert not thinking_rejected(response(status="error", error="HTTP 400 invalid_request_error: max_tokens"))

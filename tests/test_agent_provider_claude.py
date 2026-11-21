@@ -565,10 +565,11 @@ def test_the_model_that_answered_is_recorded_when_the_fallback_served(tmp_path):
                                           "discarded": {"text_chars": 11, "tool_calls": 0, "thinking_blocks": 1}}
     assert "refusal" not in result.details
     # everything the declined model wrote before the switch is dropped, never joined to the fallback model's answer;
-    # the fallback's thinking followed text the turn no longer holds, so it is not replayed; nor is the marker
+    # the fallback's thinking followed text the turn no longer holds, so it is not replayed; nor is the marker; its
+    # words beside the tool call continue the declined text, so they are not the agent's either: the call stands
     kept = result.provider_state["content"]
-    assert [b["type"] for b in kept] == ["text", "tool_use"]
-    assert result.content == "the beacon."
+    assert [b["type"] for b in kept] == ["tool_use"]
+    assert result.content == "" and [c.id for c in result.tool_calls] == ["toolu_01"]
     # every billed attempt is charged, at the prices of the model that served it
     charged = AgentBudget(BudgetLimits.from_settings(s), clock=lambda: 0.0).charge(result)
     assert (charged["prompt_tokens"], charged["completion_tokens"]) == (240, 30)
@@ -741,8 +742,9 @@ def _continued(tail: str, *, before=None) -> bytes:
 
 
 # the retry, which the API's routing sends straight to the fallback model: no switch, one fallback attempt
+# the retry, sent to the fallback model directly: one attempt, by that model
 OUTRIGHT = reply([THINKING, text(VERDICTS)], model=FALLBACK, usage={**COLD, "output_tokens": 1300},
-                 iterations=[{"type": "fallback_message", "model": FALLBACK, "input_tokens": 100,
+                 iterations=[{"type": "message", "model": FALLBACK, "input_tokens": 100,
                               "cache_creation_input_tokens": 0, "cache_read_input_tokens": 900,
                               "output_tokens": 1300}])
 
@@ -759,13 +761,26 @@ def test_a_reply_the_fallback_continued_is_set_aside_and_asked_once_more(tail):
     assert result.content == VERDICTS and result.parsed == json.loads(VERDICTS)
     assert DECLINED_PART not in result.raw and tail not in result.raw
     # the switch is recorded as fallbacks are: the model that answered and the refusal's category, with what was
-    # set aside counted, never quoted
-    assert result.details["fallback"] == {"served_by": FALLBACK, "switches": [], "category": "cyber"}
-    assert result.details["fallback_set_aside"] == [{
+    # set aside counted, and its raw response kept for audit
+    assert result.details["fallback"] == {"served_by": FALLBACK, "switches": [], "category": "cyber",
+                                          "pinned_retry": True}
+    (aside,) = result.details["fallback_set_aside"]
+    raw = aside.pop("raw_response")
+    assert aside == {
         "served_by": FALLBACK, "switches": [{"from": MODEL, "to": FALLBACK, "category": "cyber"}],
         "discarded": {"text_chars": 4694, "tool_calls": 0, "thinking_blocks": 1},
-        "reason": "the refusal fallback continued a reply the configured model had begun and declined"}]
-    assert json.dumps(result.details).count("beacon") == 0
+        "reason": "the refusal fallback continued a reply the configured model had begun and declined",
+        "retry_pinned_to": FALLBACK}
+    kept_for_audit = json.loads(raw)["content"]
+    assert kept_for_audit[1]["text"] == DECLINED_PART and kept_for_audit[3]["text"] == tail
+    # the first request asked for the fallback; the retry goes to the fallback model itself, with no fallbacks
+    first, retry = ep.body(0), ep.body(1)
+    assert (first["model"], first["fallbacks"]) == (MODEL, "default") and FALLBACK_BETA in (
+        ep.calls[0].headers.get("anthropic-beta") or "")
+    assert retry["model"] == FALLBACK and "fallbacks" not in retry and "betas" not in retry
+    assert FALLBACK_BETA not in (ep.calls[1].headers.get("anthropic-beta") or "")
+    assert {k: v for k, v in retry.items() if k != "model"} == {
+        k: v for k, v in first.items() if k not in ("model", "fallbacks")}
     # the stored turn is the fallback model's answer alone
     assert [b["type"] for b in result.provider_state["content"]] == ["thinking", "text"]
     assert result.provider_state["content"][1]["text"] == VERDICTS
@@ -844,6 +859,49 @@ def test_a_set_aside_reply_follows_the_budget_rules_for_a_retry():
     assert p.chat(ask(response_schema=GROUPS, attempt_guard=lambda info: True)).ok
 
 
+def test_a_switch_that_names_no_fallback_model_is_retried_as_before_and_says_so():
+    # (a block with no `to` at all is refused by the SDK's own stream reader, before it reaches the adapter)
+    unnamed = {"type": "fallback", "from": {"model": MODEL}, "to": {"model": ""}, "trigger": {"category": "cyber"}}
+    blocks = [THINKING, text(DECLINED_PART), unnamed, text('{"groups":[]}')]
+    ep = Endpoint(reply(blocks, model=FALLBACK, iterations=_hops()), OUTRIGHT)
+    p, _ = provider(claude_settings(**PRICES), ep)
+    result = p.chat(ask(response_schema=GROUPS))
+    assert result.ok and len(ep.calls) == 2
+    retry = ep.body(1)
+    assert retry["model"] == MODEL and retry["fallbacks"] == "default"           # not pinned
+    (aside,) = result.details["fallback_set_aside"]
+    assert aside["retry_pinned_to"] is None and aside["switches"] == [{"from": MODEL, "to": "", "category": "cyber"}]
+
+
+def test_a_retry_the_guard_refuses_keeps_the_set_aside_reply_on_the_failure_record(tmp_path):
+    from romulus.agent.provider import record_failure
+    from romulus.hunt import run as hunt_run
+    secret = "Sup3rSecretPassw0rd!xyz"
+    s = claude_settings(**PRICES, es_password=secret)
+    declined = DECLINED_PART[:100] + secret + DECLINED_PART[100:]
+    ep = Endpoint(_continued('{"groups":[]}', before=[THINKING, text(declined)]), OUTRIGHT)
+    p, _ = provider(s, ep)
+    request = ask(response_schema=GROUPS, attempt_guard=lambda info: False)
+    with pytest.raises(ProviderUnavailable) as exc:
+        p.chat(request)
+    (aside,) = exc.value.set_aside
+    assert aside["switches"][0]["category"] == "cyber" and aside["retry_pinned_to"] == FALLBACK
+    assert secret not in aside["raw_response"] and "<redacted>" in aside["raw_response"]
+    repo = hunt_run.open_repo(Settings(home=tmp_path))
+    try:
+        repo.create_hunt("h1", {"window": {}, "targets": []}, "digest", "test")
+        call = record_failure(repo, p, hunt_id="h1", purpose="agent.test", request=request, error=exc.value,
+                              limits=BudgetLimits.from_settings(s))
+        row = next(r for r in repo.model_calls(hunt_id="h1") if r["id"] == call)
+    finally:
+        repo.engine.dispose()
+    (stored,) = row["options"]["provider_details"]["fallback_set_aside"]
+    assert stored["switches"][0]["category"] == "cyber" and stored["reason"] == aside["reason"]
+    assert stored["discarded"] == {"text_chars": len(declined), "tool_calls": 0, "thinking_blocks": 1}
+    assert secret not in json.dumps(row, default=str)
+    assert [b["model"] for b in row["options"]["billed"]] == [MODEL, FALLBACK]
+
+
 def test_thinking_and_tool_calls_before_a_switch_are_dropped():
     pivot = tool_use('{"entity": "10.0.0.5"}', name="pivot", call_id="toolu_declined")
     blocks = [THINKING, text("Following the beacon "), pivot, SWITCH, {**THINKING, "signature": "fallback-sig"},
@@ -854,10 +912,10 @@ def test_thinking_and_tool_calls_before_a_switch_are_dropped():
     # whole tool calls made after the switch stand: no retry
     assert result.ok and len(ep.calls) == 1
     assert [(c.id, c.arguments) for c in result.tool_calls] == [("toolu_02", {"entity": "10.0.0.9"})]
-    assert result.content == "Checking the host."
+    assert result.content == ""          # the fallback's words continue the declined text: not the agent's own
     assert result.details["fallback"]["discarded"] == {"text_chars": 21, "tool_calls": 1, "thinking_blocks": 1}
     state = result.provider_state
-    assert [b["type"] for b in state["content"]] == ["text", "tool_use"] and list(state["tool_inputs"]) == ["toolu_02"]
+    assert [b["type"] for b in state["content"]] == ["tool_use"] and list(state["tool_inputs"]) == ["toolu_02"]
     # the turn goes back as it was stored
     history = [{"role": "user", "content": "go"}, result.assistant_message(),
                {"role": "tool", "tool_call_id": "toolu_02", "content": "ok"}]
@@ -865,8 +923,12 @@ def test_thinking_and_tool_calls_before_a_switch_are_dropped():
     p2, _ = provider(claude_settings(**PRICES), second)
     assert p2.chat(ChatRequest(history, tools=[PIVOT])).ok
     assert second.body()["messages"][1]["content"] == [
-        {"type": "text", "text": "Checking the host."},
         {"type": "tool_use", "id": "toolu_02", "name": "pivot", "input": {"entity": "10.0.0.9"}}]
+    # without declined text before the switch, the fallback's words are its own and stay
+    ep = Endpoint(reply([THINKING, SWITCH, text("Checking the host."), tool_use('{"entity": "10.0.0.9"}', name="pivot")],
+                        stop="tool_use", iterations=_hops()))
+    p, _ = provider(claude_settings(**PRICES), ep)
+    assert p.chat(ask(tools=[PIVOT])).content == "Checking the host."
     # a tool stop whose only call came before the switch has no call of the fallback model's: asked once more
     ep = Endpoint(reply([text("Following the beacon "), pivot, SWITCH, text("Checking.")], stop="tool_use",
                         iterations=_hops()), reply([tool_use('{"entity": "10.0.0.9"}', name="pivot")],
