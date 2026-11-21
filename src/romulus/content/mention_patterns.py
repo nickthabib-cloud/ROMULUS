@@ -29,13 +29,14 @@ characters and uses only literals, character classes, `.`, groups, alternation, 
 `\\A`, `\\Z`, `\\b` and `\\B`: no back references, lookaround, conditionals, atomic groups, possessive repeats or inline
 flags. Two wide repeats of positive classes (each able to take more than 16 characters) that can take the same
 characters may not follow each other unless a mandatory item neither takes stands between them (`a[e-w]*[e-w]*X` is
-refused; open gaps are bounded by the open-gap budget instead). No repeat may
-hold another repeat, an optional group included (`(?:x+)?` is refused like `(?:x+)+`); a repeat
-that can match more than once may not hold an alternation either (an optional group may), and at most four repeats may each match more than 16 characters. The upper bounds of its open gaps
-(`.`, a negated class such as `[^\\n]`, or a negated character, each repeated) along any path sum to at most
-MAX_GAP_SUM: an unbounded open gap is refused. Each expression is then timed at
-load against lines built to make it backtrack (from its own examples), and refused when one takes longer than
-`PROBE_LIMIT_SECONDS`. The matcher reads an expression over at most 512 characters from where it is tried; a line it
+refused). No repeat may hold another repeat, an optional group included (`(?:x+)?` is refused like `(?:x+)+`); a
+repeat that can match more than once may not hold an alternation either (an optional group may); and at most four
+repeats may each match more than 16 characters. Open gaps (`.`, a negated class such as `[^\\n]`, or a negated
+character, each repeated) are bounded twice: at most MAX_OPEN_GAPS of them along any path, and their upper bounds
+along any path sum to at most MAX_GAP_SUM (an unbounded open gap is refused). Each expression is then timed at load
+against lines built to make it backtrack (from its examples and from each repeat's own class), and refused when one
+line takes longer than `PROBE_LIMIT_SECONDS` over its window. The matcher reads an expression over at most 512
+characters from where it is tried; a line it
 could not rule out there is counted in the pool's coverage.
 """
 from __future__ import annotations
@@ -80,10 +81,12 @@ MAX_WIDE_REPEATS = 4
 # the sum of the upper bounds of the open gaps along any path through an anchored expression: each is where a
 # backtracking engine re-scans, so keeping their sum small keeps the work from one place small
 MAX_GAP_SUM = 360
+# and at most this many open gaps along any path: each one multiplies the ways the engine tries
+MAX_OPEN_GAPS = 2
 # the longest one hostile probe line may take an anchored expression at load, its fastest of PROBE_RUNS runs (the
 # curated corpus's worst is under 1 ms; the margin keeps a loaded machine from refusing a sound expression, while an
 # expression that backtracks catastrophically takes seconds)
-PROBE_LIMIT_SECONDS = 0.1
+PROBE_LIMIT_SECONDS = 0.005
 PROBE_RUNS = 3
 _TECHNIQUE = r"^T[0-9]{4}(?:\.[0-9]{3})?$"
 
@@ -390,6 +393,19 @@ def _gap_sum(items) -> int:
     return total
 
 
+def _gap_count(items) -> int:
+    """The number of open gaps along the path with the most (an alternation counts its branch with the most)."""
+    total = 0
+    for op, arg in items:
+        if op in _REPEATS:
+            total += 1 if _open_gap(list(arg[2])) else _gap_count(arg[2])
+        elif op == _sre.SUBPATTERN:
+            total += _gap_count(arg[3])
+        elif op == _sre.BRANCH:
+            total += max((_gap_count(alt) for alt in arg[1]), default=0)
+    return total
+
+
 def _width(items) -> int:
     widest = _sre_parse.SubPattern(_sre_parse.State(), list(items)).getwidth()[1]
     return min(int(widest), MAX_SCAN_CHARS)
@@ -495,6 +511,8 @@ def compile_anchored(expression: str, case_sensitive: bool) -> Anchored:
     if (gaps := _gap_sum(items)) > MAX_GAP_SUM:
         shown = "unbounded" if gaps >= _sre.MAXREPEAT else str(gaps)
         raise ValueError(f"its open gaps ('.', negated classes) sum to {shown} characters, above {MAX_GAP_SUM}")
+    if (gaps := _gap_count(items)) > MAX_OPEN_GAPS:
+        raise ValueError(f"it has {gaps} open gaps ('.', negated classes) along one path, more than {MAX_OPEN_GAPS}")
     widest = parsed.getwidth()[1]
     shape = {"end_anchored": _ends(items), "max_width": None if widest >= _sre.MAXREPEAT else int(widest),
              "samples": tuple(_repeat_samples(items, not case_sensitive))}

@@ -3316,13 +3316,30 @@ class Sweep:
             scanner.note_unscanned(target, partition, reason)
 
     def _mention_left_out(self, scanner) -> None:
-        """Name, per target, the sources the fetch filters leave out (so their text is never offered to the scan):
-        Linux text datasets not retrieved, and Windows event classes not read (on a target the sweep reads by class,
-        every class it does not select; otherwise the classes of channels outside the catalog's)."""
+        """Name, per target, every source the fetch leaves out, so its text is never offered to the scan:
+        - Linux text datasets not retrieved, and the dataset reconciliation's shortfalls (selected datasets the query
+          did not return, window datasets no normalizer reads, records naming no dataset), or the reconciliation
+          itself when it was never performed;
+        - Linux and Windows shipper shapes the target cannot search;
+        - Windows event classes not read: on a target the sweep reads by class, every class it does not select;
+          otherwise the classes of channels outside the catalog's; and when the class inventory itself is
+          unavailable, every channel outside the catalog's, not inventoried."""
         from romulus.evidence.windows_catalog import WINDOWS_CHANNELS
+        scanner.left_out = []
         for target, datasets in sorted((self.stats.get("linux_text_not_retrieved") or {}).items()):
             for name, reason in sorted(datasets.items()):
                 scanner.note_left_out(target, "dataset", name, None, reason)
+        for target, rows in sorted((self.stats.get("dataset_reconciliation") or {}).items()):
+            for row in rows:
+                if row.get("records") == 0:
+                    continue                 # none of its records falls in the window: nothing there was left out
+                scanner.note_left_out(target, "dataset", row.get("dataset"), row.get("records"),
+                                      f"{row.get('reason')} ({row.get('count_scope')})")
+        for stat in ("linux_shapes_not_assessed", "windows_shapes_not_assessed"):
+            for target, notes in sorted((self.stats.get(stat) or {}).items()):
+                for note in notes:
+                    shape, _sep, why = str(note).partition(": ")
+                    scanner.note_left_out(target, "shape", shape, None, why or str(note))
         channels = {channel.casefold() for channel in WINDOWS_CHANNELS if channel}
         for target, classes in sorted((self.stats.get("windows_unassessed") or {}).items()):
             selective = target in getattr(self, "_windows_selective", set())
@@ -3335,6 +3352,12 @@ class Sweep:
                 reason = ("event classes the sweep does not select on this target" if selective
                           else "a channel outside the ones the sweep reads")
                 scanner.note_left_out(target, "channel", channel, records, reason)
+        for target, reasons in sorted((getattr(self, "_windows_inventory_reasons", None) or {}).items()):
+            if any(str(reason).startswith("event class inventory unavailable") for reason in reasons):
+                scanner.note_left_out(
+                    target, "channel", "any channel outside the catalog's", None,
+                    "not offered: the sweep reads only the catalog's channels here, and the event class inventory is "
+                    "unavailable, so the channels left out are not named or counted")
 
     def publish_mentions(self, stopped: str = "") -> None:
         """Rank the mention pool and replace the hunt's stored pool with it (every exit that keeps the sweep's

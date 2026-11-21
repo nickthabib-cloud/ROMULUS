@@ -51,6 +51,7 @@ import tempfile
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
+from xml.etree import ElementTree
 
 from romulus.agent.safety import injection_flags
 from romulus.config import redact_counted
@@ -108,11 +109,15 @@ _HOST_FIELDS = ("host.name", "host.hostname", "agent.hostname", "computer_name",
 # reasons a record's text was not scanned
 NO_TEXT = "no text field"
 JSON_RECORD = "event.original is a JSON record with no MESSAGE"
+JSON_ARRAY = "event.original is a JSON array"
+XML_RECORD = "event.original is an XML record"
 # a group whose kept record or whose whole entry the budget reclaimed for a detection store
 DISK_RECLAIMED = "disk_reclaimed_for_detection"
 RECLAIMED_TEXT = ("the record's text was released to give disk to detection; the source keeps the whole record "
                   "under this reference")
 RECLAIM_BATCH = 200
+# the host of a loss row that counts the (pattern, host) pairs past the remembered-pair bound together
+PAST_PAIR_BOUND = "(further hosts past the remembered-pair bound, counted together)"
 
 
 def _field(source: dict, name: str):
@@ -144,7 +149,8 @@ def record_text(source: dict) -> tuple[str, str] | tuple[None, str]:
             return path, value
     original = _field(source, "event.original")
     if isinstance(original, str) and original:
-        if original.lstrip().startswith("{"):
+        head = original.lstrip()[:1]
+        if head in ("{", "["):
             try:
                 parsed = json.loads(original)
             except ValueError:
@@ -154,8 +160,22 @@ def record_text(source: dict) -> tuple[str, str] | tuple[None, str]:
                 if isinstance(message, str) and message:
                     return "event.original#journal:MESSAGE", message
                 return None, JSON_RECORD
+            if isinstance(parsed, list):
+                return None, JSON_ARRAY
+        elif head == "<" and _is_xml(original):
+            return None, XML_RECORD
         return "event.original", original
     return None, NO_TEXT
+
+
+def _is_xml(text: str) -> bool:
+    """Whether text is one XML document (an exported event record): it is never scanned as a line. The parser is
+    expat, which bounds entity expansion; the text is at most the record's own field."""
+    try:
+        ElementTree.fromstring(text)
+    except (ElementTree.ParseError, ValueError):
+        return False
+    return True
 
 
 def telemetry_class(source: dict, contract, windows: bool | None = None) -> str:
@@ -563,10 +583,14 @@ class MentionScanner:
             return
         strength = STRENGTH_RANK[pattern.strength]
         kept_pattern = (db.execute("SELECT kept FROM pat WHERE pattern = ?", (index,)).fetchone() or (0,))[0]
-        if kept_pattern >= self.max_per_pattern and not self._make_room_on_pattern(db, index, host):
+        kept_host = (db.execute("SELECT kept FROM host WHERE host = ?", (host,)).fetchone() or (0,))[0]
+        # At a pattern's cap a place is made for a rare host only when nothing else would refuse the new group: the
+        # host's cap and the budget are checked first (taking one of the pattern's groups keeps the hunt's count where
+        # it is), so no group is dropped for a line that is then not kept either.
+        if kept_pattern >= self.max_per_pattern and (kept_host >= self.max_per_host or self._refusal()
+                                                     or not self._make_room_on_pattern(db, index, host)):
             self._lose(db, key, index, host, "per_pattern")
             return
-        kept_host = (db.execute("SELECT kept FROM host WHERE host = ?", (host,)).fetchone() or (0,))[0]
         if kept_host >= self.max_per_host and not self._evict(db, "host = ?", (host,), strength, "per_host"):
             self._lose(db, key, index, host, "per_host")
             return
@@ -642,6 +666,13 @@ class MentionScanner:
                 "ORDER BY r.rank DESC, s.lost DESC, s.pattern, s.host"):
             yield {"pattern_id": patterns[pattern].id, "strength": patterns[pattern].strength, "host": host,
                    "lines_not_kept": lost}
+        # (pattern, host) pairs counted past the remembered-pair bound: one row per pattern, their hosts not named
+        for (pattern, kind), lost in sorted(self._overflow.items(),
+                                            key=lambda item: (-STRENGTH_RANK[patterns[item[0][0]].strength],
+                                                              item[0][0])):
+            if kind == "lost" and lost:
+                yield {"pattern_id": patterns[pattern].id, "strength": patterns[pattern].strength,
+                       "host": PAST_PAIR_BOUND, "lines_not_kept": lost}
 
     def _cap_view(self, name: str, limit: int) -> dict | None:
         counted = self.caps[name]

@@ -37,7 +37,7 @@ UNKNOWN_REASON = "text line in no recognized format: custom.unknown"
 # The mention sweep: stats and the sweep summary audit record gain the mention pool's coverage (the unknown line is
 # offered to it, not scanned: tests load no shipped pattern), and the manifest gains its mentions section.
 GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a6dadaa59988bdf81e',
- 'audit': '75490a41f428996832687508c68fd6c0d71c6f847de8fa2a21c9d0a76f150f61',
+ 'audit': 'fee1ca0142c449ca6bd5c43e28599a9cfd2509f8241bebfc68848536a24f012f',
  'baseline_counts': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_hunt_exclusions': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_observations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
@@ -54,10 +54,10 @@ GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a
  'events': 'bd5435aef6b275df8abbeb11240c6ab00cff8cfa39fbba70fc1f6acccadf23bb',
  'expansion': 'dae7cbd7929a4cb94bb232a7343d4d70f62885a979b52714b87bd3641a92169b',
  'links': '8abe2a07c083a1ea68a7cb03ccfa539e9e071fc67b2af99a555e04f4badc5928',
- 'manifest': 'd78ee99a95db66f91b66572631cd7cf4da84a77f5c71bd299fc349c4a74a7c2d',
+ 'manifest': 'd35a6d527b5eba334f0c6234f18f6b51476c9f7611152f0566a05cb04d53d235',
  'raw': '64be31e697a32f93b1a71657560af514b2d430469cb3be19f44b8827985a7775',
  'rule_cells': '745d0029db5e210729c2b542d0542646322406a475eafb41fce9cc1682edfd87',
- 'stats': 'd1914cfccfed9b45708744f1b520c1d84b43d5bb6adc7a746018400a1fb987f4',
+ 'stats': '644ebe9d88861382708c1d25db6357462e485361d8ed69eb5fba2877b7081399',
  'tasks': '31db5bad23dca3ba0a6c4114135053177ece1b46af44576b3198b8967c6762bb'}
 
 

