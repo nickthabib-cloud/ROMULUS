@@ -230,6 +230,27 @@ def matcher(entry: dict):
     return lambda line: compiled.search(line) is not None
 
 
+def _strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+
+
+def test_no_control_characters_in_any_field() -> None:
+    """A stray escape (a backslash sequence decoded by a tool) must not silently change a pattern or example."""
+    for filename, entry in _corpus():
+        for text in _strings(entry):
+            bad = [hex(ord(char)) for char in text if ord(char) < 0x20 and char not in "\n"]
+            assert not bad, f"{filename}:{entry.get('id')}: control characters {bad} in {text[:60]!r}"
+        for line in entry["examples"]["positive"] + entry["examples"]["negative"]:
+            assert "\n" not in line, f"{filename}:{entry.get('id')}: an example is one log line"
+
+
 def test_theme_files_present_and_only_yaml() -> None:
     names = {path.name for path in _mention_files()}
     assert THEME_FILES <= names, f"missing theme files: {sorted(THEME_FILES - names)}"
