@@ -11,8 +11,10 @@ Families (the first that fits):
   `Event.RenderingInfo.Message`), else an `event.original` that is plain text. Its ECS and Beats free-text fields
   (`ECS_FIELDS`) are read beside it. A Windows record also has its event data's free-text fields read
   (`WINDOWS_DATA_KEYS`, under `winlog.event_data`, `EventData` or NXLog's flat names).
-- **auditd**: a raw Linux audit record line. Its hex-encoded and quoted untrusted-string fields are decoded
-  (`AUDIT_FIELDS`, and an EXECVE record's arguments joined), never the raw hex.
+- **auditd**: raw Linux audit record lines (one, several joined by newlines, or an array of them). Their hex-encoded
+  and quoted untrusted-string fields are decoded (`AUDIT_FIELDS`, and an EXECVE record's arguments joined), never
+  the raw hex. A record a shipper indexed as fields is read by the same names under `auditd.log.*` and
+  `auditd.data.*`, its process title as `process.title`, beside its message and ECS fields.
 - **journald**: a journal record exported as JSON in `event.original` (`JOURNAL_FIELDS`).
 - **suricata_eve**: a Suricata EVE JSON record in `event.original`, by event type (`EVE_FIELDS`, from Suricata's EVE
   output documentation). An event type the table does not list is scanned by the union of the table's fields and is
@@ -394,7 +396,10 @@ def select_texts(source: dict, *, windows: bool = False, only: tuple[str, ...] |
         # and its ECS free-text fields
         texts = _shipper_audit(source, only or AUDIT_FIELDS)
         if only is None:
-            _paths(source, ECS_FIELDS, texts, {text for _path, text in texts})
+            seen = {text for _path, text in texts}
+            if message is not None:
+                _add(texts, message[0], [message[1]], seen)
+            _paths(source, ECS_FIELDS, texts, seen)
         return _bounded(Selection(AUDITD, texts))
     texts: list[tuple[str, str]] = []
     seen: set[str] = set()
