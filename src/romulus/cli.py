@@ -326,6 +326,9 @@ def cmd_report(args) -> int:
           f"broken citations={m['integrity']['broken_citations']}")
     for path in paths.values():
         print(f"  {path}")
+    if "docx_error" in paths:
+        print(f"the executive DOCX was not written; the reason is in {paths['docx_error']}", file=sys.stderr)
+        return EXIT_FAIL
     return EXIT_OK if m["integrity"]["finalizable"] else EXIT_FAIL
 
 

@@ -708,7 +708,9 @@ def write(m, path, technical_name):
         archive.writestr(part("[Content_Types].xml"), ooxml.content_types(image=image is not None))
         archive.writestr(part("_rels/.rels"), ooxml.PACKAGE_RELS)
         archive.writestr(part("docProps/core.xml"), ooxml.core_properties(title))
-        with archive.open(part("word/document.xml"), "w") as stream:
+        # the body's size is not known before it is written, and a mission-scale report can pass the 2 GiB a plain
+        # zip entry can hold, so its entry always carries the zip64 sizes (Word and LibreOffice read them)
+        with archive.open(part("word/document.xml"), "w", force_zip64=True) as stream:
             body = _Body(stream)
             body.add(ooxml.DOCUMENT_START)
             _title_page(body, m, technical_name)

@@ -513,6 +513,49 @@ def test_writing_twice_gives_the_same_bytes(tmp_path):
     assert _write(tmp_path, manifest, "a.docx").read_bytes() == _write(tmp_path, manifest, "b.docx").read_bytes()
 
 
+def test_a_body_past_the_plain_zip_limit_is_written_with_zip64_sizes(tmp_path, monkeypatch):
+    import zipfile
+    # the 2 GiB limit of a plain zip entry, scaled down to 64 KiB so a modest report passes it
+    monkeypatch.setattr(zipfile, "ZIP64_LIMIT", 1 << 16)
+    manifest = synthetic_manifest(findings=2000, incident_size=5)
+    path = _write(tmp_path, manifest)
+    with ZipFile(path) as archive:
+        info = archive.getinfo("word/document.xml")
+        assert info.file_size > 1 << 16
+        assert archive.testzip() is None
+    index = _table_after(read_back(path), executive.FINDING_INDEX_TITLE)[1:]
+    assert len(index) == len(manifest["findings"])
+
+
+def test_a_failed_executive_document_never_costs_the_revision_its_json_and_markdown(tmp_path, monkeypatch):
+    from romulus.report import bundle
+    from romulus.report.manifest import publish_revision
+    from tests.test_report import _repo_with_finding
+
+    repo, _candidate = _repo_with_finding()
+    manifest = publish_revision(repo, "h1", "test")
+    good = bundle.write_reports(repo, manifest, tmp_path)
+    earlier = good["docx"].read_bytes()
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("injected executive failure")
+
+    monkeypatch.setattr(executive, "write", broken)
+    (tmp_path / f"{manifest['revision']['id']}.md").unlink()
+    (tmp_path / f"{manifest['revision']['id']}.json").unlink()
+    paths = bundle.write_reports(repo, manifest, tmp_path)
+    assert set(paths) == {"json", "md", "docx_error"}
+    assert paths["json"].is_file() and paths["md"].is_file()
+    note = paths["docx_error"].read_text(encoding="utf-8")
+    assert "was not written" in note and "RuntimeError: injected executive failure" in note
+    # the earlier document of the same revision is left as it was, and no staging file remains
+    assert good["docx"].read_bytes() == earlier
+    assert not list(tmp_path.glob(".report-*"))
+    monkeypatch.undo()
+    again = bundle.write_reports(repo, manifest, tmp_path)
+    assert set(again) == {"json", "md", "docx"} and not paths["docx_error"].exists()
+
+
 def _soffice():
     for name in ("soffice", "libreoffice"):
         if found := shutil.which(name):
