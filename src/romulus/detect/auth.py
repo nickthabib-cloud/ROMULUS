@@ -1450,7 +1450,10 @@ class AccountOrGroupChange(Playbook):
     FLEET_MIN_HOSTS = 3
     FLEET_HOSTS_NAMED = 12          # hosts named in a fleet item's claim (every host is in its paged host list)
     FLEET_CITE_RUNS = 8             # member runs a fleet item cites changes from
-    FLEET_CITE = 64                 # records a fleet item cites
+    FLEET_CITE = 64                 # records a fleet item cites from its exemplar runs
+    # Each listed host's record (its run's first record) is cited too, so its host-list entry opens a stored record;
+    # beyond this many hosts the entries name a record that is not stored with the item, and the item says so.
+    FLEET_HOST_CITE = 1000
     FLEET_EXCLUDED_NAMED = 32       # excluded similar runs named per fleet (all are counted)
     FLEET_ACTIVE = 256              # fleets compared at once with the runs that were not merged
     FLEET_CHUNK = 1000              # hosts per chunk of a fleet's member list
@@ -1979,6 +1982,7 @@ class AccountOrGroupChange(Playbook):
             self._fleet_members.clear()
         members = self._fleet_members = KeyedStore(self, "acct_fleet_members", self.HOT, disk_budget=UNBUDGETED)
         seen = KeyedStore(self, "acct_fleet_seen", self.HOT, disk_budget=UNBUDGETED)
+        anchors = self._fleet_anchors = KeyedStore(self, "acct_fleet_anchors", self.HOT, disk_budget=UNBUDGETED)
         fleets = KeyedStore(self, "acct_fleets", self.HOT, disk_budget=UNBUDGETED)
         windows = SpillList(self, "acct_fleet_windows", self.HOT, disk_budget=UNBUDGETED)
         leftovers = SpillList(self, "acct_leftover_runs", self.HOT, disk_budget=UNBUDGETED)
@@ -2005,6 +2009,9 @@ class AccountOrGroupChange(Playbook):
             chunk = need(members.setdefault((fleet.fid, fleet.chunks - 1), list), self, "the fleet host list")
             chunk.append((shape.host, shape.anchor_id))
             fleet.chunk_fill += 1
+            if fleet.hosts <= self.FLEET_HOST_CITE:
+                anchor = next(e for e in shape.match.events if e.id == shape.anchor_id)
+                need(anchors.put((fleet.fid, fleet.hosts - 1), anchor), self, "the fleet hosts' records")
             if len(fleet.sample_hosts) < self.FLEET_HOSTS_NAMED:
                 fleet.sample_hosts.append(shape.host)
             if len(fleet.exemplars) < self.FLEET_CITE_RUNS:
@@ -2077,6 +2084,7 @@ class AccountOrGroupChange(Playbook):
         fleets.clear()
         windows.clear()
         leftovers.clear()
+        anchors.clear()
         return out
 
     def _excluded(self, fleet: _Fleet, shape: _RunShape) -> str:
@@ -2148,12 +2156,23 @@ class AccountOrGroupChange(Playbook):
             own = [e for e in shape.match.events if e.id not in shape.match.context_ids]
             own.sort(key=lambda e: (e.id != shape.anchor_id, not _record_privilege(e), e.ts, e.id))
             events += own[:per_run]
-        events = sorted(_unique(events), key=lambda e: (e.ts, e.id))
-        rest = fleet.hosts - len(fleet.exemplars)
-        claim += (f" Records of the runs on {len(fleet.exemplars)} of the {fleet.hosts} hosts are cited, the first "
-                  "record each host's list entry names among them"
-                  + (f"; the other {rest} host(s) are counted in the host list without a cited record (their "
-                     "entries name their run's first record by id)" if rest else "") + ".")
+        exemplar_ids = {e.id for e in events}
+        # each listed host's own record (the one its host-list entry names), up to FLEET_HOST_CITE hosts
+        listed = [self._fleet_anchors.peek((fleet.fid, index)) for index in range(min(fleet.hosts,
+                                                                                         self.FLEET_HOST_CITE))]
+        missing = sum(anchor is None for anchor in listed)
+        events = sorted(_unique([*events, *(anchor for anchor in listed if anchor is not None)]),
+                        key=lambda e: (e.ts, e.id))
+        claim += (f" Records of the runs on {len(fleet.exemplars)} of the {fleet.hosts} hosts are cited, and so is "
+                  "the record each listed host's entry names")
+        rest = fleet.hosts - len(listed) + missing
+        if rest:
+            claim += (f", except for {rest} host(s) whose entries name a record that is not stored with this item "
+                      f"(at most {self.FLEET_HOST_CITE} hosts' records are)")
+            self.note_limit("fleet_host_records", f"a fleet of account change runs listed more than "
+                                                  f"{self.FLEET_HOST_CITE} hosts; the further hosts' list entries name a "
+                                                  "record not stored with the item")
+        claim += "."
         notes = sorted({n for n in template.match.notes if n.startswith("T")})
         notes += [f"fleet change: {_signature_text(sig)}" for sig in signatures]      # at most NAMED (a segment's)
         notes += [f"excluded: {host} ({reason})" for host, reason in fleet.excluded]
@@ -2168,6 +2187,7 @@ class AccountOrGroupChange(Playbook):
                       group_key=f"burst-fleet|{fleet.fid}", fleet_hosts=self._fleet_hosts(fleet.fid, fleet.chunks),
                       fleet_host_count=fleet.hosts, fleet_hosts_complete=True)
         match.notes = notes
+        match.context_ids = {e.id for e in events} - exemplar_ids       # the hosts' records support the host list
         return match
 
     def _fleet_hosts(self, fid: str, chunks: int):

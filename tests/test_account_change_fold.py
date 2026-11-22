@@ -400,8 +400,9 @@ def test_a_large_fleet_is_one_item_and_every_host_is_listed(tmp_path, monkeypatc
     assert sorted(h for h, _ in listed) == [f"node{h:04d}" for h in range(hosts)]
     assert f"each host's run requested or reported the same {users * 2 + 1} distinct change(s)" in m.claim
     assert f"and {hosts - 12} more (all {hosts} are in the paged host list)" in m.claim
-    assert len({e.host for e in m.events}) == AccountOrGroupChange.FLEET_CITE_RUNS
-    assert len(m.events) <= AccountOrGroupChange.FLEET_CITE
+    assert {e.host for e in m.events} == {f"node{h:04d}" for h in range(hosts)}   # each host's own record
+    assert len([e for e in m.events if e.id not in m.context_ids]) <= AccountOrGroupChange.FLEET_CITE
+    assert {item for _host, item in listed} <= {e.id for e in m.events}
     assert elapsed < 180, elapsed
 
 
@@ -426,12 +427,13 @@ def test_twelve_hosts_with_the_same_run_are_one_fleet_item():
     assert "On every host the run requests or reports privileged access" in m.claim
     assert "membership of privileged group sudo" in m.claim and "membership of privileged group lxd" in m.claim
     assert "Hosts: node00, node01" in m.claim and "and" not in m.claim.split("Hosts: ", 1)[1].split(".", 1)[0]
-    assert len({e.host for e in m.events}) == 8                     # exemplar records from several hosts' runs
+    assert len({e.host for e in m.events if e.id not in m.context_ids}) == 8   # exemplar records of 8 hosts' runs
     assert any(n.startswith("fleet change:") and "group 'sudo'" in n for n in m.notes)
-    # every cited host's list entry names a cited record; the others are said to be uncited
+    # every listed host's entry names a cited record (its run's first), as context of the host list
     cited = {e.id for e in m.events}
-    assert sum(listed[h] in cited for h in listed) == 8
-    assert "the other 4 host(s) are counted in the host list without a cited record" in m.claim
+    assert all(listed[h] in cited for h in listed)
+    assert sum(listed[h] in m.context_ids for h in listed) == 4     # the hosts whose runs are not exemplars
+    assert "and so is the record each listed host's entry names." in m.claim
 
 
 def test_a_rollout_too_large_for_one_segment_merges_segment_by_segment_and_keeps_an_outlier_apart():
@@ -566,6 +568,9 @@ def test_a_fleet_item_is_published_through_the_sweep_with_its_host_list(tmp_path
     assert row["lane"] == "high" and row["group_key"].startswith("burst-fleet|")
     gates = row["gate_results"]
     assert gates["_fleet_host_count"] == 3 and gates["_fleet_hosts_complete"] is True
+    # every listed host's entry names a stored record, also when only one host's run is cited
+    stored = {e["id"] for e in snapshot["events"]}
+    assert set(row["event_ids"]) <= stored
     # the report manifest carries the fleet's complete host list, as for every fleet-grouped finding
     [finding] = [f for f in snapshot["manifest"]["findings"] if f.get("rule_id") == "host.account_or_group_change"]
     assert finding["fleet_hosts"]["complete"] and finding["fleet_hosts"]["count"] == 3
@@ -817,3 +822,41 @@ def test_an_interactive_login_repeating_a_rollout_does_not_merge():
     [own] = [m for m in out if m is not fleet]
     assert own.group_key.startswith("burst|node03|") and "audit login 'alice'" in own.claim
     assert "node03 (" in fleet.claim
+
+
+def test_fleet_hosts_beyond_the_record_cap_are_said_to_be_unstored(monkeypatch):
+    monkeypatch.setattr(AccountOrGroupChange, "FLEET_HOST_CITE", 5)
+    monkeypatch.setattr(AccountOrGroupChange, "FLEET_CITE_RUNS", 1)
+    pb, [m] = run(_hosts(7, users=3))
+    listed = dict(m.fleet_hosts)
+    cited = {e.id for e in m.events}
+    assert sum(listed[h] in cited for h in listed) == 5
+    assert "except for 2 host(s) whose entries name a record that is not stored with this item" in m.claim
+    assert any("listed more than 5 hosts" in r for r in pb.limit_reasons())
+
+
+def test_every_fleet_host_record_is_stored_through_the_sweep(tmp_path, monkeypatch):
+    """Only one host's run is cited as an exemplar; every host's list entry still names a stored record."""
+    from tests import test_linux_text_stack_r2 as stack
+    from tests import throughput_fixture as tf
+    monkeypatch.setattr(AccountOrGroupChange, "FLEET_CITE_RUNS", 1)
+    builder = tf.Builder(29)
+    for h, host in enumerate(("web1", "db1", "fw1")):
+        for n, body in enumerate(("useradd[{pid}]: new group: name=svc, GID=990",
+                                  ("useradd[{pid}]: new user: name=svc, UID=990, GID=990, home=/srv, "
+                                   "shell=/usr/sbin/nologin, from=none"),
+                                  "usermod[{pid}]: add 'admin' to group 'sudo'",
+                                  "usermod[{pid}]: add 'admin' to group 'adm'")):
+            when = tf.T0 + timedelta(minutes=h, seconds=n)
+            builder._doc(host, when, "custom.auth", None,
+                         message=f"Nov 18 {when:%H:%M:%S} {host} {body.format(pid=4200 + 10 * h + n)}")
+    monkeypatch.setattr(stack, "text_documents",
+                        lambda: {tf.HOST_TARGET: builder.host, tf.NETWORK_TARGET: [], tf.ARKIME_TARGET: []})
+    keep = {}
+    original = tf.run_stack
+    monkeypatch.setattr(tf, "run_stack", lambda *a, **k: original(*a, **{**k, "keep": keep}))
+    snapshot, _trace, _docs = stack.run_text_stack(tmp_path, monkeypatch)
+    [row] = [r for r in snapshot["candidates"] if r["rule_id"] == "host.account_or_group_change"]
+    stored = {e["id"] for e in snapshot["events"]}
+    hosts, _next = keep["repo"].candidate_hosts(row["id"])
+    assert len(hosts) == 3 and all(h["first_event_id"] in stored for h in hosts)
