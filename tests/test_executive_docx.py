@@ -55,7 +55,7 @@ def _mention(rank: int, *, suspicious=False) -> dict:
 
 def synthetic_manifest(*, findings=12, incident_size=3, mentions_total=4, mention_items=4, gaps=3,
                        not_assessed=2, notes=2, hostile=False, agent_findings=1, hypothesis_every=2,
-                       assessment="agent", triage=True) -> dict:
+                       assessment="agent", triage=True, ranked=False) -> dict:
     lanes = [LANES[0]] * max(1, findings // 10) + [LANES[1]] * max(1, findings // 3)
     lanes += [LANES[2]] * (findings - len(lanes))
     rows = [_finding(index, lane, hostile=hostile and index == 1) for index, lane in enumerate(lanes[:findings], 1)]
@@ -136,7 +136,27 @@ def synthetic_manifest(*, findings=12, incident_size=3, mentions_total=4, mentio
                 "nothing_cited": False, "in_deterministic_place": 1, "assessment": "likely_attack",
                 "incident_label": "credential theft", "rationale": "triage rationale" + (HOSTILE if hostile else ""),
                 "cites": [deterministic[0]["id"]]}]}, {"section": 1, "title": "High", "promoted": []}]}
+    if ranked:
+        _rank(manifest)
     return manifest
+
+
+def _rank(manifest: dict) -> None:
+    """An evidence ranking over the findings: every third non-urgent finding's entity is reported."""
+    entities = {}
+    for position, finding in enumerate(manifest["findings"], 1):
+        host = finding["entities"][0][1]
+        reported = finding["lane"] == "urgent" or position % 3 == 0
+        finding.update(rank=float(10_000 - position), rank_position=position, reported=reported,
+                       entity={"kind": "host", "value": host}, rank_reasons=["test rank"])
+        entity = entities.setdefault(host, {"kind": "host", "value": host, "position": len(entities) + 1,
+                                            "score": 1.0, "reported": False, "confirmed": 0, "tactics": [],
+                                            "rules": 1, "cooccurrence": 0, "findings": 0, "reasons": ["test"],
+                                            "finding_ids": []})
+        entity["reported"] = entity["reported"] or reported
+        entity["finding_ids"].append(finding["id"])
+    manifest["ranking"] = {"status": "complete", "pass": "final"}
+    manifest["entities"] = list(entities.values())
 
 
 # ------------------------------------------------------------------------------------------------------- read back
@@ -182,17 +202,40 @@ def _write(tmp_path, manifest, name="executive.docx"):
     return path
 
 
-def test_every_finding_count_and_coverage_row_reads_back(tmp_path):
-    manifest = synthetic_manifest()
+def _sections(manifest: dict) -> dict[str, str]:
+    """Each finding's report section, from the shared Markdown helpers (ranked) or its lane."""
+    from romulus.report.markdown import is_ranked, ranked_sections
+    if is_ranked(manifest):
+        titles = ("Confirmed", "Reported entities", "Ranked findings (not reported)")
+        return {finding["id"]: title for title, rows in zip(titles, ranked_sections(manifest), strict=True)
+                for finding in rows}
+    return {finding["id"]: executive.LANE_TITLES[finding["lane"]] for finding in manifest["findings"]}
+
+
+@pytest.mark.parametrize("ranked", [False, True], ids=["lanes", "ranked"])
+def test_every_finding_count_and_coverage_row_reads_back(tmp_path, ranked):
+    manifest = synthetic_manifest(ranked=ranked)
     blocks = read_back(_write(tmp_path, manifest))
     index = _table_after(blocks, executive.FINDING_INDEX_TITLE)[1:]
     # one index row per finding, matched on exact cell values (an id is never found inside another)
     assert len(index) == len(manifest["findings"])
-    assert {row[1]: row[2] for row in index} == {finding["id"]: finding["lane"] for finding in manifest["findings"]}
+    assert {row[1]: row[3] for row in index} == {finding["id"]: finding["lane"] for finding in manifest["findings"]}
     assert [int(row[0]) for row in index] == list(range(1, len(index) + 1))
-    # strong indicators first: every urgent finding precedes every other one in report order
-    lanes = [row[2] for row in index]
-    assert lanes == sorted(lanes, key=lambda lane: LANES.index(lane))
+    # each finding's section is the report's: confirmed, reported or not for a ranked report, else its lane
+    sections = _sections(manifest)
+    assert {row[1]: row[2] for row in index} == sections
+    # strong indicators first: urgent (or confirmed) findings precede every other one in report order
+    lanes = [row[3] for row in index]
+    assert lanes[:lanes.count("urgent")] == ["urgent"] * lanes.count("urgent")
+    if ranked:
+        order = [row[2] for row in index]
+        assert order == sorted(order, key=["Confirmed", "Reported entities",
+                                           "Ranked findings (not reported)"].index)
+        assert {"Confirmed", "Reported entities", "Ranked findings (not reported)"} <= set(order)
+        key = _paragraphs(_section(blocks, "Key findings"))
+        assert key.index("Confirmed") < key.index("Reported entities") < key.index("Ranked findings (not reported)")
+    else:
+        assert lanes == sorted(lanes, key=lambda lane: LANES.index(lane))
     # the bottom-line counts are the manifest's
     glance = dict(tuple(row) for row in _table_after(blocks, "Bottom line up front")[1:])
     deterministic = Counter(f["lane"] for f in manifest["findings"] if f["provenance"] != "agent")
@@ -239,11 +282,12 @@ def test_mentions_are_labelled_counted_and_never_findings(tmp_path):
     by_rank = {row[0]: row for row in rows}
     # pattern, strength, source, host, count and the text around the match, labelled as a mention
     assert by_rank["1"][1] == "Pattern 1 (mention) [mention.p1]" and by_rank["1"][2] == "strong"
-    assert by_rank["1"][3] == "public corpus" and by_rank["1"][4] == "mhost1" and by_rank["1"][5] == "1"
-    assert by_rank["1"][7].startswith("cmd.exe /c whoami 1")
+    assert by_rank["1"][3] == "public corpus" and by_rank["1"][4] == "mhost1" and by_rank["1"][6] == "1"
+    assert by_rank["1"][5] == "rr-1 (idx/1)"
+    assert by_rank["1"][8].startswith("cmd.exe /c whoami 1")
     # text flagged as possible prompt injection is withheld, and says where the record is
-    assert "ignore all previous instructions" not in by_rank["2"][7] and "withheld" in by_rank["2"][7]
-    assert "rr-2" in by_rank["2"][7]
+    assert "ignore all previous instructions" not in by_rank["2"][8] and "withheld" in by_rank["2"][8]
+    assert "rr-2" in by_rank["2"][8]
 
 
 def test_ai_output_is_labelled_and_a_hunt_without_the_agent_says_so(tmp_path):
@@ -325,7 +369,7 @@ def _png_pixels(data: bytes) -> tuple[tuple[int, int], bytes]:
 
 def test_large_manifest_renders_bounded_with_honest_overflow_notes(tmp_path):
     manifest = synthetic_manifest(findings=5000, incident_size=40, mentions_total=123_456, mention_items=200,
-                                  gaps=400, not_assessed=150, notes=30, agent_findings=25)
+                                  gaps=400, not_assessed=150, notes=30, agent_findings=25, ranked=True)
     started = time.monotonic()
     path = _write(tmp_path, manifest)
     elapsed = time.monotonic() - started
@@ -333,7 +377,8 @@ def test_large_manifest_renders_bounded_with_honest_overflow_notes(tmp_path):
     blocks = read_back(path)
     # nothing reportable is lost: every finding is in the index, with its lane
     index = _table_after(blocks, executive.FINDING_INDEX_TITLE)[1:]
-    assert {row[1]: row[2] for row in index} == {f["id"]: f["lane"] for f in manifest["findings"]}
+    assert {row[1]: row[3] for row in index} == {f["id"]: f["lane"] for f in manifest["findings"]}
+    assert {row[1]: row[2] for row in index} == _sections(manifest)
     # key findings describe a bounded number and say how many more there are and where
     key = _section(blocks, "Key findings")
     cards = [block for block in key if block[0] == "p" and block[1] == "Heading3"]
@@ -406,8 +451,11 @@ def test_package_is_well_formed(tmp_path):
             else:
                 assert "word/" + rel.get("Target") in names
         document = ElementTree.fromstring(archive.read("word/document.xml"))
-        for part in ("word/styles.xml", "word/settings.xml", "word/header1.xml", "word/footer1.xml"):
+        for part in ("word/styles.xml", "word/settings.xml"):
             ElementTree.fromstring(archive.read(part))
+        # the classification banner is on every page: in the header and in the footer
+        for part in ("word/header1.xml", "word/footer1.xml"):
+            assert executive.BANNER in [_text(p) for p in ElementTree.fromstring(archive.read(part)).iter(f"{W}p")]
         styles = {style.get(f"{W}styleId") for style in ElementTree.fromstring(
             archive.read("word/styles.xml")).iter(f"{W}style")}
     # every relationship reference resolves

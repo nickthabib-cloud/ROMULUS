@@ -55,8 +55,8 @@ ATTACK_PATH_TITLE = "Attack path"
 NO_ATTACK_PATH = "No reportable finding formed an incident, so there is no attack path to draw."
 AI_LABEL = ("AI-generated: a model's reading of the cited evidence, not confirmed by an analyst. The deterministic "
             "findings above do not depend on it.")
-NO_AI_ASSESSMENT = ("No AI assessment was produced for this hunt: the AI agent did not run. The incident accounts "
-                    "under Attack path are template narratives built from typed fields only.")
+NO_AI_ASSESSMENT = ("This report carries no AI assessment: none is stored for this hunt. The incident accounts under "
+                    "Attack path are template narratives built from typed fields only.")
 LANE_TITLES = {"urgent": "Urgent findings", "high": "High findings", "lead": "Investigative leads"}
 _FIXED_TIME = (1980, 1, 1, 0, 0, 0)
 _FLUSH_BYTES = 1 << 16
@@ -522,16 +522,21 @@ def _mentions(body: _Body, m: dict, technical_name: str) -> None:
                                            EXECUTIVE_MENTION_CHARS)
         return ("…" if before or item.get("line_from") else "") + line + ("…" if after or item.get("line_cut") else "")
 
-    body.table(["#", "Mention (pattern)", "Strength", "Pattern source", "Host", "Lines", "First seen (UTC)",
-                "Text around the match"],
-               [450, 1700, 800, 1100, 1100, 600, 1200, 2410],
+    def pattern_source(item):
+        source = (item.get("pattern") or {}).get("source")
+        return str((source.get("name") if isinstance(source, dict) else source) or "not recorded")
+
+    def record(item):
+        ref = item.get("source_ref") or {}
+        return f"{item.get('raw_id')} ({ref.get('target')}/{ref.get('native_id')})"
+
+    body.table(["#", "Mention (pattern)", "Strength", "Pattern source", "Host", "Record (source)", "Lines",
+                "First seen (UTC)", "Text around the match"],
+               [400, 1500, 700, 1000, 1000, 1300, 500, 1100, 1860],
                ([str(item.get("rank")), f"{item.get('headline')} [{(item.get('pattern') or {}).get('id')}]",
-                 (item.get("pattern") or {}).get("strength") or "",
-                 str(((item.get("pattern") or {}).get("source") or {}).get("name") or "not recorded")
-                 if isinstance((item.get("pattern") or {}).get("source"), dict)
-                 else str((item.get("pattern") or {}).get("source") or "not recorded"),
-                 item.get("host") or "no host", str(item.get("count")), item.get("first_seen") or "not recorded",
-                 text_of(item)] for item in shown))
+                 (item.get("pattern") or {}).get("strength") or "", pattern_source(item),
+                 item.get("host") or "no host", record(item), str(item.get("count")),
+                 item.get("first_seen") or "not recorded", text_of(item)] for item in shown))
     if view["total"] > len(shown):
         body.p(f"{view['total'] - len(shown)} more mention(s) not listed here.", style="Muted")
 
@@ -654,14 +659,16 @@ def _finding_index(body: _Body, m: dict, sections, numbers: dict, technical_name
     body.p(f"Every finding in this report, {len(numbers)} in all, in report order. The number is the F-number used in "
            f"the attack path. Full evidence for each is in {technical_name}.")
     lane_title = "Lane (rule estimate)" if ranked else "Lane"
-    body.table(["#", "Finding", lane_title, "Severity", "Confidence", "Time (UTC)", "Rule", "Entity or host", "Claim"],
-               [450, 1300, 750, 750, 800, 1100, 1300, 1100, 1810],
-               ([str(numbers[finding["id"]]), finding["id"], _lane_badge(finding["lane"]),
-                 str(finding.get("severity")), str(finding.get("confidence")), _time(finding.get("observed_at")),
+    # the section says where each finding stands in the report (for a ranked report: confirmed, reported or not)
+    body.table(["#", "Finding", "Section", lane_title, "Severity / confidence", "Time (UTC)", "Rule",
+                "Entity or host", "Claim"],
+               [450, 1200, 1000, 700, 650, 1000, 1200, 1000, 2160],
+               ([str(numbers[finding["id"]]), finding["id"], title, _lane_badge(finding["lane"]),
+                 f"{finding.get('severity')} / {finding.get('confidence')}", _time(finding.get("observed_at")),
                  finding.get("rule_title") or finding["rule_id"], _where(finding, ranked),
                  ("Agent finding (AI-proposed, unconfirmed): " if finding.get("provenance") == "agent" else "")
                  + str(finding["claim"])]
-                for _title, _intro, findings in sections for finding in findings))
+                for title, _intro, findings in sections for finding in findings))
 
 
 def _versions(body: _Body, m: dict) -> None:

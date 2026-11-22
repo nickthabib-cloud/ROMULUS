@@ -15,7 +15,7 @@ from tests.test_report import _repo_with_finding
 
 
 def _docx(tmp_path, monkeypatch, manifest):
-    # the executive writer stamps every package part with one fixed time, so its bytes are reproducible as written
+    # the executive writer stamps every package part with one fixed time, so its parts are reproducible as written
     manifest["revision"] = {"number": 1}
     path = tmp_path / "report.docx"
     executive.write(manifest, path, "technical.md")
@@ -26,7 +26,14 @@ def test_old_hunt_docx_bytes_are_unchanged(tmp_path, monkeypatch):
     repo, _ = _repo_with_finding()
     manifest = build_manifest(repo, "h1", "test")
     path = _docx(tmp_path, monkeypatch, manifest)
-    assert hashlib.sha256(path.read_bytes()).hexdigest() == "2d6f48c60151b4ee8d08b81a09af1f234bcb801f0e05f24b641a7db116a1d4a6"
+    # the digest of every text part's content, in package order: compressed bytes (the package's and the picture's)
+    # depend on the zlib build, so the picture is checked by its own tests
+    content = hashlib.sha256()
+    with ZipFile(path) as archive:
+        for name in archive.namelist():
+            if not name.startswith("word/media/"):
+                content.update(name.encode() + b"\0" + archive.read(name) + b"\0")
+    assert content.hexdigest() == "d6b237955d15685b2f8a74e86c312edfcc5726b7df52863e5ff3229072641873"
 
 
 def test_old_hunt_json_and_markdown_are_unchanged(monkeypatch):
