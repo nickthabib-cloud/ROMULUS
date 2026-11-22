@@ -166,6 +166,8 @@ def test_smb_session_joins_4624_by_ip_port_with_share_and_process_in_the_logon_s
     assert "logon session 0x1a2b" in m.claim and "(session 0x1a2b)" in m.claim
     assert "example\\alice" in m.claim and "logon type 3" in m.claim
     assert "3 process or share record(s)" in m.claim and "notepad" not in m.claim
+    # notepad's local session, read from the logon's own target, is not a record read before its logon
+    assert not any("read from a source target read before" in note for note in m.notes)
     assert "T1021.002" in m.attack and m.proposed_lane == "lead"
 
 
@@ -212,6 +214,18 @@ def test_telnet_login_record_joins_its_session():
     host = [audit_login("tl", 3.0, service="login", session=12), execve("tx", 5, "/bin/sh", session=12)]
     _rule, matches = run([[session], host], [finding("F1", [session])])
     assert len(matches) == 1 and "Telnet" in matches[0].claim and matches[0].confidence == "low"
+
+
+def test_rlogin_and_windows_openssh_logons_join_their_sessions():
+    rlogin = flow("rl", cport=1023, sport=513, start=0.0)
+    host = [audit_login("rl1", 2.0, service="in.rlogind", session=21), execve("rx", 3, "/bin/ls", session=21)]
+    _rule, matches = run([[rlogin], host], [finding("F1", [rlogin])])
+    assert len(matches) == 1 and "rlogin" in matches[0].claim
+    ssh = flow("ws", cport=50400, sport=22, start=0.0)
+    _rule, matches = run([[ssh], [logon4624(1.0, ltype=8, port=50400)]], [finding("F1", [ssh])])
+    assert len(matches) == 1 and "logon type 8" in matches[0].claim and "T1021.004" in matches[0].attack
+    _rule, matches = run([[ssh], [logon4624(1.0, ltype=10, port=50400)]], [finding("F1", [ssh])])
+    assert matches == []                                 # an interactive RDP logon type is no SSH logon
 
 
 def test_vnc_is_unresolved_by_name_never_a_negative():
@@ -312,7 +326,7 @@ def test_client_side_and_domain_controller_records_never_place_the_logon():
     explicit = native_event(4648, {"SubjectUserName": "alice", "TargetUserName": "admin", "IpAddress": CLIENT,
                                    "IpPort": "50001", "TargetServerName": "srv01"}, host="ws01.example.test",
                             offset=0.1)
-    rule, matches = run([[session], [dc, explicit]], [finding("F1", [session])])
+    _rule, matches = run([[session], [dc, explicit]], [finding("F1", [session])])
     assert matches == []
 
 
@@ -337,6 +351,21 @@ def test_a_process_in_another_boot_with_the_same_session_id_is_not_joined():
     assert "1 process or share record(s)" in matches[0].claim and "x2" not in {e.id for e in matches[0].events}
 
 
+def test_a_login_without_a_boot_id_still_joins_processes_that_carry_one():
+    session = flow("f1")
+    host = [sshd("acc", 0.4, boot=""), audit_login("ul", 0.6, boot=""), execve("x1", 2, "/bin/bash", boot="b1")]
+    _rule, matches = run([host, [session]], [finding("F1", [session])])
+    assert "1 process or share record(s)" in matches[0].claim
+
+
+def test_a_process_started_before_the_logon_is_not_its_activity():
+    session = flow("smb", cport=50000, sport=445, start=10.0)
+    host = [logon4624(10.5, port=50000), process4688(12, "C:\\Windows\\System32\\whoami.exe")]
+    early = [process4688(2, "C:\\Windows\\System32\\early.exe")]      # read after the logon, dated before it
+    _rule, matches = run([[session], host, early], [finding("F1", [session])])
+    assert "1 process or share record(s)" in matches[0].claim and "early" not in matches[0].claim
+
+
 def test_failed_logon_only_is_a_medium_severity_lead_with_no_activity():
     session = flow("smb", cport=50000, sport=445)
     host = [logon4624(0.5, port=50000, code=4625, logon_id="0x0")]
@@ -354,6 +383,25 @@ def test_admin_record_without_ports_is_counted_missing_never_matched():
                 normalizer="test-net@1")
     rule, matches = run([[broken], [sshd("acc", 1)]], [finding("F1", [broken])])
     assert matches == [] and rule.missing_required == 1
+
+
+def test_a_windows_logon_without_its_type_is_unresolved_as_a_missing_field():
+    session = flow("smb", cport=50000, sport=445)
+    untyped = native_event(4624, {"TargetUserName": "alice", "TargetDomainName": "EXAMPLE", "IpAddress": CLIENT,
+                                  "IpPort": "50000", "TargetLogonId": "0x1a2b"}, host="srv01.example.test", offset=0.5)
+    assert not untyped.has("auth.logon_type")
+    rule, matches = run([[session], [untyped]], [finding("F1", [session])])
+    assert matches == []
+    assert any("does not record its logon type" in note for note in rule.coverage_notes())
+
+
+def test_a_logon_of_unknown_outcome_is_joined_but_never_read_as_a_success():
+    session = flow("f1")
+    unknown = sshd("acc", 0.4, outcome=Outcome.unknown)
+    _rule, matches = run([[session], [unknown, execve("x1", 2, "/bin/bash")]], [finding("F1", [session])])
+    m = matches[0]
+    assert "outcome unknown" in m.claim and m.severity == "medium" and "T1078" not in m.attack
+    assert "process or share record" not in m.claim
 
 
 def test_without_published_findings_the_rule_states_it_joined_nothing():
@@ -386,6 +434,15 @@ def test_lane_rises_only_on_a_typed_host_finding_in_the_joined_session():
     assert matches[0].proposed_lane == "lead"
 
 
+def test_a_record_a_high_finding_cites_only_in_support_does_not_raise_the_lane():
+    session, host = ssh_case()
+    ancestor = finding("H1", [host[2], ev("other", "process_exec", 9, "web01", {"process.session_id": 50})],
+                       rule="host.reverse_shell", lane="high")
+    ancestor["context_event_ids"] = [host[2].id]          # the session's bash is only a lineage ancestor here
+    _rule, matches = run([host, [session]], [finding("F1", [session]), ancestor])
+    assert matches[0].proposed_lane == "lead"
+
+
 def test_the_join_never_lowers_or_replaces_the_network_finding_and_is_never_urgent():
     session, host = ssh_case()
     flagged = finding("H1", [host[2]], rule="host.reverse_shell", lane="urgent")
@@ -411,7 +468,7 @@ def test_process_records_read_before_their_logon_are_named_not_silently_lost():
     _rule, matches = run([host_processes, [session], host_logons], [finding("F1", [session])],
                          targets=["sysmon-like", "net", "auth-like"])
     m = matches[0]
-    assert any("read before a remote logon naming their session" in note for note in m.notes)
+    assert any("read from a source target read before" in note for note in m.notes)
 
 
 def test_activity_keeps_the_earliest_records_whatever_their_order_and_counts_them_all():
@@ -572,3 +629,56 @@ def test_sweep_joins_a_published_network_finding_to_the_host_logon_and_retains_e
     assert cites and all(c["status"] == "retained" for c in cites), cites
     cells = {c["rule_id"]: c for c in repo.rule_cells("h1") if c["target"] == "*"}
     assert cells["corr.network_admin_logon"]["state"] == "matched"
+
+
+def test_sweep_joins_a_windows_smb_logon_and_its_process_with_every_citation_retained(monkeypatch):
+    from romulus.hunt import sweep as sw
+    from romulus.report import manifest as rm
+    from romulus.sources.models import Window
+    from romulus.store.db import make_engine, migrate
+    from romulus.store.repo import Repo
+    from tests.test_network_correlation import _Client, _outcome, eve_hit
+    from tests.windows_fixtures import LogicalWindowsEvent, windows_hit
+
+    client, server, host_index = "10.1.0.50", "10.1.0.20", "winlogbeat-x"
+
+    def stamp(offset):
+        return (START + timedelta(seconds=offset)).isoformat().replace("+00:00", "Z")
+
+    def win(code, data, offset, record, channel="Security", provider=SECURITY):
+        hit = windows_hit(LogicalWindowsEvent(channel, provider, code, "srv01.example.test", record, stamp(offset),
+                                              data), "winlogbeat_8")
+        hit["_index"] = host_index
+        return hit
+
+    alert = eve_hit("al1", {"timestamp": (START + timedelta(seconds=1)).isoformat(), "event_type": "alert",
+                            "src_ip": client, "src_port": 50000, "dest_ip": server, "dest_port": 445, "proto": "TCP",
+                            "app_proto": "smb",
+                            "alert": {"signature": "ET POLICY SMB2 NT Create AndX Request For an Executable File",
+                                      "signature_id": 2025705, "category": "Potentially Bad Traffic",
+                                      "severity": 1}}, ts=stamp(1))
+    hosts = [win(4624, {"TargetUserName": "alice", "TargetDomainName": "EXAMPLE", "SubjectUserName": "-",
+                        "IpAddress": client, "IpPort": "50000", "LogonType": "3", "TargetLogonId": "0x1a2b",
+                        "LogonProcessName": "NtLmSsp", "AuthenticationPackageName": "NTLM"}, 1.5, 501),
+             win(1, {"Image": "C:\\Windows\\System32\\cmd.exe", "LogonId": "0x1a2b", "ProcessId": "5004",
+                     "ProcessGuid": "{00000000-0000-0000-0000-000000005004}", "User": "EXAMPLE\\alice",
+                     "CommandLine": "cmd.exe /c whoami"}, 3.0, 502, SYSMON_CHANNEL, SYSMON)]
+    by_target = {host_index: hosts, "romulus-network-logs": [alert]}
+    monkeypatch.setattr(sw, "execute", lambda client_, intent, contract: _outcome(intent, by_target[intent.target]))
+    engine = make_engine(":memory:")
+    migrate(engine)
+    repo = Repo(engine)
+    order = (host_index, "romulus-network-logs")
+    repo.create_hunt("h1", {"targets": list(order)}, "d", "t")
+    window = Window(start=START - timedelta(minutes=5), end=START + timedelta(hours=1))
+    sweep = sw.Sweep(repo, _Client(by_target), "h1", window, {target: None for target in order})
+    for target in order:
+        sweep.run_partition(target, None, [], window, est=2)
+    sweep.finalize()
+    candidates = repo.candidates("h1")
+    joined = [c for c in candidates if c["rule_id"] == "corr.network_admin_logon"]
+    assert len(joined) == 1, [(c["rule_id"], c["lane"]) for c in candidates]
+    item = joined[0]
+    assert "host srv01" in item["claim"] and "logon type 3" in item["claim"] and "cmd.exe" in item["claim"]
+    cites = rm._citations(repo, item)
+    assert len(cites) == 3 and all(c["status"] == "retained" for c in cites), cites

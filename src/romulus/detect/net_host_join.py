@@ -110,6 +110,8 @@ UNRESOLVED_WORDS = {
     "logon_scan_capped": "the client address logged more logons in the window than one lookup reads",
     "connection_host_no_logon": ("the host that recorded the connection logged no portless logon of a fitting type "
                                  "from the client in the window"),
+    "logon_type_missing": ("a Windows logon from the client in the window does not record its logon type, so whether "
+                           "the protocol produced it is not decided"),
     "external_server": ("the server address is outside the site's internal networks, and no port or host connection "
                         "record ties a host's portless logon to it"),
 }
@@ -131,7 +133,7 @@ def _epoch(value) -> float | None:
         return (value if value.tzinfo else value.replace(tzinfo=UTC)).timestamp()
     if isinstance(value, str):
         try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(value)
         except ValueError:
             return None
         return (parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)).timestamp()
@@ -281,6 +283,11 @@ def consistent(service: str, server_port: int, row: LogonRow) -> bool:
     return False
 
 
+def _untyped(service: str, row: LogonRow) -> bool:
+    """A Windows logon record without its logon type, for a protocol whose fitting logon is told by its type."""
+    return row.kind == "win_logon" and row.ltype is None and service in WINDOWS_LOGON_TYPES
+
+
 def _session_of(event: TypedEvent) -> str | None:
     for name in ("auth.session_id", "share.session_id", "process.session_id"):
         session = canon_session(event.get(name))
@@ -327,8 +334,8 @@ class NetworkAdminLogonJoin(Playbook):
         "a join is an inference from the client endpoint, address and time; a session that does not join is "
         "unresolved (the destination may keep no host telemetry, a NAT may sit between sensor and host, or clocks may "
         "differ beyond the allowance), never evidence that no logon happened")
-    benign = ("authorized administration over the named protocol (help desk, patching, configuration management, "
-              "backup and inventory agents)",
+    benign = (("authorized administration over the named protocol (help desk, patching, configuration management, "
+               "backup and inventory agents)"),
               "domain members fetching group policy over SMB from a domain controller")
     next_checks = ("what the account did on the destination host in the joined logon session beyond the cited records",
                    "whether the account and the client are expected to administer that host",
@@ -356,6 +363,7 @@ class NetworkAdminLogonJoin(Playbook):
     # up to ACTIVITY_KEPT compact records (a few KiB), so fewer of them stay in memory.
     HOT = 200_000
     ACTIVITY_HOT = 20_000
+    ENTRIES_KEPT = 8               # logons per (host, session id) told apart by boot: reboots within one hunt
     ROW_BYTES = 200
     card: ClassVar[dict] = {
         "behavior": "an administration session (SMB, RPC/DCOM/WMI/service control, WinRM, RDP, SSH, Telnet, rlogin, "
@@ -419,9 +427,10 @@ class NetworkAdminLogonJoin(Playbook):
         self._target_seq: dict[str | None, int] = {}
         self._rid = 0
         register_store(self, self)
-        # (host, session, boot) of remote logons read so far -> the logon time first registered
+        # (host, session) of remote logons read so far -> [[logon id, earliest logon time, boot], ...]: one entry per
+        # logon, a new one only when a boot both records name differs (the id was reused after a reboot)
         self.remote = KeyedStore(self, "join_remote_sessions", self.HOT)
-        # (host, session, boot) -> [count, first ts, last ts, [(ts, id, compact record), ...] earliest kept]
+        # (host, session, logon id) -> [count, first ts, last ts, [(ts, id, compact record), ...] earliest kept]
         self.activity = KeyedStore(self, "join_session_activity", self.ACTIVITY_HOT)
         # host -> earliest target order that delivered a session-bearing process or share record not yet joinable
         self.unjoined_activity = KeyedStore(self, "join_unjoined_activity", self.HOT)
@@ -441,8 +450,7 @@ class NetworkAdminLogonJoin(Playbook):
         return self._rows_account
 
     TABLES = (("net", "eid, client, cport, server, sport, service, start, \"end\""),
-              ("logon", "rid, host, boot, ts, src, sport, kind, code, ltype, svc, outcome, session, account, tseq, "
-                        "blob"),
+              ("logon", "rid, host, boot, ts, src, sport, kind, code, ltype, svc, outcome, session, account, tseq, blob"),
               ("hostconn", "host, ts, ckey, eid, blob"))
 
     def _store(self):
@@ -546,10 +554,29 @@ class NetworkAdminLogonJoin(Playbook):
         if not self._add("logon", row):
             return
         if session is not None and event.outcome == Outcome.success:
-            key = (event.host, session, boot)
-            if self.remote.get(key) is None and not self.remote.put(key, event.ts.timestamp()):
-                self.note_limit("remote_sessions", "the remote logon sessions' store took no new session; later "
-                                                   "process records of a new session are not joined to it")
+            self._register(event.host, session, boot, event.ts.timestamp())
+
+    def _register(self, host: str, session: str, boot: str, when: float) -> None:
+        """Record a remote logon session. Records of one logon (sshd's line and the audit login, 4624 and 5140)
+        share one entry, the earliest time kept; a reboot (both records naming different boots) starts another."""
+        entries = self.remote.get((host, session)) or []
+        for entry in entries:
+            if not _boots_conflict(entry[2], boot):
+                entry[1] = min(entry[1], when)
+                entry[2] = entry[2] or boot
+                return
+        entries = [*entries, [f"{when:.6f}", when, boot]][-self.ENTRIES_KEPT:]
+        if not self.remote.put((host, session), entries):
+            self.note_limit("remote_sessions", "the remote logon sessions' store took no new session; later "
+                                               "process records of a new session are not joined to it")
+
+    def _entry(self, host: str, session: str, boot: str, when: float | None):
+        """The remote logon entry a record of this session belongs to: boots agree (or one is unknown) and, for a
+        record with a time, the logon came first (one second of slack for clock rounding). The latest such."""
+        entries = self.remote.peek((host, session)) if when is None else self.remote.get((host, session))
+        fitting = [entry for entry in entries or [] if not _boots_conflict(entry[2], boot)
+                   and (when is None or entry[1] <= when + 1.0)]
+        return max(fitting, key=lambda entry: entry[1]) if fitting else None
 
     def _host_connection(self, event: TypedEvent) -> None:
         a, b = canon_ip(event.get("source.ip")), canon_ip(event.get("destination.ip"))
@@ -565,16 +592,17 @@ class NetworkAdminLogonJoin(Playbook):
 
     def _activity(self, event: TypedEvent, seq: int) -> None:
         boot = str(event.get("host.boot.id") or "")
+        when = event.ts.timestamp()
         for session in _process_sessions(event):
-            key = (event.host, session, boot)
-            if self.remote.get(key) is None:
+            entry = self._entry(event.host, session, boot, when)
+            if entry is None:
                 continue
+            key = (event.host, session, entry[0])
             state = self.activity.setdefault(key, lambda: [0, None, None, []])
             if state is None:
                 self.note_limit("session_activity", "the joined sessions' activity store took no new session; "
                                                     "later process records of a new session are not joined")
                 return
-            when = event.ts.timestamp()
             state[0] += 1
             state[1] = when if state[1] is None else min(state[1], when)
             state[2] = when if state[2] is None else max(state[2], when)
@@ -602,7 +630,6 @@ class NetworkAdminLogonJoin(Playbook):
     def _finalize(self):
         spill = self._store()
         spill.flush()
-        db = spill.db
         for sql in ("CREATE INDEX IF NOT EXISTS net_eid ON net(eid)",
                     "CREATE INDEX IF NOT EXISTS net_client ON net(client, start)",
                     "CREATE INDEX IF NOT EXISTS logon_src ON logon(src, sport, ts)",
@@ -610,12 +637,12 @@ class NetworkAdminLogonJoin(Playbook):
                     "CREATE INDEX IF NOT EXISTS hostconn_key ON hostconn(ckey, ts)"):
             spill.write(sql, [()])
         spill.table("lead", "eid, cid, rule, lane")
-        spill.table("flag", "host, session, boot, cid, rule, lane, eid")
+        spill.table("flag", "host, session, boot, cid, rule, lane, eid, ts")
         spill.table("res", "gkey, host, client, service, eid, tier, rids, offset, keys, conn")
         self._collect_findings(spill)
         spill.flush()
         spill.write("CREATE INDEX IF NOT EXISTS lead_eid ON lead(eid)", [()])
-        spill.write("CREATE INDEX IF NOT EXISTS flag_key ON flag(host, session, boot)", [()])
+        spill.write("CREATE INDEX IF NOT EXISTS flag_key ON flag(host, session)", [()])
         self._resolve_leads(spill)
         spill.flush()
         spill.write("CREATE INDEX IF NOT EXISTS res_key ON res(gkey)", [()])
@@ -636,9 +663,12 @@ class NetworkAdminLogonJoin(Playbook):
                 for row in page:
                     if row.get("rule_id") == self.id or row.get("provenance", "deterministic") != "deterministic":
                         continue
+                    # a record cited only in support of a statement (a lineage ancestor, a span bound) is not
+                    # what a host finding flags
+                    supporting = set(row.get("context_event_ids") or ())
                     for eid in row.get("event_ids") or []:
                         spill.add("lead", (str(eid), row["id"], row["rule_id"], lane))
-                        if lane in ("urgent", "high"):
+                        if lane in ("urgent", "high") and eid not in supporting:
                             flagged_ids.setdefault(str(eid), (row["id"], row["rule_id"], lane))
                 ids = sorted(flagged_ids)
                 for start in range(0, len(ids), self.EVENT_BATCH):
@@ -648,7 +678,8 @@ class NetworkAdminLogonJoin(Playbook):
                         cid, rule, flag_lane = flagged_ids[event.id]
                         boot = str(event.get("host.boot.id") or "")
                         for session in _process_sessions(event):
-                            spill.add("flag", (event.host, session, boot, cid, rule, flag_lane, event.id))
+                            spill.add("flag", (event.host, session, boot, cid, rule, flag_lane, event.id,
+                                               event.ts.timestamp()))
                 if hasattr(self, "heartbeat"):
                     self.heartbeat()
 
@@ -702,12 +733,14 @@ class NetworkAdminLogonJoin(Playbook):
         high = (session.end if session.end is not None else session.start) + self.SKEW_SECONDS
         columns = "rid, host, boot, ts, src, sport, kind, code, ltype, svc, outcome, session, account"
         # The client endpoint first: a busy client (a jump host, a NAT) logs many logons, but few name this port.
-        endpoint = [row for row in self._logon_rows(
+        named = self._logon_rows(
             db, f"SELECT {columns} FROM logon WHERE src = ? AND sport = ? AND ts BETWEEN ? AND ? ORDER BY ts, rid "
                 "LIMIT ?", (session.client, session.cport, low, high, self.LOGON_SCAN + 1))
-            if consistent(session.service, session.sport, row)]
-        if len(endpoint) > self.LOGON_SCAN:
+        if len(named) > self.LOGON_SCAN:
             return "logon_scan_capped"
+        endpoint = [row for row in named if consistent(session.service, session.sport, row)]
+        if not endpoint and any(_untyped(session.service, row) for row in named):
+            return "logon_type_missing"
         if endpoint:
             if len({row.host for row in endpoint}) > 1:
                 return "ambiguous_endpoint"
@@ -724,6 +757,8 @@ class NetworkAdminLogonJoin(Playbook):
                                       (session.client, low, high, self.LOGON_SCAN))
             if any(consistent(session.service, session.sport, row) for row in ported):
                 return "other_connections"
+            if any(_untyped(session.service, row) for row in rows):
+                return "logon_type_missing"
             return "type_inconsistent" if rows or ported else "no_logon"
         seen = {row[0] for row in db.execute(
             "SELECT DISTINCT host FROM hostconn WHERE ckey = ? AND ts BETWEEN ? AND ? LIMIT 3",
@@ -767,7 +802,7 @@ class NetworkAdminLogonJoin(Playbook):
             if row.outcome != "success":
                 continue
             if row.session is not None:
-                key = [row.host, row.session, row.boot]
+                key = [row.host, row.session, row.boot, row.ts]
                 if key not in keys:
                     keys.append(key)
                 continue
@@ -782,7 +817,7 @@ class NetworkAdminLogonJoin(Playbook):
                 companion = companions[0]
                 if all(item.rid != companion.rid for item in chosen):
                     chosen.append(companion)
-                key = [companion.host, companion.session, companion.boot]
+                key = [companion.host, companion.session, companion.boot, companion.ts]
                 if key not in keys:
                     keys.append(key)
             elif companions:
@@ -852,15 +887,21 @@ class NetworkAdminLogonJoin(Playbook):
         findings = db.execute(
             f"SELECT DISTINCT rule, lane, cid FROM lead WHERE eid IN ({','.join('?' * len(named))}) "
             "ORDER BY rule, cid", tuple(named)).fetchall()
-        activity_events, counts, flags = [], [], []
-        for key in keys:
-            state = self.activity.peek(tuple(key))
+        activity_events, counts, flags, seen = [], [], [], set()
+        for key_host, session, boot, when in keys:
+            entry = self._entry_at(key_host, session, boot, when)
+            if entry is None or (key_host, session, entry[0]) in seen:
+                continue
+            seen.add((key_host, session, entry[0]))
+            state = self.activity.peek((key_host, session, entry[0]))
             if state is not None:
-                counts.append((key, state[0]))
+                counts.append(((key_host, session), state[0]))
                 activity_events += [_compact(blob) for _ts, _id, blob in state[3]]
-            for flag in db.execute("SELECT DISTINCT cid, rule, lane, eid FROM flag WHERE host = ? AND session = ? "
-                                   "AND boot = ? ORDER BY lane DESC, rule, cid", tuple(key)).fetchall():
-                flags.append(flag)
+            for cid, rule, flag_lane, eid, flag_boot, flag_ts in db.execute(
+                    "SELECT DISTINCT cid, rule, lane, eid, boot, ts FROM flag WHERE host = ? AND session = ? "
+                    "ORDER BY lane DESC, rule, cid", (key_host, session)).fetchall():
+                if not _boots_conflict(entry[2], flag_boot) and flag_ts >= entry[1] - 1.0:
+                    flags.append((cid, rule, flag_lane, eid))
         flag_ids = {flag[3] for flag in flags}
         flagged_events = [event for event in (self._load_events(sorted(flag_ids)[:self.ACTIVITY_KEPT])
                                               if flag_ids and self._load_events else [])
@@ -873,16 +914,17 @@ class NetworkAdminLogonJoin(Playbook):
         events = list({event.id: event for event in
                        [*network_events, *logon_events, *activity_events, *flagged_events]}.values())
         predicate = self._predicate(network_events, logon_events, tier)
-        notes = [f"Join key: {TIER_WORDS[tier]}; clock allowance +-{self.SKEW_SECONDS:.0f} s around the session's "
-                 "recorded lifetime.",
-                 "The link between the network session and the host's logon is inferred, not observed: NAT, a shared "
-                 "client address or a host clock beyond the allowance can make it wrong."]
+        notes = [(f"Join key: {TIER_WORDS[tier]}; clock allowance +-{self.SKEW_SECONDS:.0f} s around the session's "
+                  "recorded lifetime."),
+                 ("The link between the network session and the host's logon is inferred, not observed: NAT, a "
+                  "shared client address or a host clock beyond the allowance can make it wrong.")]
         if tier == "address":
             notes.append("Address-only join: no port ties the logon to this connection, so it rests on this host "
                          "being the only one with a fitting logon from the client in the window.")
-        order_note = self._order_note(host, logon_events)
-        if order_note:
-            notes.append(order_note)
+        if self._read_before(db, host, rids):
+            notes.append("Some process or share records of this host were read from a source target read before the "
+                         "joined logon's, while no remote logon naming their session had been read; any that belong "
+                         "to the joined session are not counted here.")
         attack = tuple(sorted({"T1021", *(SERVICE_ATTACK.get(service, "T1021"),),
                                *(("T1078",) if successes else ())}))
         entities = list(dict.fromkeys(entity for event in [*logon_events, *network_events[:1]]
@@ -892,15 +934,23 @@ class NetworkAdminLogonJoin(Playbook):
                      TIER_CONFIDENCE[tier], entities, notes, group_key=f"{self.id}|{host}|{client}|{service}",
                      context_ids={event.id for event in network_events}, attack=attack)
 
-    def _order_note(self, host: str, logon_events: list[TypedEvent]) -> str:
-        """Process records of this host read from a target before its logons were: those in a joined session were
-        not joined (they arrived before the logon that names their session)."""
+    def _read_before(self, db, host: str, rids: list[int]) -> bool:
+        """Whether session-bearing process records of this host that joined no remote logon came from a source target
+        read before a joined logon's target: those of the joined session arrived before the logon naming it. Records
+        of the logon's own target (read in time order) or a later one were judged with the logon known."""
         earliest = self.unjoined_activity.peek(host)
-        if earliest is None:
-            return ""
-        return ("Some process or share records of this host were read before a remote logon naming their session "
-                "had been read (a source target read earlier than the logon's); any that belong to the joined "
-                "session are not counted here.")
+        if earliest is None or not rids:
+            return False
+        batch = rids[:900]
+        latest = db.execute(f"SELECT max(tseq) FROM logon WHERE rid IN ({','.join('?' * len(batch))})",
+                            tuple(batch)).fetchone()[0]
+        return latest is not None and earliest < latest
+
+    def _entry_at(self, host: str, session: str, boot: str, when: float):
+        """At finalize: the remote logon entry a joined logon record of this session belongs to (read in place)."""
+        fitting = [entry for entry in self.remote.peek((host, session)) or []
+                   if not _boots_conflict(entry[2], boot) and entry[1] <= when + 1.0]
+        return max(fitting, key=lambda entry: entry[1]) if fitting else None
 
     def _predicate(self, network_events, logon_events, tier) -> list[PredicateField]:
         out = []
@@ -945,6 +995,11 @@ class NetworkAdminLogonJoin(Playbook):
             named = list(dict.fromkeys(f"{rule} ({lane})" for _cid, rule, lane, _eid in flags))
             parts.append(f" A typed host finding cites a record in that session: {', '.join(named[:4])}.")
         return "".join(parts)
+
+
+def _boots_conflict(left: str, right: str) -> bool:
+    """Two records' boots differ only when both name one (an unknown boot conflicts with none)."""
+    return bool(left) and bool(right) and left != right
 
 
 def _ckey(a: str, ap: int, b: str, bp: int) -> str:
