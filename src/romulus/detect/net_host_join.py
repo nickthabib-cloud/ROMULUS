@@ -149,6 +149,9 @@ UNRESOLVED_WORDS = {
                                  "from the client in the window"),
     "logon_type_missing": ("a Windows logon from the client in the window does not record its logon type, so whether "
                            "the protocol produced it is not decided"),
+    "endpoint_outside_opening": ("a host logged a logon naming the client endpoint outside the connection's opening "
+                                 "(SSH, Telnet and the r-services authenticate when they open), so it may be a later "
+                                 "connection's that reused the port"),
     "logons_refused": ("the state budget refused some host logon or connection records, so this host being the only one "
                        "with a fitting portless logon is not known"),
     "port_reused": ("the client used the same port toward another server in the window, so the host's logon naming "
@@ -997,7 +1000,11 @@ class NetworkAdminLogonJoin(Playbook):
             ported = self._logon_rows(db, f"SELECT {columns} FROM logon WHERE src = ? AND sport IS NOT NULL "
                                           "AND ts BETWEEN ? AND ? ORDER BY ts, rid LIMIT ?",
                                       (session.client, low, high, self.LOGON_SCAN))
-            if any(consistent(session.service, session.sport, row) for row in ported):
+            fitting = [row for row in ported if consistent(session.service, session.sport, row)]
+            if any(row.sport == session.cport for row in fitting):
+                # this endpoint's logon, but later than a connection-opening protocol authenticates
+                return "endpoint_outside_opening"
+            if fitting:
                 return "other_connections"
             if any(_untyped(session.service, row) for row in candidates):
                 return "logon_type_missing"

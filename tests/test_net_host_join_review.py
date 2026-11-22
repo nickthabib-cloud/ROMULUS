@@ -36,8 +36,10 @@ def test_a_reused_client_port_toward_another_server_never_joins_the_cited_ssh_se
 
 def test_an_ssh_logon_long_after_the_opening_is_not_the_sessions_own():
     cited = flow("f1", cport=51022, server=SERVER, sport=22, start=0.0, duration=7200.0)
-    _rule, matches = run([[cited], [sshd("late", 1800.3, host="web02")]], [finding("F1", [cited])])
+    rule, matches = run([[cited], [sshd("late", 1800.3, host="web02")]], [finding("F1", [cited])])
     assert matches == []
+    assert "naming the client endpoint outside the connection's opening" in _notes(rule)
+    assert "name other client ports" not in _notes(rule)
 
 
 def test_a_reused_endpoint_toward_another_server_is_unresolved_for_a_lifetime_protocol():
