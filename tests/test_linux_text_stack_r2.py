@@ -38,12 +38,13 @@ UNKNOWN_REASON = "text line in no recognized format: custom.unknown"
 # offered to it, not scanned: tests load no shipped pattern), and the manifest gains its mentions section.
 # Evidence version 21 rehashes the event ids; the new privilege-broker rules add cells, and host.kernel_module_load
 # now reads a text family (kernel taint notices), so its cells follow the text partition's coverage.
+# The network-to-host join adds its rule cells, its manifest card and its later pass's audit; it publishes nothing here.
 GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a6dadaa59988bdf81e',
  # Fleet member hosts staged as memberships add two ranking statements: only the audit's rank query count moved.
  # The ranking version rank@1 -> rank@2 (fleet member hosts keep the rule's evidence, timed by their own record) moves
  # only the version string in the rank audit rows and the manifest's ranking block: with the version set back, both
  # digests are the earlier ones.
- 'audit': 'd3eef1f8eadd67edb41785415a890377d6106d56230a7118bd0484af907ac245',
+ 'audit': 'cb432e74c7f7cd06abf2c7e05c7a58783f01f9c06fc007f4aabab6604c4e0c0b',
  'baseline_counts': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_hunt_exclusions': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_observations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
@@ -60,10 +61,10 @@ GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a
  'events': 'f0d612c20f67d030a43e835b8ef639a78c824b51fff59c169d3d5219700de383',
  'expansion': 'dae7cbd7929a4cb94bb232a7343d4d70f62885a979b52714b87bd3641a92169b',
  'links': 'd9f0da030bf1447f35601910ec18eb012f4a55a0a8feef7262ab6e745319890e',
- 'manifest': '14fe76920541b9d88e0b6597e9d278a1f0d4f8bce2feee37b6ee44fb16c6130d',
+ 'manifest': '74103613c9b4d6587e489279291e4090af66b3364be2f38d8448996cfa3904ec',
  'raw': '64be31e697a32f93b1a71657560af514b2d430469cb3be19f44b8827985a7775',
  # host.account_or_group_change 7->8 moves only the rule cells (its version); every other digest is unchanged.
- 'rule_cells': 'af6fa01cdd41ac504da51333a9573b5d56fa02ad55ceb8d4dd72fce626abf732',
+ 'rule_cells': '8fa891a3f1146e00c43ffedf09c1ab1e9b7161ed833d9c1b21a491a240417838',
  'stats': 'e7d40465da77f85df2ab649392225bdfb16e5b75834447cd6d3a625129032b54',
  'tasks': '31db5bad23dca3ba0a6c4114135053177ece1b46af44576b3198b8967c6762bb'}
 

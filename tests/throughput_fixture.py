@@ -663,6 +663,8 @@ def run_stack(stage_dir, *, scale: int = 1, docs: dict | None = None, rank: bool
     )
     baseline = run_baseline_stage(repo, "h1", window)
     repo.audit("system", "hunt.baseline_summary", "h1", baseline)
+    from romulus.hunt.net_join_pass import run_join_pass
+    run_join_pass(repo, client, "h1", stage_dir)        # the network-to-host join over the later stages, as run.py
     executor = PivotExecutor(repo, client, "h1", contracts, source_query_budget=180,
                              dataset_inventory={HOST_TARGET: {"linux.audit", "systemd.journal", "apache.access",
                                                               "apache.error"}})
