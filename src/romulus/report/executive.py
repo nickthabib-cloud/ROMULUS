@@ -189,12 +189,14 @@ def _bottom_line(body: _Body, m: dict, technical_name: str, sections, plan: dict
     coverage = m.get("coverage") or {}
     assessment = m.get("ai_assessment") or {}
     counts = plan["counts"]
+    multi_step = sum(len(item.get("finding_ids") or []) > 1
+                     for item in (m.get("incident_graph") or {}).get("incidents") or [])
     rows = [[_lane_badge(lane), str(lanes[lane])] for lane in ("urgent", "high", "lead")]
     rows += [[_lane_badge(lane), str(count)] for lane, count in sorted(lanes.items())
              if lane not in ("urgent", "high", "lead")]
     rows += [["Findings the AI agent added (unconfirmed)", str(agent)],
              ["Incidents (linked by observed evidence)",
-              f"{counts['incidents']} ({sum(len(item.get('finding_ids') or []) > 1 for item in (m.get('incident_graph') or {}).get('incidents') or [])} with more than one finding)"],
+              f"{counts['incidents']} ({multi_step} with more than one finding)"],
              ["Mentions kept (text records contain, not findings)",
               f"{mentions['total']} ({mentions.get('status_text') or mentions.get('status')})" if mentions
               else "not part of this report"],
