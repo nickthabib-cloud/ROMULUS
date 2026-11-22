@@ -148,6 +148,8 @@ UNRESOLVED_WORDS = {
                                  "from the client in the window"),
     "logon_type_missing": ("a Windows logon from the client in the window does not record its logon type, so whether "
                            "the protocol produced it is not decided"),
+    "logons_refused": ("the state budget refused some host logon or connection records, so this host being the only one "
+                       "with a fitting portless logon is not known"),
     "port_reused": ("the client used the same port toward another server in the window, so the host's logon naming "
                     "that endpoint may be the other connection's"),
     "pairing_unread": ("the session was read by a later stage, not the sweep, so the client's other sessions in its "
@@ -470,6 +472,7 @@ class NetworkAdminLogonJoin(Playbook):
         self._published = None
         self._load_events = None
         self._net_refused = 0
+        self._host_refused = 0          # host logon and connection records the state budget refused
         self._target_seq: dict[str | None, int] = {}
         self._rid = 0
         register_store(self, self)
@@ -586,6 +589,7 @@ class NetworkAdminLogonJoin(Playbook):
         if not _usable_client(src) or not event.host:
             return
         if not self._room(1):
+            self._host_refused += 1
             return
         session = _session_of(event)
         boot = str(event.get("host.boot.id") or "")
@@ -596,6 +600,7 @@ class NetworkAdminLogonJoin(Playbook):
                event.outcome.value if isinstance(event.outcome, Outcome) else str(event.outcome), session,
                str(account), seq, compact_event(event))
         if not self._add("logon", row):
+            self._host_refused += 1
             return
         if session is not None and event.outcome == Outcome.success:
             self._register(event.host, session, boot, event.ts.timestamp())
@@ -629,10 +634,9 @@ class NetworkAdminLogonJoin(Playbook):
             return
         if PORT_SERVICE.get(ap) is None and PORT_SERVICE.get(bp) is None:
             return
-        if not self._room(1):
-            return
-        self._add("hostconn", (event.host, event.ts.timestamp(), _ckey(a, ap, b, bp), event.id,
-                               compact_event(event)))
+        if not self._room(1) or not self._add("hostconn", (event.host, event.ts.timestamp(), _ckey(a, ap, b, bp),
+                                                             event.id, compact_event(event))):
+            self._host_refused += 1
 
     def _activity(self, event: TypedEvent, seq: int) -> None:
         boot = str(event.get("host.boot.id") or "")
@@ -710,7 +714,7 @@ class NetworkAdminLogonJoin(Playbook):
             rows["unjoined"].append((host, seq))
         flush(force=True)
         spill.write("INSERT OR REPLACE INTO meta VALUES (?, ?)",
-                    [("net_refused", str(self._net_refused)),
+                    [("net_refused", str(self._net_refused)), ("host_refused", str(self._host_refused)),
                      ("limits", json.dumps(sorted(self.limit_reasons())))])
 
     def _persist(self, spill) -> None:
@@ -765,6 +769,7 @@ class NetworkAdminLogonJoin(Playbook):
             rows.write(index, [()])
         meta = dict(rows.db.execute("SELECT k, v FROM meta").fetchall())
         self._net_refused = int(meta.get("net_refused") or self._net_refused or 0)
+        self._host_refused = int(meta.get("host_refused") or self._host_refused or 0)
         rows.write("DELETE FROM flag", [()])
         self._collect_findings(rows)
         self._resolve_leads(rows)
@@ -956,6 +961,10 @@ class NetworkAdminLogonJoin(Playbook):
             return "external_server"
         if self._net_refused:
             return "pairing_unknown"
+        if self._host_refused:
+            # a refused logon record may be another host's portless logon from this client: "only this host" is not
+            # known
+            return "logons_refused"
         if session.origin != "sweep":
             # a session a later stage's finding cites that the sweep never read: the client's other sessions in that
             # source were not all read, so a portless pairing cannot be checked
@@ -1033,6 +1042,10 @@ class NetworkAdminLogonJoin(Playbook):
         if int(meta.get("net_refused") or 0):
             notes.append(NOTE_PREFIX + "state limit: administration session records the state budget refused are not "
                                        "joined and make portless pairings undecidable")
+        if int(meta.get("host_refused") or 0):
+            notes.append(NOTE_PREFIX + f"state limit: {meta['host_refused']} host logon or connection record(s) the "
+                                       "state budget refused were not kept: no address-only join was made, and a "
+                                       "joined host's uniqueness is stated as unchecked")
         return notes
 
     def partial_notes(self, notes: list[str]) -> bool:
@@ -1124,6 +1137,9 @@ class NetworkAdminLogonJoin(Playbook):
         severity = "high" if successes else "medium"
         claim = self._claim(host, client, service, tier, connections, len(session_ids), findings, logon_events,
                             offsets, counts, activity_events, flags, network_events, raising)
+        if self._host_refused:
+            claim += (" Some host logon or connection records were refused by the state budget, so this host being "
+                      "the only one naming the client endpoint or connection is unchecked.")
         events = list({event.id: event for event in
                        [*network_events, *logon_events, *activity_events, *flagged_events]}.values())
         predicate = self._predicate(network_events, logon_events, tier)
@@ -1131,6 +1147,10 @@ class NetworkAdminLogonJoin(Playbook):
                   "recorded lifetime."),
                  ("The link between the network session and the host's logon is inferred, not observed: NAT, a "
                   "shared client address or a host clock beyond the allowance can make it wrong.")]
+        if self._host_refused:
+            notes.append("The state budget refused some host logon or connection records: another host's record "
+                         "naming the same client endpoint or connection may be among them, so this host being the only "
+                         "one is unchecked.")
         if tier == "address":
             notes.append("Address-only join: no port ties the logon to this connection, so it rests on this host "
                          "being the only one with a fitting logon from the client in the window.")

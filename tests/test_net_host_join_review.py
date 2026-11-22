@@ -1,7 +1,6 @@
 """Adversarial joins from the network-to-host join's review: each must stay unresolved, or be joined at the lane its
 key supports. Addresses are private or documentation ranges, hosts and accounts are invented."""
 from tests.test_net_host_join import (
-    CLIENT,
     SERVER,
     SERVER2,
     audit_login,
@@ -37,7 +36,7 @@ def test_a_reused_client_port_toward_another_server_never_joins_the_cited_ssh_se
 
 def test_an_ssh_logon_long_after_the_opening_is_not_the_sessions_own():
     cited = flow("f1", cport=51022, server=SERVER, sport=22, start=0.0, duration=7200.0)
-    rule, matches = run([[cited], [sshd("late", 1800.3, host="web02")]], [finding("F1", [cited])])
+    _rule, matches = run([[cited], [sshd("late", 1800.3, host="web02")]], [finding("F1", [cited])])
     assert matches == []
 
 
@@ -60,6 +59,44 @@ def test_an_address_only_join_never_rises_above_lead_and_says_so():
     m = matches[0]
     assert m.proposed_lane == "lead" and m.confidence == "low"
     assert "win.test_high (high)" in m.claim and "an address-only join never raises the lane" in m.claim
+
+
+def _refusing(after: int):
+    """A join whose state budget refuses every row after the first `after`."""
+    from romulus.detect.net_host_join import NetworkAdminLogonJoin
+    rule = NetworkAdminLogonJoin()
+    original, calls = rule._room, {"n": 0}
+
+    def room(rows):
+        calls["n"] += 1
+        if calls["n"] > after:
+            rule.refuse("state_disk", "simulated refusal")
+            return False
+        return original(rows)
+    rule._room = room
+    return rule
+
+
+# ---- I1: refused host rows make "only this host" unknown ----------------------------------------------------------
+
+def test_a_refused_logon_row_stops_an_address_only_join():
+    session = flow("w1", cport=50200, sport=5985, start=0.0, duration=40.0)
+    first, second = logon4624(1.0, host="srv02.example.test"), logon4624(1.5, host="srv01.example.test")
+    rule, matches = run([[session], [first, second]], [finding("F1", [session])])
+    assert matches == [] and "several hosts logged a portless logon" in _notes(rule)
+    # the session row and the first logon are kept, the second (another host's) refused
+    rule, matches = run([[session], [first, second]], [finding("F1", [session])], rule=_refusing(2))
+    assert matches == []
+    assert "this host being the only one with a fitting portless logon is not known" in _notes(rule)
+    assert any("host logon or connection record(s)" in reason for reason in rule.limit_reasons())
+
+
+def test_a_refused_row_leaves_an_endpoint_join_standing_with_its_uniqueness_unchecked():
+    session = flow("s1", cport=50000, sport=445, start=0.0)
+    logons = [logon4624(0.5, port=50000), logon4624(0.6, port=50000, host="srv02.example.test")]
+    _rule, matches = run([[session], logons], [finding("F1", [session])], rule=_refusing(2))
+    assert len(matches) == 1 and "uniqueness" not in matches[0].claim
+    assert "being the only one naming the client endpoint or connection is unchecked" in matches[0].claim
 
 
 def test_a_session_only_a_later_stage_read_is_never_paired_by_address():
