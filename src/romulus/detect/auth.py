@@ -2053,15 +2053,19 @@ class AccountOrGroupChange(Playbook):
         claim += (" A provisioning run rolled out across a fleet looks like this; so does one intruder making the same "
                   "changes on many hosts, so the item keeps the lane of its strongest run.")
         # exemplar records from several hosts' runs: the privileged changes' records first
+        # (each cited host's host-list record, its run's first cited record, among them)
         per_run = max(1, self.FLEET_CITE // max(1, len(fleet.exemplars)))
         events: list[TypedEvent] = []
         for shape in fleet.exemplars:
             own = [e for e in shape.match.events if e.id not in shape.match.context_ids]
-            own.sort(key=lambda e: (not _record_privilege(e), e.ts, e.id))
+            own.sort(key=lambda e: (e.id != shape.anchor_id, not _record_privilege(e), e.ts, e.id))
             events += own[:per_run]
-        events = sorted(_unique(events), key=lambda e: (e.ts, e.id))[:self.FLEET_CITE]
-        claim += (f" Records of the runs on {len(fleet.exemplars)} of the {fleet.hosts} hosts are cited; each host's "
-                  "first cited record is in its host list entry.")
+        events = sorted(_unique(events), key=lambda e: (e.ts, e.id))
+        rest = fleet.hosts - len(fleet.exemplars)
+        claim += (f" Records of the runs on {len(fleet.exemplars)} of the {fleet.hosts} hosts are cited, the first "
+                  "record each host's list entry names among them"
+                  + (f"; the other {rest} host(s) are counted in the host list without a cited record (their "
+                     "entries name their run's first record by id)" if rest else "") + ".")
         notes = sorted({n for n in template.match.notes if n.startswith("T")})
         notes += [f"fleet change: {_signature_text(sig)}" for sig in signatures[:self.NAMED]]
         if len(signatures) > self.NAMED:

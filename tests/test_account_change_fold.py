@@ -401,7 +401,8 @@ def test_twelve_hosts_with_the_same_run_are_one_fleet_item():
     [m] = out
     assert m.group_key.startswith("burst-fleet|") and (m.proposed_lane, m.severity) == ("high", "high")
     assert m.fleet_host_count == 12 and m.fleet_hosts_complete
-    assert sorted(h for h, _ in m.fleet_hosts) == [f"node{h:02d}" for h in range(12)]
+    listed = dict(m.fleet_hosts)                                       # streamed once, as publishing reads it
+    assert sorted(listed) == [f"node{h:02d}" for h in range(12)]
     assert "On 12 hosts, the same run of account and group changes was recorded" in m.claim
     assert "it does not show that the runs share an origin" in m.claim
     assert "On every host the run requests or reports privileged access" in m.claim
@@ -409,6 +410,50 @@ def test_twelve_hosts_with_the_same_run_are_one_fleet_item():
     assert "Hosts: node00, node01" in m.claim and "and" not in m.claim.split("Hosts: ", 1)[1].split(".", 1)[0]
     assert len({e.host for e in m.events}) == 8                     # exemplar records from several hosts' runs
     assert any(n.startswith("fleet change:") and "group 'sudo'" in n for n in m.notes)
+    # every cited host's list entry names a cited record; the others are said to be uncited
+    cited = {e.id for e in m.events}
+    assert sum(listed[h] in cited for h in listed) == 8
+    assert "the other 4 host(s) are counted in the host list without a cited record" in m.claim
+
+
+def test_a_run_too_large_to_compare_is_not_merged_and_is_named(monkeypatch):
+    monkeypatch.setattr(AccountOrGroupChange, "SHAPE_SIGNATURES", 40)
+    events = _hosts(3)                                                  # 35 distinct changes each
+    big = provisioning(start=T0 + timedelta(minutes=3), host="big01", users=10, admin_groups=("adm", "sudo", "lxd"),
+                       passwords=2)
+    big += [line("passwd", f"password for 'x{i}' changed by 'root'", T0 + timedelta(minutes=4, seconds=i),
+                 host="big01") for i in range(10)]
+    out = run(events + big)[1]
+    fleet = next(m for m in out if m.group_key.startswith("burst-fleet|"))
+    [own] = [m for m in out if m is not fleet]
+    assert fleet.fleet_host_count == 3 and own.group_key.startswith("burst|big01|")
+    assert "big01 (not compared whole: it holds more than 40 distinct changes" in fleet.claim
+
+
+def test_excluded_runs_beyond_the_named_cap_are_counted(monkeypatch):
+    monkeypatch.setattr(AccountOrGroupChange, "FLEET_EXCLUDED_NAMED", 1)
+    events = _hosts(3)
+    for name in ("odd01", "odd02"):
+        events += provisioning(start=T0 + timedelta(minutes=5), host=name, users=10, admin_groups=("adm", "sudo",
+                                                                                                   "lxd"), passwords=2)
+        events.append(line("usermod", f"add '{name}' to group 'docker'", T0 + timedelta(minutes=6), host=name))
+    out = run(events)[1]
+    fleet = next(m for m in out if m.group_key.startswith("burst-fleet|"))
+    assert len(out) == 3 and fleet.fleet_host_count == 3
+    assert "2 similar host run(s) differ from this shape" in fleet.claim
+    assert "; and 1 more (the first 1 are named in the notes)." in fleet.claim
+    assert sum(n.startswith("excluded:") for n in fleet.notes) == 1
+    assert "1 further excluded run(s) are counted, not named" in fleet.notes
+
+
+def test_too_many_overlapping_fleets_say_an_exclusion_may_go_unnamed(monkeypatch):
+    monkeypatch.setattr(AccountOrGroupChange, "FLEET_ACTIVE", 1)
+    events = _hosts(3, prefix="a") + _hosts(3, users=4, prefix="b")
+    events += provisioning(start=T0 + timedelta(minutes=30), host="lone", users=6, admin_groups=("adm",),
+                           passwords=0)
+    pb, out = run(events)
+    assert sum(m.group_key.startswith("burst-fleet|") for m in out) == 2
+    assert any("more than 1 fleets of account change runs overlapped in time" in r for r in pb.limit_reasons())
 
 
 def test_a_host_with_an_extra_sudo_grant_stays_its_own_high_item_and_the_fleet_names_it():
@@ -495,6 +540,9 @@ def test_a_fleet_item_is_published_through_the_sweep_with_its_host_list(tmp_path
     assert row["lane"] == "high" and row["group_key"].startswith("burst-fleet|")
     gates = row["gate_results"]
     assert gates["_fleet_host_count"] == 3 and gates["_fleet_hosts_complete"] is True
+    # the report manifest carries the fleet's complete host list, as for every fleet-grouped finding
+    [finding] = [f for f in snapshot["manifest"]["findings"] if f.get("rule_id") == "host.account_or_group_change"]
+    assert finding["fleet_hosts"]["complete"] and finding["fleet_hosts"]["count"] == 3
 
 
 def test_gpasswd_audit_record_and_its_line_pair():
@@ -622,3 +670,7 @@ def test_a_provisioned_fleet_ranks_as_one_item_and_no_longer_buries_an_attacked_
     per_host, merged = ranked(False), ranked(True)
     assert per_host[:12] == [f"acct{h:02d}" for h in range(12)] and per_host.index("atk0") >= 12
     assert merged[0] == "acct-fleet" and set(merged[1:4]) == {"atk0", "atk1", "atk2"}
+    # the side effect: the rule's evidence now counts on the cited host only, so the other provisioned hosts' second
+    # rule no longer meets the evidence bar there (their findings stay ranked and listed, not reported)
+    assert [cid for cid in merged if cid.startswith("priv")] == ["priv00"]
+    assert "priv05" in [row for row in per_host]
