@@ -99,6 +99,44 @@ def test_a_refused_row_leaves_an_endpoint_join_standing_with_its_uniqueness_unch
     assert "being the only one naming the client endpoint or connection is unchecked" in matches[0].claim
 
 
+# ---- I2: only the server's record of a connection places it ------------------------------------------------------
+
+def _sysmon3_client(offset, *, cport=50100, sport=3389, host="wks01.example.test"):
+    from romulus.evidence.windows_catalog import SYSMON, SYSMON_CHANNEL
+    from tests.test_net_host_join import CLIENT
+    from tests.test_windows_c_burst_review import native_event
+    return native_event(3, {"SourceIp": CLIENT, "SourcePort": str(cport), "DestinationIp": SERVER,
+                            "DestinationPort": str(sport), "Protocol": "tcp", "Initiated": "true",
+                            "Image": "C:\\Windows\\System32\\mstsc.exe",
+                            "ProcessGuid": "{00000000-0000-0000-0000-000000000004}", "ProcessId": "901"},
+                        host=host, offset=offset, channel=SYSMON_CHANNEL, provider=SYSMON)
+
+
+def test_sysmon_on_the_server_only_places_the_rdp_logon():
+    from tests.test_net_host_join import sysmon3
+    session = flow("rdp", cport=50100, sport=3389, start=0.0, duration=900.0)
+    _rule, matches = run([[session], [sysmon3(0.2), logon4624(4.0, ltype=10)]], [finding("F1", [session])])
+    assert len(matches) == 1 and "host recorded this connection itself" in matches[0].claim
+
+
+def test_sysmon_on_both_ends_still_places_the_rdp_logon_on_the_server():
+    from tests.test_net_host_join import sysmon3
+    session = flow("rdp", cport=50100, sport=3389, start=0.0, duration=900.0)
+    host = [sysmon3(0.2), _sysmon3_client(0.1), logon4624(4.0, ltype=10)]
+    rule, matches = run([[session], host], [finding("F1", [session])])
+    assert len(matches) == 1 and "host srv01 wrote" in matches[0].claim
+    assert "several hosts recorded the same connection" not in _notes(rule)
+
+
+def test_sysmon_on_the_client_only_does_not_stand_in_for_the_server():
+    session = flow("rdp", cport=50100, sport=3389, start=0.0, duration=900.0)
+    rule, matches = run([[session], [_sysmon3_client(0.1), logon4624(4.0, ltype=10)]], [finding("F1", [session])])
+    # the client's own record places nothing; the server's portless logon is then an address-only join
+    assert len(matches) == 1 and matches[0].confidence == "low"
+    assert "host recorded this connection itself" not in matches[0].claim
+    assert "recorded the connection logged no portless logon" not in _notes(rule)
+
+
 def test_a_session_only_a_later_stage_read_is_never_paired_by_address():
     from romulus.detect.net_host_join import NetworkAdminLogonJoin
     rule = NetworkAdminLogonJoin()

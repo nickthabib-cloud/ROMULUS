@@ -634,6 +634,12 @@ class NetworkAdminLogonJoin(Playbook):
             return
         if PORT_SERVICE.get(ap) is None and PORT_SERVICE.get(bp) is None:
             return
+        # Only the server's record of the connection places it: a host that initiated it (Sysmon's Initiated, an audit
+        # connect() call) is the client, and a record that does not say which side the host was places nothing.
+        accepted = (event.get("network.direction") == "ingress"
+                    or str(event.get("socket.syscall") or "").startswith("accept"))
+        if not accepted:
+            return
         if not self._room(1) or not self._add("hostconn", (event.host, event.ts.timestamp(), _ckey(a, ap, b, bp),
                                                              event.id, compact_event(event))):
             self._host_refused += 1
