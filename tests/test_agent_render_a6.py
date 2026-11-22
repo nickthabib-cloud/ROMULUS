@@ -3,7 +3,7 @@ import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from xml.etree import ElementTree
-from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
+from zipfile import ZipFile
 
 from sqlalchemy import select
 
@@ -15,13 +15,8 @@ from tests.test_report import _repo_with_finding
 
 
 def _docx(tmp_path, monkeypatch, manifest):
+    # the executive writer stamps every package part with one fixed time, so its bytes are reproducible as written
     manifest["revision"] = {"number": 1}
-    class FixedZip(ZipFile):
-        def writestr(self, name, data, *args, **kwargs):
-            info = ZipInfo(name, date_time=(2024, 1, 1, 0, 0, 0))
-            info.compress_type = ZIP_DEFLATED
-            return super().writestr(info, data, *args, **kwargs)
-    monkeypatch.setattr(executive, "ZipFile", FixedZip)
     path = tmp_path / "report.docx"
     executive.write(manifest, path, "technical.md")
     return path
@@ -31,7 +26,7 @@ def test_old_hunt_docx_bytes_are_unchanged(tmp_path, monkeypatch):
     repo, _ = _repo_with_finding()
     manifest = build_manifest(repo, "h1", "test")
     path = _docx(tmp_path, monkeypatch, manifest)
-    assert hashlib.sha256(path.read_bytes()).hexdigest() == "0a153da5054826714df626d05f915a5af35442e45e8abd675a8855acb1705721"
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == "2d6f48c60151b4ee8d08b81a09af1f234bcb801f0e05f24b641a7db116a1d4a6"
 
 
 def test_old_hunt_json_and_markdown_are_unchanged(monkeypatch):
@@ -62,7 +57,9 @@ def test_docx_assessment_uses_plain_text_and_all_sentence_groups(tmp_path, monke
     path = _docx(tmp_path, monkeypatch, manifest)
     with ZipFile(path) as archive:
         document = ElementTree.fromstring(archive.read("word/document.xml"))
-        assert "word/_rels/document.xml.rels" not in archive.namelist()
+        relationships = archive.read("word/_rels/document.xml.rels").decode()
+    # the hostile text made no link: the package's only relationships are its own parts
+    assert "External" not in relationships and "hyperlink" not in relationships
     values = [node.text or "" for node in document.iter(f"{{{executive._WORD}}}t")]
     assert "AI assessment" in values
     assert "Prior AI assessment: not current." in values
@@ -70,8 +67,8 @@ def test_docx_assessment_uses_plain_text_and_all_sentence_groups(tmp_path, monke
     assert sum("[F-real, E-real]" in value and "hypothesis" in value for value in values) == 6
     assert any("uncited" in value for value in values)
     assert values.index("AI assessment") > next(i for i, v in enumerate(values) if v.startswith("Recommended check:"))
-    assert all(node.tag not in {f"{{{executive._WORD}}}fldSimple", f"{{{executive._WORD}}}hyperlink"}
-               for node in document.iter())
+    assert all(node.tag not in {f"{{{executive._WORD}}}{name}" for name in (
+        "fldSimple", "hyperlink", "fldChar", "instrText")} for node in document.iter())
 
 
 def test_assessment_latest_and_stale_check_do_not_materialize_history(monkeypatch):

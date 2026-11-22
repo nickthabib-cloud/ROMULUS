@@ -292,9 +292,15 @@ def test_docx_carries_the_labelled_narrative_as_plain_text(repo, tmp_path, monke
     assert values.index(TITLE) > next(i for i, v in enumerate(values) if v.startswith("AI-generated hypothesis"))
     assert f"1. Credential Access · {IN_WINDOW}" in values
     assert f"inferred: {HOSTILE} [ev1]" in values
-    # muted lines (the support mix) add only italics and a grey colour
-    assert all(node.tag.rsplit("}", 1)[-1] in {"document", "body", "p", "r", "rPr", "b", "i", "color", "t", "sectPr",
-                                               "pgSz", "pgMar"} for node in document.iter())
+    # muted lines (the support mix) add only italics and a grey colour: the document holds the layout's own
+    # paragraph, table and picture structure and nothing else (no field, hyperlink or embedded object)
+    layout = {"document", "body", "p", "pPr", "pStyle", "keepNext", "pageBreakBefore", "shd", "jc", "r", "rPr", "b",
+              "i", "color", "t", "tbl", "tblPr", "tblStyle", "tblW", "tblLayout", "tblLook", "tblGrid", "gridCol",
+              "tr", "trPr", "cantSplit", "tblHeader", "tc", "tcPr", "tcW", "sectPr", "headerReference",
+              "footerReference", "pgSz", "pgMar", "drawing", "inline", "extent", "docPr", "cNvGraphicFramePr",
+              "graphicFrameLocks", "graphic", "graphicData", "pic", "nvPicPr", "cNvPr", "cNvPicPr", "blipFill",
+              "blip", "stretch", "fillRect", "spPr", "xfrm", "off", "ext", "prstGeom", "avLst"}
+    assert all(node.tag.rsplit("}", 1)[-1] in layout for node in document.iter())
 
 
 def test_old_and_template_manifests_render_no_narrative_section(repo, tmp_path, monkeypatch):

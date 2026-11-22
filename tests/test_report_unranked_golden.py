@@ -10,10 +10,10 @@ from romulus.report.manifest import build_manifest
 from romulus.report.markdown import render
 from tests.test_report import T, _repo_with_finding
 
-# Digests of this hunt's Markdown report and executive document body as rendered before evidence ranking existed.
-# (Captured by rendering this same hunt with the code before ranking.)
+# The digest of this hunt's Markdown report as rendered before evidence ranking existed (captured by rendering this
+# same hunt with the code before ranking), and of its executive document body in the current executive layout.
 MARKDOWN_SHA256 = "916270762b901bf993ba001d5ee0f3ae6c6609fe69c7e3c5454e61f0a0b3ffd0"
-DOCX_SHA256 = "fa8e34ae71af552b7133dd5df67f88d2321f9ffe1469c33d9d4dd56be7e0f424"
+DOCX_SHA256 = "fa84e5e3ab6153dfce46c440d2e432c6707f4724286b5fba911d85448f2a877d"
 
 
 def render_unranked() -> tuple[str, bytes]:
