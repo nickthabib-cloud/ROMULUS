@@ -86,7 +86,8 @@ def write_reports(repo, manifest, directory):
             staged["note"] = staged.pop("docx")
             staged["note"].write_text(f"The executive DOCX for report revision {stem} was not written.\n"
                                       f"Reason: {docx_error}\nThe JSON manifest and the technical report of this "
-                                      "revision were written.\n", encoding="utf-8")
+                                      "revision were written.\n", encoding="utf-8",
+                                      errors="backslashreplace")  # an unpaired surrogate never costs the rest
             paths = {**{ext: paths[ext] for ext in ("json", "md")}, "docx_error": note}
             targets = {"json": paths["json"], "md": paths["md"], "note": note}
         else:

@@ -790,6 +790,24 @@ def test_a_failed_executive_document_never_costs_the_revision_its_json_and_markd
     assert set(again) == {"json", "md", "docx"} and not paths["docx_error"].exists()
 
 
+def test_a_failure_message_with_an_unpaired_surrogate_still_leaves_json_and_markdown(tmp_path, monkeypatch):
+    from romulus.report import bundle
+    from romulus.report.manifest import publish_revision
+    from tests.test_report import _repo_with_finding
+
+    repo, _candidate = _repo_with_finding()
+    manifest = publish_revision(repo, "h1", "test")
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("bad text \ud800 in a record")
+
+    monkeypatch.setattr(executive, "write", broken)
+    paths = bundle.write_reports(repo, manifest, tmp_path)
+    assert set(paths) == {"json", "md", "docx_error"}
+    assert paths["json"].is_file() and paths["md"].is_file()
+    assert "\\ud800" in paths["docx_error"].read_text(encoding="utf-8")
+
+
 def _soffice():
     for name in ("soffice", "libreoffice"):
         if found := shutil.which(name):
