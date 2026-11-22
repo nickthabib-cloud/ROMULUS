@@ -51,6 +51,12 @@ class Predicate(BaseModel):
         return v
 
 
+class Selection(BaseModel):
+    """The record selection of a search: filters ANDed with an OR of AND-groups (none: every record)."""
+    filters: list[Predicate] = []
+    any_of: list[list[Predicate]] = []
+
+
 class SearchIntent(BaseModel):
     """Source-neutral description of a search. Never contains backend syntax."""
     kind: Literal["raw", "aggregate", "histogram"]
@@ -58,6 +64,10 @@ class SearchIntent(BaseModel):
     window: Window
     filters: list[Predicate] = []
     any_of: list[list[Predicate]] = []           # OR of AND-groups, ANDed with filters
+    # A selection whose records are left out: the records of the window that another intent with these filters and
+    # any_of would not select (`hunt.mention_residue`). It compiles to the very query that selection compiles to,
+    # negated, so the two intents together read every record of the window exactly once.
+    excluding: Selection | None = None
     group_by: list[str] = []                     # aggregate
     interval_seconds: int | None = None          # histogram
     max_records: int = Field(default=10_000, ge=1, le=2_000_000)  # raw hits or aggregate buckets

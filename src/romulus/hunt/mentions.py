@@ -116,6 +116,8 @@ NAMES_SHOWN = 20
 NOTES_SHOWN = 200
 # hosts whose cut lines are counted by name (the rest are counted together)
 CUT_HOSTS_COUNTED = 1_000
+# keys of a target's records outside the sweep's selection, not read in full, named in the coverage (all counted)
+RESIDUE_KEYS_NAMED = 50
 # distinct (family, field) names counted for the coverage summary
 MAX_FIELD_KEYS = 512
 NO_HOST = ""
@@ -207,6 +209,7 @@ class MentionScanner:
         self.unscanned: list[dict] = []            # partitions the sweep could not read in full (the first NOTES_SHOWN)
         self.unscanned_count = 0
         self.left_out: list[dict] = []             # sources the sweep's fetch filters leave out
+        self.residue: dict[str, dict] = {}         # per target: its records outside the sweep's selection
         self.cut_hosts: Counter = Counter()
         self.cut_records: list[dict] = []
         self.pin_changes: list[str] = []
@@ -262,18 +265,38 @@ class MentionScanner:
         self.left_out.append({"target": target, "kind": kind, "name": str(name)[:200], "records": records,
                               "reason": reason})
 
+    def note_residue(self, target: str, *, records: int | None, read: int, counted: bool, reason: str = "",
+                     short_keys=()) -> None:
+        """A target's records outside the sweep's selection (`hunt.mention_residue`): how many (None: not counted
+        exactly), how many were read into the scan, and the keys not read in full."""
+        short = list(short_keys)
+        self.residue[target] = {"records": records, "read": read, "counted": counted, "reason": reason,
+                                "keys_not_read_in_full": len(short),
+                                "keys": [{**item, "not_read": item["records"] - item["read"]}
+                                         for item in sorted(short, key=lambda item: item["read"] - item["records"])
+                                         [:RESIDUE_KEYS_NAMED]]}
+
+    def residue_counted(self, target: str) -> bool:
+        """Whether the target's records outside the sweep's selection were counted exactly (each then read, or
+        counted as not read): the sweep's left-out sources of that target are what was counted."""
+        return bool((self.residue.get(target) or {}).get("counted"))
+
     def note_scan_failure(self, target: str, partition: str, error: BaseException) -> None:
         """The scan raised on a partition: the partition's detection goes on, and the pool says what was not scanned."""
         self.stats["scan_failures"] += 1
         self.note_unscanned(target, partition, f"the scan failed ({type(error).__name__}: {error})"[:300])
 
-    def scan(self, target: str, contract, unread: list[tuple], task_id: str | None) -> None:
+    def scan(self, target: str, contract, unread: list[tuple], task_id: str | None, *,
+             residue: bool = False) -> None:
         """Scan one partition's unread records: (hit, why no normalizer read it[, whether it is a Windows event
-        record[, the audit fields to read]]) as `normalize_hits(unread=...)` lists them."""
+        record[, the audit fields to read]]) as `normalize_hits(unread=...)` lists them. `residue`: the records are
+        outside the sweep's selection (`hunt.mention_residue`)."""
         if not unread:
             return
         stats = self.stats
         stats["records_offered"] += len(unread)
+        if residue:
+            stats["residue_offered"] += len(unread)
         for entry in unread:
             hit = entry[0]
             source = hit.get("_source")
@@ -327,7 +350,7 @@ class MentionScanner:
                 stats["lines_not_staged"] += 1
                 continue
             try:
-                self._keep(target, contract, hit, texts, found, task_id, telemetry)
+                self._keep(target, contract, hit, texts, found, task_id, telemetry, residue)
             except (sqlite3.Error, OSError) as error:
                 # the stage itself failed: this line and every later match are counted, never kept
                 self._fail(f"the mention stage failed ({type(error).__name__}: {error})"[:300])
@@ -565,7 +588,7 @@ class MentionScanner:
         return excerpt, start, offset - start, len(line)
 
     def _keep(self, target: str, contract, hit: dict, texts: list[tuple[str, str]],
-              found: dict[int, tuple[int, int]], task_id: str | None, telemetry: str) -> None:
+              found: dict[int, tuple[int, int]], task_id: str | None, telemetry: str, residue: bool = False) -> None:
         db = self._open()
         host = record_host(hit["_source"])
         # one group per record, under its strongest pattern (the earliest loaded among equals); the rest are metadata.
@@ -617,7 +640,8 @@ class MentionScanner:
             session_id=None, task_id=task_id,
             query_digest="mention:" + digest({"pattern": pattern.id, "task": task_id})[:24],
             query_text=(f"mention sweep: pattern {pattern.id} matched the record's {path} in the deterministic "
-                        f"sweep of {target}"),
+                        + (f"read of {target}'s records outside the sweep's selection" if residue
+                           else f"sweep of {target}")),
             redact=self._redact, flagged=injection_flags,
             time_unit=time_unit(contract) if contract is not None else "ms", window=self.window)
         raw["ts"] = _iso(raw["ts"])
@@ -738,6 +762,18 @@ class MentionScanner:
             names = ", ".join(f"{item['target']} {item['kind']} {item['name']}" for item in self.left_out[:10])
             reasons.append(f"{len(self.left_out)} source(s) the sweep's fetch filters leave out were not scanned: "
                            f"{names}{' and others' if len(self.left_out) > 10 else ''}")
+        for target, row in sorted(self.residue.items()):
+            if not row["counted"]:
+                reasons.append(f"{target}: {row['reason']}; its sources the sweep's fetch filters leave out were not "
+                               "offered")
+            elif row["records"] and row["read"] < row["records"]:
+                named = ", ".join(f"{item['key']} ({item['not_read']:,} of {item['records']:,})"
+                                  for item in row["keys"][:10])
+                more = row["keys_not_read_in_full"] - min(10, len(row["keys"]))
+                reasons.append(f"{target}: {row['records'] - row['read']:,} of {row['records']:,} record(s) outside "
+                               f"the sweep's selection were not scanned ({row['reason']})"
+                               + (f"; keys not read in full: {named}" if named else "")
+                               + (f" and {more} more" if more > 0 else ""))
         for why, count in sorted(self.not_scanned.items()):
             reasons.append(f"{count} record(s) not scanned: {why}")
         for why, count in sorted(self.in_part.items()):
@@ -796,6 +832,12 @@ class MentionScanner:
                             "cut_line_records": list(self.cut_records)},
             "unscanned_partitions": {"count": self.unscanned_count, "listed": list(self.unscanned)},
             "left_out_sources": list(self.left_out),
+            "outside_selection": {
+                "records": sum(row["records"] or 0 for row in self.residue.values()),
+                "read": sum(row["read"] for row in self.residue.values()),
+                "offered": stats["residue_offered"],
+                "targets_not_counted": sorted(target for target, row in self.residue.items() if not row["counted"]),
+                "targets": {target: dict(row) for target, row in sorted(self.residue.items())}},
             "groups_kept": self._groups, "groups_evicted": stats["groups_evicted"],
             "lines_not_kept": lost_lines, "caps": caps,
             "hosts_with_lines_not_kept": lost_hosts, "hosts_with_strong_lines_not_kept": strong_lost_hosts,

