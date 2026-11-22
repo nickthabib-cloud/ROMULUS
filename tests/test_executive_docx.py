@@ -631,20 +631,36 @@ def test_telemetry_text_stays_inert(tmp_path):
         raw = archive.read("word/document.xml").decode("utf-8")
         rels = archive.read("word/_rels/document.xml.rels").decode("utf-8")
         document = ElementTree.fromstring(raw)
-    # no field, hyperlink or external relationship came from the text, and the bidi override is gone
+    # no field, hyperlink or external relationship came from the text, and the bidi override is shown by name
     assert not any(node.tag in (f"{W}fldSimple", f"{W}hyperlink", f"{W}instrText", f"{W}fldChar")
                    for node in document.iter())
     assert "External" not in rels and "<script>" not in raw and "\u202e" not in raw
     words = "\n".join(_paragraphs(read_back(path)))
     for table in (block[1] for block in read_back(path) if block[0] == "tbl"):
         words += "\n".join(cell for row in table for cell in row)
-    visible = HOSTILE.replace("\u202e", "")
+    visible = HOSTILE.replace("\u202e", "[RLO]")
     # the hostile text is shown literally in the claim, entity, gap reason, triage rationale, mention and assessment
     assert words.count(visible) >= 6
     # nothing telemetry-derived reaches an attribute value
     for node in document.iter():
         for value in node.attrib.values():
             assert "script" not in value and "DDE" not in value
+
+
+@pytest.mark.parametrize(("character", "shown"), [
+    ("\u202e", "[RLO]"), ("\u202d", "[LRO]"), ("\u2066", "[LRI]"), ("\u2069", "[PDI]"), ("\u200f", "[RLM]"),
+    ("\u061c", "[ALM]"), ("\u200b", ""), ("\u200c", ""), ("\u200d", ""), ("\u2060", ""), ("\u2064", ""),
+    ("\u00ad", ""), ("\u180e", ""), ("\ufeff", ""), ("\ufff9", ""), ("\ufffb", ""), ("\U000e0001", ""),
+    ("\U000e0041", ""), ("\U000e007f", "")])
+def test_invisible_characters_are_named_or_removed(tmp_path, character, shown):
+    from romulus.report import ooxml
+    assert ooxml.clean(f"cmd{character}.exe") == f"cmd{shown}.exe"
+    manifest = synthetic_manifest(findings=3)
+    manifest["findings"][0]["claim"] = f"invoice{character}fdp.exe ran"
+    with ZipFile(_write(tmp_path, manifest)) as archive:
+        document = archive.read("word/document.xml").decode("utf-8")
+    # a direction control is named where it was, so a name written backwards stays evident; the rest is removed
+    assert character not in document and f"invoice{shown}fdp.exe ran" in document
 
 
 def test_attribute_values_are_only_colours_and_identifiers():

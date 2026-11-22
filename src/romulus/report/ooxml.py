@@ -17,10 +17,17 @@ PIC_NS = "http://schemas.openxmlformats.org/drawingml/2006/picture"
 PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
 
-# characters XML 1.0 forbids, then the invisible controls that can disguise text (bidirectional overrides and
-# isolates, zero-width marks, the byte-order mark)
+# characters XML 1.0 forbids
 _XML_INVALID = re.compile(r"[^\x09\x0a\x0d\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
-_INVISIBLE = re.compile(r"[\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+# Invisible characters that can hide or disguise text. The direction controls (overrides, embeddings, isolates and
+# marks) are replaced by a visible name, so a disguised name ("exe.txt" written backwards) stays evident; the
+# zero-width and formatting ones (zero-width space and joiners, word joiner and invisible operators, soft hyphen,
+# Mongolian vowel separator, byte-order mark, interlinear annotation marks, tag characters) are removed.
+DIRECTION_MARKS = {"\u061c": "[ALM]", "\u200e": "[LRM]", "\u200f": "[RLM]", "\u202a": "[LRE]", "\u202b": "[RLE]",
+                   "\u202c": "[PDF]", "\u202d": "[LRO]", "\u202e": "[RLO]", "\u2066": "[LRI]", "\u2067": "[RLI]",
+                   "\u2068": "[FSI]", "\u2069": "[PDI]"}
+_DIRECTION = re.compile("[" + "".join(DIRECTION_MARKS) + "]")
+_INVISIBLE = re.compile(r"[\u00ad\u180e\u200b-\u200d\u2060-\u2064\ufeff\ufff9-\ufffb\U000e0000-\U000e007f]")
 
 # the severity colour system, shared by text badges and the attack-path image
 LANE_COLORS = {"urgent": "B91C1C", "high": "C2410C", "lead": "A16207", "mention": "475569", "context": "6B7280"}
@@ -34,8 +41,10 @@ TEXT_WIDTH_TWIPS = 9360
 
 
 def clean(value) -> str:
-    """Text safe for a WordprocessingML text node: forbidden and invisible control characters removed."""
-    return _INVISIBLE.sub("", _XML_INVALID.sub("", "" if value is None else str(value)))
+    """Text safe for a WordprocessingML text node: XML-forbidden and invisible characters removed, and direction
+    controls shown by name."""
+    text = _INVISIBLE.sub("", _XML_INVALID.sub("", "" if value is None else str(value)))
+    return _DIRECTION.sub(lambda match: DIRECTION_MARKS[match.group()], text)
 
 
 def text_xml(value) -> str:
