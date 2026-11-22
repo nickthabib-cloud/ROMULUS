@@ -10,6 +10,7 @@ manifest text is untrusted and is written only as escaped text nodes (see `romul
 """
 import json
 from collections import Counter
+from typing import NamedTuple
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from romulus.detect.netdef import coverage_shown
@@ -92,16 +93,18 @@ class _Body:
         self.add(paragraph(run(value), style=f"Heading{level}", page_break_before=page_break))
 
     def table(self, header: list[str], widths: list[int], rows) -> int:
-        """A grid table; each cell value is text or a dict (text, fill, color, bold). Returns the row count."""
+        """A grid table; each cell value is text (from the manifest, escaped) or a renderer `Badge`. Returns the row
+        count."""
         self.add(ooxml.table_start(widths, header))
         count = 0
         for values in rows:
             cells = []
             for value, width in zip(values, widths, strict=True):
-                spec = value if isinstance(value, dict) else {"text": value}
-                cells.append(cell(paragraph(run(spec.get("text", ""), bold=spec.get("bold", False),
-                                                color=spec.get("color")), style="TableText"),
-                                  width, fill=spec.get("fill")))
+                if isinstance(value, Badge):
+                    cells.append(cell(paragraph(run(value.text, bold=True, color=value.color), style="TableText"),
+                                      width, fill=value.fill))
+                else:
+                    cells.append(cell(paragraph(run(value), style="TableText"), width))
             self.add(ooxml.table_row(cells))
             count += 1
         if not count:
@@ -112,9 +115,17 @@ class _Body:
         return count
 
 
-def _lane_badge(lane) -> dict:
+class Badge(NamedTuple):
+    """A coloured table cell. Its colours come from the renderer's palette, never from the manifest, and the writer
+    accepts only six-digit colours in attributes."""
+    text: str
+    fill: str
+    color: str = "FFFFFF"
+
+
+def _lane_badge(lane) -> Badge | str:
     color = LANE_COLORS.get(str(lane))
-    return {"text": str(lane), "fill": color, "color": "FFFFFF", "bold": True} if color else {"text": str(lane)}
+    return Badge(str(lane), color) if color else str(lane)
 
 
 def _time(value) -> str:

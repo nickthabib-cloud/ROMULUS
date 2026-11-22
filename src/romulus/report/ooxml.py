@@ -43,17 +43,37 @@ def text_xml(value) -> str:
     return escape(clean(value))
 
 
+_HEX_COLOR = re.compile(r"[0-9A-F]{6}")
+_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9]*")
+_ALIGN = frozenset({"left", "center", "right", "both"})
+
+
+def hex_color(value) -> str:
+    """A colour for an attribute: six upper-case hex digits, never anything else."""
+    if not isinstance(value, str) or not _HEX_COLOR.fullmatch(value):
+        raise ValueError(f"not a colour: {value!r}")
+    return value
+
+
+def token(value) -> str:
+    """A style or relationship id for an attribute: a letter, then letters and digits."""
+    if not isinstance(value, str) or not _TOKEN.fullmatch(value):
+        raise ValueError(f"not an identifier: {value!r}")
+    return value
+
+
 def run(value, *, bold=False, italic=False, color=None, size=None, style=None) -> str:
-    """One text run. Its properties follow the schema order (rStyle, b, i, color, sz)."""
+    """One text run. Its properties follow the schema order (rStyle, b, i, color, sz). Only `value` may carry
+    manifest text; every attribute value is checked to be a colour or an identifier."""
     props = []
     if style:
-        props.append(f'<w:rStyle w:val="{style}"/>')
+        props.append(f'<w:rStyle w:val="{token(style)}"/>')
     if bold:
         props.append("<w:b/>")
     if italic:
         props.append("<w:i/>")
     if color:
-        props.append(f'<w:color w:val="{color}"/>')
+        props.append(f'<w:color w:val="{hex_color(color)}"/>')
     if size:
         props.append(f'<w:sz w:val="{int(size)}"/>')
     rpr = f"<w:rPr>{''.join(props)}</w:rPr>" if props else ""
@@ -66,14 +86,16 @@ def paragraph(runs: str = "", *, style=None, keep_next=False, page_break_before=
     shd, jc)."""
     props = []
     if style:
-        props.append(f'<w:pStyle w:val="{style}"/>')
+        props.append(f'<w:pStyle w:val="{token(style)}"/>')
     if keep_next:
         props.append("<w:keepNext/>")
     if page_break_before:
         props.append("<w:pageBreakBefore/>")
     if shade:
-        props.append(f'<w:shd w:val="clear" w:color="auto" w:fill="{shade}"/>')
+        props.append(f'<w:shd w:val="clear" w:color="auto" w:fill="{hex_color(shade)}"/>')
     if align:
+        if align not in _ALIGN:
+            raise ValueError(f"not an alignment: {align!r}")
         props.append(f'<w:jc w:val="{align}"/>')
     ppr = f"<w:pPr>{''.join(props)}</w:pPr>" if props else ""
     return f"<w:p>{ppr}{runs}</w:p>"
@@ -81,8 +103,8 @@ def paragraph(runs: str = "", *, style=None, keep_next=False, page_break_before=
 
 def cell(content: str, width: int, *, fill=None) -> str:
     """One table cell holding prepared paragraphs (a cell always ends with a paragraph)."""
-    shade = f'<w:shd w:val="clear" w:color="auto" w:fill="{fill}"/>' if fill else ""
-    return (f'<w:tc><w:tcPr><w:tcW w:w="{width}" w:type="dxa"/>{shade}</w:tcPr>'
+    shade = f'<w:shd w:val="clear" w:color="auto" w:fill="{hex_color(fill)}"/>' if fill else ""
+    return (f'<w:tc><w:tcPr><w:tcW w:w="{int(width)}" w:type="dxa"/>{shade}</w:tcPr>'
             f"{content or paragraph()}</w:tc>")
 
 
@@ -113,7 +135,7 @@ def inline_image(rel_id: str, width_emu: int, height_emu: int, picture_id: int, 
             f'<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>'
             f'<a:graphic><a:graphicData uri="{PIC_NS}"><pic:pic>'
             f'<pic:nvPicPr><pic:cNvPr id="{picture_id}" name="{escape(name)}"/><pic:cNvPicPr/></pic:nvPicPr>'
-            f'<pic:blipFill><a:blip r:embed="{rel_id}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
+            f'<pic:blipFill><a:blip r:embed="{token(rel_id)}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
             f'<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{width_emu}" cy="{height_emu}"/></a:xfrm>'
             f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>'
             f"</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>")

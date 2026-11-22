@@ -647,6 +647,25 @@ def test_telemetry_text_stays_inert(tmp_path):
             assert "script" not in value and "DDE" not in value
 
 
+def test_attribute_values_are_only_colours_and_identifiers():
+    from romulus.report import ooxml
+    assert ooxml.run("x", color="B91C1C").count('w:val="B91C1C"') == 1
+    for bad in ('"/><w:b', "b91c1c", "red", "B91C1C0", None, 0xB91C1C):
+        with pytest.raises(ValueError):
+            ooxml.hex_color(bad)
+    with pytest.raises(ValueError):
+        ooxml.run("x", color='FFFFFF"/><w:fldSimple w:instr="x')
+    with pytest.raises(ValueError):
+        ooxml.cell(ooxml.paragraph(), 100, fill="red")
+    with pytest.raises(ValueError):
+        ooxml.paragraph(style='Normal"/><w:b')
+    with pytest.raises(ValueError):
+        ooxml.paragraph(align='center"')
+    # a table cell is text or a renderer badge; a manifest dict is shown as text, never read for colours
+    assert executive._lane_badge("urgent") == executive.Badge("urgent", "B91C1C")
+    assert executive._lane_badge('x" w:fill="000000') == 'x" w:fill="000000'
+
+
 def test_writing_twice_gives_the_same_bytes(tmp_path):
     manifest = synthetic_manifest()
     assert _write(tmp_path, manifest, "a.docx").read_bytes() == _write(tmp_path, manifest, "b.docx").read_bytes()
