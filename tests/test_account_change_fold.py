@@ -71,10 +71,11 @@ def test_a_provisioning_run_of_200_changes_is_one_item_with_the_lane_of_its_stro
     assert len(out) == 1
     [m] = out
     assert m.group_key.startswith("burst|prov01|") and (m.proposed_lane, m.severity) == ("high", "high")
-    assert "On prov01, 200 account or group change(s) were recorded close together in time" in m.claim
+    assert "On prov01, 200 account or group change(s) were requested or reported close together in time" in m.claim
     assert "naming 67 distinct account and group name(s)" in m.claim     # 60 users, admin and its 6 groups
-    assert ("60 group(s) added, 60 account(s) added, 60 password aging or expiry change(s), 14 password change(s), "
-            "6 group membership grant(s)") in m.claim
+    assert ("reported by the tools' own records: 60 group(s) added, 60 account(s) added, 60 password aging or "
+            "expiry change(s), 14 password change(s), 6 group membership grant(s)") in m.claim
+    assert "requested by commands" not in m.claim and "not established" not in m.claim
     assert "Made as 'an unrecorded account' (200)." in m.claim
     assert "a line logged under the identifier 'usermod'" in m.claim and "'useradd'" not in m.claim
     # every privileged change is named in the claim and the notes, and cited
@@ -364,7 +365,7 @@ def test_spilled_and_unspilled_fleets_are_identical(tmp_path, monkeypatch):
     hosts = list(m.fleet_hosts)
     _big, [big] = staged_run(AccountOrGroupChange, parts, tmp_path / "again", hot=10**6, monkeypatch=monkeypatch)
     assert hosts == list(big.fleet_hosts) and sorted(h for h, _ in hosts) == [f"node{h:04d}" for h in range(12)]
-    assert "each host's run made the same 81 distinct change(s)" in m.claim     # 40 accounts, 40 expiries, 1 grant
+    assert "each host's run requested or reported the same 81 distinct change(s)" in m.claim     # 40 accounts, 40 expiries, 1 grant
 
 
 def test_a_large_fleet_is_one_item_and_every_host_is_listed(tmp_path, monkeypatch):
@@ -380,7 +381,7 @@ def test_a_large_fleet_is_one_item_and_every_host_is_listed(tmp_path, monkeypatc
     assert m.fleet_host_count == hosts and m.fleet_hosts_complete and m.proposed_lane == "high"
     listed = list(m.fleet_hosts)
     assert sorted(h for h, _ in listed) == [f"node{h:04d}" for h in range(hosts)]
-    assert f"each host's run made the same {users * 2 + 1} distinct change(s)" in m.claim
+    assert f"each host's run requested or reported the same {users * 2 + 1} distinct change(s)" in m.claim
     assert f"and {hosts - 12} more (all {hosts} are in the paged host list)" in m.claim
     assert len({e.host for e in m.events}) == AccountOrGroupChange.FLEET_CITE_RUNS
     assert len(m.events) <= AccountOrGroupChange.FLEET_CITE
@@ -694,3 +695,44 @@ def test_fleet_member_hosts_keep_the_rules_evidence():
         assert entity["rules"] == 2 and "persistence" in entity["tactics"] and entity["reported"]
     # the fleet finding is ranked once, under the host it names
     assert findings["acct-fleet"]["entity"] == "node00"
+
+
+# ---------------------------------------------------------------- requests are not changes made
+def _commands(host, start, pid0):
+    """useradd alpha, useradd beta and usermod -aG sudo gamma, as exec records only (no tool record)."""
+    out = []
+    for i, argv in enumerate((["useradd", "alpha"], ["useradd", "beta"], ["usermod", "-aG", "sudo", "gamma"])):
+        e = ex(argv, pid=pid0 + i, ppid=pid0 - 1, ts=start + timedelta(seconds=5 * i))
+        e.host = host
+        out.append(e)
+    return out
+
+
+def test_a_run_of_commands_only_is_worded_as_requests():
+    [m] = run(_commands("h1", T0, 7000))[1]
+    assert m.group_key.startswith("burst|h1|") and m.proposed_lane == "high"
+    assert ("requested by commands, with no tool record from the same process: 2 account(s) added, 1 group "
+            "membership grant(s) (for these 3 request(s), whether the account database changed is not established)"
+            ) in m.claim
+    assert "reported by the tools' own records" not in m.claim
+    assert "(requested only; not shown to have taken effect)" in m.claim
+
+
+def test_a_fleet_of_command_only_runs_says_requested_or_reported():
+    events = [e for h in range(3) for e in _commands(f"n{h}", T0 + timedelta(minutes=h), 7000 + 10 * h)]
+    [m] = run(events)[1]
+    assert m.group_key.startswith("burst-fleet|") and m.fleet_host_count == 3
+    assert "each host's run requested or reported the same 3 distinct change(s)" in m.claim
+    assert "whether the account database changed is not established" in m.claim
+    assert any(n.endswith("(requested only; not shown to have taken effect)") for n in m.notes)
+
+
+def test_requested_reported_and_failed_are_counted_apart():
+    events = provisioning(users=3, admin_groups=(), passwords=0)
+    events += _commands("prov01", T0 + timedelta(seconds=30), 7100)
+    failed = audit("USER_MGMT", "modify_user", T0 + timedelta(seconds=50), pid=9300, outcome=Outcome.failure,
+                   account__op="add-user-to-group", account__name="admin", account__group="lxd")
+    [m] = run([*events, failed])[1]
+    assert "reported by the tools' own records: 3 group(s) added, 3 account(s) added, 3 password aging" in m.claim
+    assert "requested by commands, with no tool record from the same process: 2 account(s) added, 1 group" in m.claim
+    assert "attempted, every recorded result failed: 1 group membership grant(s)" in m.claim

@@ -1193,6 +1193,35 @@ def _change_failed(c: _Change) -> bool:
     return bool(c.records) and all(r.outcome == Outcome.failure for r in c.records)
 
 
+def _change_status(c: _Change) -> str:
+    """What the evidence shows of a change: 'reported' (a tool's own record reports it), 'requested' (only a command
+    asked for it: whether the account database changed is not established) or 'failed' (every recorded exec or tool
+    result failed)."""
+    if _change_failed(c):
+        return "failed"
+    return "reported" if c.records else "requested"
+
+
+_STATUS_PHRASE = {"reported": "reported by the tools' own records",
+                  "requested": "requested by commands, with no tool record from the same process",
+                  "failed": "attempted, every recorded result failed"}
+
+
+def _status_counts(counts: Counter) -> str:
+    """'reported by ...: 3 account(s) added, 1 group membership grant(s); requested by ...: ...' from (status, kind)
+    counts, with the sentence that a request does not show the change took effect."""
+    parts = []
+    for status in ("reported", "requested", "failed"):
+        kinds = sorted(((kind, n) for (s, kind), n in counts.items() if s == status), key=lambda item: (-item[1],
+                                                                                                         item[0]))
+        if kinds:
+            text = ", ".join(f"{n} {_KIND_NOUN.get(kind, kind + ' change(s)')}" for kind, n in kinds)
+            parts.append(f"{_STATUS_PHRASE[status]}: {text}")
+    requested = sum(n for (s, _kind), n in counts.items() if s == "requested")
+    return "; ".join(parts) + (f" (for these {requested} request(s), whether the account database changed is not "
+                               "established)" if requested else "")
+
+
 def _change_lane(c: _Change) -> str:
     """The lane the change would have on its own: high for a privileged request or report (or a web-service exec
     lineage) unless every recorded result failed, else lead."""
@@ -1257,7 +1286,7 @@ class _Burst:
     continued: bool = False             # the host's run began in the item before this one
     continues: bool = False             # ... and goes on in the item after it
     changes: int = 0
-    kinds: Counter = field(default_factory=Counter)
+    kinds: Counter = field(default_factory=Counter)     # (status, kind) -> changes
     targets: set = field(default_factory=set)
     targets_more: bool = False
     privileged: list = field(default_factory=list)      # each privileged change named (up to PRIVILEGED_NAMED)
@@ -1328,12 +1357,13 @@ class _Fleet:
 
 
 def _signature_text(sig: tuple) -> str:
-    kind, accounts, groups, privileges, failed = sig
+    kind, accounts, groups, privileges, status = sig
     text = _KIND_NOUN.get(kind, kind).replace("(s)", "")
     noun = "group" if kind in _GROUP_ACTIONS and not groups else "account"
     names = ", ".join([f"{noun} '{a}'" for a in accounts] + [f"group '{g}'" for g in groups])
-    return (f"{text} ({names})" if names else text) + (f": {'; '.join(privileges)}" if privileges else "") + (
-        " (failed)" if failed else "")
+    return (f"{text} ({names})" if names else text) + (f": {'; '.join(privileges)}" if privileges else "") + {
+        "reported": "", "requested": " (requested only; not shown to have taken effect)",
+        "failed": " (failed)"}[status]
 
 
 class AccountOrGroupChange(Playbook):
@@ -1466,7 +1496,9 @@ class AccountOrGroupChange(Playbook):
                   "least 3 distinct account or group names becomes one item listing exact counts by kind, every "
                   "privileged change named (up to 500) and cited first (up to 64 changes cited), other changes "
                   "named with repeat counts (up to 500 distinct); a run cut at the hour goes on in the next item, "
-                  "which says so; a smaller run keeps the per-actor findings",
+                  "which says so; a smaller run keeps the per-actor findings; counts are split into changes the "
+                  "tools' own records report, changes only a command requested (whether the account database "
+                  "changed is not established) and changes whose every recorded result failed",
         "fleets": "run items of the same shape (the same distinct changes to the same names, the same actors, writing "
                   "programs and exec lineage kinds) on at least 3 hosts, each starting less than 6 hours after the "
                   "first, are one fleet item at the lane of its strongest run, with every host in its paged host "
@@ -2020,14 +2052,12 @@ class AccountOrGroupChange(Playbook):
     def _fleet_finding(self, fleet: _Fleet) -> Match:
         template = fleet.template
         signatures = sorted(template.signatures)
-        kinds = Counter(sig[0] for sig in signatures)
-        kind_text = ", ".join(f"{n} {_KIND_NOUN.get(kind, kind + ' change(s)')}"
-                              for kind, n in sorted(kinds.items(), key=lambda item: (-item[1], item[0])))
+        kind_text = _status_counts(Counter((sig[4], sig[0]) for sig in signatures))
         span = (f"{fleet.changes_min} change(s) per host" if fleet.changes_min == fleet.changes_max
                 else f"{fleet.changes_min} to {fleet.changes_max} change(s) per host (repeats of the same changes)")
         claim = (f"On {fleet.hosts} hosts, the same run of account and group changes was recorded from "
-                 f"{_iso(fleet.first)} to {_iso(fleet.last)}: each host's run made the same {len(signatures)} "
-                 f"distinct change(s) ({kind_text}; {span}), recorded as {', '.join(repr(a) for a in template.actors)}"
+                 f"{_iso(fleet.first)} to {_iso(fleet.last)}: each host's run requested or reported the same "
+                 f"{len(signatures)} distinct change(s) ({kind_text}; {span}), recorded as {', '.join(repr(a) for a in template.actors)}"
                  + (f" and written by {', '.join(repr(w) for w in template.writers)}" if template.writers else "")
                  + f". This item groups hosts whose runs match in shape and started less than "
                    f"{self.FLEET_WINDOW / 3600:.0f} hours after the first; it does not show that the runs share an "
@@ -2100,7 +2130,8 @@ class AccountOrGroupChange(Playbook):
         """Count one change into a run: exact counts always; a name, an exemplar and a citation while their caps
         allow (privileged changes have their own, so other changes never crowd them out)."""
         run.changes += 1
-        run.kinds[_change_kind(change)] += 1
+        status = _change_status(change)
+        run.kinds[(status, _change_kind(change))] += 1
         for name in change.accounts + change.groups:
             if name in run.targets:
                 continue
@@ -2125,7 +2156,7 @@ class AccountOrGroupChange(Playbook):
                 else:
                     run.writers_more = True
         signature = (_change_kind(change), tuple(sorted(change.accounts)), tuple(sorted(change.groups)),
-                     tuple(_change_privilege(change)), _change_failed(change))
+                     tuple(_change_privilege(change)), status)
         if signature not in run.signatures:
             if len(run.signatures) < self.SHAPE_SIGNATURES:
                 run.signatures.add(signature)
@@ -2146,8 +2177,9 @@ class AccountOrGroupChange(Playbook):
         if privileges:
             run.privileged_count += 1
             if len(run.privileged) < self.PRIVILEGED_NAMED:
-                run.privileged.append(f"{text}: {'; '.join(privileges)}"
-                                      + (" (every recorded result failed)" if failed else ""))
+                run.privileged.append(f"{text}: {'; '.join(privileges)}" + {
+                    "reported": "", "requested": " (requested only; not shown to have taken effect)",
+                    "failed": " (every recorded result failed)"}[status])
             if len(run.cited_privileged) < self.BURST_CITE:
                 run.cited_privileged.append(exemplar)
             return
@@ -2160,10 +2192,9 @@ class AccountOrGroupChange(Playbook):
 
     def _burst_finding(self, run: _Burst) -> Match:
         host = run.host
-        kinds = ", ".join(f"{n} {_KIND_NOUN.get(kind, kind + ' change(s)')}"
-                          for kind, n in sorted(run.kinds.items(), key=lambda item: (-item[1], item[0])))
+        kinds = _status_counts(run.kinds)
         count = f"more than {len(run.targets)}" if run.targets_more else str(len(run.targets))
-        claim = (f"On {host}, {run.changes} account or group change(s) were recorded close together in time from "
+        claim = (f"On {host}, {run.changes} account or group change(s) were requested or reported close together in time from "
                  f"{_iso(run.first)} to {_iso(run.last)}, each less than {self.BURST_GAP / 60:.0f} minutes after the "
                  f"one before (a run: grouped by time alone, so its changes may come from different processes and "
                  f"accounts), naming {count} distinct account and group name(s): {kinds}.")
