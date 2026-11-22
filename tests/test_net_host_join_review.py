@@ -195,6 +195,33 @@ def test_a_dual_stack_sshds_mapped_client_address_meets_the_sensors_ipv4_one():
     assert len(matches) == 1 and "client address and client port" in matches[0].claim
 
 
+def test_parallel_ssh_logins_pair_by_the_sshd_pid_when_both_records_carry_it():
+    from romulus.evidence.typed import Outcome
+    from tests.test_net_host_join import CLIENT, ev
+    session = flow("f1")
+
+    def sshd_pid(eid, offset, port, pid):
+        return ev(eid, "auth", offset, "web01", {"auth.service": "sshd", "auth.phase": "authentication",
+                                                 "source.ip": CLIENT, "source.port": port, "user.name": "root",
+                                                 "process.pid": pid, "host.boot.id": "b1"}, outcome=Outcome.success)
+
+    def login_pid(eid, offset, session_id, pid):
+        return ev(eid, "auth", offset, "web01", {"auth.service": "sshd", "auth.phase": "login", "source.ip": CLIENT,
+                                                 "process.session_id": session_id, "process.pid": pid,
+                                                 "user.name": "root", "host.boot.id": "b1"}, outcome=Outcome.success)
+    host = [sshd_pid("a1", 0.4, 51022, 900), sshd_pid("a2", 0.45, 51099, 901), login_pid("u1", 0.6, 7, 900),
+            login_pid("u2", 0.65, 8, 901), execve("x7", 2, "/usr/bin/id", session=7),
+            execve("x8", 3, "/usr/bin/curl", session=8)]
+    rule, matches = run([host, [session]], [finding("F1", [session])])
+    m = matches[0]
+    assert "(session 7)" in m.claim and "id" in m.claim and "curl" not in m.claim
+    assert "several audit login sessions" not in _notes(rule)
+    # without the pid on the sshd line the two logins stay ambiguous, and say so
+    plain = [sshd("a1", 0.4), login_pid("u1", 0.6, 7, 900), login_pid("u2", 0.65, 8, 901)]
+    rule, matches = run([plain, [session]], [finding("F1", [session])])
+    assert "process or share record(s) in" not in matches[0].claim and "several audit login sessions" in _notes(rule)
+
+
 def test_a_session_only_a_later_stage_read_is_never_paired_by_address():
     from romulus.detect.net_host_join import NetworkAdminLogonJoin
     rule = NetworkAdminLogonJoin()

@@ -96,7 +96,7 @@ _UNSET_SESSIONS = {"0", "4294967295", "-1"}
 # pair; pub holds each item's last published content digest, so a pass republishes only what changed.
 JOIN_SCHEMA = {
     "net": 'eid, client, cport, server, sport, service, start, "end", origin',
-    "logon": "rid, host, boot, ts, src, sport, kind, code, ltype, svc, outcome, session, account, tseq, blob",
+    "logon": "rid, host, boot, ts, src, sport, kind, code, ltype, svc, outcome, session, account, tseq, blob, pid",
     "hostconn": "host, ts, ckey, eid, blob",
     "remote_rows": "host, session, entry, min_ts, boot, end_ts, PRIMARY KEY (host, session, entry)",
     "act": "host, session, entry, count, PRIMARY KEY (host, session, entry)",
@@ -301,6 +301,7 @@ class LogonRow:
     outcome: str
     session: str | None
     account: str
+    pid: int | None = None     # the writing process (sshd's, the audit login's), where typed
 
 
 def logon_kind(event: TypedEvent) -> str | None:
@@ -507,9 +508,7 @@ class NetworkAdminLogonJoin(Playbook):
             self._rows_account = self.state_budget().account(f"{self.id}:rows")
         return self._rows_account
 
-    TABLES = (("net", JOIN_SCHEMA["net"]),
-              ("logon", "rid, host, boot, ts, src, sport, kind, code, ltype, svc, outcome, session, account, tseq, blob"),
-              ("hostconn", "host, ts, ckey, eid, blob"))
+    TABLES = tuple((name, JOIN_SCHEMA[name]) for name in ("net", "logon", "hostconn"))
 
     def _store(self):
         """The rule's spill with its tables; a table the volume refused is created again on the next write, and one
@@ -619,7 +618,7 @@ class NetworkAdminLogonJoin(Playbook):
         row = (self._rid, event.host, boot, event.ts.timestamp(), src, _num(event.get("source.port")), kind,
                _num(event.get("event.code")), _num(event.get("auth.logon_type")), str(event.get("auth.service") or ""),
                event.outcome.value if isinstance(event.outcome, Outcome) else str(event.outcome), session,
-               str(account), seq, compact_event(event))
+               str(account), seq, compact_event(event), _num(event.get("process.pid")))
         if not self._add("logon", row):
             self._host_refused += 1
             return
@@ -962,7 +961,7 @@ class NetworkAdminLogonJoin(Playbook):
             return "no_host_logon"
         low = session.start - self.SKEW_SECONDS
         high = (session.end if session.end is not None else session.start) + self.SKEW_SECONDS
-        columns = "rid, host, boot, ts, src, sport, kind, code, ltype, svc, outcome, session, account"
+        columns = "rid, host, boot, ts, src, sport, kind, code, ltype, svc, outcome, session, account, pid"
         # The client endpoint first: a busy client (a jump host, a NAT) logs many logons, but few name this port. A
         # protocol that authenticates when its connection opens (SSH, Telnet, the r-services) logs its logon then, so
         # its endpoint is read only around the opening: a long session's client port can be used again later for
@@ -1057,10 +1056,15 @@ class NetworkAdminLogonJoin(Playbook):
             if row.kind != "linux":
                 continue
             companions = self._logon_rows(
-                rows.db, "SELECT rid, host, boot, ts, src, sport, kind, code, ltype, svc, outcome, session, account "
+                rows.db, "SELECT rid, host, boot, ts, src, sport, kind, code, ltype, svc, outcome, session, account, "
+                         "pid "
                          "FROM logon WHERE host = ? AND src = ? AND ts BETWEEN ? AND ? AND session IS NOT NULL "
                          "AND svc = ? AND outcome = 'success' ORDER BY ts, rid LIMIT 8",
                 (row.host, row.src, row.ts - self.COMPANION_BEFORE, row.ts + self.COMPANION_AFTER, row.svc))
+            # parallel logins from one client: the audit login record the same sshd process wrote, where both
+            # records carry the writer's pid
+            same_writer = [item for item in companions if row.pid is not None and item.pid == row.pid]
+            companions = same_writer or companions
             if len({(item.session, item.boot) for item in companions}) == 1:
                 companion = companions[0]
                 if all(item.rid != companion.rid for item in chosen):
