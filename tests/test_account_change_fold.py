@@ -76,7 +76,8 @@ def test_a_provisioning_run_of_200_changes_is_one_item_with_the_lane_of_its_stro
     assert ("reported by the tools' own records: 60 group(s) added, 60 account(s) added, 60 password aging or "
             "expiry change(s), 14 password change(s), 6 group membership grant(s)") in m.claim
     assert "requested by commands" not in m.claim and "not established" not in m.claim
-    assert "Made as 'an unrecorded account' (200)." in m.claim
+    assert ("every change in it was made as 'an unrecorded account' (no audit login recorded), recorded by tool "
+            "line (unverified writer), with no exec record of the changing process") in m.claim
     assert "a line logged under the identifier 'usermod'" in m.claim and "'useradd'" not in m.claim
     # every privileged change is named in the claim and the notes, and cited
     assert "2 of them request or report privileged access" in m.claim
@@ -86,7 +87,8 @@ def test_a_provisioning_run_of_200_changes_is_one_item_with_the_lane_of_its_stro
         assert any(e.get("account.group") == group for e in m.events)
     # every change is named once (all 200 are distinct)
     assert sum(n.startswith(("change:", "privileged change:")) for n in m.notes) == 200
-    assert "The records of 64 of the 200 changes are cited: the privileged ones first, then the earliest." in m.claim
+    assert ("The records of 64 of the 200 changes are cited: the privileged ones first, then the earliest; every "
+            "change is named in the notes.") in m.claim
     assert {"T1136.001", "T1098"} <= set(m.notes)
     assert "so does an intruder creating an account and granting it a privileged group inside such a run" in m.claim
     # the entity list stays bounded: the host and the accounts of the cited changes only
@@ -98,17 +100,24 @@ def test_a_run_without_a_privileged_change_is_one_lead():
     assert [(m.group_key.split("|")[0], m.proposed_lane) for m in out] == [("burst", "lead")]
 
 
-def test_a_failed_grant_is_lead_on_its_own_and_a_successful_one_keeps_the_run_high():
+def test_a_grant_recorded_by_other_evidence_is_not_folded_into_the_run():
+    """Audit-recorded grants beside a run of tool lines are another evidence class: they are not folded into the
+    tool lines' run (a lead); together they name three names, so they are their own run, high for the successful
+    grant and stating the failed one."""
     base = provisioning(users=3, admin_groups=(), passwords=0)
     failed = audit("USER_MGMT", "modify_user", T0 + timedelta(seconds=30), pid=9300, outcome=Outcome.failure,
                    account__op="add-user-to-group", account__name="admin", account__group="sudo")
-    [m] = run([*base, failed])[1]
-    assert m.proposed_lane == "lead" and "(every recorded result failed)" in m.claim
-    assert "Every recorded result failed for 1 of them." in m.claim
     granted = audit("USER_MGMT", "modify_user", T0 + timedelta(seconds=40), pid=9301,
                     account__op="add-user-to-group", account__name="admin", account__group="lxd")
-    [m] = run([*base, failed, granted])[1]
-    assert m.proposed_lane == "high" and "2 of them request or report privileged access" in m.claim
+    out = run([*base, failed, granted])[1]
+    by_kind = sorted((m.group_key.split("|")[0], m.proposed_lane) for m in out)
+    assert by_kind == [("burst", "high"), ("burst", "lead")]
+    audited = next(m for m in out if m.proposed_lane == "high")
+    assert {failed.id, granted.id} <= {e.id for e in audited.events}
+    assert "recorded by audit record" in audited.claim and "attempted, every recorded result failed" in audited.claim
+    # one audit-recorded grant alone is below the floor: its own per-actor item
+    out = run([*base, granted])[1]
+    assert sorted((m.group_key.split("|")[0], m.proposed_lane) for m in out) == [("actor", "high"), ("burst", "lead")]
 
 
 # ---------------------------------------------------------------- two views of one change
@@ -246,8 +255,8 @@ def test_runs_on_two_hosts_are_two_items():
     assert all(m.proposed_lane == "high" for m in out)
 
 
-def test_a_run_longer_than_the_span_goes_on_in_a_second_item_and_both_say_so():
-    # a change every five minutes for 100 minutes: the gap never breaks it, the hour does
+def test_a_run_longer_than_the_span_is_two_segments_that_say_so():
+    # a change every five minutes for 100 minutes: the gap never breaks it, the hour cuts it into segments
     events = []
     for i in range(21):
         events.append(line("useradd", f"new user: name=s{i:02d}, UID={3000 + i}, GID={3000 + i}, home=/srv, "
@@ -255,8 +264,8 @@ def test_a_run_longer_than_the_span_goes_on_in_a_second_item_and_both_say_so():
     out = sorted(run(events)[1], key=lambda m: m.ts)
     assert [m.group_key.split("|")[0] for m in out] == ["burst", "burst"]
     first, second = out
-    assert "The run goes on past this item" in first.claim and "The run began earlier" not in first.claim
-    assert "The run began earlier" in second.claim and "goes on past" not in second.claim
+    assert "This is segment 1 of 2 of the run" in first.claim and "This is segment 2 of 2 of the run" in second.claim
+    assert all("the whole run holds 21 change(s)" in m.claim for m in out)
     assert "12 account or group change(s)" in first.claim and "9 account or group change(s)" in second.claim
     assert second.ts - first.ts == timedelta(hours=1)
 
@@ -281,23 +290,21 @@ def test_boot_and_package_groups_are_unchanged_beside_a_run():
 
 
 # ---------------------------------------------------------------- caps, spill and volume
-def test_caps_on_names_and_citations_make_the_item_say_what_it_does_not_list(monkeypatch):
+def test_every_change_is_named_in_some_segment_and_uncited_privileged_changes_are_said(monkeypatch):
     monkeypatch.setattr(AccountOrGroupChange, "NAMED", 10)
-    monkeypatch.setattr(AccountOrGroupChange, "PRIVILEGED_NAMED", 3)
     monkeypatch.setattr(AccountOrGroupChange, "BURST_CITE", 5)
     events = provisioning(users=20, admin_groups=("sudo", "lxd", "docker", "wheel", "disk", "adm"), passwords=0)
-    pb, [m] = run(events)
-    assert "66 account or group change(s)" in m.claim and m.proposed_lane == "high"
-    assert "5 of them request or report privileged access" in m.claim
-    assert "and 0 more" not in m.claim
-    assert sum(n.startswith("privileged change:") for n in m.notes) == 3
-    assert "2 further privileged change(s) are counted, not named (the first 3 are)" in m.notes
-    assert "51 further change(s) are counted by kind, not named (the first 10 distinct changes are)" in m.notes
-    assert "The records of 5 of the 66 changes are cited" in m.claim
-    cited_groups = {e.get("account.group") for e in m.events if e.get("account.group")}
-    assert len(cited_groups & {"sudo", "lxd", "docker", "wheel", "disk"}) == 4    # privileged first, one slot kept
-    assert any("more than 10 distinct changes" in r for r in pb.limit_reasons())
-    assert any("more than 3 privileged changes" in r for r in pb.limit_reasons())
+    pb, out = run(events)
+    out = sorted(out, key=lambda m: m.ts)
+    assert len(out) == 7 and all("of 7 of the run" in m.claim for m in out)
+    assert all("the whole run holds 66 change(s)" in m.claim for m in out)
+    named = [n for m in out for n in m.notes if n.startswith(("change:", "privileged change:"))]
+    assert len(named) == 66 and len(set(named)) == 66                  # every distinct change, once
+    last = out[-1]
+    assert last.proposed_lane == "high" and "5 of them request or report privileged access" in last.claim
+    assert "1 privileged change(s) are named but not cited (at most 4 are)" in last.claim
+    assert any("more than 4 privileged changes" in r for r in pb.limit_reasons())
+    assert all(m.proposed_lane == "lead" for m in out[:-1])
 
 
 def test_a_run_straddling_the_change_budget_is_honest_about_what_it_does_not_count(tmp_path, monkeypatch):
@@ -328,8 +335,9 @@ def test_a_run_straddling_the_change_budget_is_honest_about_what_it_does_not_cou
 
 
 def _fleet(hosts, users, *, start=T0):
-    """Record-only provisioning on many hosts, built without the normalizer (fast): an audit ADD_USER and a tool
-    line for each new account, an expiry change, and the administrator added to sudo."""
+    """Record-only provisioning on many hosts, built without the normalizer (fast): an audit record and the tool's
+    line (two views of one change) for each new account, each expiry change and the administrator's sudo grant, all
+    made as root."""
     events, pid = [], 50000
     for h in range(hosts):
         host = f"node{h:04d}"
@@ -344,11 +352,20 @@ def _fleet(hosts, users, *, start=T0):
                           account__name=name)
             del text.fields["audit.record_type"]            # the tool's own line: same typed fields, no audit type
             events.append(text)
-            events.append(record("USER_MGMT", "modify_user", ts=t + timedelta(milliseconds=500), pid=pid + 10**6,
-                                 host=host, account__name=name, account__op="change-password-expiry"))
-        events.append(record("USER_MGMT", "modify_user", ts=t + timedelta(seconds=2), pid=pid + 2 * 10**6, host=host,
-                             account__name="admin", account__group="sudo", account__op="add-user-to-group",
-                             process__user="root"))
+            expiry = {"pid": pid + 10**6, "host": host, "account__name": name,
+                      "account__op": "change-password-expiry"}
+            events.append(record("USER_MGMT", "modify_user", ts=t + timedelta(milliseconds=500), process__user="root",
+                                 process__executable="/usr/bin/chage", **expiry))
+            text = record("USER_MGMT", "modify_user", ts=t + timedelta(milliseconds=501), **expiry)
+            del text.fields["audit.record_type"]
+            events.append(text)
+        grant = {"pid": pid + 2 * 10**6, "host": host, "account__name": "admin", "account__group": "sudo",
+                 "account__op": "add-user-to-group"}
+        events.append(record("USER_MGMT", "modify_user", ts=t + timedelta(seconds=2), process__user="root",
+                             process__executable="/usr/sbin/usermod", **grant))
+        text = record("USER_MGMT", "modify_user", ts=t + timedelta(seconds=2, milliseconds=1), **grant)
+        del text.fields["audit.record_type"]
+        events.append(text)
     return events
 
 
@@ -417,18 +434,27 @@ def test_twelve_hosts_with_the_same_run_are_one_fleet_item():
     assert "the other 4 host(s) are counted in the host list without a cited record" in m.claim
 
 
-def test_a_run_too_large_to_compare_is_not_merged_and_is_named(monkeypatch):
-    monkeypatch.setattr(AccountOrGroupChange, "SHAPE_SIGNATURES", 40)
-    events = _hosts(3)                                                  # 35 distinct changes each
-    big = provisioning(start=T0 + timedelta(minutes=3), host="big01", users=10, admin_groups=("adm", "sudo", "lxd"),
-                       passwords=2)
-    big += [line("passwd", f"password for 'x{i}' changed by 'root'", T0 + timedelta(minutes=4, seconds=i),
-                 host="big01") for i in range(10)]
-    out = run(events + big)[1]
-    fleet = next(m for m in out if m.group_key.startswith("burst-fleet|"))
-    [own] = [m for m in out if m is not fleet]
-    assert fleet.fleet_host_count == 3 and own.group_key.startswith("burst|big01|")
-    assert "big01 (not compared whole: it holds more than 40 distinct changes" in fleet.claim
+def test_a_rollout_too_large_for_one_segment_merges_segment_by_segment_and_keeps_an_outlier_apart():
+    """A 250-user rollout on three hosts (more than 500 distinct changes per host) and an interactive root session's
+    account on one of them: each segment is one fleet item, every change is named, the outlier keeps its own item."""
+    hosts = [f"r{h}" for h in range(3)]
+    events = []
+    for h, host in enumerate(hosts):
+        events += provisioning(start=T0 + timedelta(minutes=h), host=host, users=250, admin_groups=("adm", "sudo"),
+                               passwords=0, step=0.5)
+    session = audit("ADD_USER", "create_user", T0 + timedelta(minutes=2, seconds=100), host="r1", pid=31900,
+                    account__name="support", exe="/usr/sbin/useradd", process__login_user="alice",
+                    process__auid="1000")
+    out = run([*events, session])[1]
+    fleets = sorted((m for m in out if m.group_key.startswith("burst-fleet|")), key=lambda m: m.ts)
+    assert len(fleets) == 2 and all(m.fleet_host_count == 3 for m in fleets)
+    assert "as segment 1 of 2 of each host's run" in fleets[0].claim
+    assert "as segment 2 of 2 of each host's run" in fleets[1].claim
+    named = {n for m in fleets for n in m.notes if n.startswith("fleet change:")}
+    assert len(named) == 250 * 3 + 2                                      # every distinct change of the shape
+    [own] = [m for m in out if m not in fleets]
+    assert own.group_key.startswith("actor|r1|") and "support" in own.claim
+    assert ("account", "r1\\support", "subject") in own.entities or any("support" in str(e) for e in own.entities)
 
 
 def test_excluded_runs_beyond_the_named_cap_are_counted(monkeypatch):
@@ -484,16 +510,15 @@ def test_two_hosts_are_below_the_fleet_minimum():
 def test_runs_that_differ_by_actor_are_not_merged_and_are_named():
     events = _fleet(4, 5)
     for e in events:
-        if e.host == "node0003" and e.get("process.user") == "root" and e.get("account.action") == "create_user":
+        if e.host == "node0003" and e.get("process.user") == "root":
             e.fields["process.user"] = fv("alice", "fixture:process.user")
     out = run(events)[1]
     fleet = next(m for m in out if m.group_key.startswith("burst-fleet|"))
-    assert fleet.fleet_host_count == 3
+    assert fleet.fleet_host_count == 3 and "node0003" not in {h for h, _ in fleet.fleet_hosts}
     [own] = [m for m in out if m is not fleet]
     assert own.group_key.startswith("burst|node0003|") and own.proposed_lane == "high"
-    assert ("node0003 (recorded as 'alice', 'an unrecorded account', 'root' rather than 'an unrecorded account', "
-            "'root')") in fleet.claim
-
+    assert "node0003 (made as 'alice' (no audit login recorded)" in fleet.claim
+    assert "rather than 'root' (no audit login recorded)" in fleet.claim
 
 
 def test_the_same_run_at_an_odd_moment_stays_its_own_item_and_is_named():
@@ -728,11 +753,67 @@ def test_a_fleet_of_command_only_runs_says_requested_or_reported():
 
 
 def test_requested_reported_and_failed_are_counted_apart():
+    """Changes of one evidence class are counted by status; the commands' requests are their own run (another
+    evidence class than the tool lines), worded as requests."""
     events = provisioning(users=3, admin_groups=(), passwords=0)
     events += _commands("prov01", T0 + timedelta(seconds=30), 7100)
-    failed = audit("USER_MGMT", "modify_user", T0 + timedelta(seconds=50), pid=9300, outcome=Outcome.failure,
-                   account__op="add-user-to-group", account__name="admin", account__group="lxd")
-    [m] = run([*events, failed])[1]
-    assert "reported by the tools' own records: 3 group(s) added, 3 account(s) added, 3 password aging" in m.claim
-    assert "requested by commands, with no tool record from the same process: 2 account(s) added, 1 group" in m.claim
-    assert "attempted, every recorded result failed: 1 group membership grant(s)" in m.claim
+    lines = [line("usermod", f"add 'ops{i}' to group 'video'", T0 + timedelta(seconds=40 + i)) for i in range(2)]
+    out = run([*events, *lines])[1]
+    runs = sorted((m for m in out if m.group_key.startswith("burst|")), key=lambda m: m.ts)
+    assert len(runs) == 2
+    assert "reported by the tools' own records: 3 group(s) added, 3 account(s) added, 3 password aging" in runs[0].claim
+    assert "2 group membership grant(s)" in runs[0].claim
+    assert ("requested by commands, with no tool record from the same process: 2 account(s) added, 1 group "
+            "membership grant(s)") in runs[1].claim
+
+
+# ---------------------------------------------------------------- outliers stay out of the fold
+def test_a_late_intruder_account_in_a_large_run_is_named_entitied_and_cited():
+    """A 250-user run and an intruder's account created inside it: every change is named in some segment, and the
+    intruder's account is an entity of the item that names it."""
+    events = provisioning(users=250, admin_groups=("adm",), passwords=0, step=1.0)
+    late = events[-1].ts - timedelta(seconds=30)
+    intruder = line("useradd", "new user: name=support, UID=4999, GID=4999, home=/home/support, shell=/bin/bash, "
+                               "from=/dev/pts/3", late, pid=31999)
+    _pb, out = run([*events, intruder])
+    holder = [m for m in out if any("'support'" in n for n in m.notes)]
+    assert len(holder) == 1
+    assert ("account", "prov01\\support", "subject") in holder[0].entities
+    total = sum(1 for m in out for n in m.notes if n.startswith(("change:", "privileged change:")))
+    assert total == 250 * 3 + 1 + 1
+
+
+@pytest.mark.parametrize("forged_state", ["mismatch", "unverified"])
+def test_forged_tool_lines_never_hide_an_audit_recorded_change(forged_state):
+    """Dozens of `logger -t useradd` lines (journald contradicts their writer, or plain syslog cannot confirm it)
+    and one audit-recorded change: the forged lines are their own run, the audited change its own item."""
+    from romulus.evidence.linux_text_types import SYSLOG_WRITER_CAVEAT, WRITER_MISMATCH_CAVEAT
+    forged = provisioning(users=20, admin_groups=(), passwords=0)
+    caveat = WRITER_MISMATCH_CAVEAT if forged_state == "mismatch" else SYSLOG_WRITER_CAVEAT
+    for e in forged:
+        e.caveats = [c for c in e.caveats if c not in (WRITER_MISMATCH_CAVEAT, SYSLOG_WRITER_CAVEAT)] + [caveat]
+    real = audit("USER_MGMT", "modify_user", T0 + timedelta(seconds=30), pid=9400, account__op="add-user-to-group",
+                 account__name="mallory", account__group="sudo")
+    out = run([*forged, real])[1]
+    [own] = [m for m in out if real.id in {e.id for e in m.events}]
+    assert own.group_key.startswith("actor|") and own.proposed_lane == "high"
+    [forged_run] = [m for m in out if m is not own]
+    assert forged_run.group_key.startswith("burst|")
+    assert f"tool line ({forged_state} writer)" in forged_run.claim
+
+
+def test_an_interactive_login_repeating_a_rollout_does_not_merge():
+    events = []
+    for h in range(3):
+        events += provisioning(start=T0 + timedelta(minutes=h), host=f"node{h:02d}", users=3, admin_groups=("sudo",),
+                               passwords=0)
+    session = provisioning(start=T0 + timedelta(minutes=4), host="node03", users=3, admin_groups=("sudo",),
+                           passwords=0)
+    for e in session:
+        e.fields["process.login_user"] = fv("alice", "fixture:process.login_user")
+    out = run([*events, *session])[1]
+    fleet = next(m for m in out if m.group_key.startswith("burst-fleet|"))
+    assert fleet.fleet_host_count == 3
+    [own] = [m for m in out if m is not fleet]
+    assert own.group_key.startswith("burst|node03|") and "audit login 'alice'" in own.claim
+    assert "node03 (" in fleet.claim
