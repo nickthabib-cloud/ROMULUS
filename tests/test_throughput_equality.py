@@ -405,7 +405,10 @@ from tests import throughput_fixture as tf
 # the rule_version digests (and all_fields, which holds them) moved.
 GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
  # Fleet member hosts staged as memberships add two ranking statements: only the audit's rank query count moved.
- 'audit': 'aa759e5792e5190ec5ec9de14b6322229684145029d4f570032b854b7b1e478e',
+ # The ranking version rank@1 -> rank@2 (fleet member hosts keep the rule's evidence, timed by their own record) moves
+ # only the version string in the rank audit rows and the manifest's ranking block: with the version set back, both
+ # digests are the earlier ones.
+ 'audit': 'd0e77ecac1a33ac47a6d0073b9caff4cb4832a00fa121dd45b415b7aa84e0581',
  'baseline_counts': 'be05fabb25336f21341b46eae7d8c2627828f7a7a7e8fdb24f4eb58576099354',
  'baseline_hunt_exclusions': 'c91eefda01c512d6d63e892dc9696016b01a71d44e4abcc429d954bd51864852',
  'baseline_observations': 'ca094cd8cd080e826679198c590e07aa2b8d8d80e465ad016ccb89c8c3e28c25',
@@ -422,7 +425,7 @@ GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe55
  'events': '9b9544ad6f24d002f3f71d874518df5ecee3d968e12ec1fd5c9dce2345d7a87f',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
  'links': '5fa22b4162492394955b6b1873f566f427a58dfd7529c0df73e87a6da8daa76f',
- 'manifest': '0c25bea60e31eecb2a4359eb3293e7d2a63ff62d0d9914f4427a9897d9cdce05',
+ 'manifest': '25d5da9d0e2cfb9aa9af452275a66b11e7e0f1c28fb13f25506e41650a119e50',
  'raw': 'd924f62eebd5ee88c8142c690333924450c3344b18210ddfe87b8e486127dd35',
  'rule_cells': '9097f4a522657dacad13702ef339a22e193e73d68b293ffe29cd45abe7e02c88',
  'stats': '3cab287a0e842808a55545533e3005e8ebaf22bebf7af112b62598c7bd3c3ca6',

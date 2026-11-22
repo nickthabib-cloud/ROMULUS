@@ -708,6 +708,28 @@ def test_a_provisioned_fleet_ranks_as_one_item_and_no_longer_buries_an_attacked_
     assert sum(cid.startswith("acct") for cid in merged) == 1
 
 
+def test_a_fleet_member_is_timed_by_its_own_record():
+    """A member host's membership is timed by the record its list entry names, so its other findings co-occur with
+    its own change, not with the fleet's first; a member whose record is not stored falls back to the fleet's time."""
+    from romulus.decide.rank import RANK_VERSION
+    from romulus.hunt.rank import PASS_FINAL, compute_rank_pass
+    from tests.test_evidence_rank import START, _event, _insert, _ranks, _repo, _row
+    assert RANK_VERSION == "rank@2"
+    repo = _repo()
+    _insert(repo, [_row("acct-fleet", "host.account_or_group_change", lane="high", host="node00",
+                        attack=["T1136.001"], ts=START),
+                   _row("priv01", "r.priv", host="node01", attack=["T1548.003"], ts=START + timedelta(hours=3, minutes=5)),
+                   _row("priv02", "r.priv", host="node02", attack=["T1548.003"],
+                        ts=START + timedelta(hours=3, minutes=5))])
+    _event(repo, "e1", "node01", "account_change", [], ts=START + timedelta(hours=3))
+    repo.save_candidate_hosts("acct-fleet", "h1", [("node00", "e0"), ("node01", "e1"), ("node02", "e2-not-stored")],
+                              replace=True, expected_count=3)
+    compute_rank_pass(repo, "h1", PASS_FINAL)
+    _findings, entities = _ranks(repo)
+    assert entities[("host", "node01")]["cooccur"] == 1           # its own change three hours in
+    assert entities[("host", "node02")]["cooccur"] == 0           # no stored record: the fleet's time
+
+
 def test_fleet_member_hosts_keep_the_rules_evidence():
     from romulus.hunt.rank import PASS_FINAL, compute_rank_pass
     from tests.test_evidence_rank import START, _insert, _ranks, _repo, _row
