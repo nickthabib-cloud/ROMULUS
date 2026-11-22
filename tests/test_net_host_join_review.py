@@ -137,6 +137,25 @@ def test_sysmon_on_the_client_only_does_not_stand_in_for_the_server():
     assert "recorded the connection logged no portless logon" not in _notes(rule)
 
 
+# ---- I3: keeping the rows can fail without ending the sweep ------------------------------------------------------
+
+def test_rows_that_cannot_be_kept_end_nothing_and_are_named(tmp_path):
+    from romulus.detect.bounded import StateBudget
+    from romulus.detect.net_host_join import NetworkAdminLogonJoin
+    from tests.test_net_host_join import ssh_case
+    blocker = tmp_path / "join"
+    blocker.write_bytes(b"not a folder")                 # the rows' folder cannot be made
+    rule = NetworkAdminLogonJoin()
+    rule.spill_dir = tmp_path / "spill"
+    rule.budget = StateBudget(tmp_path)
+    rule.persist_path = blocker / "h1.db"
+    session, host = ssh_case()
+    _rule, matches = run([host, [session]], [finding("F1", [session])], rule=rule)
+    assert len(matches) == 1                             # the sweep's own join stands
+    assert any("could not be kept" in reason for reason in rule.limit_reasons())
+    assert not list(tmp_path.glob("**/*.part"))
+
+
 def test_a_session_only_a_later_stage_read_is_never_paired_by_address():
     from romulus.detect.net_host_join import NetworkAdminLogonJoin
     rule = NetworkAdminLogonJoin()

@@ -24,6 +24,7 @@ agent) is not joined here.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import ipaddress
 import json
@@ -741,13 +742,16 @@ class NetworkAdminLogonJoin(Playbook):
             self.note_limit("kept_rows", "the stage volume had no room to keep the join's rows for findings published "
                                          "after the sweep; those findings' sessions are left unresolved", records=0)
             return
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        import sqlite3
         partial = path.with_name(path.name + ".part")
-        partial.unlink(missing_ok=True)
         db = spill.db
-        db.commit()
-        db.execute("ATTACH DATABASE ? AS kept", (str(partial),))
+        attached = False
         try:
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            partial.unlink(missing_ok=True)
+            db.commit()
+            db.execute("ATTACH DATABASE ? AS kept", (str(partial),))
+            attached = True
             for name in KEPT_TABLES:
                 db.execute(f"CREATE TABLE kept.{name} ({JOIN_SCHEMA[name]})")
                 if db.execute("SELECT 1 FROM main.sqlite_master WHERE type = 'table' AND name = ?",
@@ -756,13 +760,21 @@ class NetworkAdminLogonJoin(Playbook):
             for index in JOIN_INDEXES:
                 db.execute(index.replace("CREATE INDEX IF NOT EXISTS ", "CREATE INDEX IF NOT EXISTS kept."))
             db.commit()
-        except Exception:
-            db.rollback()
             db.execute("DETACH DATABASE kept")
-            partial.unlink(missing_ok=True)
-            raise
-        db.execute("DETACH DATABASE kept")
-        os.replace(partial, path)
+            attached = False
+            os.replace(partial, path)
+        except (sqlite3.Error, OSError) as exc:
+            # the volume filled (or the folder could not be written) between the room check and the copy: the sweep's
+            # own results stand; the later pass finds no rows and leaves its findings' sessions unresolved, named
+            with contextlib.suppress(sqlite3.Error):
+                db.rollback()
+                if attached:
+                    db.execute("DETACH DATABASE kept")
+            with contextlib.suppress(OSError):
+                partial.unlink(missing_ok=True)
+            self.note_limit("kept_rows", f"the join's rows could not be kept for findings published after the sweep "
+                                         f"({exc.__class__.__name__}: {str(exc)[:120]}); those findings' sessions are "
+                                         "left unresolved", records=0)
 
     # ---- the join itself, over the sweep's spill or over the kept rows ------------------------------------------------
     def join_pass(self, rows, *, later: bool):
