@@ -174,8 +174,9 @@ def _restate_cell(repo: Repo, hunt_id: str, rule: NetworkAdminLogonJoin, notes: 
     reasons = [*kept, *[("state limit: " + note[len(LIMIT_PREFIX):]) if note.startswith(LIMIT_PREFIX) else note
                         for note in notes]]
     state = (cell or {}).get("state") or "positive_only_partial"
-    was_partial = state in ("positive_only_partial", "match_on_partial", "evaluated_partial", "executed_failed")
-    partial = partial or was_partial or rule.partial_notes(notes)
+    # partial only for a reason the cell names: a reason kept from the sweep (its rollup, a state limit, an
+    # assumed direction) or one of this pass's; a statement this pass replaced leaves no partial behind
+    partial = partial or bool(kept) or rule.partial_notes(notes) or state == "executed_failed"
     if state == "executed_failed":
         new_state = state
     elif matched is None:

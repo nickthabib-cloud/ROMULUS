@@ -204,6 +204,7 @@ def test_the_pass_is_skipped_once_finished_and_its_stop_is_named(swept):
     jp.run_join_pass(repo, client, "h1", stage)
     cell = next(c for c in repo.rule_cells("h1", rule_id=RULE) if c["target"] == "*" and c["partition"] == "window")
     assert not any("did not finish" in reason for reason in cell["detail"]["reasons"])
+    assert cell["state"] == "matched"                      # the stop's partial goes with its reason
     assert jp.finished(repo, "h1")
 
 
