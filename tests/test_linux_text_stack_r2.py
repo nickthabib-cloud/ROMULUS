@@ -38,6 +38,7 @@ UNKNOWN_REASON = "text line in no recognized format: custom.unknown"
 # offered to it, not scanned: tests load no shipped pattern), and the manifest gains its mentions section.
 # Evidence version 21 rehashes the event ids; the new privilege-broker rules add cells, and host.kernel_module_load
 # now reads a text family (kernel taint notices), so its cells follow the text partition's coverage.
+# The network-to-host join adds its rule cells and its manifest card; it publishes nothing here.
 GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a6dadaa59988bdf81e',
  'audit': 'caeecb16c4bf63c70d6c115e4b3ea120a6374d01a26da0963e79674d0b2e7737',
  'baseline_counts': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
@@ -56,9 +57,9 @@ GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a
  'events': 'f0d612c20f67d030a43e835b8ef639a78c824b51fff59c169d3d5219700de383',
  'expansion': 'dae7cbd7929a4cb94bb232a7343d4d70f62885a979b52714b87bd3641a92169b',
  'links': 'd9f0da030bf1447f35601910ec18eb012f4a55a0a8feef7262ab6e745319890e',
- 'manifest': 'd7eee59854e647bbff8400b1055887cb94d7eaae2f06512a99d94ffe15273c82',
+ 'manifest': '9f93defb27b5a3dae897f4a7c39be7a0b140c37115e4a4ee2780579f7a5deb35',
  'raw': '64be31e697a32f93b1a71657560af514b2d430469cb3be19f44b8827985a7775',
- 'rule_cells': 'ea79843a8700b925e62daa6d49eedd454afa615775a2e1bb8c1f0768901e9eb5',
+ 'rule_cells': '9ecc5d8b973e9c15e198518ae71e684b958d62a9a8f345946435afa5366ebcfc',
  'stats': 'e7d40465da77f85df2ab649392225bdfb16e5b75834447cd6d3a625129032b54',
  'tasks': '31db5bad23dca3ba0a6c4114135053177ece1b46af44576b3198b8967c6762bb'}
 
