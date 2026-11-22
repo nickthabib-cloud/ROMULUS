@@ -7,8 +7,13 @@ from tempfile import NamedTemporaryFile
 
 from romulus.report import executive, markdown
 
+# the note written beside a revision whose executive document failed to render
+DOCX_ERROR_SUFFIX = "docx-error.txt"
+
 
 def write_reports(repo, manifest, directory):
+    """Write the JSON manifest, technical Markdown and executive DOCX of one revision. Returns their paths by
+    extension; when the DOCX failed, `docx_error` names the note that says why in place of `docx`."""
     directory.mkdir(parents=True, exist_ok=True)
     stem = manifest["revision"]["id"]
     if Path(stem).name != stem or any(char in stem for char in ("/", "\\")) or stem in ("", ".", ".."):
@@ -68,11 +73,30 @@ def write_reports(repo, manifest, directory):
             output.writelines(markdown.iter_render(manifest, host_rows=lambda ref: repo.report_hosts(
                 manifest["hunt"]["id"], ref["sha256"]), visibility_rows=lambda ref: repo.zeek_visibility_rows(
                     manifest["hunt"]["id"], ref["sha256"])))
-        executive.write(manifest, staged["docx"], paths["md"].name)
         staged["json"].write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+        # The executive document is a summary of the same manifest: its failure never costs the revision its JSON
+        # and technical report. It is named in a note beside them, and an earlier document is left as it was.
+        docx_error = None
+        try:
+            executive.write(manifest, staged["docx"], paths["md"].name)
+        except Exception as exc:  # noqa: BLE001 - any renderer failure is reported, never allowed to block the rest
+            docx_error = f"{type(exc).__name__}: {exc}"[:2000]
+        note = directory/f"{stem}.{DOCX_ERROR_SUFFIX}"
+        if docx_error is not None:
+            staged["note"] = staged.pop("docx")
+            staged["note"].write_text(f"The executive DOCX for report revision {stem} was not written.\n"
+                                      f"Reason: {docx_error}\nThe JSON manifest and the technical report of this "
+                                      "revision were written.\n", encoding="utf-8",
+                                      errors="backslashreplace")  # an unpaired surrogate never costs the rest
+            paths = {**{ext: paths[ext] for ext in ("json", "md")}, "docx_error": note}
+            targets = {"json": paths["json"], "md": paths["md"], "note": note}
+        else:
+            targets = dict(paths)
         # All renderers have completed before any existing revision file is replaced.
-        for ext, temporary in staged.items():
-            os.replace(temporary, paths[ext])
+        for key, temporary in staged.items():
+            os.replace(temporary, targets[key])
+        if docx_error is None:
+            note.unlink(missing_ok=True)
     finally:
         for temporary in staged.values():
             temporary.unlink(missing_ok=True)
