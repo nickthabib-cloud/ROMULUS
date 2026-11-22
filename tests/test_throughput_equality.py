@@ -398,6 +398,11 @@ from tests import throughput_fixture as tf
 # the two privilege-broker rules (pack@61, their cells are new rows) move only rule versions and cells. With the
 # evidence version set back to 20 and the prior versions restored the candidates digest is the earlier one; the
 # candidate count, lanes and claims are unchanged.
+# host.account_or_group_change 7->8 (an audit record and the tool's line of one change are one change; a host's
+# run of changes naming three or more accounts or groups is one item) and pack@62 move only the rule version,
+# its cells and the manifest's rule card: with the prior versions restored the candidates digest is the earlier
+# one, so no candidate, lane or claim of this scenario changed; in the non-baseline semantic projection only
+# the rule_version digests (and all_fields, which holds them) moved.
 GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
  'audit': '8271edcfc6c48298d5634ac9b8a34cfb40d22d1abfeb2647ed5042bdfbcdfe9f',
  'baseline_counts': 'be05fabb25336f21341b46eae7d8c2627828f7a7a7e8fdb24f4eb58576099354',
@@ -409,16 +414,16 @@ GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe55
  'baseline_window_counts': '7cc0f5555260b0533927f47cfe29e6a543e2d921b0cc79e4b6b89f418d6052f8',
  'baseline_window_event_hours': 'e2b7f260fd489fbd23e538c741b30181a7e2a98b89a1bac3b1f8a6cbecebe945',
  'baseline_window_scope_hours': '4b73b3426ea6cf0570205ba4319a7481466e43cdcb5d210679f4e69a813bad3d',
- 'candidates': 'cd2d3031e3b0b072f35bc5f0273473bd54566ffe2bf3340f285f5e1aa1c7968a',
+ 'candidates': '2910177e36ae77129ffe7648eb9661e2073af0a6d68a7fbc29640e81e4f7fd4b',
  'entities': 'f26a3ccda6f16d94a0b0822914a0827ecd57ab81791dec1e39227f76a3529f17',
  'event_citations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'event_entities': 'eff8a025e1e2912008cbc1ab1ab03ae386f747e78043e93e8586f464003a963d',
  'events': '9b9544ad6f24d002f3f71d874518df5ecee3d968e12ec1fd5c9dce2345d7a87f',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
  'links': '5fa22b4162492394955b6b1873f566f427a58dfd7529c0df73e87a6da8daa76f',
- 'manifest': '46b99a4f9ba64da5f4e87171cef24a1428962dcfcc8cea2c10c817269e6a3540',
+ 'manifest': '0c25bea60e31eecb2a4359eb3293e7d2a63ff62d0d9914f4427a9897d9cdce05',
  'raw': 'd924f62eebd5ee88c8142c690333924450c3344b18210ddfe87b8e486127dd35',
- 'rule_cells': 'ef5931b9402c0f851be82d8103703226b8d8027e909ac42b10ef8d7a1646585f',
+ 'rule_cells': '9097f4a522657dacad13702ef339a22e193e73d68b293ffe29cd45abe7e02c88',
  'stats': '3cab287a0e842808a55545533e3005e8ebaf22bebf7af112b62598c7bd3c3ca6',
  'tasks': '1e1eeb69d05da151bec8f6dff43c1863a4eb43a288f84c1ba35168311b303360'}
 # The rule-estimate stack's digests (expansion seeded by the urgent and high lanes, as before evidence ranking;
@@ -434,20 +439,20 @@ GOLDEN_STACK_BY_RULE_ESTIMATE = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e
  'baseline_window_counts': '7cc0f5555260b0533927f47cfe29e6a543e2d921b0cc79e4b6b89f418d6052f8',
  'baseline_window_event_hours': 'e2b7f260fd489fbd23e538c741b30181a7e2a98b89a1bac3b1f8a6cbecebe945',
  'baseline_window_scope_hours': '4b73b3426ea6cf0570205ba4319a7481466e43cdcb5d210679f4e69a813bad3d',
- 'candidates': 'cd2d3031e3b0b072f35bc5f0273473bd54566ffe2bf3340f285f5e1aa1c7968a',
+ 'candidates': '2910177e36ae77129ffe7648eb9661e2073af0a6d68a7fbc29640e81e4f7fd4b',
  'entities': 'f26a3ccda6f16d94a0b0822914a0827ecd57ab81791dec1e39227f76a3529f17',
  'event_citations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'event_entities': 'eff8a025e1e2912008cbc1ab1ab03ae386f747e78043e93e8586f464003a963d',
  'events': '9b9544ad6f24d002f3f71d874518df5ecee3d968e12ec1fd5c9dce2345d7a87f',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
  'links': '5fa22b4162492394955b6b1873f566f427a58dfd7529c0df73e87a6da8daa76f',
- 'manifest': '7b8cc193e6d3cfea8fc0908ced87708cb2a9203200e8934839a64d57083eee70',
+ 'manifest': 'a1713b08ef66d6bc8f5c695f7a80688f58ef1fe8828aab6c0b63f83fbc4d9c3f',
  'raw': 'd924f62eebd5ee88c8142c690333924450c3344b18210ddfe87b8e486127dd35',
- 'rule_cells': 'ef5931b9402c0f851be82d8103703226b8d8027e909ac42b10ef8d7a1646585f',
+ 'rule_cells': '9097f4a522657dacad13702ef339a22e193e73d68b293ffe29cd45abe7e02c88',
  'stats': '3cab287a0e842808a55545533e3005e8ebaf22bebf7af112b62598c7bd3c3ca6',
  'tasks': '1e1eeb69d05da151bec8f6dff43c1863a4eb43a288f84c1ba35168311b303360'}
 GOLDEN_CANDIDATES_BY_RULE_ESTIMATE = GOLDEN_STACK_BY_RULE_ESTIMATE['candidates']
-GOLDEN_NON_BASELINE_SEMANTICS_BY_RULE_ESTIMATE = {'candidates': {'all_fields': '7c7845e9969d4e689d3d288610a4412878c08eb00706739305fe5d39181798d2',
+GOLDEN_NON_BASELINE_SEMANTICS_BY_RULE_ESTIMATE = {'candidates': {'all_fields': '01298210f34ad208d907cc81e2b3dd0d7a1813ccda18e812398b6fa0df8edda8',
                 'benign_alternatives': '16fd65da86c5d4c29ea644b96abb0c02d4b84558e0cb9687e295da52785e42ea',
                 'claim': '51beb7acd2901c1cf055d36792edda30fd960e0dd79cb4d456908a10c87f805d',
                 'claim_type': '62ee830737cd920223bd88ccd391e5074f2e72242803701f1f849e25d1fdf7c2',
@@ -464,24 +469,24 @@ GOLDEN_NON_BASELINE_SEMANTICS_BY_RULE_ESTIMATE = {'candidates': {'all_fields': '
                 'priority': '81a856684110a1b2b59396843facb23007b68eaf8c3c031222a8e9c1d5db1e06',
                 'priority_reasons': 'd38e0586d04b87d7f11769084f0368af795f59c692d2debbb4dad2eaaca05150',
                 'rule_id': '50045a80bc2eb3e1c66c58f0a55acfc5e8db0f87e8b18bd8772a1361b20c1313',
-                'rule_version': '5b1dd052d3417b54480b844f6287b64a1a4fa662b484fe37c20d8f54b05f334a',
+                'rule_version': '4cbbd04e1a71af3ac863f7273f2e5a8c2eb6cfef0fe9c5a2ed64c64170d5494d',
                 'severity': 'd8fb260b8a62f9175181cdba1356bfbd3dab9167f0965c5e7586e2202c62bcc3',
                 'source_presence': '31f6a55e225e04f5da96ef7f565969408d500a329be1bf37e463188763a5af16',
                 'ts': 'bfc0e0328d7a2b9fb224bc2791da7a13f533d4b8f03819ad9f65e7609fac08e0'},
- 'rule_cells': {'all_fields': 'f940a78a3bbd86d07b7bfb51281623d1a7e881dbe18fe8a862bf3d8ca030b43a',
+ 'rule_cells': {'all_fields': 'ecb6deabdf2480c957ca1aa3850299b5feb8f33590b5297ae100754ec7dbaf4f',
                 'count': 19101,
                 'detail': '9ae8eb135f74e5a28036a798ad4f6d0a0256c0924b521f97d734a46dc2773cf0',
                 'evaluated': '4e966692e60912e38bec63790db681b516bfa4109c16fddef94fe3cf056fe9b9',
                 'matched': 'ddfd9c6ed1fa6f03f2f7f7046b2d206bccdc1df992f4f63da7ea81776cfca02d',
                 'partition': 'a99e2c10fb0ffd39888e13022785d2a2838e5f3a7a0ffd8a40af9c316d148dc5',
                 'rule_id': '69ec88451280e542dc24ad89d964517c490faead9dbdcec230d87952640fb1cb',
-                'rule_version': '2a05019bd1479bf35d393497b26cc7a4716bc8dc741784e217791db335208585',
+                'rule_version': 'bc890fa7c64682d82a91a978f43d8749a9f2cff9de44390a3ea048b0efed4751',
                 'state': 'b1808fb24fabaec4a2a44d58b47e59423475d1f36736e2624c9148ec61730367',
                 'target': 'a9321c6ded04403230d071f3c0607e5c9fc5e48f87d03d3208acc0078d2c7a10'}}
 # Captured directly from the S7 fixture through _non_baseline_semantic_digests. Typed-event-derived hashes and
 # interchangeable predicate origins are normalized, while every decision, claim, lane, raw citation and gate is
 # checked field by field.
-GOLDEN_NON_BASELINE_SEMANTICS = {'candidates': {'all_fields': '7c7845e9969d4e689d3d288610a4412878c08eb00706739305fe5d39181798d2',
+GOLDEN_NON_BASELINE_SEMANTICS = {'candidates': {'all_fields': '01298210f34ad208d907cc81e2b3dd0d7a1813ccda18e812398b6fa0df8edda8',
                 'benign_alternatives': '16fd65da86c5d4c29ea644b96abb0c02d4b84558e0cb9687e295da52785e42ea',
                 'claim': '51beb7acd2901c1cf055d36792edda30fd960e0dd79cb4d456908a10c87f805d',
                 'claim_type': '62ee830737cd920223bd88ccd391e5074f2e72242803701f1f849e25d1fdf7c2',
@@ -498,18 +503,18 @@ GOLDEN_NON_BASELINE_SEMANTICS = {'candidates': {'all_fields': '7c7845e9969d4e689
                 'priority': '81a856684110a1b2b59396843facb23007b68eaf8c3c031222a8e9c1d5db1e06',
                 'priority_reasons': 'd38e0586d04b87d7f11769084f0368af795f59c692d2debbb4dad2eaaca05150',
                 'rule_id': '50045a80bc2eb3e1c66c58f0a55acfc5e8db0f87e8b18bd8772a1361b20c1313',
-                'rule_version': '5b1dd052d3417b54480b844f6287b64a1a4fa662b484fe37c20d8f54b05f334a',
+                'rule_version': '4cbbd04e1a71af3ac863f7273f2e5a8c2eb6cfef0fe9c5a2ed64c64170d5494d',
                 'severity': 'd8fb260b8a62f9175181cdba1356bfbd3dab9167f0965c5e7586e2202c62bcc3',
                 'source_presence': '31f6a55e225e04f5da96ef7f565969408d500a329be1bf37e463188763a5af16',
                 'ts': 'bfc0e0328d7a2b9fb224bc2791da7a13f533d4b8f03819ad9f65e7609fac08e0'},
- 'rule_cells': {'all_fields': 'f940a78a3bbd86d07b7bfb51281623d1a7e881dbe18fe8a862bf3d8ca030b43a',
+ 'rule_cells': {'all_fields': 'ecb6deabdf2480c957ca1aa3850299b5feb8f33590b5297ae100754ec7dbaf4f',
                 'count': 19101,
                 'detail': '9ae8eb135f74e5a28036a798ad4f6d0a0256c0924b521f97d734a46dc2773cf0',
                 'evaluated': '4e966692e60912e38bec63790db681b516bfa4109c16fddef94fe3cf056fe9b9',
                 'matched': 'ddfd9c6ed1fa6f03f2f7f7046b2d206bccdc1df992f4f63da7ea81776cfca02d',
                 'partition': 'a99e2c10fb0ffd39888e13022785d2a2838e5f3a7a0ffd8a40af9c316d148dc5',
                 'rule_id': '69ec88451280e542dc24ad89d964517c490faead9dbdcec230d87952640fb1cb',
-                'rule_version': '2a05019bd1479bf35d393497b26cc7a4716bc8dc741784e217791db335208585',
+                'rule_version': 'bc890fa7c64682d82a91a978f43d8749a9f2cff9de44390a3ea048b0efed4751',
                 'state': 'b1808fb24fabaec4a2a44d58b47e59423475d1f36736e2624c9148ec61730367',
                 'target': 'a9321c6ded04403230d071f3c0607e5c9fc5e48f87d03d3208acc0078d2c7a10'}}
 GOLDEN_NORMALIZED = {'arkime_sessions3-x': 'b4464dbf8fe8d697a71ef62d8c965b6ad2034f24e0fb055db657a71564d0061c',
