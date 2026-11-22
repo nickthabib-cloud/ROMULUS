@@ -45,7 +45,7 @@ AI investigating agent (planned) ─► orient ─► hypotheses, typed pivots �
                             │       own budget, so the phase can run up to AGENT_TRIAGE_MAX_WALL_SECONDS longer than
                             │       AGENT_MAX_WALL_SECONDS)
                             │
-report ─► ReportManifest ─► JSON | Markdown | web (findings, incidents, narratives, timeline)
+report ─► ReportManifest ─► JSON | Markdown | executive DOCX | web (findings, incidents, narratives, timeline)
 ```
 
 Coverage cells are written at every stage that can lose information (compile, execute, ingest, normalize, evaluate), so the report can say exactly what was and wasn't assessed.
@@ -83,6 +83,15 @@ Pass 1 runs after the sweep, packet and baseline stages and adds to expansion's 
 | `cli`, `doctor` | Command-line entry points and environment checks |
 
 Other top-level directories: `content/` (indicator lists, vendored ATT&CK), `tests/`, `scripts/`, `docs/`.
+
+## Executive report (DOCX)
+
+`report/executive.py` formats the report manifest as a Word document for leadership; `report/ooxml.py` holds the styled base template (headings with outline levels, banner, callouts, captions, the report table style) and writes the package with the standard library only. The classification banner is in the header and footer of every page and opens and closes the body. Sections: title page, bottom line, hunt scope, key findings (confirmed or urgent first, on their own), the attack path, the AI assessment and the AI triage view (each labelled as AI output; a hunt without the agent says so), the mention pool (labelled as mentions, never findings; text flagged as possible prompt injection is withheld), recommendations, coverage limitations (every gap, not-assessed row and note), and an index of every finding.
+
+- **Bounded, never lossy.** Sections that show a selection (finding details, mentions, the picture) state how many items they leave out and where they are; the finding index lists every finding. The body is streamed into its package part.
+- **Attack-path picture.** `report/attack_path.py` draws the strongest incidents (at most 8 rows of 6 steps) as a PNG: boxes numbered by their finding-index row and coloured by lane, solid arrows for observed links, dashed arrows tagged `H` for every other strength (a hypothesis). It holds no telemetry, only numbers, times and legend words; names and claims stay in document text beside it. Counts of incidents, findings and links not drawn are stated under it.
+- **Inert text.** Manifest text is written only as escaped text nodes, with XML-forbidden and invisible bidirectional characters removed; it never reaches an attribute, a relationship, a style or a field. The output is byte-reproducible.
+- **Checks.** Tests read the document back against the manifest (finding ids and lanes, counts, coverage rows, mention totals, overflow notes, a 5,000-finding manifest), check the package structure, and convert it to PDF with LibreOffice where it is installed.
 
 ## Mention sweep
 
