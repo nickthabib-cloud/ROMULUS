@@ -19,12 +19,15 @@ commands and shell text that write the account files directly, and the audit rec
 id) or a kernel file-change record shows the change. A tool's audit record and its own syslog line of the same change
 are one change citing both. A host's run of changes naming several accounts or groups (provisioning, or an intruder
 creating several accounts) is one item with the lane of its strongest change, so a privileged grant inside it keeps
-its lane and is named and cited first.
+its lane and is named and cited first. The same run on several hosts in one rollout window is one fleet item at the
+lane of its strongest run; a host whose run differs keeps its own item and is named in the fleet item.
 """
 from __future__ import annotations
 
+import hashlib
 import heapq
 import itertools
+import json
 import re
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field, replace
@@ -1275,6 +1278,62 @@ class _Burst:
     lineage_high: bool = False
     techniques: set = field(default_factory=set)
     mentions: set = field(default_factory=set)
+    # the run's shape, for merging the same run across hosts (see AccountOrGroupChange._fleets): what each distinct
+    # change did to which names, and who and what recorded it; `shape_more` when a cap left it incomplete
+    signatures: set = field(default_factory=set)
+    lineages: set = field(default_factory=set)
+    writers_more: bool = False
+    shape_more: bool = False
+
+
+@dataclass
+class _RunShape:
+    """A finished per-host run item and what a fleet merge compares: its shape key (empty when the run cannot be
+    merged, with the reason) and the parts the shape is made of."""
+    key: str
+    unmergeable: str
+    host: str | None
+    first: float
+    last: float
+    lane: str
+    anchor_id: str
+    signatures: frozenset
+    actors: tuple
+    writers: tuple
+    lineages: tuple
+    changes: int
+    match: Match
+
+
+@dataclass
+class _Fleet:
+    """Runs of one shape on several hosts inside one fleet window: exact counts, bounded names and exemplars; the
+    full host list is in the rule's member store, in chunks."""
+    fid: str
+    key: str
+    first: float
+    last: float
+    template: _RunShape
+    runs: int = 0
+    hosts: int = 0
+    lane: str = "lead"
+    sample_hosts: list = field(default_factory=list)
+    exemplars: list = field(default_factory=list)
+    chunks: int = 0
+    chunk_fill: int = 0
+    changes_min: int = 0
+    changes_max: int = 0
+    excluded: list = field(default_factory=list)
+    excluded_count: int = 0
+
+
+def _signature_text(sig: tuple) -> str:
+    kind, accounts, groups, privileges, failed = sig
+    text = _KIND_NOUN.get(kind, kind).replace("(s)", "")
+    noun = "group" if kind in _GROUP_ACTIONS and not groups else "account"
+    names = ", ".join([f"{noun} '{a}'" for a in accounts] + [f"group '{g}'" for g in groups])
+    return (f"{text} ({names})" if names else text) + (f": {'; '.join(privileges)}" if privileges else "") + (
+        " (failed)" if failed else "")
 
 
 class AccountOrGroupChange(Playbook):
@@ -1331,6 +1390,24 @@ class AccountOrGroupChange(Playbook):
     ACTORS_NAMED = 16
     WRITERS_NAMED = 8
     ALONE_HOSTS = 65536             # hosts whose changes published alone are counted by host
+    # The same run on several hosts. A rollout (configuration management applied across an inventory, an image or
+    # template deployment wave, an autoscaling batch) applies one run to its hosts within one maintenance window;
+    # six hours spans such a window, and a host whose same run comes later stays its own item (an odd moment is
+    # never merged away). Three hosts is the least that shows a rollout rather than a pair of hosts, the same floor
+    # the ranking's fleet prevalence uses. Neither value decides a lane.
+    FLEET_WINDOW = 6 * 3600.0       # a run joins a fleet when it starts less than this after the fleet's first run
+    FLEET_MIN_HOSTS = 3
+    SHAPE_SIGNATURES = 4096         # distinct changes a run's shape holds; beyond, the run is not merged
+    FLEET_HOSTS_NAMED = 12          # hosts named in a fleet item's claim (every host is in its paged host list)
+    FLEET_CITE_RUNS = 8             # member runs a fleet item cites changes from
+    FLEET_CITE = 64                 # records a fleet item cites
+    FLEET_EXCLUDED_NAMED = 32       # excluded similar runs named per fleet (all are counted)
+    FLEET_ACTIVE = 256              # fleets compared at once with the runs that were not merged
+    FLEET_CHUNK = 1000              # hosts per chunk of a fleet's member list
+    FLEET_SIMILAR = 0.5             # a run sharing at least this share of a fleet's changes is named as excluded
+    # A similar run is named as excluded when it starts within a day of the fleet's span: the same run repeated at
+    # another hour of the same day is the odd moment an analyst should see beside the fleet.
+    FLEET_NEAR = 24 * 3600.0
     program_prefilter = True
     card: ClassVar[dict] = {
         "behavior": "an account or group tool was run to create, delete or modify an account, group membership, "
@@ -1375,7 +1452,8 @@ class AccountOrGroupChange(Playbook):
                  "before to 15 minutes after a recorded boot, are one grouped lead per (host, boot), worded as "
                  "boot-time provisioning or a boot-time job; a run of changes on one host naming at least 3 "
                  "distinct accounts and groups is one item per run with the lane of its strongest change (high when "
-                 "any change in it is), never lower; web-service lineage is never folded into a run; "
+                 "any change in it is), never lower; the same run on 3 or more hosts in one rollout window is one "
+                 "fleet item at the lane of its strongest run; web-service lineage is never folded into a run; "
                  "everything else is a lead",
         "views": "a tool's audit record and its own syslog line of one change (opposite views, same host and action, "
                  "at most 10 s apart, equal pids or one pid missing with the same account, every shared field "
@@ -1389,6 +1467,14 @@ class AccountOrGroupChange(Playbook):
                   "privileged change named (up to 500) and cited first (up to 64 changes cited), other changes "
                   "named with repeat counts (up to 500 distinct); a run cut at the hour goes on in the next item, "
                   "which says so; a smaller run keeps the per-actor findings",
+        "fleets": "run items of the same shape (the same distinct changes to the same names, the same actors, writing "
+                  "programs and exec lineage kinds) on at least 3 hosts, each starting less than 6 hours after the "
+                  "first, are one fleet item at the lane of its strongest run, with every host in its paged host "
+                  "list (each with its first cited record), records cited from up to 8 hosts' runs, and wording "
+                  "that it groups by shape, not proven common origin; a run that differs (an extra or missing "
+                  "change, another actor or writer, another lineage, cut at the hour, too large to compare, or the "
+                  "same run more than 6 hours later) keeps its own item, and the fleet item names it with how it "
+                  "differs when it shares at least half the fleet's changes and starts within a day of the fleet",
         "retrieval": "the sweep retrieves every record of the host datasets in each partition (dataset filter "
                      "only), a superset of what this evaluator reads",
     }
@@ -1580,8 +1666,11 @@ class AccountOrGroupChange(Playbook):
                 groups.trim()
                 timeline.trim()
         unjoined.clear()
-        runs = self._bursts(timeline, groups)
+        run_items = SpillList(self, "acct_runs", self.HOT, disk_budget=UNBUDGETED)
+        self._bursts(timeline, groups, run_items)
         timeline.clear()
+        runs = self._fleets(run_items)
+        run_items.clear()
         out = [_citation for key in sorted(groups.keys(), key=str)
                for _citation in citation_call(self, self._finding, key, groups.peek(key))]
         groups.clear()
@@ -1708,12 +1797,12 @@ class AccountOrGroupChange(Playbook):
                        _record_actor(named) or "an unrecorded account", records=records,
                        login=next((login for login in map(_login, ordered) if login), None), exec_seen=exec_seen)
 
-    def _bursts(self, timeline: SpillList, groups: KeyedStore) -> list[Match]:
+    def _bursts(self, timeline: SpillList, groups: KeyedStore, runs: SpillList) -> None:
         """One item per run of a host's changes naming at least BURST_TARGETS distinct account or group names; the
         changes of a smaller run go to their per-actor groups. The timeline is read by host then time, so one run is
         open at a time; until a run reaches the floor its changes wait on a spilling list, after it they are
-        aggregated as read (`_Burst`, bounded)."""
-        out: list[Match] = []
+        aggregated as read (`_Burst`, bounded). Each finished run item goes to `runs` with its shape, ordered by
+        shape then start, for the fleet merge."""
         pending = SpillList(self, "acct_pending", self.HOT, disk_budget=UNBUDGETED)
         run: _Burst | None = None
         names: set[str] = set()
@@ -1724,8 +1813,13 @@ class AccountOrGroupChange(Playbook):
             if run.changes:
                 run.continues = continues
                 key = f"burst|{run.host}|{run.first_id}"
-                with citation_group(self, out, key, run):
-                    out.append(self._burst_finding(run))
+                made: list[Match] = []
+                with citation_group(self, made, key, run):
+                    made.append(self._burst_finding(run))
+                for match in made:
+                    shape = self._run_shape(run, match)
+                    need(runs.append(shape, (shape.key, f"{shape.first:020.6f}|{shape.host or ''}|{shape.anchor_id}")),
+                         self, "the account change runs")
             else:
                 for i, change in enumerate(pending):
                     need(groups.setdefault(self._group(change), list), self,
@@ -1760,7 +1854,243 @@ class AccountOrGroupChange(Playbook):
                 pending.trim()
                 groups.trim()
         close(False)
+        pending.clear()
+
+    def _run_shape(self, run: _Burst, match: Match) -> _RunShape:
+        """A finished run item and its shape. A run is merged across hosts only when its shape is whole: every
+        distinct change, actor and writing program held, cited, and not cut at the hour."""
+        reasons = []
+        if not match.events or match.citation_unavailable:
+            reasons.append("its records could not be cited")
+        if run.continued or run.continues:
+            reasons.append("it is cut at the hour")
+        if run.shape_more:
+            reasons.append(f"it holds more than {self.SHAPE_SIGNATURES} distinct changes")
+        if run.actors_more or run.writers_more:
+            reasons.append("it has more actors or writing programs than are compared")
+        signatures = frozenset(run.signatures)
+        actors, writers = tuple(sorted(run.actors)), tuple(sorted(run.writers))
+        lineages = tuple(sorted(run.lineages))
+        key = "" if reasons else hashlib.sha256(json.dumps(
+            [sorted(signatures), actors, writers, lineages]).encode()).hexdigest()[:32]
+        own = [e for e in match.events if e.id not in match.context_ids]
+        anchor = (own or match.events)[0].id if match.events else run.first_id
+        return _RunShape(key, "; ".join(reasons), run.host, run.first, run.last, match.proposed_lane, anchor,
+                         signatures, actors, writers, lineages, run.changes, match)
+
+    def _fleets(self, runs: SpillList) -> list[Match]:
+        """Run items of one shape on at least FLEET_MIN_HOSTS hosts, starting within FLEET_WINDOW of the first, are
+        one fleet item at the lane of its strongest run; every other run item is published as it is. Runs are read
+        by shape then start, so one cluster is open at a time. Runs that were not merged are then compared with the
+        fleets near them in time: one sharing at least FLEET_SIMILAR of a fleet's changes is named in that fleet's
+        item as excluded, with how it differs (it keeps its own item)."""
+        out: list[Match] = []
+        if getattr(self, "_fleet_members", None) is not None:
+            self._fleet_members.clear()
+        members = self._fleet_members = KeyedStore(self, "acct_fleet_members", self.HOT, disk_budget=UNBUDGETED)
+        seen = KeyedStore(self, "acct_fleet_seen", self.HOT, disk_budget=UNBUDGETED)
+        fleets = KeyedStore(self, "acct_fleets", self.HOT, disk_budget=UNBUDGETED)
+        windows = SpillList(self, "acct_fleet_windows", self.HOT, disk_budget=UNBUDGETED)
+        leftovers = SpillList(self, "acct_leftover_runs", self.HOT, disk_budget=UNBUDGETED)
+        fleet: _Fleet | None = None
+        waiting: list[_RunShape] = []        # a cluster's runs while it has fewer than FLEET_MIN_HOSTS hosts
+
+        def leave(shape: _RunShape) -> None:
+            need(leftovers.append(shape, (shape.first, f"{shape.host or ''}|{shape.anchor_id}")), self,
+                 "the account change runs not merged")
+
+        def add(shape: _RunShape) -> None:
+            fleet.runs += 1
+            fleet.last = max(fleet.last, shape.last)
+            fleet.changes_min = min(fleet.changes_min or shape.changes, shape.changes)
+            fleet.changes_max = max(fleet.changes_max, shape.changes)
+            if shape.lane == "high":
+                fleet.lane = "high"
+            if seen.peek((fleet.fid, shape.host)) is not None:
+                return                                        # a repeat on a host already counted
+            need(seen.put((fleet.fid, shape.host), 1), self, "the fleet host index")
+            fleet.hosts += 1
+            if not fleet.chunks or fleet.chunk_fill >= self.FLEET_CHUNK:
+                fleet.chunks, fleet.chunk_fill = fleet.chunks + 1, 0
+            chunk = need(members.setdefault((fleet.fid, fleet.chunks - 1), list), self, "the fleet host list")
+            chunk.append((shape.host, shape.anchor_id))
+            fleet.chunk_fill += 1
+            if len(fleet.sample_hosts) < self.FLEET_HOSTS_NAMED:
+                fleet.sample_hosts.append(shape.host)
+            if len(fleet.exemplars) < self.FLEET_CITE_RUNS:
+                fleet.exemplars.append(shape)
+
+        def close() -> None:
+            nonlocal fleet, waiting
+            if fleet is not None:
+                need(fleets.put(fleet.fid, fleet), self, "the fleets")
+                need(windows.append(fleet.fid, (fleet.first - self.FLEET_NEAR, fleet.fid)), self, "the fleets")
+            for shape in waiting:
+                leave(shape)
+            fleet, waiting = None, []
+
+        key, start = None, 0.0
+        for i, shape in enumerate(runs.ordered()):
+            if not shape.key:
+                leave(shape)
+                continue
+            if shape.key != key or shape.first - start >= self.FLEET_WINDOW:
+                close()
+                key, start = shape.key, shape.first
+            if fleet is not None:
+                add(shape)
+            else:
+                waiting.append(shape)
+                if len({s.host for s in waiting}) >= self.FLEET_MIN_HOSTS:
+                    first = waiting[0]
+                    fleet = _Fleet(f"{first.key}|{first.anchor_id}", first.key, first.first, first.last, first,
+                                   lane=first.lane)
+                    for held in waiting:
+                        add(held)
+                    waiting = []
+            if i % self.FINALIZE_TRIM == self.FINALIZE_TRIM - 1:
+                for store in (members, seen, fleets, windows, leftovers):
+                    store.trim()
+        close()
+        seen.clear()
+        # compare the runs that were not merged with the fleets whose span, widened by FLEET_NEAR, holds their start
+        order = iter(windows.ordered())
+        upcoming = next(order, None)
+        active: list[tuple[str, float]] = []           # (fleet id, end of its widened span)
+        for i, shape in enumerate(leftovers.ordered()):
+            while upcoming is not None and fleets.peek(upcoming).first - self.FLEET_NEAR <= shape.first:
+                found = fleets.peek(upcoming)
+                active.append((upcoming, found.last + self.FLEET_NEAR))
+                if len(active) > self.FLEET_ACTIVE:
+                    active.pop(0)
+                    self.note_limit("fleet_active", f"more than {self.FLEET_ACTIVE} fleets of account change runs "
+                                                    "overlapped in time; runs that were not merged were compared "
+                                                    "with the latest of them only, so a fleet item may not name every "
+                                                    "similar run it excluded")
+                upcoming = next(order, None)
+            active = [(fid, end) for fid, end in active if end >= shape.first]
+            for fid, _end in active:
+                found = fleets.peek(fid)
+                reason = self._excluded(found, shape)
+                if reason:
+                    found.excluded_count += 1
+                    if len(found.excluded) < self.FLEET_EXCLUDED_NAMED:
+                        found.excluded.append((shape.host, reason))
+                    need(fleets.put(fid, found), self, "the fleets")
+            out.append(shape.match)
+            if i % self.FINALIZE_TRIM == self.FINALIZE_TRIM - 1:
+                fleets.trim()
+        for fid in sorted(fleets.keys(), key=str):
+            found = fleets.peek(fid)
+            with citation_group(self, out, f"burst-fleet|{fid}", found):
+                out.append(self._fleet_finding(found))
+        fleets.clear()
+        windows.clear()
+        leftovers.clear()
         return out
+
+    def _excluded(self, fleet: _Fleet, shape: _RunShape) -> str:
+        """How a run that was not merged differs from a fleet it resembles ('' when it does not resemble it)."""
+        template = fleet.template
+        if not template.signatures or len(shape.signatures & template.signatures) < (
+                self.FLEET_SIMILAR * len(template.signatures)):
+            return ""
+        parts = []
+        if shape.unmergeable:
+            parts.append(f"not compared whole: {shape.unmergeable}")
+        extra = sorted(shape.signatures - template.signatures)
+        missing = len(template.signatures - shape.signatures)
+        if extra:
+            parts.append(f"{len(extra)} change(s) the fleet's runs do not make: "
+                         + "; ".join(map(_signature_text, extra[:3])) + ("; and more" if len(extra) > 3 else ""))
+        if missing:
+            parts.append(f"{missing} of the fleet's changes not made")
+        if shape.actors != template.actors:
+            parts.append(f"recorded as {', '.join(map(repr, shape.actors))} rather than "
+                         f"{', '.join(map(repr, template.actors))}")
+        if shape.writers != template.writers:
+            parts.append("written by " + (", ".join(shape.writers) or "no recorded program") + " rather than "
+                         + (", ".join(template.writers) or "no recorded program"))
+        if shape.lineages != template.lineages:
+            parts.append("under another exec lineage")
+        if not fleet.first <= shape.first < fleet.first + self.FLEET_WINDOW:
+            parts.append(f"started at {_iso(shape.first)}, outside the fleet window")
+        return "; ".join(parts)
+
+    def _fleet_finding(self, fleet: _Fleet) -> Match:
+        template = fleet.template
+        signatures = sorted(template.signatures)
+        kinds = Counter(sig[0] for sig in signatures)
+        kind_text = ", ".join(f"{n} {_KIND_NOUN.get(kind, kind + ' change(s)')}"
+                              for kind, n in sorted(kinds.items(), key=lambda item: (-item[1], item[0])))
+        span = (f"{fleet.changes_min} change(s) per host" if fleet.changes_min == fleet.changes_max
+                else f"{fleet.changes_min} to {fleet.changes_max} change(s) per host (repeats of the same changes)")
+        claim = (f"On {fleet.hosts} hosts, the same run of account and group changes was recorded from "
+                 f"{_iso(fleet.first)} to {_iso(fleet.last)}: each host's run made the same {len(signatures)} "
+                 f"distinct change(s) ({kind_text}; {span}), recorded as {', '.join(repr(a) for a in template.actors)}"
+                 + (f" and written by {', '.join(repr(w) for w in template.writers)}" if template.writers else "")
+                 + f". This item groups hosts whose runs match in shape and started less than "
+                   f"{self.FLEET_WINDOW / 3600:.0f} hours after the first; it does not show that the runs share an "
+                   "origin.")
+        if fleet.runs > fleet.hosts:
+            claim += f" {fleet.runs} runs in all ({fleet.runs - fleet.hosts} more on hosts already counted)."
+        privileged = [_signature_text(sig) for sig in signatures if sig[3]]
+        if privileged:
+            claim += (f" On every host the run requests or reports privileged access: {'; '.join(privileged[:8])}"
+                      + (f"; and {len(privileged) - 8} more (each is in the notes)" if len(privileged) > 8 else "")
+                      + ".")
+        more = fleet.hosts - len(fleet.sample_hosts)
+        claim += (f" Hosts: {', '.join(str(h) for h in fleet.sample_hosts)}"
+                  + (f" and {more} more (all {fleet.hosts} are in the paged host list)" if more else "") + ".")
+        if fleet.excluded_count:
+            shown = "; ".join(f"{host} ({reason})" for host, reason in fleet.excluded[:4])
+            rest = fleet.excluded_count - min(4, len(fleet.excluded))
+            claim += (f" {fleet.excluded_count} similar host run(s) differ from this shape and keep their own items: "
+                      f"{shown}" + (f"; and {rest} more" + (" (named in the notes)" if fleet.excluded_count
+                                                             <= self.FLEET_EXCLUDED_NAMED else
+                                                             f" (the first {self.FLEET_EXCLUDED_NAMED} are named in "
+                                                             "the notes)") if rest else "") + ".")
+        claim += (" A provisioning run rolled out across a fleet looks like this; so does one intruder making the same "
+                  "changes on many hosts, so the item keeps the lane of its strongest run.")
+        # exemplar records from several hosts' runs: the privileged changes' records first
+        per_run = max(1, self.FLEET_CITE // max(1, len(fleet.exemplars)))
+        events: list[TypedEvent] = []
+        for shape in fleet.exemplars:
+            own = [e for e in shape.match.events if e.id not in shape.match.context_ids]
+            own.sort(key=lambda e: (not _record_privilege(e), e.ts, e.id))
+            events += own[:per_run]
+        events = sorted(_unique(events), key=lambda e: (e.ts, e.id))[:self.FLEET_CITE]
+        claim += (f" Records of the runs on {len(fleet.exemplars)} of the {fleet.hosts} hosts are cited; each host's "
+                  "first cited record is in its host list entry.")
+        notes = sorted({n for n in template.match.notes if n.startswith("T")})
+        notes += [f"fleet change: {_signature_text(sig)}" for sig in signatures[:self.NAMED]]
+        if len(signatures) > self.NAMED:
+            notes.append(f"{len(signatures) - self.NAMED} further distinct change(s) of the shape are counted, not "
+                         "named")
+        notes += [f"excluded: {host} ({reason})" for host, reason in fleet.excluded]
+        if fleet.excluded_count > len(fleet.excluded):
+            notes.append(f"{fleet.excluded_count - len(fleet.excluded)} further excluded run(s) are counted, not named")
+        entities = list(template.match.entities)
+        predicate = [pf(e, n) for e in sorted(events, key=lambda e: (not _record_privilege(e), e.ts, e.id))[:4]
+                     for n in ("process.argv", "process.executable", "audit.record_type", "account.action",
+                               "account.name", "account.group") if e.has(n)]
+        match = Match(self.id, claim, self.claim_type, events, predicate,
+                      min(e.ts for e in events), self.severity, fleet.lane, template.match.confidence, entities,
+                      group_key=f"burst-fleet|{fleet.fid}", fleet_hosts=self._fleet_hosts(fleet.fid, fleet.chunks),
+                      fleet_host_count=fleet.hosts, fleet_hosts_complete=True)
+        match.notes = notes
+        return match
+
+    def _fleet_hosts(self, fid: str, chunks: int):
+        """A fleet item's hosts with each host's first cited record, read from the rule's member store when the
+        finding is published."""
+        store = self._fleet_members
+        for index in range(chunks):
+            chunk = store.peek((fid, index))
+            if chunk is None:
+                self.note_limit("fleet_hosts", f"the host list of fleet {fid} could not be fully read")
+                raise LookupError(f"the host list of fleet {fid} could not be fully read")
+            yield from chunk
 
     def _burst_add(self, run: _Burst, change: _Change) -> None:
         """Count one change into a run: exact counts always; a name, an exemplar and a citation while their caps
@@ -1785,8 +2115,19 @@ class AccountOrGroupChange(Playbook):
             run.actors_more += 1
         for record in change.records[:4]:
             exe = record.get("process.executable")
-            if exe and len(run.writers) < self.WRITERS_NAMED:
-                run.writers.add(str(exe))
+            if exe and str(exe) not in run.writers:
+                if len(run.writers) < self.WRITERS_NAMED:
+                    run.writers.add(str(exe))
+                else:
+                    run.writers_more = True
+        signature = (_change_kind(change), tuple(sorted(change.accounts)), tuple(sorted(change.groups)),
+                     tuple(_change_privilege(change)), _change_failed(change))
+        if signature not in run.signatures:
+            if len(run.signatures) < self.SHAPE_SIGNATURES:
+                run.signatures.add(signature)
+            else:
+                run.shape_more = True
+        run.lineages.add(change.lineage.kind)
         run.techniques.add(_ACTION_TECHNIQUE.get(change.action, "T1098"))
         run.mentions.update(m for m in map(_record_mention, change.records[:4]) if m)
         lane = _change_lane(change)

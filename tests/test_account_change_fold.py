@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from romulus.detect.auth import AccountOrGroupChange, _view_fit
-from romulus.evidence.typed import Outcome
+from romulus.evidence.typed import Outcome, fv
 from tests.storage_capacity_fixture import refuse_configured_stores
 from tests.test_account_changes import ex, record, run
 from tests.test_bounded_host import same_small_and_unbounded, staged_run
@@ -355,26 +355,157 @@ def _count(m) -> int:
     return int(m.claim.split(", ", 1)[1].split(" ", 1)[0])
 
 
-def test_spilled_and_unspilled_runs_are_identical(tmp_path, monkeypatch):
+def test_spilled_and_unspilled_fleets_are_identical(tmp_path, monkeypatch):
     events = sorted(_fleet(12, 40), key=lambda e: (e.ts, e.id))
     parts = [events[i:i + 250] for i in range(0, len(events), 250)]
-    _rule, out = same_small_and_unbounded(AccountOrGroupChange, parts, tmp_path, monkeypatch, "records")
-    assert len(out) == 12 and all(m.proposed_lane == "high" for m in out)
-    assert sum(_count(m) for m in out) == 12 * (40 * 2 + 1)
+    _small, out = same_small_and_unbounded(AccountOrGroupChange, parts, tmp_path, monkeypatch, "records")
+    [m] = out
+    assert m.group_key.startswith("burst-fleet|") and m.proposed_lane == "high" and m.fleet_host_count == 12
+    hosts = list(m.fleet_hosts)
+    _big, [big] = staged_run(AccountOrGroupChange, parts, tmp_path / "again", hot=10**6, monkeypatch=monkeypatch)
+    assert hosts == list(big.fleet_hosts) and sorted(h for h, _ in hosts) == [f"node{h:04d}" for h in range(12)]
+    assert "each host's run made the same 81 distinct change(s)" in m.claim     # 40 accounts, 40 expiries, 1 grant
 
 
-def test_a_large_fleet_is_one_item_per_host_and_every_change_is_counted(tmp_path, monkeypatch):
+def test_a_large_fleet_is_one_item_and_every_host_is_listed(tmp_path, monkeypatch):
     hosts, users = 200, 120
     events = sorted(_fleet(hosts, users), key=lambda e: (e.ts, e.id))
     parts = [events[i:i + 5000] for i in range(0, len(events), 5000)]
+    monkeypatch.setattr(AccountOrGroupChange, "FLEET_CHUNK", 7)            # many chunks of the member list
     began = time.perf_counter()
     rule, out = staged_run(AccountOrGroupChange, parts, tmp_path, hot=500, monkeypatch=monkeypatch)
     elapsed = time.perf_counter() - began
-    assert rule.records.on_disk > 0 and rule.capped == 0
-    assert len(out) == hosts and {m.group_key.split("|")[1] for m in out} == {f"node{h:04d}" for h in range(hosts)}
-    assert sum(_count(m) for m in out) == hosts * (users * 2 + 1)      # two views per account were one change
-    assert all(m.proposed_lane == "high" and len(m.events) <= 3 * AccountOrGroupChange.BURST_CITE for m in out)
-    assert elapsed < 120, elapsed
+    assert rule.records.on_disk > 0 and rule.capped == 0 and rule.limit_reasons() == []
+    [m] = out
+    assert m.fleet_host_count == hosts and m.fleet_hosts_complete and m.proposed_lane == "high"
+    listed = list(m.fleet_hosts)
+    assert sorted(h for h, _ in listed) == [f"node{h:04d}" for h in range(hosts)]
+    assert f"each host's run made the same {users * 2 + 1} distinct change(s)" in m.claim
+    assert f"and {hosts - 12} more (all {hosts} are in the paged host list)" in m.claim
+    assert len({e.host for e in m.events}) == AccountOrGroupChange.FLEET_CITE_RUNS
+    assert len(m.events) <= AccountOrGroupChange.FLEET_CITE
+    assert elapsed < 180, elapsed
+
+
+# ---------------------------------------------------------------- the same run on several hosts
+def _hosts(n, users=10, start=T0, admin_groups=("adm", "sudo", "lxd"), prefix="node"):
+    events = []
+    for h in range(n):
+        events += provisioning(start=start + timedelta(minutes=h), host=f"{prefix}{h:02d}", users=users,
+                               admin_groups=admin_groups, passwords=2)
+    return events
+
+
+def test_twelve_hosts_with_the_same_run_are_one_fleet_item():
+    out = run(_hosts(12))[1]
+    [m] = out
+    assert m.group_key.startswith("burst-fleet|") and (m.proposed_lane, m.severity) == ("high", "high")
+    assert m.fleet_host_count == 12 and m.fleet_hosts_complete
+    assert sorted(h for h, _ in m.fleet_hosts) == [f"node{h:02d}" for h in range(12)]
+    assert "On 12 hosts, the same run of account and group changes was recorded" in m.claim
+    assert "it does not show that the runs share an origin" in m.claim
+    assert "On every host the run requests or reports privileged access" in m.claim
+    assert "membership of privileged group sudo" in m.claim and "membership of privileged group lxd" in m.claim
+    assert "Hosts: node00, node01" in m.claim and "and" not in m.claim.split("Hosts: ", 1)[1].split(".", 1)[0]
+    assert len({e.host for e in m.events}) == 8                     # exemplar records from several hosts' runs
+    assert any(n.startswith("fleet change:") and "group 'sudo'" in n for n in m.notes)
+
+
+def test_a_host_with_an_extra_sudo_grant_stays_its_own_high_item_and_the_fleet_names_it():
+    events = _hosts(12)
+    events += provisioning(start=T0 + timedelta(minutes=12), host="node12", users=10, admin_groups=("adm", "sudo",
+                                                                                                    "lxd"), passwords=2)
+    events.append(line("usermod", "add 'backdoor' to group 'sudo'", T0 + timedelta(minutes=13), host="node12"))
+    out = run(events)[1]
+    fleet = next(m for m in out if m.group_key.startswith("burst-fleet|"))
+    alone = [m for m in out if not m.group_key.startswith("burst-fleet|")]
+    assert fleet.fleet_host_count == 12 and "node12" not in {h for h, _ in fleet.fleet_hosts}
+    assert [(m.group_key.split("|")[:2], m.proposed_lane) for m in alone] == [(["burst", "node12"], "high")]
+    assert "'backdoor'" in alone[0].claim
+    assert ("1 similar host run(s) differ from this shape and keep their own items: node12 (1 change(s) the fleet's "
+            "runs do not make: group membership grant (account 'backdoor', group 'sudo'): membership of privileged "
+            "group sudo)") in fleet.claim
+    assert any(n.startswith("excluded: node12") for n in fleet.notes)
+
+
+def test_two_hosts_are_below_the_fleet_minimum():
+    out = run(_hosts(2))[1]
+    assert sorted(m.group_key.split("|")[0] for m in out) == ["burst", "burst"]
+    out = run(_hosts(3))[1]
+    assert [m.group_key.split("|")[0] for m in out] == ["burst-fleet"]
+
+
+def test_runs_that_differ_by_actor_are_not_merged_and_are_named():
+    events = _fleet(4, 5)
+    for e in events:
+        if e.host == "node0003" and e.get("process.user") == "root" and e.get("account.action") == "create_user":
+            e.fields["process.user"] = fv("alice", "fixture:process.user")
+    out = run(events)[1]
+    fleet = next(m for m in out if m.group_key.startswith("burst-fleet|"))
+    assert fleet.fleet_host_count == 3
+    [own] = [m for m in out if m is not fleet]
+    assert own.group_key.startswith("burst|node0003|") and own.proposed_lane == "high"
+    assert ("node0003 (recorded as 'alice', 'an unrecorded account', 'root' rather than 'an unrecorded account', "
+            "'root')") in fleet.claim
+
+
+
+def test_the_same_run_at_an_odd_moment_stays_its_own_item_and_is_named():
+    late = T0 + timedelta(hours=10)
+    events = _hosts(5) + provisioning(start=late, host="late01", users=10, admin_groups=("adm", "sudo", "lxd"),
+                                      passwords=2)
+    out = run(events)[1]
+    fleet = next(m for m in out if m.group_key.startswith("burst-fleet|"))
+    own = [m for m in out if m is not fleet]
+    assert fleet.fleet_host_count == 5 and [m.group_key.split("|")[1] for m in own] == ["late01"]
+    assert own[0].proposed_lane == "high"
+    assert "late01 (started at 2030-03-04T19:00:02+00:00, outside the fleet window)" in fleet.claim
+
+
+@pytest.mark.parametrize("offset,merged", [(AccountOrGroupChange.FLEET_WINDOW - 1, True),
+                                           (AccountOrGroupChange.FLEET_WINDOW, False)])
+def test_the_fleet_window_is_half_open(offset, merged):
+    events = _hosts(3, users=3)
+    events += provisioning(start=T0 + timedelta(seconds=offset), host="edge", users=3,
+                           admin_groups=("adm", "sudo", "lxd"), passwords=2)
+    out = run(events)[1]
+    fleet = next(m for m in out if m.group_key.startswith("burst-fleet|"))
+    assert fleet.fleet_host_count == (4 if merged else 3)
+
+
+def test_a_fleet_item_is_published_through_the_sweep_with_its_host_list(tmp_path, monkeypatch):
+    from tests import test_linux_text_stack_r2 as stack
+    from tests import throughput_fixture as tf
+
+    builder = tf.Builder(29)
+    for h, host in enumerate(("web1", "db1", "fw1")):
+        for n, body in enumerate(("useradd[{pid}]: new group: name=svc, GID=990",
+                                  ("useradd[{pid}]: new user: name=svc, UID=990, GID=990, home=/srv, "
+                                   "shell=/usr/sbin/nologin, from=none"),
+                                  "usermod[{pid}]: add 'admin' to group 'sudo'",
+                                  "usermod[{pid}]: add 'admin' to group 'adm'")):
+            when = tf.T0 + timedelta(minutes=h, seconds=n)
+            builder._doc(host, when, "custom.auth", None,
+                         message=f"Nov 18 {when:%H:%M:%S} {host} {body.format(pid=4200 + 10 * h + n)}")
+    monkeypatch.setattr(stack, "text_documents",
+                        lambda: {tf.HOST_TARGET: builder.host, tf.NETWORK_TARGET: [], tf.ARKIME_TARGET: []})
+    snapshot, _trace, _docs = stack.run_text_stack(tmp_path, monkeypatch)
+    assert snapshot["stats"]["errors"] == 0 and not snapshot["stats"].get("rule_failures")
+    [row] = [row for row in snapshot["candidates"] if row["rule_id"] == "host.account_or_group_change"]
+    assert row["lane"] == "high" and row["group_key"].startswith("burst-fleet|")
+    gates = row["gate_results"]
+    assert gates["_fleet_host_count"] == 3 and gates["_fleet_hosts_complete"] is True
+
+
+def test_gpasswd_audit_record_and_its_line_pair():
+    # shadow-utils gpasswd -a: audit_logger_with_group(AUDIT_USER_MGMT, "add-user-to-group", user, ..., "grp", group)
+    # and syslog "user %s added by %s to group %s"
+    rec = audit("USER_MGMT", "modify_user", T0, host="app01", pid=9500, account__op="add-user-to-group",
+                account__name="mallory", account__group="sudo", exe="/usr/bin/gpasswd")
+    text = line("gpasswd", "user mallory added by root to group sudo", T0 + timedelta(milliseconds=200),
+                host="app01", pid=9500)
+    [m] = run([rec, text])[1]
+    assert {e.id for e in m.events} == {rec.id, text.id} and m.proposed_lane == "high"
 
 
 def test_real_shipper_shapes_of_one_useradd_pair_into_one_change():
@@ -460,30 +591,34 @@ def test_separate_changes_crowd_the_top_and_one_run_counts_once():
     assert {"atk0", "atk1", "atk2", "prov-cred"} <= set(folded_top)
 
 
-def test_a_provisioned_fleet_after_the_fold_is_one_reported_item_per_host():
+def test_a_provisioned_fleet_ranks_as_one_item_and_no_longer_buries_an_attacked_host():
     """Twelve freshly provisioned hosts, each meeting the evidence bar (the account change and a privilege-use lead
-    of another tactic), and one attacked host with three tactics. Separately, one host's 30 per-change items take
-    the whole reported top ten; folded, each host's run is one item. The fold does not go further: twelve high run
-    items still rank above the attacked host's lead findings, one per provisioned host (a cross-host merge would be
-    a separate decision)."""
+    of another tactic), and one attacked host with three tactics. Per-host run items take twelve reported places
+    above the attacked host's leads; the fleet item takes one (its member hosts are the hunt's hosts and the rule's
+    prevalence, as for every fleet-grouped finding, but its evidence counts once, on the host it cites)."""
     from romulus.hunt.rank import PASS_FINAL, compute_rank_pass
     from tests.test_evidence_rank import START, _insert, _repo, _row
 
-    def ranked(per_host: int) -> list[str]:
+    def ranked(fleet: bool) -> list[str]:
         repo = _repo()
-        rows = [_row(f"acct{h:02d}-{i:02d}", "host.account_or_group_change", lane="high", host=f"node{h:02d}",
-                     attack=["T1136.001"], ts=START + timedelta(minutes=h, seconds=i))
-                for h in range(12) for i in range(per_host)]
+        if fleet:
+            rows = [_row("acct-fleet", "host.account_or_group_change", lane="high", host="node00",
+                         attack=["T1136.001"], ts=START)]
+        else:
+            rows = [_row(f"acct{h:02d}", "host.account_or_group_change", lane="high", host=f"node{h:02d}",
+                         attack=["T1136.001"], ts=START + timedelta(minutes=h)) for h in range(12)]
         rows += [_row(f"priv{h:02d}", "r.priv", host=f"node{h:02d}", attack=["T1548.003"],
                       ts=START + timedelta(minutes=h, seconds=40)) for h in range(12)]
         rows += [_row(f"atk{i}", rule, host="atk", attack=[technique], ts=START + timedelta(hours=3, minutes=i))
                  for i, (rule, technique) in enumerate((("r.exec", "T1059"), ("r.cred", "T1003"),
                                                          ("r.c2", "T1071")))]
         _insert(repo, rows)
+        if fleet:
+            repo.save_candidate_hosts("acct-fleet", "h1", [(f"node{h:02d}", f"e{h}") for h in range(12)],
+                                      replace=True, expected_count=12)
         compute_rank_pass(repo, "h1", PASS_FINAL)
         return [row["candidate_id"] for row in repo.finding_ranks_page("h1", PASS_FINAL, reported=True, limit=40)]
 
-    separate, folded = ranked(30), ranked(1)
-    assert [cid.split("-")[0] for cid in separate[:10]] == ["acct00"] * 10     # one host fills the top ten
-    assert [cid.split("-")[0] for cid in folded[:12]] == [f"acct{h:02d}" for h in range(12)]  # one item per host
-    assert folded.index("atk0") < len(folded) and len(folded) == 12 + 12 + 3
+    per_host, merged = ranked(False), ranked(True)
+    assert per_host[:12] == [f"acct{h:02d}" for h in range(12)] and per_host.index("atk0") >= 12
+    assert merged[0] == "acct-fleet" and set(merged[1:4]) == {"atk0", "atk1", "atk2"}
