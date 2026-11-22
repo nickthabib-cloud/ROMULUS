@@ -33,7 +33,7 @@ def test_old_hunt_docx_bytes_are_unchanged(tmp_path, monkeypatch):
         for name in archive.namelist():
             if not name.startswith("word/media/"):
                 content.update(name.encode() + b"\0" + archive.read(name) + b"\0")
-    assert content.hexdigest() == "d6b237955d15685b2f8a74e86c312edfcc5726b7df52863e5ff3229072641873"
+    assert content.hexdigest() == "c5c3db13349f7369045514cc49856d9f4c0b690b3bed10fa91e4fb07b7324823"
 
 
 def test_old_hunt_json_and_markdown_are_unchanged(monkeypatch):

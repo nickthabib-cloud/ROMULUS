@@ -314,7 +314,8 @@ def test_attack_path_draws_observed_and_hypothesis_links_and_lists_its_steps(tmp
     blocks = read_back(path)
     section = _section(blocks, executive.ATTACK_PATH_TITLE)
     text = _paragraphs(section)
-    assert "Every incident, finding and link of the incident graph is drawn." in text
+    assert any(value.startswith("The picture draws every incident, finding and link") and "not a complete account" in value
+               for value in text)
     steps = [block[1] for block in section if block[0] == "tbl"][1][1:]
     index = {row[1]: row[0] for row in _table_after(blocks, executive.FINDING_INDEX_TITLE)[1:]}
     # each box carries the finding's row number in the index
@@ -327,6 +328,38 @@ def test_attack_path_draws_observed_and_hypothesis_links_and_lists_its_steps(tmp
         relationships = ElementTree.fromstring(archive.read("word/_rels/document.xml.rels"))
     assert any(rel.get("Target") == "media/attack-path.png" for rel in relationships)
     assert _png_pixels(image)[1].count(bytes.fromhex(HYPOTHESIS_COLOR)) > 0
+
+
+def test_a_long_incident_account_keeps_its_hypothesis_and_gap_sentences(tmp_path):
+    from romulus.report.incidents import incident_narrative
+    manifest = synthetic_manifest(findings=40, incident_size=20, hypothesis_every=0)
+    graph = manifest["incident_graph"]
+    by_id = {finding["id"]: finding for finding in manifest["findings"]}
+    first = graph["incidents"][0]
+    first["open_ends"]["partial_anchors"] = [{"anchor_id": first["finding_ids"][0], "reasons": ["cap"]}]
+    first["open_ends"]["unresolved_links"] = [{"link_id": "L1", "status": "partial", "reasons": ["timeout"]}] * 2
+    graph["edges"].append({"id": "HI", "link_id": "HI", "from": first["finding_ids"][0], "to": graph["incidents"][1]["finding_ids"][0],
+                           "link_type": "same_account_window", "style": "inferred", "kind": "expansion",
+                           "incident_role": "hypothesis"})
+    for incident in graph["incidents"]:
+        incident["narrative"] = incident_narrative(incident, by_id, graph["edges"])
+    kinds = [sentence["kind"] for sentence in first["narrative"]]
+    assert kinds.count("observed") > executive.INCIDENT_SENTENCES and {"hypothesis", "gap", "mapping"} <= set(kinds)
+    section = _section(read_back(_write(tmp_path, manifest)), executive.ATTACK_PATH_TITLE)
+    text = _paragraphs(section)
+    # the bound cuts only observed step sentences; the hypothesis, mapping and gap sentences always show
+    assert any(value.startswith("gap: This account may be incomplete: 0 anchor(s) were not expanded, 1 were "
+                                "expanded only in part, and 2 link(s)") for value in text)
+    assert any(value.startswith("hypothesis: 1 inferred link(s) from this incident remain hypotheses") for value in text)
+    assert any(value.startswith("mapping: Rule mappings place these steps") for value in text)
+    hidden = kinds.count("observed") - executive.INCIDENT_SENTENCES
+    assert f"{hidden} more observed step sentence(s) of this account are in technical.md." in text
+    # open ends are a column of the incident table and a callout, and "drawn in full" never claims completeness
+    drawn = next(block[1] for block in section if block[0] == "tbl")
+    assert drawn[0][-1] == "Open ends" and drawn[1][-1] == "1 expanded in part; 2 link(s) not resolved"
+    assert drawn[2][-1] == "none"
+    assert any(value.startswith("1 drawn incident(s) have open ends") for value in text)
+    assert not any("is drawn." in value for value in text)
 
 
 def test_an_unknown_link_strength_is_drawn_as_a_hypothesis():

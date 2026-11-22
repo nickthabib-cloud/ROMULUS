@@ -13,7 +13,7 @@ from tests.test_report import T, _repo_with_finding
 # The digest of this hunt's Markdown report as rendered before evidence ranking existed (captured by rendering this
 # same hunt with the code before ranking), and of its executive document body in the current executive layout.
 MARKDOWN_SHA256 = "916270762b901bf993ba001d5ee0f3ae6c6609fe69c7e3c5454e61f0a0b3ffd0"
-DOCX_SHA256 = "fe3854b2d95d29a3fcfdfab0fd64c0acc5626a1ad89cf1a0589f5af286e1ec3a"
+DOCX_SHA256 = "9c439f8062df75b291759c5993c7603300a3a19c5c48f5effa9810eebb324ec0"
 
 
 def render_unranked() -> tuple[str, bytes]:

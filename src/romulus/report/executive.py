@@ -245,6 +245,16 @@ def _scope(body: _Body, m: dict) -> None:
            "limitations; what was not searched is unknown, not absent.")
 
 
+def open_ends_text(incident: dict) -> str:
+    """What an incident's expansion left open, in a few words ("none" when nothing is open)."""
+    ends = incident.get("open_ends") or {}
+    parts = [(len(ends.get("unexpanded_anchors") or []) + len(ends.get("pending_anchors") or []),
+              "anchor(s) not expanded"),
+             (len(ends.get("partial_anchors") or []), "expanded in part"),
+             (len(ends.get("unresolved_links") or []), "link(s) not resolved")]
+    return "; ".join(f"{count} {words}" for count, words in parts if count) or "none"
+
+
 def _finding_card(body: _Body, finding: dict, number: int, ranked: bool, technical_name: str) -> None:
     body.add(paragraph(run(f"{number}. {finding.get('rule_title') or finding['rule_id']}"), style="Heading3"))
     lane = finding["lane"]
@@ -321,7 +331,9 @@ def _attack_path(body: _Body, m: dict, plan: dict, technical_name: str, image_re
     body.p("Figure 1. Attack path: incidents in rows, steps in time order. Solid = observed link; dashed with H = "
            "hypothesis (inferred, not proven); grey = time order only.", style="Caption")
     if attack_path.everything_drawn(counts):
-        body.p("Every incident, finding and link of the incident graph is drawn.", style="Muted")
+        # drawn in full is a statement about the picture, not about the attack: what was linked, not all that happened
+        body.p("The picture draws every incident, finding and link the incident graph records. It shows what was "
+               "linked, not a complete account of the activity.", style="Muted")
     else:
         body.p(f"Drawn: {counts['incidents_drawn']} of {counts['incidents']} incident(s), "
                f"{counts['findings_drawn']} of {counts['findings']} finding(s) in incidents, "
@@ -330,14 +342,20 @@ def _attack_path(body: _Body, m: dict, plan: dict, technical_name: str, image_re
                f"is listed in {technical_name} (Incidents), and every finding is in {FINDING_INDEX_TITLE}.",
                style="Callout")
     by_id, numbers = plan["by_id"], plan["numbers"]
+    open_rows = [row for row in plan["rows"] if open_ends_text(row["incident"]) != "none"]
+    if open_rows:
+        body.p(f"{len(open_rows)} drawn incident(s) have open ends: anchors not expanded, expanded only in part, or "
+               "links not fully resolved. Their accounts may be incomplete (Open ends column).", style="Callout")
     body.heading("Incidents drawn", 2)
-    body.table(["Row", "Incident", "Steps drawn", "Hosts", "Accounts", "ATT&CK tactics", "Observed / inferred links"],
-               [600, 1500, 1000, 1900, 1400, 1660, 1300],
+    body.table(["Row", "Incident", "Steps drawn", "Hosts", "Accounts", "ATT&CK tactics", "Observed / inferred links",
+                "Open ends"],
+               [550, 1300, 800, 1500, 1100, 1400, 1110, 1600],
                ([row["label"], row["incident"].get("id"), f"{len(row['steps'])} of {row['total_steps']}",
                  ", ".join(row["incident"].get("hosts") or []) or "none",
                  ", ".join(row["incident"].get("accounts") or []) or "none",
                  ", ".join(row["incident"].get("attack_tactics") or []) or "none",
-                 f"{row['incident'].get('observed_edges', 0)} / {row['incident'].get('inferred_edges', 0)}"]
+                 f"{row['incident'].get('observed_edges', 0)} / {row['incident'].get('inferred_edges', 0)}",
+                 open_ends_text(row["incident"])]
                 for row in plan["rows"]))
     body.heading("Steps drawn", 2)
     body.table(["Box", "Row", "Finding", "Lane", "Rule", "Time (UTC)"], [700, 600, 2000, 1000, 3260, 1800],
@@ -363,14 +381,20 @@ def _attack_path(body: _Body, m: dict, plan: dict, technical_name: str, image_re
             if len(incident.get("finding_ids") or []) < 2:
                 continue
             body.p(f"{row['label']} ({incident.get('id')})", bold=True, keep_next=True)
-            sentences = incident.get("narrative") or []
-            for sentence in sentences[:INCIDENT_SENTENCES]:
+            # only the observed step sentences are bounded: the mapping, hypothesis and gap sentences (one each,
+            # bounded where they are built) always show, so an account never reads as complete when it is not
+            observed_shown = 0
+            for sentence in incident.get("narrative") or []:
                 kind = sentence.get("kind", "observed")
+                if kind == "observed":
+                    observed_shown += 1
+                    if observed_shown > INCIDENT_SENTENCES:
+                        continue
                 prefix = "" if kind == "observed" else f"{kind}: "
                 body.p(prefix + str(sentence.get("text", "")), style="ListLine",
                        color=ooxml.HYPOTHESIS_COLOR if kind == "hypothesis" else None)
-            if len(sentences) > INCIDENT_SENTENCES:
-                body.p(f"{len(sentences) - INCIDENT_SENTENCES} more sentence(s) of this account are in "
+            if observed_shown > INCIDENT_SENTENCES:
+                body.p(f"{observed_shown - INCIDENT_SENTENCES} more observed step sentence(s) of this account are in "
                        f"{technical_name}.", style="Muted")
     analyst = m.get("analyst_links") or []
     if analyst:
