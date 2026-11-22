@@ -440,13 +440,21 @@ class NetworkAdminLogonJoin(Playbook):
             self._rows_account = self.state_budget().account(f"{self.id}:rows")
         return self._rows_account
 
+    TABLES = (("net", "eid, client, cport, server, sport, service, start, \"end\""),
+              ("logon", "rid, host, boot, ts, src, sport, kind, code, ltype, svc, outcome, session, account, tseq, "
+                        "blob"),
+              ("hostconn", "host, ts, ckey, eid, blob"))
+
     def _store(self):
+        """The rule's spill with its tables; a table the volume refused is created again on the next write, and one
+        already made is never made twice."""
         spill = self.spill()
         if not self._tables:
-            spill.table("net", "eid, client, cport, server, sport, service, start, \"end\"")
-            spill.table("logon", "rid, host, boot, ts, src, sport, kind, code, ltype, svc, outcome, session, "
-                                 "account, tseq, blob")
-            spill.table("hostconn", "host, ts, ckey, eid, blob")
+            made = self.__dict__.setdefault("_made", set())
+            for name, columns in self.TABLES:
+                if name not in made:
+                    spill.table(name, columns)
+                    made.add(name)
             self._tables = True
         return spill
 
@@ -455,6 +463,7 @@ class NetworkAdminLogonJoin(Playbook):
             self._spill.close()
             self._spill = None
         self._tables = False
+        self.__dict__.pop("_made", None)
 
     def release_state(self) -> None:
         for store in (self.remote, self.activity, self.unjoined_activity):
