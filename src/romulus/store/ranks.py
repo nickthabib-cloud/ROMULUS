@@ -196,6 +196,24 @@ class RankWorkspace:
         self._run(f"INSERT OR IGNORE INTO rk_rule_host (rule_id, host) SELECT c.rule_id, h.host {joined} "
                   f"AND {_RANKED_LANES}", {"hunt": self.hunt_id})
 
+    def host_member_rules(self) -> list[tuple[str, str | None]]:
+        """The distinct (rule, stored technique list) of ranked findings whose streamed members are host names. One
+        query, bounded by the rule catalog and the techniques its rules declare."""
+        rows = self._page(self._run(
+            f"SELECT DISTINCT c.rule_id, json_extract(c.gate_results, '$._attack') FROM candidate c "
+            f"WHERE {self._population()} AND {_RANKED_LANES} AND NOT COALESCE({_ADDRESS_MEMBERS}, 0) "
+            f"AND EXISTS (SELECT 1 FROM candidate_host h WHERE h.candidate_id = c.id) ORDER BY 1, 2",
+            {"hunt": self.hunt_id}).all())
+        return [(rule_id, attack) for rule_id, attack in rows]
+
+    def stage_host_members(self, agent_provenance: str,
+                           tactics: dict[tuple[str, str | None], tuple[str, ...]]) -> None:
+        """Each host a fleet-grouped finding streams as a member becomes a `host` membership of that finding, with
+        the finding's tactics, unlisted and never confirmed by the group's lane, as an internal-address member. A
+        fleet finding stands for what each member host did, so every member keeps the rule's evidence (its tactic and
+        its rule count) for its other findings, while the finding itself is ranked once, on the entities it names."""
+        self._stage_members(f"NOT COALESCE({_ADDRESS_MEMBERS}, 0)", "host", "h.host", agent_provenance, tactics)
+
     def member_rules(self) -> tuple[list[tuple[str, str | None]], list[tuple[str, str | None]], bool]:
         """The distinct (rule, stored technique list) of ranked findings with outside-address members, the same for
         internal-address members, and whether any finding of the pass lists internal addresses at all. One query,

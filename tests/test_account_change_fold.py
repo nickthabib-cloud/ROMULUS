@@ -670,7 +670,27 @@ def test_a_provisioned_fleet_ranks_as_one_item_and_no_longer_buries_an_attacked_
     per_host, merged = ranked(False), ranked(True)
     assert per_host[:12] == [f"acct{h:02d}" for h in range(12)] and per_host.index("atk0") >= 12
     assert merged[0] == "acct-fleet" and set(merged[1:4]) == {"atk0", "atk1", "atk2"}
-    # the side effect: the rule's evidence now counts on the cited host only, so the other provisioned hosts' second
-    # rule no longer meets the evidence bar there (their findings stay ranked and listed, not reported)
-    assert [cid for cid in merged if cid.startswith("priv")] == ["priv00"]
-    assert "priv05" in [row for row in per_host]
+    # every member host keeps the rule's evidence (its tactic and rule count): its other findings stay reported, and
+    # the attacked host's leads still rank above the member hosts' benign leads
+    assert {cid for cid in merged if cid.startswith("priv")} == {f"priv{h:02d}" for h in range(12)}
+    assert max(merged.index(f"atk{i}") for i in range(3)) < min(merged.index(f"priv{h:02d}") for h in range(12))
+    assert sum(cid.startswith("acct") for cid in merged) == 1
+
+
+def test_fleet_member_hosts_keep_the_rules_evidence():
+    from romulus.hunt.rank import PASS_FINAL, compute_rank_pass
+    from tests.test_evidence_rank import START, _insert, _ranks, _repo, _row
+    repo = _repo()
+    _insert(repo, [_row("acct-fleet", "host.account_or_group_change", lane="high", host="node00",
+                        attack=["T1136.001"], ts=START),
+                   *[_row(f"priv{h:02d}", "r.priv", host=f"node{h:02d}", attack=["T1548.003"],
+                          ts=START + timedelta(minutes=h, seconds=40)) for h in range(3)]])
+    repo.save_candidate_hosts("acct-fleet", "h1", [(f"node{h:02d}", f"e{h}") for h in range(3)], replace=True,
+                              expected_count=3)
+    compute_rank_pass(repo, "h1", PASS_FINAL)
+    findings, entities = _ranks(repo)
+    for h in range(3):
+        entity = entities[("host", f"node{h:02d}")]
+        assert entity["rules"] == 2 and "persistence" in entity["tactics"] and entity["reported"]
+    # the fleet finding is ranked once, under the host it names
+    assert findings["acct-fleet"]["entity"] == "node00"
