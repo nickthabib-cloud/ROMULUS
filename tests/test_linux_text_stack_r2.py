@@ -39,7 +39,8 @@ UNKNOWN_REASON = "text line in no recognized format: custom.unknown"
 # Evidence version 21 rehashes the event ids; the new privilege-broker rules add cells, and host.kernel_module_load
 # now reads a text family (kernel taint notices), so its cells follow the text partition's coverage.
 GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a6dadaa59988bdf81e',
- 'audit': 'caeecb16c4bf63c70d6c115e4b3ea120a6374d01a26da0963e79674d0b2e7737',
+ # Fleet member hosts staged as memberships add two ranking statements: only the audit's rank query count moved.
+ 'audit': 'f4f11350caf83e4768b8cd45e73c03d5262bd5375399e2ae3f8c5baa1aab0a5e',
  'baseline_counts': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_hunt_exclusions': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_observations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',

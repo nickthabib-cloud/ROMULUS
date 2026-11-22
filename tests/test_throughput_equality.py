@@ -404,7 +404,8 @@ from tests import throughput_fixture as tf
 # one, so no candidate, lane or claim of this scenario changed; in the non-baseline semantic projection only
 # the rule_version digests (and all_fields, which holds them) moved.
 GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
- 'audit': '8271edcfc6c48298d5634ac9b8a34cfb40d22d1abfeb2647ed5042bdfbcdfe9f',
+ # Fleet member hosts staged as memberships add two ranking statements: only the audit's rank query count moved.
+ 'audit': 'aa759e5792e5190ec5ec9de14b6322229684145029d4f570032b854b7b1e478e',
  'baseline_counts': 'be05fabb25336f21341b46eae7d8c2627828f7a7a7e8fdb24f4eb58576099354',
  'baseline_hunt_exclusions': 'c91eefda01c512d6d63e892dc9696016b01a71d44e4abcc429d954bd51864852',
  'baseline_observations': 'ca094cd8cd080e826679198c590e07aa2b8d8d80e465ad016ccb89c8c3e28c25',
