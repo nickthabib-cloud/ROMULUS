@@ -262,8 +262,9 @@ def test_native_scale4_releases_use_global_room_without_poisoning_later_findings
     previous = fixture.with_prior_versions(snapshot)
     assert fixture.deterministic_golden_digests(previous)["candidates"] == (
         "5f85db10b783860b1c48e42b201b30bef210a011da866beda0dbf4d465ae7095")
+    # host.account_or_group_change 7->8 moves only the current digest; the prior-version digest above is unchanged.
     assert fixture.deterministic_golden_digests(snapshot)["candidates"] == (
-        "49164a634c6205edd1743f1e7432fe852c57854a522c3bd2e5c4728e5636734f")
+        "ddf355cfe0f8ae28d5b63385da7ef948e61750cf55b7a571fa954ff0afc9d479")
     assert any(row["rule_id"] == "host.shell_spawned_by_connected_process" and row["event_ids"]
                for row in snapshot["candidates"])
 

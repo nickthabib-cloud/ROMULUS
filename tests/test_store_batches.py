@@ -1,5 +1,6 @@
 """Batched store writes: one compiled statement executed over many rows, the same conflict rules, any batch size;
 one transaction for a partition's coverage cells; each staged event serialized once per partition."""
+import gc
 import time
 from datetime import UTC, datetime, timedelta
 
@@ -81,17 +82,23 @@ def test_linux_save_evidence_stays_close_to_the_no_overlay_write_path(monkeypatc
     events = [_event(n) for n in range(8_000)]
     raw = {ref.key: {"n": ref.native_id} for event in events for ref in event.raw}
 
+    def timed():
+        # best of three, each after a collection, so heap left by earlier tests in the same process is not timed
+        best, repo = None, None
+        for _ in range(3):
+            gc.collect()
+            repo = _repo()
+            started = time.perf_counter()
+            repo.save_evidence("h1", events, raw, None)
+            spent = time.perf_counter() - started
+            best = spent if best is None else min(best, spent)
+        return best, repo
+
     with monkeypatch.context() as patch:
         patch.setattr(Repo, "_merge_citation_raw", staticmethod(lambda *_args: None))
-        baseline_repo = _repo()
-        started = time.perf_counter()
-        baseline_repo.save_evidence("h1", events, raw, None)
-        baseline = time.perf_counter() - started
+        baseline, _ = timed()
 
-    repo = _repo()
-    started = time.perf_counter()
-    repo.save_evidence("h1", events, raw, None)
-    elapsed = time.perf_counter() - started
+    elapsed, repo = timed()
     with repo.engine.connect() as connection:
         overlays = connection.execute(select(func.count()).select_from(t.event_citation)).scalar_one()
 

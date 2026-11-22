@@ -66,6 +66,11 @@ def compute_rank_pass(repo: Repo, hunt_id: str, pass_no: int, *, owner_token: st
         ws.commit()
         pages = _stage_population(ws, batch_size, heartbeat, is_internal, tactics)
         ws.stage_fleet_hosts()
+        # hosts grouped under one fleet finding: `host` memberships with the rule's tactics, so each member keeps
+        # the rule's evidence while the finding is ranked once
+        ws.stage_host_members(model.AGENT_PROVENANCE, {
+            (rule_id, attack): tactics(rule_id, json.loads(attack) if attack else [])
+            for rule_id, attack in ws.host_member_rules()})
         # outside addresses grouped under one finding: `ip` memberships with the rule's tactics, never hosts
         outside_rules, internal_rules, internal_members = ws.member_rules()
         ws.stage_external_members(model.AGENT_PROVENANCE, model.CONFIRMED_LANE, {

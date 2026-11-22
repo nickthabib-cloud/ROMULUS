@@ -18,6 +18,11 @@ the same well-known principal on every host (SYSTEM, the local and network servi
 not entities of their own: such an account says nothing beyond its host, and one name shared by the whole fleet would
 join unrelated hosts' evidence.
 
+Fleet members. A finding that stands for many hosts (a fleet-grouped finding with a streamed host list) is ranked
+once, on the entities it names, and each listed host also counts it (an unlisted membership with the rule's tactics),
+timed by that host's own record when the hunt stored it: a host keeps the evidence of what it did whether its finding
+was grouped or not.
+
 Agent findings. A finding the AI agent proposed (provenance `agent`) is ranked and can be reported like any pool
 finding, but it never counts toward any entity's confirmed findings, tactics, rules, co-occurrence or strongest rule
 prior. The model must never raise the rank of the entities it chose to investigate.
@@ -33,7 +38,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from itertools import combinations
 
-RANK_VERSION = "rank@1"
+RANK_VERSION = "rank@2"
 
 # Tiers and the pool.
 CONFIRMED_LANE = "urgent"

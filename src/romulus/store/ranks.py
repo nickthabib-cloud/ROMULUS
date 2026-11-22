@@ -196,6 +196,29 @@ class RankWorkspace:
         self._run(f"INSERT OR IGNORE INTO rk_rule_host (rule_id, host) SELECT c.rule_id, h.host {joined} "
                   f"AND {_RANKED_LANES}", {"hunt": self.hunt_id})
 
+    def host_member_rules(self) -> list[tuple[str, str | None]]:
+        """The distinct (rule, stored technique list) of ranked findings whose streamed members are host names. One
+        query, bounded by the rule catalog and the techniques its rules declare."""
+        rows = self._page(self._run(
+            f"SELECT DISTINCT c.rule_id, json_extract(c.gate_results, '$._attack') FROM candidate c "
+            f"WHERE {self._population()} AND {_RANKED_LANES} AND NOT COALESCE({_ADDRESS_MEMBERS}, 0) "
+            f"AND EXISTS (SELECT 1 FROM candidate_host h WHERE h.candidate_id = c.id) ORDER BY 1, 2",
+            {"hunt": self.hunt_id}).all())
+        return [(rule_id, attack) for rule_id, attack in rows]
+
+    def stage_host_members(self, agent_provenance: str,
+                           tactics: dict[tuple[str, str | None], tuple[str, ...]]) -> None:
+        """Each host a fleet-grouped finding streams as a member becomes a `host` membership of that finding, with
+        the finding's tactics, unlisted and never confirmed by the group's lane, as an internal-address member. A
+        fleet finding stands for what each member host did, so every member keeps the rule's evidence (its tactic and
+        its rule count) for its other findings, while the finding itself is ranked once, on the entities it names.
+        Each membership is timed by the host's own record (the one its list entry names) when the hunt stored it,
+        so co-occurrence on that host reads when the host's own change happened. A member whose record was not stored
+        has no time: it keeps the rule and its tactics but never co-occurs, since the finding's time is not its own."""
+        own_time = "(SELECT e.ts FROM typed_event e WHERE e.id = h.first_event_id)"
+        self._stage_members(f"NOT COALESCE({_ADDRESS_MEMBERS}, 0)", "host", "h.host", agent_provenance, tactics,
+                            ts=own_time)
+
     def member_rules(self) -> tuple[list[tuple[str, str | None]], list[tuple[str, str | None]], bool]:
         """The distinct (rule, stored technique list) of ranked findings with outside-address members, the same for
         internal-address members, and whether any finding of the pass lists internal addresses at all. One query,
@@ -211,14 +234,14 @@ class RankWorkspace:
                 any(row[0] == "internal_address" for row in rows))
 
     def _stage_members(self, members: str, kind: str, name: str, agent_provenance: str,
-                       tactics: dict[tuple[str, str | None], tuple[str, ...]]) -> None:
+                       tactics: dict[tuple[str, str | None], tuple[str, ...]], *, ts: str = "c.ts") -> None:
         """One membership per streamed member of each ranked finding, and the finding's tactics for it. One SQL
         statement, and one per (rule, techniques, tactic); nothing is held in Python."""
         joined = (f"FROM candidate c JOIN candidate_host h ON h.candidate_id = c.id "
                   f"WHERE {self._population()} AND {_RANKED_LANES} AND {members}")
         params = {"hunt": self.hunt_id, "agent": agent_provenance}
         self._run(f"INSERT OR IGNORE INTO rk_member (entity_kind, entity, candidate_id, rule_id, ts, confirmed, "
-                  f"contributes, prior, listed) SELECT '{kind}', {name}, c.id, c.rule_id, c.ts, 0, "
+                  f"contributes, prior, listed) SELECT '{kind}', {name}, c.id, c.rule_id, {ts}, 0, "
                   f"CASE WHEN c.provenance != :agent AND c.source_case_id IS NULL THEN 1 ELSE 0 END, "
                   f"c.priority, 0 {joined}", params)
         for (rule_id, attack), counted in sorted(tactics.items(), key=lambda item: (item[0][0], item[0][1] or "")):

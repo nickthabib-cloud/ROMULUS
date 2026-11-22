@@ -16,15 +16,21 @@ The rules are positive-only: sshd's message grammar is text, and lines it words 
 The account rule reads exec records of the account and group tools (argv parsed with each tool's option grammar),
 commands and shell text that write the account files directly, and the audit records the tools write (family
 `account_change`). An exec record shows a command was run; only the tool's own audit record (joined by process
-id) or a kernel file-change record shows the change.
+id) or a kernel file-change record shows the change. A tool's audit record and its own syslog line of the same change
+are one change citing both. A host's run of changes naming several accounts or groups (provisioning, or an intruder
+creating several accounts) is one item with the lane of its strongest change, so a privileged grant inside it keeps
+its lane and is named and cited first. The same run on several hosts in one rollout window is one fleet item at the
+lane of its strongest run; a host whose run differs keeps its own item and is named in the fleet item.
 """
 from __future__ import annotations
 
+import hashlib
 import heapq
 import itertools
+import json
 import re
 from collections import Counter, defaultdict, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import ClassVar, NamedTuple
 
@@ -52,7 +58,7 @@ from romulus.detect.linux_argv import (
     shell_segments,
     write_targets,
 )
-from romulus.detect.log_writer import writer_sentence
+from romulus.detect.log_writer import writer_sentence, writer_state
 from romulus.evidence.shellparse import SHELLS
 from romulus.evidence.typed import Outcome, TypedEvent
 
@@ -1114,10 +1120,277 @@ def _record_text(e: TypedEvent) -> str:
     return " ".join(parts) + f" res={result}"
 
 
+# Two views of one change. A tool that changes an account writes its own audit record (when built with audit support)
+# and its own syslog line, both from the same process within milliseconds. Without an exec record of that process
+# they would be two changes with two actors ("root" from the audit record, "an unrecorded account" from the line).
+_REMOVAL_OPS = re.compile(r"(?:^|[-:_])(?:del|delete|remove|removed)(?:$|[-:_])")
+
+
+def _op_class(e: TypedEvent) -> str | None:
+    """The class of a record's operation that must agree between two views of one change: a grant, a removal or a
+    list set; None when the operation is absent or of another kind (the audit and line operations name the same
+    change differently, so only these classes are compared)."""
+    op = str(e.get("account.op") or "")
+    if op.startswith("set-group-"):
+        return "set"
+    if _GRANT_OPS.search(op):
+        return "grant"
+    if _REMOVAL_OPS.search(op):
+        return "removal"
+    return None
+
+
+def _view_fit(a: TypedEvent, b: TypedEvent) -> tuple[int, int] | None:
+    """How well two tool records fit as the two views of one change, or None when they cannot be one.
+
+    One must be an audit record and the other a tool line (two records of one view are two changes: chage writes a
+    record per attribute, a loop repeats a change); they are on the same host with the same action; every field both
+    carry agrees (account, group, operation class, known outcome); and their pids are equal, or one pid is missing
+    and both name the same account. A higher fit (pids both recorded, more fields agreeing) wins."""
+    if a.host != b.host or a.has("audit.record_type") == b.has("audit.record_type"):
+        return None
+    if a.get("account.action") != b.get("account.action"):
+        return None
+    agree = 0
+    for name in ("account.name", "account.group"):
+        x, y = a.get(name), b.get(name)
+        if x not in (None, "") and y not in (None, ""):
+            if str(x) != str(y):
+                return None
+            agree += 1
+    ox, oy = _op_class(a), _op_class(b)
+    if ox and oy:
+        if ox != oy:
+            return None
+        agree += 1
+    if Outcome.unknown not in (a.outcome, b.outcome) and a.outcome != b.outcome:
+        return None
+    pa, pb = a.get("process.pid"), b.get("process.pid")
+    both = isinstance(pa, int) and isinstance(pb, int)
+    if both and pa != pb:
+        return None
+    if not both and not (a.get("account.name") not in (None, "") and a.get("account.name") == b.get("account.name")):
+        return None
+    return int(both), agree
+
+
+def _record_actor(e: TypedEvent) -> str | None:
+    """Who a tool record says made the change: the audit login user, the process's user, then the audit login uid."""
+    value = e.get("process.login_user") or e.get("process.user")
+    if value not in (None, ""):
+        return str(value)
+    return f"audit login uid {e.get('process.auid')}" if e.has("process.auid") else None
+
+
+def _change_privilege(c: _Change) -> list[str]:
+    return sorted(({c.privileged} | set(map(_record_privilege, c.records))) - {""})
+
+
+def _change_failed(c: _Change) -> bool:
+    """Every recorded exec or tool result of the change failed (the same test the grouped findings apply)."""
+    if c.command is not None:
+        return c.command.outcome == Outcome.failure and not any(r.outcome == Outcome.success for r in c.records)
+    return bool(c.records) and all(r.outcome == Outcome.failure for r in c.records)
+
+
+def _change_status(c: _Change) -> str:
+    """What the evidence shows of a change: 'reported' (a tool's own record reports it), 'requested' (only a command
+    asked for it: whether the account database changed is not established) or 'failed' (every recorded exec or tool
+    result failed)."""
+    if _change_failed(c):
+        return "failed"
+    return "reported" if c.records else "requested"
+
+
+_STATUS_PHRASE = {"reported": "reported by the tools' own records",
+                  "requested": "requested by commands, with no tool record from the same process",
+                  "failed": "attempted, every recorded result failed"}
+
+
+def _status_counts(counts: Counter) -> str:
+    """'reported by ...: 3 account(s) added, 1 group membership grant(s); requested by ...: ...' from (status, kind)
+    counts, with the sentence that a request does not show the change took effect."""
+    parts = []
+    for status in ("reported", "requested", "failed"):
+        kinds = sorted(((kind, n) for (s, kind), n in counts.items() if s == status), key=lambda item: (-item[1],
+                                                                                                         item[0]))
+        if kinds:
+            text = ", ".join(f"{n} {_KIND_NOUN.get(kind, kind + ' change(s)')}" for kind, n in kinds)
+            parts.append(f"{_STATUS_PHRASE[status]}: {text}")
+    requested = sum(n for (s, _kind), n in counts.items() if s == "requested")
+    return "; ".join(parts) + (f" (for these {requested} request(s), whether the account database changed is not "
+                               "established)" if requested else "")
+
+
+def _change_lane(c: _Change) -> str:
+    """The lane the change would have on its own: high for a privileged request or report (or a web-service exec
+    lineage) unless every recorded result failed, else lead."""
+    if (c.lineage.kind == "web" or _change_privilege(c)) and not _change_failed(c):
+        return "high"
+    return "lead"
+
+
+def _change_text(c: _Change) -> str:
+    """The change as a burst names it: what was requested or reported, with the account and group a record names."""
+    text = c.detail
+    if c.command is None:
+        # a group record names the group it adds, deletes or modifies in its account field
+        noun = "group" if c.action in _GROUP_ACTIONS and not c.groups else "account"
+        text += (f" ({noun} '{c.accounts[0]}')" if c.accounts else "") + (f" (group '{c.groups[0]}')" if c.groups
+                                                                         else "")
+    return text
+
+
+_GROUP_ACTIONS = frozenset({"create_group", "delete_group", "modify_group", "group_password_change"})
+
+
+def _change_kind(c: _Change) -> str:
+    if c.action in ("add_to_group", "remove_from_group", "expiry_change"):
+        return {"add_to_group": "grant", "remove_from_group": "removal", "expiry_change": "expiry"}[c.action]
+    if c.action in ("modify_user", "modify_group"):
+        ops = [r for r in c.records if r.has("account.op")]
+        kind = next((k for k in map(_op_class, ops) if k), None)
+        if kind:
+            return kind
+        if any("expiry" in str(r.get("account.op")) for r in ops):
+            return "expiry"
+    return c.action
+
+
+def _timeline_order(c: _Change) -> tuple[str, str]:
+    """A change's place in the run timeline: by host, then time, then the record and the form (one command can
+    request several changes at one instant), so the order never depends on how the state was held."""
+    ident = c.command.id if c.command is not None else (c.records[0].id if c.records else "")
+    return (f"{int(c.host is None)}|{c.host or ''}",
+            f"{c.ts:020.6f}|{ident}|{c.action}|{','.join(c.accounts)}|{','.join(c.groups)}|{c.detail}")
+
+
+_KIND_NOUN = {"create_user": "account(s) added", "delete_user": "account(s) deleted", "create_group": "group(s) added",
+              "delete_group": "group(s) deleted", "grant": "group membership grant(s)",
+              "removal": "group membership removal(s)", "set": "group member or administrator list(s) set",
+              "password_change": "password change(s)", "group_password_change": "group password change(s)",
+              "expiry": "password aging or expiry change(s)", "lock": "account lock(s)",
+              "unlock": "account unlock(s)", "modify_user": "other account modification(s)",
+              "modify_group": "other group modification(s)", "account_db_edit": "direct account database edit(s)",
+              "defaults_change": "change(s) to the defaults for new accounts"}
+
+
+def _writer_kind(e: TypedEvent) -> str:
+    """The evidence a tool record is: a kernel audit record, or a tool line whose writer journald confirms, cannot
+    confirm or contradicts (a line anyone can log under the tool's name)."""
+    return "audit record" if e.has("audit.record_type") else f"tool line ({writer_state(e)} writer)"
+
+
+def _change_class(c: _Change) -> tuple:
+    """What a run's changes must share: the account that made them, the kind of evidence that records them, the audit
+    login and whether an exec record of the changing process was retrieved. A change that differs in any of these
+    is not folded into the others' run (a forged tool line beside audit-recorded changes, an interactive login's
+    change inside a scripted run)."""
+    writers = tuple(sorted({_writer_kind(r) for r in c.records})) or ("exec record only",)
+    login = c.login or next((value for value in map(_login, c.records) if value), None) or ""
+    return c.actor, writers, str(login), c.command is not None or c.exec_seen
+
+
+def _class_text(cls: tuple) -> str:
+    actor, writers, login, exec_seen = cls
+    return (f"made as '{actor}'" + (f" (audit login '{login}')" if login else " (no audit login recorded)")
+            + f", recorded by {' and '.join(writers)}, "
+            + ("with an exec record of the changing process" if exec_seen else
+               "with no exec record of the changing process"))
+
+
+@dataclass
+class _Burst:
+    """One segment of a run of one evidence class of changes on one host, held as an aggregate: exact counts, every
+    distinct change named (a segment holds at most NAMED distinct changes), bounded exemplars."""
+    host: str | None
+    cls: tuple
+    first: float
+    last: float
+    first_id: str
+    segment: int = 1                    # this item's segment of the run ...
+    segments: int = 1                   # ... of this many
+    run_changes: int = 0                # the whole run's changes of this class, and their kinds
+    run_kinds: Counter = field(default_factory=Counter)
+    changes: int = 0
+    kinds: Counter = field(default_factory=Counter)     # (status, kind) -> changes
+    targets: set = field(default_factory=set)
+    targets_more: bool = False
+    accounts: set = field(default_factory=set)          # account names, for one entity each
+    accounts_more: int = 0
+    privileged: dict = field(default_factory=dict)      # privileged change text -> count
+    privileged_count: int = 0
+    named: dict = field(default_factory=dict)           # other change text -> count
+    high: int = 0
+    commands: int = 0
+    records: int = 0
+    unexplained: int = 0
+    cited_privileged: list = field(default_factory=list)
+    cited_other: list = field(default_factory=list)
+    lineage: object = None
+    lineage_high: bool = False
+    techniques: set = field(default_factory=set)
+    mentions: set = field(default_factory=set)
+    # the shape the fleet merge compares (see AccountOrGroupChange._fleets)
+    signatures: set = field(default_factory=set)
+    lineages: set = field(default_factory=set)
+
+
+@dataclass
+class _RunShape:
+    """A finished run segment item and what a fleet merge compares: its shape key (empty when it cannot be merged,
+    with the reason) and the parts the shape is made of."""
+    key: str
+    unmergeable: str
+    host: str | None
+    first: float
+    last: float
+    lane: str
+    anchor_id: str
+    signatures: frozenset
+    cls: tuple
+    lineages: tuple
+    segment: tuple
+    changes: int
+    match: Match
+
+
+@dataclass
+class _Fleet:
+    """Runs of one shape on several hosts inside one fleet window: exact counts, bounded names and exemplars; the
+    full host list is in the rule's member store, in chunks."""
+    fid: str
+    key: str
+    first: float
+    last: float
+    template: _RunShape
+    runs: int = 0
+    hosts: int = 0
+    lane: str = "lead"
+    sample_hosts: list = field(default_factory=list)
+    exemplars: list = field(default_factory=list)
+    chunks: int = 0
+    chunk_fill: int = 0
+    changes_min: int = 0
+    changes_max: int = 0
+    excluded: list = field(default_factory=list)
+    excluded_count: int = 0
+
+
+def _signature_text(sig: tuple) -> str:
+    kind, accounts, groups, privileges, status = sig
+    text = _KIND_NOUN.get(kind, kind).replace("(s)", "")
+    noun = "group" if kind in _GROUP_ACTIONS and not groups else "account"
+    names = ", ".join([f"{noun} '{a}'" for a in accounts] + [f"group '{g}'" for g in groups])
+    return (f"{text} ({names})" if names else text) + (f": {'; '.join(privileges)}" if privileges else "") + {
+        "reported": "", "requested": " (requested only; not shown to have taken effect)",
+        "failed": " (failed)"}[status]
+
+
 class AccountOrGroupChange(Playbook):
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.account_or_group_change"
-    version = "7"
+    version = "8"
     title = "Account or group created, deleted or modified (command or account-management audit record)"
     anchor_class = "persistence"
     kind = "aggregate"
@@ -1143,6 +1416,51 @@ class AccountOrGroupChange(Playbook):
     PRE_BOOT_SECONDS = 120.0        # before it: records buffered before the audit daemon logged the boot
     BOOT_CITE = 64                  # distinct changes of a boot group cited with a record each
     BOOTS_KEPT = 64                 # boot records kept per host for the join and the citation
+    # Two views of one change (an audit record and the tool's line) are written by one process within milliseconds;
+    # the tolerance only absorbs timestamp granularity and shipper stamping (plain syslog has 1 s resolution), the
+    # same allowance the join of a record to its exec uses. The pid, not the time, is what identifies the process.
+    VIEW_SECONDS = JOIN_SECONDS
+    VIEW_OPEN = 4096                # unpaired records held per host while a partner may still come (10 s of them)
+    # A run of changes on one host. Steps of one automated run (configuration management, an image build, a
+    # first-boot agent, an administrator's script) follow each other within seconds, and its longest pauses are the
+    # package transactions and service restarts between its account steps, which take minutes; ten minutes spans
+    # those. The hour bounds what one item covers (the window that holds one hands-on session or one scripted stage,
+    # as in the ranking's co-occurrence), so a host changing accounts all day is one item per hour, each saying the
+    # run goes on. Neither value decides a lane: they decide only how many items one host's changes become.
+    BURST_GAP = 600.0               # a change joins the run when it is less than this after the previous one
+    BURST_SPAN = 3600.0             # ... and less than this after the run's first change
+    # One account's setup (the account, its private group of the same name, one group grant, its password and
+    # expiry) names at most two names; three distinct account or group names make a run of several accounts or
+    # several grants. Below it the per-actor findings stand, so a lone account created with a sudo grant stays its
+    # own item.
+    BURST_TARGETS = 3
+    BURST_TARGET_NAMES = 4096       # distinct names counted exactly per run segment; beyond, "more than"
+    BURST_CITE = 64                 # changes cited per run segment (privileged first, then the earliest)
+    # A run segment names every distinct change it holds, with repeat counts; a run with more distinct changes goes
+    # on in a further segment item, so every change is named in some item and no item's notes grow without bound.
+    NAMED = 500
+    RUN_CLASSES = 64                # evidence classes of one run told apart; changes of further classes stay alone
+    ALONE_HOSTS = 65536             # hosts whose changes published alone are counted by host
+    # The same run on several hosts. A rollout (configuration management applied across an inventory, an image or
+    # template deployment wave, an autoscaling batch) applies one run to its hosts within one maintenance window;
+    # six hours spans such a window, and a host whose same run comes later stays its own item (an odd moment is
+    # never merged away). Three hosts is the least that shows a rollout rather than a pair of hosts, the same floor
+    # the ranking's fleet prevalence uses. Neither value decides a lane.
+    FLEET_WINDOW = 6 * 3600.0       # a run joins a fleet when it starts less than this after the fleet's first run
+    FLEET_MIN_HOSTS = 3
+    FLEET_HOSTS_NAMED = 12          # hosts named in a fleet item's claim (every host is in its paged host list)
+    FLEET_CITE_RUNS = 8             # member runs a fleet item cites changes from
+    FLEET_CITE = 64                 # records a fleet item cites from its exemplar runs
+    # Each listed host's record (its run's first record) is cited too, so its host-list entry opens a stored record;
+    # beyond this many hosts the entries name a record that is not stored with the item, and the item says so.
+    FLEET_HOST_CITE = 1000
+    FLEET_EXCLUDED_NAMED = 32       # excluded similar runs named per fleet (all are counted)
+    FLEET_ACTIVE = 256              # fleets compared at once with the runs that were not merged
+    FLEET_CHUNK = 1000              # hosts per chunk of a fleet's member list
+    FLEET_SIMILAR = 0.5             # a run sharing at least this share of a fleet's changes is named as excluded
+    # A similar run is named as excluded when it starts within a day of the fleet's span: the same run repeated at
+    # another hour of the same day is the odd moment an analyst should see beside the fleet.
+    FLEET_NEAR = 24 * 3600.0
     program_prefilter = True
     card: ClassVar[dict] = {
         "behavior": "an account or group tool was run to create, delete or modify an account, group membership, "
@@ -1160,7 +1478,12 @@ class AccountOrGroupChange(Playbook):
                            "package or cloud-init lineage); first-boot provisioning that left only the tools' audit "
                            "records (no exec record of the changing process) is one lead per (host, boot) when every "
                            "change is from 2 minutes before to 15 minutes after a recorded boot and carries no audit "
-                           "login uid; one record is cited per distinct change and every change is in the notes",
+                           "login uid; one record is cited per distinct change and every change is in the notes; "
+                           "a provisioning run (configuration management, an image build, an administrator's "
+                           "script creating accounts and adding the administrator to privileged groups) is one item "
+                           "per host and run, high when it grants a privileged group, so a freshly built fleet costs "
+                           "one item per host rather than one per change. Cost of the fold: an intruder's grant made "
+                           "inside such a run shares its item (named and cited first, lane kept)",
         "query_cost": "none beyond the sweep",
         "next_pivot": "the account's first login and what that session ran",
         "adds": "no earlier rule covers account or group changes",
@@ -1180,8 +1503,38 @@ class AccountOrGroupChange(Playbook):
                  "membership of a root-equivalent group; package/cloud-init lineage is one grouped lead per host; "
                  "unprivileged audit records with no exec record of their process and no login uid, from 2 minutes "
                  "before to 15 minutes after a recorded boot, are one grouped lead per (host, boot), worded as "
-                 "boot-time provisioning or a boot-time job; "
+                 "boot-time provisioning or a boot-time job; a run of changes on one host naming at least 3 "
+                 "distinct accounts and groups is one item per run with the lane of its strongest change (high when "
+                 "any change in it is), never lower; the same run on 3 or more hosts in one rollout window is one "
+                 "fleet item at the lane of its strongest run; web-service lineage is never folded into a run; "
                  "everything else is a lead",
+        "views": "a tool's audit record and its own syslog line of one change (opposite views, same host and action, "
+                 "at most 10 s apart, equal pids or one pid missing with the same account, every shared field "
+                 "agreeing, grants never paired with removals) are one change citing both; the actor comes from the "
+                 "record that names one (audit record first). A line with neither a pid nor an account name, or "
+                 "farther than 10 s from its audit record, stays a change of its own",
+        "bursts": "a host's changes outside package/cloud-init lineage, outside the boot group and outside a "
+                  "web-service lineage are read in time order; a run continues while each change is less than 10 "
+                  "minutes after the previous one, and is held whole (spilled) until it ends; it is split by "
+                  "evidence class (the account that made the change, whether audit records, journald-confirmed, "
+                  "unconfirmed or contradicted tool lines record it, the audit login, and whether an exec record of "
+                  "the changing process was retrieved): a class naming at least 3 distinct account or group names "
+                  "becomes run items, every other change (an outlier) keeps its per-actor finding, so a forged tool "
+                  "line or an interactive login's change never hides inside a scripted run; a class's run is cut "
+                  "into segments of less than an hour and at most 500 distinct changes, each item saying which "
+                  "segment of how many and the whole run's counts; every distinct change is named in its segment's "
+                  "notes, privileged ones first, up to 64 changes cited (privileged first; more privileged ones are "
+                  "named, counted and the cell partial), one entity per account name; counts are split into "
+                  "changes the tools' own records report, changes only a command requested (whether the account "
+                  "database changed is not established) and changes whose every recorded result failed",
+        "fleets": "run segment items of the same shape (the same distinct changes and their status, the same "
+                  "evidence class, the same exec lineage kinds, the same segment of the same count) on at least 3 "
+                  "hosts, each starting less than 6 hours after the first, are one fleet item at the lane of its "
+                  "strongest run, with every host in its paged host list, records cited from up to 8 hosts' runs, "
+                  "and wording that it groups by shape, not proven common origin; a run that differs (an extra or "
+                  "missing change, another evidence class or lineage, or the same run more than 6 hours later) "
+                  "keeps its own item, and the fleet item names it with how it differs when it shares at least half "
+                  "the fleet's changes and starts within a day of the fleet",
         "retrieval": "the sweep retrieves every record of the host datasets in each partition (dataset filter "
                      "only), a superset of what this evaluator reads",
     }
@@ -1207,6 +1560,8 @@ class AccountOrGroupChange(Playbook):
         self._pending: list[TypedEvent] = []
         self._alone: list[Match] = []   # changes published on their own (the budget refused holding them)
         self._boot_events: dict[str, TypedEvent] = {}
+        self._alone_hosts: Counter = Counter()   # changes published alone, by host (ALONE_HOSTS hosts at most) ...
+        self._alone_other = 0                     # ... and on further hosts
         self.load = lambda ids: []
 
     def drain_staged(self) -> list[TypedEvent]:
@@ -1266,6 +1621,10 @@ class AccountOrGroupChange(Playbook):
         groups: dict[tuple, list[_Change]] = {}
         for change in changes:
             groups.setdefault(self._group(change), []).append(change)
+            if change.host in self._alone_hosts or len(self._alone_hosts) < self.ALONE_HOSTS:
+                self._alone_hosts[change.host] += 1
+            else:
+                self._alone_other += 1
         for key, held in groups.items():
             add_unheld(self._alone, alone(self._finding(key, held), self, record))
 
@@ -1323,7 +1682,7 @@ class AccountOrGroupChange(Playbook):
             return
         self.evaluated += 1
         if not self.records.append(e, (e.ts.timestamp(), e.id)):
-            self._publish_alone(list(self._record_changes([e])), e)
+            self._publish_alone([self._record_change([e])], e)
             return
         self._pending.append(e)
 
@@ -1345,22 +1704,37 @@ class AccountOrGroupChange(Playbook):
                 for change in candidates:
                     change.records.append(record)
             else:
-                need(unjoined.append(record), self, "the unjoined tool records")
+                need(unjoined.append(record, (str(record.host or ""), f"{ts:020.6f}|{record.id}")), self,
+                     "the unjoined tool records")
             if i % self.FINALIZE_TRIM == self.FINALIZE_TRIM - 1:
                 self.by_pid.trim()
                 unjoined.trim()
         groups = KeyedStore(self, "acct_groups", self.HOT, disk_budget=UNBUDGETED)
+        # the changes a run may fold, by host then time (see _bursts)
+        timeline = SpillList(self, "acct_timeline", self.HOT, disk_budget=UNBUDGETED)
         self._boot_events: dict[str, TypedEvent] = {}
         changes = (c for _key, held in self.by_pid.items() for c in held)
         loose = (c for held in self.loose for c in held)
-        for i, change in enumerate(itertools.chain(changes, loose, self._record_changes(unjoined))):
-            need(groups.setdefault(self._group(change), list), self, "the account change grouping").append(change)
+        views = (self._record_change(view) for view in self._views(unjoined.ordered()))
+        for i, change in enumerate(itertools.chain(changes, loose, views)):
+            key = self._group(change)
+            if key[0] == "actor" and change.lineage.kind != "web":
+                need(timeline.append(change, _timeline_order(change)), self, "the account change timeline")
+            else:
+                need(groups.setdefault(key, list), self, "the account change grouping").append(change)
             if i % self.FINALIZE_TRIM == self.FINALIZE_TRIM - 1:
                 groups.trim()
-        out = [_citation for key in sorted(groups.keys(), key=str) for _citation in citation_call(self, self._finding, key, groups.peek(key))]
-        groups.clear()
+                timeline.trim()
         unjoined.clear()
-        return out
+        run_items = SpillList(self, "acct_runs", self.HOT, disk_budget=UNBUDGETED)
+        self._bursts(timeline, groups, run_items)
+        timeline.clear()
+        runs = self._fleets(run_items)
+        run_items.clear()
+        out = [_citation for key in sorted(groups.keys(), key=str)
+               for _citation in citation_call(self, self._finding, key, groups.peek(key))]
+        groups.clear()
+        return out + runs
 
     def finalize_fallback(self, reason: str) -> list[Match]:
         """Every held change on its own (grouping and joining needed disk): command changes by process, changes
@@ -1377,33 +1751,602 @@ class AccountOrGroupChange(Playbook):
                     out.append(m)
         for source in (lambda: (c for _key, held in self.by_pid.items() for c in held),
                        lambda: (c for held in self.loose for c in held),
-                       lambda: self._record_changes(self.records)):
+                       lambda: (self._record_change([record]) for record in self.records)):
             try:
                 each(source())
             except StateExhausted:
                 continue                            # a table on disk cannot be read: what was read stands
         return out
 
-    def _record_changes(self, unjoined):
-        """A change for each tool record no command of its process explains."""
-        for record in unjoined:
+    def _views(self, records):
+        """The changes the unjoined tool records report, as lists of the records that report each: a record alone,
+        or an audit record and a tool line that are two views of one change (`_view_fit`). Records arrive ordered by
+        host, then time; a record waits VIEW_SECONDS for its partner, and at most VIEW_OPEN unpaired records of a
+        host wait at once (beyond, the oldest is taken alone and the rule says a pairing may have been missed)."""
+        # unpaired records by (action, "name", account name or "") and, with a pid, by (action, "pid", pid): a record
+        # with a name looks up its name and the nameless; a nameless one looks up the nameless and its pid (a
+        # nameless pair needs equal pids), so the pairing does not depend on which view arrives first
+        waiting: dict[tuple, list[TypedEvent]] = {}
+        order: deque = deque()                           # unpaired records in time order (paired ones skipped)
+        alive: set[str] = set()
+        host = None
+
+        def buckets(e: TypedEvent) -> list[tuple]:
+            action, pid = str(e.get("account.action")), e.get("process.pid")
+            return [(action, "name", str(e.get("account.name") or ""))] + (
+                [(action, "pid", pid)] if isinstance(pid, int) else [])
+
+        def lookups(e: TypedEvent) -> list[tuple]:
+            action, name, pid = str(e.get("account.action")), str(e.get("account.name") or ""), e.get("process.pid")
+            if name:
+                return [(action, "name", name), (action, "name", "")]
+            return [(action, "name", "")] + ([(action, "pid", pid)] if isinstance(pid, int) else [])
+
+        def take(e: TypedEvent) -> None:
+            alive.discard(e.id)
+            for key in buckets(e):
+                waiting[key].remove(e)
+                if not waiting[key]:
+                    del waiting[key]
+
+        def oldest() -> TypedEvent | None:
+            while order:
+                e = order.popleft()
+                if e.id in alive:
+                    take(e)
+                    return e
+            return None
+
+        for record in records:
             ts = record.ts.timestamp()
-            lineage = self.lineage.classify_pid(record.host, record.get("process.pid"), ts, boot_of(record),
-                                                record.get("audit.serial"))
-            actor = str(record.get("process.login_user") or record.get("process.user")
-                        or (f"audit login uid {record.get('process.auid')}" if record.has("process.auid")
-                            else "an unrecorded account"))
-            name = record.get("account.name")
-            group = record.get("account.group")
-            pid = record.get("process.pid")
-            exec_seen = (isinstance(pid, int)
-                         and self.lineage.parent(record.host, pid, ts, boot_of(record),
-                                                             record.get("audit.serial")) is not None)
-            yield _Change(record.host, ts, str(record.get("account.action")),
-                          (str(name),) if name else (), (str(group),) if group else (),
-                          _RECORD_PHRASE.get(str(record.get("account.action")), "an account change"),
-                          _record_privilege(record), lineage, actor, records=[record],
-                          login=_login(record), exec_seen=exec_seen)
+            if record.host != host:
+                while (e := oldest()) is not None:
+                    yield [e]
+                host = record.host
+            while order and (order[0].id not in alive or ts - order[0].ts.timestamp() > self.VIEW_SECONDS):
+                e = order.popleft()
+                if e.id in alive:
+                    take(e)
+                    yield [e]
+            pool = list({other.id: other for key in lookups(record) for other in waiting.get(key, ())}.values())
+            best = None
+            for other in pool:
+                fit = _view_fit(other, record)
+                if fit is not None and (best is None or fit > best[0]
+                                        or (fit == best[0] and (other.ts, other.id) < (best[1].ts, best[1].id))):
+                    best = (fit, other)
+            if best is not None:
+                take(best[1])
+                yield sorted([best[1], record], key=lambda e: (e.ts, e.id))
+                continue
+            alive.add(record.id)
+            for key in buckets(record):
+                waiting.setdefault(key, []).append(record)
+            order.append(record)
+            if len(alive) > self.VIEW_OPEN:
+                self.note_limit("views_open", f"more than {self.VIEW_OPEN} account tool records of one host were "
+                                              f"unpaired within {self.VIEW_SECONDS:.0f} s; the oldest were taken as "
+                                              "changes of their own, so an audit record and the line of the same "
+                                              "change may be counted as two changes")
+                yield [oldest()]
+        while (e := oldest()) is not None:
+            yield [e]
+
+    def _record_change(self, records: list[TypedEvent]) -> _Change:
+        """The change one tool record, or two views of one change, report. The actor is the first record's that names
+        one (an audit record before a tool line); the lineage and the exec check use a record with a pid (an audit
+        record first, for its serial and boot); the change is timed by its earliest record."""
+        records = sorted(records, key=lambda e: (e.ts, e.id))
+        named = min(records, key=lambda r: (_record_actor(r) is None, not r.has("audit.record_type"), r.ts, r.id))
+        anchor = min(records, key=lambda r: (not isinstance(r.get("process.pid"), int),
+                                             not r.has("audit.record_type"), r.ts, r.id))
+        ts = records[0].ts.timestamp()
+        at = anchor.ts.timestamp()
+        pid = anchor.get("process.pid")
+        lineage = self.lineage.classify_pid(anchor.host, pid, at, boot_of(anchor), anchor.get("audit.serial"))
+        exec_seen = (isinstance(pid, int)
+                     and self.lineage.parent(anchor.host, pid, at, boot_of(anchor),
+                                             anchor.get("audit.serial")) is not None)
+        ordered = sorted(records, key=lambda r: (not r.has("audit.record_type"), r.ts, r.id))
+        name = next((r.get("account.name") for r in ordered if r.get("account.name") not in (None, "")), None)
+        group = next((r.get("account.group") for r in ordered if r.get("account.group") not in (None, "")), None)
+        action = str(ordered[0].get("account.action"))
+        return _Change(anchor.host, ts, action, (str(name),) if name else (), (str(group),) if group else (),
+                       _RECORD_PHRASE.get(action, "an account change"),
+                       next((p for p in map(_record_privilege, ordered) if p), ""), lineage,
+                       _record_actor(named) or "an unrecorded account", records=records,
+                       login=next((login for login in map(_login, ordered) if login), None), exec_seen=exec_seen)
+
+    def _bursts(self, timeline: SpillList, groups: KeyedStore, runs: SpillList) -> None:
+        """Run items. The timeline is read by host then time; a host's changes each less than BURST_GAP after the
+        previous one are one run, held whole on a spilling list and read again when it ends (`_close_run`). Each
+        finished run item goes to `runs` with its shape, ordered by shape then start, for the fleet merge."""
+        pending = SpillList(self, "acct_pending", self.HOT, disk_budget=UNBUDGETED)
+        host, last = None, 0.0
+        for i, change in enumerate(timeline.ordered()):
+            if len(pending) and (change.host != host or change.ts - last >= self.BURST_GAP):
+                self._close_run(pending, groups, runs)
+                pending.clear()
+            if not len(pending):
+                host, last = change.host, change.ts
+            last = max(last, change.ts)
+            need(pending.append(change, _timeline_order(change)), self, "the account change run")
+            if i % self.FINALIZE_TRIM == self.FINALIZE_TRIM - 1:
+                pending.trim()
+                groups.trim()
+        if len(pending):
+            self._close_run(pending, groups, runs)
+        pending.clear()
+
+    def _segments(self, pending: SpillList, folding: set):
+        """Each change of a folding class with its segment number: a segment ends when the next change is BURST_SPAN
+        or more after the segment's first, or would be its NAMED + 1st distinct change. Read in the run's order, so
+        the cut is the same however the run was held."""
+        state: dict[tuple, list] = {}                   # class -> [segment number, first time, distinct texts]
+        for change in pending.ordered():
+            cls = _change_class(change)
+            if cls not in folding:
+                yield change, cls, 0
+                continue
+            seg = state.get(cls)
+            text = _change_text(change)
+            if seg is None:
+                seg = state[cls] = [1, change.ts, set()]
+            elif change.ts - seg[1] >= self.BURST_SPAN or (text not in seg[2] and len(seg[2]) >= self.NAMED):
+                seg[0], seg[1], seg[2] = seg[0] + 1, change.ts, set()
+            seg[2].add(text)
+            yield change, cls, seg[0]
+
+    def _close_run(self, pending: SpillList, groups: KeyedStore, runs: SpillList) -> None:
+        """A finished run of one host. Its changes are split by evidence class (`_change_class`): a class naming at
+        least BURST_TARGETS distinct account or group names is folded into run items, in segments of at most
+        BURST_SPAN and NAMED distinct changes; every other change (an outlier class, or more than RUN_CLASSES classes)
+        keeps its per-actor finding."""
+        names: dict[tuple, set] = {}
+        overflow = False
+        for change in pending.ordered():
+            cls = _change_class(change)
+            if cls not in names:
+                if len(names) >= self.RUN_CLASSES:
+                    overflow = True
+                    continue
+                names[cls] = set()
+            if len(names[cls]) < self.BURST_TARGETS:
+                names[cls].update((change.accounts + change.groups)[:self.BURST_TARGETS])
+        if overflow:
+            self.note_limit("run_classes", f"a run of account changes held more than {self.RUN_CLASSES} evidence "
+                                           "classes; changes of the further classes keep their own per-actor "
+                                           "findings, not folded")
+        folding = {cls for cls, held in names.items() if len(held) >= self.BURST_TARGETS}
+        # the whole run's counts and segment count per folding class
+        totals: dict[tuple, list] = {cls: [0, Counter(), 0] for cls in folding}   # changes, kinds, segments
+        for change, cls, segment in self._segments(pending, folding):
+            if segment:
+                total = totals[cls]
+                total[0] += 1
+                total[1][(_change_status(change), _change_kind(change))] += 1
+                total[2] = segment
+        open_runs: dict[tuple, _Burst] = {}
+        for i, (change, cls, segment) in enumerate(self._segments(pending, folding)):
+            if not segment:
+                need(groups.setdefault(self._group(change), list), self, "the account change grouping").append(change)
+            else:
+                run = open_runs.get(cls)
+                if run is not None and run.segment != segment:
+                    self._finish_run(run, runs)
+                    run = None
+                if run is None:
+                    ident = change.command.id if change.command is not None else change.records[0].id
+                    changes, kinds, segments = totals[cls]
+                    run = open_runs[cls] = _Burst(change.host, cls, change.ts, change.ts, ident, segment, segments,
+                                                  changes, kinds)
+                run.last = max(run.last, change.ts)
+                self._burst_add(run, change)
+            if i % self.FINALIZE_TRIM == self.FINALIZE_TRIM - 1:
+                groups.trim()
+        for cls in sorted(open_runs, key=str):
+            self._finish_run(open_runs[cls], runs)
+
+    def _finish_run(self, run: _Burst, runs: SpillList) -> None:
+        key = f"burst|{run.host}|{run.first_id}|{run.segment}"
+        made: list[Match] = []
+        with citation_group(self, made, key, run):
+            made.append(self._burst_finding(run))
+        for match in made:
+            shape = self._run_shape(run, match)
+            need(runs.append(shape, (shape.key, f"{shape.first:020.6f}|{shape.host or ''}|{shape.anchor_id}")),
+                 self, "the account change runs")
+
+    def _run_shape(self, run: _Burst, match: Match) -> _RunShape:
+        """A finished run segment item and its shape: its distinct changes, its evidence class, its exec lineage
+        kinds and which segment of how many it is. It is merged across hosts only when it was cited."""
+        reason = "" if match.events and not match.citation_unavailable else "its records could not be cited"
+        signatures = frozenset(run.signatures)
+        lineages = tuple(sorted(run.lineages))
+        segment = (run.segment, run.segments)
+        key = "" if reason else hashlib.sha256(json.dumps(
+            [sorted(signatures), list(run.cls), lineages, list(segment)]).encode()).hexdigest()[:32]
+        own = [e for e in match.events if e.id not in match.context_ids]
+        anchor = (own or match.events)[0].id if match.events else run.first_id
+        return _RunShape(key, reason, run.host, run.first, run.last, match.proposed_lane, anchor, signatures,
+                         run.cls, lineages, segment, run.changes, match)
+
+    def _fleets(self, runs: SpillList) -> list[Match]:
+        """Run items of one shape on at least FLEET_MIN_HOSTS hosts, starting within FLEET_WINDOW of the first, are
+        one fleet item at the lane of its strongest run; every other run item is published as it is. Runs are read
+        by shape then start, so one cluster is open at a time. Runs that were not merged are then compared with the
+        fleets near them in time: one sharing at least FLEET_SIMILAR of a fleet's changes is named in that fleet's
+        item as excluded, with how it differs (it keeps its own item)."""
+        out: list[Match] = []
+        if getattr(self, "_fleet_members", None) is not None:
+            self._fleet_members.clear()
+        members = self._fleet_members = KeyedStore(self, "acct_fleet_members", self.HOT, disk_budget=UNBUDGETED)
+        seen = KeyedStore(self, "acct_fleet_seen", self.HOT, disk_budget=UNBUDGETED)
+        anchors = self._fleet_anchors = KeyedStore(self, "acct_fleet_anchors", self.HOT, disk_budget=UNBUDGETED)
+        fleets = KeyedStore(self, "acct_fleets", self.HOT, disk_budget=UNBUDGETED)
+        windows = SpillList(self, "acct_fleet_windows", self.HOT, disk_budget=UNBUDGETED)
+        leftovers = SpillList(self, "acct_leftover_runs", self.HOT, disk_budget=UNBUDGETED)
+        fleet: _Fleet | None = None
+        waiting: list[_RunShape] = []        # a cluster's runs while it has fewer than FLEET_MIN_HOSTS hosts
+
+        def leave(shape: _RunShape) -> None:
+            need(leftovers.append(shape, (shape.first, f"{shape.host or ''}|{shape.anchor_id}")), self,
+                 "the account change runs not merged")
+
+        def add(shape: _RunShape) -> None:
+            fleet.runs += 1
+            fleet.last = max(fleet.last, shape.last)
+            fleet.changes_min = min(fleet.changes_min or shape.changes, shape.changes)
+            fleet.changes_max = max(fleet.changes_max, shape.changes)
+            if shape.lane == "high":
+                fleet.lane = "high"
+            if seen.peek((fleet.fid, shape.host)) is not None:
+                return                                        # a repeat on a host already counted
+            need(seen.put((fleet.fid, shape.host), 1), self, "the fleet host index")
+            fleet.hosts += 1
+            if not fleet.chunks or fleet.chunk_fill >= self.FLEET_CHUNK:
+                fleet.chunks, fleet.chunk_fill = fleet.chunks + 1, 0
+            chunk = need(members.setdefault((fleet.fid, fleet.chunks - 1), list), self, "the fleet host list")
+            chunk.append((shape.host, shape.anchor_id))
+            fleet.chunk_fill += 1
+            if fleet.hosts <= self.FLEET_HOST_CITE:
+                anchor = next(e for e in shape.match.events if e.id == shape.anchor_id)
+                need(anchors.put((fleet.fid, fleet.hosts - 1), anchor), self, "the fleet hosts' records")
+            if len(fleet.sample_hosts) < self.FLEET_HOSTS_NAMED:
+                fleet.sample_hosts.append(shape.host)
+            if len(fleet.exemplars) < self.FLEET_CITE_RUNS:
+                fleet.exemplars.append(shape)
+
+        def close() -> None:
+            nonlocal fleet, waiting
+            if fleet is not None:
+                need(fleets.put(fleet.fid, fleet), self, "the fleets")
+                need(windows.append(fleet.fid, (fleet.first - self.FLEET_NEAR, fleet.fid)), self, "the fleets")
+            for shape in waiting:
+                leave(shape)
+            fleet, waiting = None, []
+
+        key, start = None, 0.0
+        for i, shape in enumerate(runs.ordered()):
+            if not shape.key:
+                leave(shape)
+                continue
+            if shape.key != key or shape.first - start >= self.FLEET_WINDOW:
+                close()
+                key, start = shape.key, shape.first
+            if fleet is not None:
+                add(shape)
+            else:
+                waiting.append(shape)
+                if len({s.host for s in waiting}) >= self.FLEET_MIN_HOSTS:
+                    first = waiting[0]
+                    fleet = _Fleet(f"{first.key}|{first.anchor_id}", first.key, first.first, first.last, first,
+                                   lane=first.lane)
+                    for held in waiting:
+                        add(held)
+                    waiting = []
+            if i % self.FINALIZE_TRIM == self.FINALIZE_TRIM - 1:
+                for store in (members, seen, fleets, windows, leftovers):
+                    store.trim()
+        close()
+        seen.clear()
+        # compare the runs that were not merged with the fleets whose span, widened by FLEET_NEAR, holds their start
+        order = iter(windows.ordered())
+        upcoming = next(order, None)
+        active: list[tuple[str, float]] = []           # (fleet id, end of its widened span)
+        for i, shape in enumerate(leftovers.ordered()):
+            while upcoming is not None and fleets.peek(upcoming).first - self.FLEET_NEAR <= shape.first:
+                found = fleets.peek(upcoming)
+                active.append((upcoming, found.last + self.FLEET_NEAR))
+                if len(active) > self.FLEET_ACTIVE:
+                    active.pop(0)
+                    self.note_limit("fleet_active", f"more than {self.FLEET_ACTIVE} fleets of account change runs "
+                                                    "overlapped in time; runs that were not merged were compared "
+                                                    "with the latest of them only, so a fleet item may not name every "
+                                                    "similar run it excluded")
+                upcoming = next(order, None)
+            active = [(fid, end) for fid, end in active if end >= shape.first]
+            for fid, _end in active:
+                found = fleets.peek(fid)
+                reason = self._excluded(found, shape)
+                if reason:
+                    found.excluded_count += 1
+                    if len(found.excluded) < self.FLEET_EXCLUDED_NAMED:
+                        found.excluded.append((shape.host, reason))
+                    need(fleets.put(fid, found), self, "the fleets")
+            out.append(shape.match)
+            if i % self.FINALIZE_TRIM == self.FINALIZE_TRIM - 1:
+                fleets.trim()
+        for fid in sorted(fleets.keys(), key=str):
+            found = fleets.peek(fid)
+            with citation_group(self, out, f"burst-fleet|{fid}", found):
+                out.append(self._fleet_finding(found))
+        fleets.clear()
+        windows.clear()
+        leftovers.clear()
+        anchors.clear()
+        return out
+
+    def _excluded(self, fleet: _Fleet, shape: _RunShape) -> str:
+        """How a run that was not merged differs from a fleet it resembles ('' when it does not resemble it)."""
+        template = fleet.template
+        if not template.signatures or len(shape.signatures & template.signatures) < (
+                self.FLEET_SIMILAR * len(template.signatures)):
+            return ""
+        parts = []
+        if shape.unmergeable:
+            parts.append(f"not compared whole: {shape.unmergeable}")
+        extra = sorted(shape.signatures - template.signatures)
+        missing = len(template.signatures - shape.signatures)
+        if extra:
+            parts.append(f"{len(extra)} change(s) the fleet's runs do not make: "
+                         + "; ".join(map(_signature_text, extra[:3])) + ("; and more" if len(extra) > 3 else ""))
+        if missing:
+            parts.append(f"{missing} of the fleet's changes not made")
+        if shape.cls != template.cls:
+            parts.append(f"{_class_text(shape.cls)} rather than {_class_text(template.cls).removeprefix('made as ')}")
+        if shape.segment != template.segment:
+            parts.append(f"segment {shape.segment[0]} of {shape.segment[1]} rather than {template.segment[0]} of "
+                         f"{template.segment[1]}")
+        if shape.lineages != template.lineages:
+            parts.append("under another exec lineage")
+        if not fleet.first <= shape.first < fleet.first + self.FLEET_WINDOW:
+            parts.append(f"started at {_iso(shape.first)}, outside the fleet window")
+        return "; ".join(parts)
+
+    def _fleet_finding(self, fleet: _Fleet) -> Match:
+        template = fleet.template
+        signatures = sorted(template.signatures)
+        kind_text = _status_counts(Counter((sig[4], sig[0]) for sig in signatures))
+        span = (f"{fleet.changes_min} change(s) per host" if fleet.changes_min == fleet.changes_max
+                else f"{fleet.changes_min} to {fleet.changes_max} change(s) per host (repeats of the same changes)")
+        claim = (f"On {fleet.hosts} hosts, the same run of account and group changes was recorded from "
+                 f"{_iso(fleet.first)} to {_iso(fleet.last)}: each host's run requested or reported the same "
+                 f"{len(signatures)} distinct change(s) ({kind_text}; {span}), {_class_text(template.cls)}"
+                 + (f", as segment {template.segment[0]} of {template.segment[1]} of each host's run"
+                    if template.segment[1] > 1 else "")
+                 + f". This item groups hosts whose runs match in shape and started less than "
+                   f"{self.FLEET_WINDOW / 3600:.0f} hours after the first; it does not show that the runs share an "
+                   "origin.")
+        if fleet.runs > fleet.hosts:
+            claim += f" {fleet.runs} runs in all ({fleet.runs - fleet.hosts} more on hosts already counted)."
+        privileged = [_signature_text(sig) for sig in signatures if sig[3]]
+        if privileged:
+            claim += (f" On every host the run requests or reports privileged access: {'; '.join(privileged[:8])}"
+                      + (f"; and {len(privileged) - 8} more (each is in the notes)" if len(privileged) > 8 else "")
+                      + ".")
+        more = fleet.hosts - len(fleet.sample_hosts)
+        claim += (f" Hosts: {', '.join(str(h) for h in fleet.sample_hosts)}"
+                  + (f" and {more} more (all {fleet.hosts} are in the paged host list)" if more else "") + ".")
+        if fleet.excluded_count:
+            shown = "; ".join(f"{host} ({reason})" for host, reason in fleet.excluded[:4])
+            rest = fleet.excluded_count - min(4, len(fleet.excluded))
+            claim += (f" {fleet.excluded_count} similar host run(s) differ from this shape and keep their own items: "
+                      f"{shown}" + (f"; and {rest} more" + (" (named in the notes)" if fleet.excluded_count
+                                                             <= self.FLEET_EXCLUDED_NAMED else
+                                                             f" (the first {self.FLEET_EXCLUDED_NAMED} are named in "
+                                                             "the notes)") if rest else "") + ".")
+        claim += (" A provisioning run rolled out across a fleet looks like this; so does one intruder making the same "
+                  "changes on many hosts, so the item keeps the lane of its strongest run.")
+        # exemplar records from several hosts' runs: the privileged changes' records first
+        # (each cited host's host-list record, its run's first cited record, among them)
+        per_run = max(1, self.FLEET_CITE // max(1, len(fleet.exemplars)))
+        events: list[TypedEvent] = []
+        for shape in fleet.exemplars:
+            own = [e for e in shape.match.events if e.id not in shape.match.context_ids]
+            own.sort(key=lambda e: (e.id != shape.anchor_id, not _record_privilege(e), e.ts, e.id))
+            events += own[:per_run]
+        exemplar_ids = {e.id for e in events}
+        # each listed host's own record (the one its host-list entry names), up to FLEET_HOST_CITE hosts
+        listed = [self._fleet_anchors.peek((fleet.fid, index)) for index in range(min(fleet.hosts,
+                                                                                         self.FLEET_HOST_CITE))]
+        missing = sum(anchor is None for anchor in listed)
+        events = sorted(_unique([*events, *(anchor for anchor in listed if anchor is not None)]),
+                        key=lambda e: (e.ts, e.id))
+        claim += (f" Records of the runs on {len(fleet.exemplars)} of the {fleet.hosts} hosts are cited, and so is "
+                  "the record each listed host's entry names")
+        rest = fleet.hosts - len(listed) + missing
+        if rest:
+            claim += (f", except for {rest} host(s) whose entries name a record that is not stored with this item "
+                      f"(at most {self.FLEET_HOST_CITE} hosts' records are)")
+            self.note_limit("fleet_host_records", f"a fleet of account change runs listed more than "
+                                                  f"{self.FLEET_HOST_CITE} hosts; the further hosts' list entries name a "
+                                                  "record not stored with the item")
+        claim += "."
+        notes = sorted({n for n in template.match.notes if n.startswith("T")})
+        notes += [f"fleet change: {_signature_text(sig)}" for sig in signatures]      # at most NAMED (a segment's)
+        notes += [f"excluded: {host} ({reason})" for host, reason in fleet.excluded]
+        if fleet.excluded_count > len(fleet.excluded):
+            notes.append(f"{fleet.excluded_count - len(fleet.excluded)} further excluded run(s) are counted, not named")
+        entities = list(template.match.entities)
+        predicate = [pf(e, n) for e in sorted(events, key=lambda e: (not _record_privilege(e), e.ts, e.id))[:4]
+                     for n in ("process.argv", "process.executable", "audit.record_type", "account.action",
+                               "account.name", "account.group") if e.has(n)]
+        match = Match(self.id, claim, self.claim_type, events, predicate,
+                      min(e.ts for e in events), self.severity, fleet.lane, template.match.confidence, entities,
+                      group_key=f"burst-fleet|{fleet.fid}", fleet_hosts=self._fleet_hosts(fleet.fid, fleet.chunks),
+                      fleet_host_count=fleet.hosts, fleet_hosts_complete=True)
+        match.notes = notes
+        match.context_ids = {e.id for e in events} - exemplar_ids       # the hosts' records support the host list
+        return match
+
+    def _fleet_hosts(self, fid: str, chunks: int):
+        """A fleet item's hosts with each host's first cited record, read from the rule's member store when the
+        finding is published."""
+        store = self._fleet_members
+        for index in range(chunks):
+            chunk = store.peek((fid, index))
+            if chunk is None:
+                self.note_limit("fleet_hosts", f"the host list of fleet {fid} could not be fully read")
+                raise LookupError(f"the host list of fleet {fid} could not be fully read")
+            yield from chunk
+
+    def _burst_add(self, run: _Burst, change: _Change) -> None:
+        """Count one change into a run segment: exact counts, every distinct change named (the segment holds at most
+        NAMED of them), one entity per account name, and an exemplar and a citation while their caps allow (privileged
+        changes have their own, so other changes never crowd them out)."""
+        run.changes += 1
+        status = _change_status(change)
+        run.kinds[(status, _change_kind(change))] += 1
+        for name in change.accounts + change.groups:
+            if name in run.targets:
+                continue
+            if len(run.targets) < self.BURST_TARGET_NAMES:
+                run.targets.add(name)
+            else:
+                run.targets_more = True
+        for name in change.accounts:
+            if name not in run.accounts:
+                if len(run.accounts) < self.BURST_TARGET_NAMES:
+                    run.accounts.add(name)
+                else:
+                    run.accounts_more += 1
+        run.commands += change.command is not None
+        run.records += len(change.records)
+        run.unexplained += change.command is None and not change.exec_seen
+        signature = (_change_kind(change), tuple(sorted(change.accounts)), tuple(sorted(change.groups)),
+                     tuple(_change_privilege(change)), status)
+        run.signatures.add(signature)                   # at most NAMED distinct per segment
+        run.lineages.add(change.lineage.kind)
+        run.techniques.add(_ACTION_TECHNIQUE.get(change.action, "T1098"))
+        run.mentions.update(m for m in map(_record_mention, change.records[:4]) if m)
+        lane = _change_lane(change)
+        if lane == "high":
+            run.high += 1
+        if run.lineage is None or (lane == "high" and not run.lineage_high):
+            run.lineage, run.lineage_high = change.lineage, lane == "high"
+        # an exemplar keeps the change's command and its first records only (a bulk tool's change can hold thousands)
+        exemplar = replace(change, records=change.records[:3])
+        text = _change_text(change)
+        privileges = _change_privilege(change)
+        if privileges:
+            run.privileged_count += 1
+            text = f"{text}: {'; '.join(privileges)}" + {
+                "reported": "", "requested": " (requested only; not shown to have taken effect)",
+                "failed": " (every recorded result failed)"}[status]
+            run.privileged[text] = run.privileged.get(text, 0) + 1
+            if len(run.cited_privileged) < self.BURST_CITE - 1:
+                run.cited_privileged.append(exemplar)
+            return
+        run.named[text] = run.named.get(text, 0) + 1
+        if len(run.cited_other) < self.BURST_CITE:
+            run.cited_other.append(exemplar)
+
+    def _burst_finding(self, run: _Burst) -> Match:
+        host = run.host
+        count = f"more than {len(run.targets)}" if run.targets_more else str(len(run.targets))
+        claim = (f"On {host}, {run.changes} account or group change(s) were requested or reported close together in "
+                 f"time from {_iso(run.first)} to {_iso(run.last)}, each less than {self.BURST_GAP / 60:.0f} minutes "
+                 f"after the one before (a run: grouped by time and by evidence: every change in it was "
+                 f"{_class_text(run.cls)}), naming {count} distinct account and group name(s): "
+                 f"{_status_counts(run.kinds)}.")
+        if run.segments > 1:
+            claim += (f" This is segment {run.segment} of {run.segments} of the run (a segment covers less than "
+                      f"{self.BURST_SPAN / 3600:.0f} hour and at most {self.NAMED} distinct changes); the whole run "
+                      f"holds {run.run_changes} change(s): {_status_counts(run.run_kinds)}.")
+        if run.privileged_count:
+            shown = [text + (f" (x{n})" if n > 1 else "") for text, n in list(run.privileged.items())[:8]]
+            rest = len(run.privileged) - len(shown)
+            claim += (f" {run.privileged_count} of them request or report privileged access: {'; '.join(shown)}"
+                      + (f"; and {rest} more distinct (each is named in the notes)" if rest else "") + ".")
+        backed = run.changes - run.commands
+        claim += (f" {run.commands} of the changes rest on an exec record of the account tool or command and {backed} "
+                  f"on the tools' own records only ({run.records} account-management record(s) in all)")
+        claim += (f"; no exec record of the changing process was retrieved for {run.unexplained} of them, so what "
+                  "started those is unknown." if run.unexplained else ".")
+        claim += (" Changes on this host made by another account, recorded by other evidence, under another audit "
+                  "login or with a different exec-record status are not in this item; they keep their own findings.")
+        claim += (" Configuration management, an image build, a first-boot agent or an administrator's script "
+                  "creating accounts and adding the administrator to its groups looks like this; so does an intruder "
+                  "creating an account and granting it a privileged group inside such a run, so the item takes the "
+                  "lane of its strongest change and names and cites the privileged changes first.")
+        if run.mentions:
+            claim += (f" A record {'; '.join(sorted(run.mentions)[:4])}, but its operation does not show a membership "
+                      "being granted.")
+        phrase, lineage_events, lineage_raw = self.lineage.cited_phrase(run.lineage)
+        if phrase:
+            claim += f" Exec lineage of the first {'privileged ' if run.lineage_high else ''}change: {phrase}."
+        lane = "high" if run.high else "lead"
+        # the privileged changes first (at most BURST_CITE - 1); one slot is kept for the earliest other change, which
+        # times the run
+        cited_privileged = run.cited_privileged
+        cited = cited_privileged + run.cited_other[:self.BURST_CITE - len(cited_privileged)]
+        if lane == "high":
+            claim += writer_sentence([r for c in cited_privileged for r in c.records if not r.has("audit.record_type")],
+                                     lambda r: str(r.get("log.identifier") or r.get("journal.identifier")
+                                                   or "the account tool"))
+        events: list[TypedEvent] = []
+        for c in cited:
+            if c.command is not None:
+                events.append(c.command)
+            events += c.records if (_change_privilege(c) or c.command is None) else c.records[:1]
+        events = sorted(_unique(events), key=lambda e: (e.ts, e.id))
+        notes = sorted(run.techniques)
+        if run.changes > len(cited):
+            claim += (f" The records of {len(cited)} of the {run.changes} changes are cited: the privileged ones "
+                      "first, then the earliest; every change is named in the notes.")
+        if run.privileged_count > len(cited_privileged):
+            claim += (f" {run.privileged_count - len(cited_privileged)} privileged change(s) are named but not cited "
+                      f"(at most {self.BURST_CITE - 1} are).")
+            self.note_limit("burst_privileged_cited", f"a run segment of account changes held more than "
+                                                      f"{self.BURST_CITE - 1} privileged changes; the rest are named "
+                                                      "and counted in its item, not cited")
+        notes += [f"privileged change: {text}" + (f" (x{n})" if n > 1 else "") for text, n in run.privileged.items()]
+        notes += [f"change: {text}" + (f" (x{n})" if n > 1 else "") for text, n in run.named.items()]
+        if run.targets_more:
+            notes.append(f"more than {self.BURST_TARGET_NAMES} distinct account and group names: the count is a "
+                         "lower bound")
+        alone = self._alone_hosts.get(host, 0)
+        if alone:
+            notes.append(f"{alone} account change(s) on this host were published as findings of their own when the "
+                         "change budget was spent; they are not counted in this item")
+        elif self._alone_other:
+            notes.append(f"{self._alone_other} account change(s) on hosts beyond the first {self.ALONE_HOSTS} counted "
+                         "by host were published as findings of their own when the change budget was spent; any on "
+                         "this host are not counted in this item")
+        # the predicate is read from the privileged changes' records first
+        first = _unique([e for c in cited_privileged for e in (c.command, *c.records) if e is not None] + events)
+        predicate = [pf(e, n) for e in first[:4]
+                     for n in ("process.argv", "process.executable", "audit.record_type", "account.action",
+                               "account.name", "account.group") if e.has(n)]
+        # one entity per account name the segment changes (the intruder's account among them, as a pivot)
+        entities = list(events[0].entities())
+        entities += [("account", f"{host}\\{a}", "subject") for a in sorted(run.accounts)]
+        if run.accounts_more:
+            notes.append(f"{run.accounts_more} further account name(s) are named in the changes but not listed as "
+                         f"entities (the first {self.BURST_TARGET_NAMES} are)")
+            self.note_limit("burst_entities", f"a run segment named more than {self.BURST_TARGET_NAMES} accounts; "
+                                              "the rest are named in its notes, not listed as entities")
+        when = events[0].ts
+        cited_ids = {e.id for e in events}
+        events = sorted(_unique([*events, *lineage_events]), key=lambda e: (e.ts, e.id))
+        match = Match(self.id, claim, self.claim_type, events, predicate, when, self.severity, lane,
+                      "high" if run.records else "medium", list(dict.fromkeys(entities)),
+                      group_key=f"burst|{host}|{run.first_id}")
+        match.notes = notes
+        match.raw_copies.update(lineage_raw)
+        match.context_ids = {e.id for e in lineage_events} - cited_ids
+        return match
 
     def _group(self, change: _Change) -> tuple:
         privileged = change.privileged or any(_record_privilege(r) for r in change.records)
@@ -1457,7 +2400,7 @@ class AccountOrGroupChange(Playbook):
                      + f" ran {len(commands)} command(s) to {first.detail} (e.g. "
                      f"{_argv_summary(commands[0].get('process.argv'), 120)}); {_outcome_tally(commands)}.")
         else:
-            exe = records[0].get("process.executable")
+            exe = next((r.get("process.executable") for r in records if r.get("process.executable")), None)
             noun = ("account-management audit record(s)" if all(r.has("audit.record_type") for r in records)
                     else "account-management record(s) (audit records or the tool's own log lines)")
             claim = (f"On {host}, {len(records)} {noun} report that "
