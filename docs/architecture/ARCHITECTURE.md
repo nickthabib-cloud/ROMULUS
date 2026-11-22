@@ -95,6 +95,33 @@ Records the sweep reads but no normalizer turns into a typed event are scanned f
 - **Lane.** `mention` is a lane of its own between context and lead, stored outside the findings table. Ranking, triage, expansion, entities, incidents and hypothesis decisions never read it. The report manifest carries the pool's coverage and its top mentions under `mentions`; Markdown, DOCX, the web *Mentions* tab and the agent's dossier and `list_mentions` tool show them labelled as mentions. No alias is issued for a mention, so the agent cannot cite one: it corroborates a mention with typed evidence and cites that. A lead resting on raw text only comes from the agent reading the raw record itself and judging it; such a lead is labelled a mention, has low confidence and no ATT&CK technique.
 - **Coverage.** The pool `scanned every offered record` (never a statement that there are no mentions), or is `partial`, or `not_scanned` (no patterns). It is partial, each with its counts and names, for a partition the sweep could not read in full, a source the fetch filters leave out (Linux text datasets not retrieved, Windows classes not selected or channels outside the catalog's), a record without scannable text, a line cut at the bound, a line not ruled out, a cap, a stage write refused or disk reclaimed, a refused or changed pattern file, a scan that failed, or a stop. A scan that raises costs the pool that partition, never its detection. The pool's coverage does not change the detection result.
 
+## Network-to-host join
+
+`detect.net_host_join` (`corr.network_admin_logon`) joins the administration sessions that the sweep's network findings
+cite (SMB, RPC, WinRM, RDP, SSH, Telnet and the r-services) to the logon the destination host recorded from that
+client, and to the process and share records in that logon session. Host records often carry no address of the host
+itself, so the join never maps addresses to hosts. It is keyed on the client endpoint the destination writes into its
+own logon record, strongest first: the client address and port (4624/4625, 5140/5145, sshd's `Accepted` line); the
+host's own record of the connection (Sysmon 3 or an audit socket record) plus a portless logon of a type the protocol
+produces; or a portless logon on the only host with one in the window, when the client held no other session of that
+logon class to another address. Records written on the client or by a domain controller (4648, 4768, 4769, 4776) are
+never read. The logon must fall within the session's recorded lifetime widened by five minutes (the Windows Kerberos
+clock tolerance, which bounds the host clocks whose domain logons are read). Anything else is unresolved with its
+reason, counted on the rule's coverage, and never a negative; VNC and X11 sessions are named unresolved, since they
+leave no typed host logon.
+
+- **State.** Both sides are compact rows on the rule's disk spill (the sweep reads one target before the next), joined
+  at finalize. Remote logon sessions and, for each, a count and its earliest process and share records are in keyed
+  stores. A process record read before any remote logon naming its session (a target read earlier) is not joined, and
+  the item says so.
+- **Order.** The rule is finalized after every other rule has published (`after_findings`). It reads the hunt's urgent,
+  high and lead findings from the store in full, then the session records they cite, and publishes one item per
+  (destination host, client address, protocol). Findings published later (expansion, the agent) are not joined.
+- **Lane.** The item is a lead labelled as an inferred link, with its key and each logon's offset from the session
+  start. It is high only when a typed host finding the hunt published at high or urgent cites a process or share record
+  in the joined logon session, and it never touches the network finding's own lane. Cited host records are kept
+  compact and their bodies are fetched by native id when the item is published.
+
 ## Linux text logs
 
 Known shipper shapes retain their existing normalization. The last host-log route, `linux.text`, identifies

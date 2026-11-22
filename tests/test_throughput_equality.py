@@ -398,6 +398,8 @@ from tests import throughput_fixture as tf
 # the two privilege-broker rules (pack@61, their cells are new rows) move only rule versions and cells. With the
 # evidence version set back to 20 and the prior versions restored the candidates digest is the earlier one; the
 # candidate count, lanes and claims are unchanged.
+# The network-to-host join (pack@62) publishes nothing in this scenario: it adds its rule cells and its manifest card
+# and nothing else.
 GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
  'audit': '8271edcfc6c48298d5634ac9b8a34cfb40d22d1abfeb2647ed5042bdfbcdfe9f',
  'baseline_counts': 'be05fabb25336f21341b46eae7d8c2627828f7a7a7e8fdb24f4eb58576099354',
@@ -416,9 +418,9 @@ GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe55
  'events': '9b9544ad6f24d002f3f71d874518df5ecee3d968e12ec1fd5c9dce2345d7a87f',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
  'links': '5fa22b4162492394955b6b1873f566f427a58dfd7529c0df73e87a6da8daa76f',
- 'manifest': '46b99a4f9ba64da5f4e87171cef24a1428962dcfcc8cea2c10c817269e6a3540',
+ 'manifest': '8234955475f4e6b6b642a7144700cee379e33d498dbebdf4582e1b23dba8e642',
  'raw': 'd924f62eebd5ee88c8142c690333924450c3344b18210ddfe87b8e486127dd35',
- 'rule_cells': 'ef5931b9402c0f851be82d8103703226b8d8027e909ac42b10ef8d7a1646585f',
+ 'rule_cells': '9896657d6c30351a74a36bb1a4992e765c85fc9c13db29eff956a6ed3bf11d45',
  'stats': '3cab287a0e842808a55545533e3005e8ebaf22bebf7af112b62598c7bd3c3ca6',
  'tasks': '1e1eeb69d05da151bec8f6dff43c1863a4eb43a288f84c1ba35168311b303360'}
 # The rule-estimate stack's digests (expansion seeded by the urgent and high lanes, as before evidence ranking;
@@ -441,9 +443,9 @@ GOLDEN_STACK_BY_RULE_ESTIMATE = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e
  'events': '9b9544ad6f24d002f3f71d874518df5ecee3d968e12ec1fd5c9dce2345d7a87f',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
  'links': '5fa22b4162492394955b6b1873f566f427a58dfd7529c0df73e87a6da8daa76f',
- 'manifest': '7b8cc193e6d3cfea8fc0908ced87708cb2a9203200e8934839a64d57083eee70',
+ 'manifest': 'c5ce253db18b5c52eaae8da8cfcef6151acd7798c90b0c0a73fa9e2b1e0c5c66',
  'raw': 'd924f62eebd5ee88c8142c690333924450c3344b18210ddfe87b8e486127dd35',
- 'rule_cells': 'ef5931b9402c0f851be82d8103703226b8d8027e909ac42b10ef8d7a1646585f',
+ 'rule_cells': '9896657d6c30351a74a36bb1a4992e765c85fc9c13db29eff956a6ed3bf11d45',
  'stats': '3cab287a0e842808a55545533e3005e8ebaf22bebf7af112b62598c7bd3c3ca6',
  'tasks': '1e1eeb69d05da151bec8f6dff43c1863a4eb43a288f84c1ba35168311b303360'}
 GOLDEN_CANDIDATES_BY_RULE_ESTIMATE = GOLDEN_STACK_BY_RULE_ESTIMATE['candidates']

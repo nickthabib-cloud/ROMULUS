@@ -408,6 +408,13 @@ class Sweep:
                 pb.citation_fetcher = WindowsCitationFetcher(client)
             else:
                 pb.citation_fetcher = SourceCitationFetcher(client)
+            if getattr(pb, "after_findings", False) and repo is not None:
+                # a rule that joins other rules' published findings: it is finalized after every other rule and
+                # reads them from the store (stable pages per lane, and their cited records)
+                pb.bind_published(
+                    lambda lane, offset, limit: repo.candidate_page(hunt_id, offset=offset, limit=limit, lane=lane),
+                    lambda ids: [TypedEvent.model_validate(row["event"])
+                                 for row in repo.citation_events(hunt_id, list(ids))])
         self._has_windows = any(contract is not None and contract.os_family == "windows"
                                 for contract in contracts.values())
         # Plan only detection stores. Citation owners have no floor and yield their optional cache bytes first.
@@ -3208,13 +3215,16 @@ class Sweep:
         self.repo.audit("system", BOOT_INTERVALS_AUDIT, self.hunt_id, self.boots.to_json())
         self._boot_summary()
         agg_raw = getattr(self, "_agg_raw", {})
-        for pb in self.pack:
+        # Rules that join other rules' published findings run last, once every other rule has published.
+        for pb in sorted(self.pack, key=lambda rule: bool(getattr(rule, "after_findings", False))):
             if pb.kind != "aggregate":
                 continue
             self.heartbeat()
             if pb.staged:
                 stage = self._event_stage()
                 pb.bind_loader(stage.load)
+                pb.heartbeat = self.heartbeat
+            elif getattr(pb, "after_findings", False):
                 pb.heartbeat = self.heartbeat
             finalized_matches = 0
             finalize_began = time.perf_counter()
