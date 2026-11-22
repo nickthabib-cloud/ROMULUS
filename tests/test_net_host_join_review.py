@@ -186,6 +186,15 @@ def test_activity_and_flags_after_the_logoff_are_not_the_joined_logons():
     assert m.proposed_lane == "lead" and "1 process or share record(s)" in m.claim and "cmd.exe" not in m.claim
 
 
+# ---- minors -------------------------------------------------------------------------------------------------------
+
+def test_a_dual_stack_sshds_mapped_client_address_meets_the_sensors_ipv4_one():
+    from tests.test_net_host_join import CLIENT
+    session = flow("f1")
+    _rule, matches = run([[session], [sshd("acc", 0.4, client="::ffff:" + CLIENT)]], [finding("F1", [session])])
+    assert len(matches) == 1 and "client address and client port" in matches[0].claim
+
+
 def test_a_session_only_a_later_stage_read_is_never_paired_by_address():
     from romulus.detect.net_host_join import NetworkAdminLogonJoin
     rule = NetworkAdminLogonJoin()

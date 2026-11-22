@@ -200,6 +200,16 @@ def canon_session(value) -> str | None:
     return None if number < 0 or text in _UNSET_SESSIONS else text
 
 
+def join_ip(value) -> str | None:
+    """An address in one spelling for the join: an IPv4-mapped IPv6 address (`::ffff:192.0.2.1`, as dual-stack
+    daemons such as sshd log an IPv4 client) is its IPv4 address, so a host's record and a sensor's meet."""
+    text = canon_ip(value)
+    if text is None or not text.startswith("::ffff:"):
+        return text
+    mapped = ipaddress.ip_address(text).ipv4_mapped
+    return str(mapped) if mapped is not None else text
+
+
 def _usable_client(ip: str | None) -> bool:
     if ip is None:
         return False
@@ -242,7 +252,7 @@ def admin_session(event: TypedEvent) -> AdminSession | str | None:
     names = _names(event)
     named = {PROTOCOL_SERVICE[name] for name in names if name in PROTOCOL_SERVICE}
     family_service = FAMILY_SERVICE.get(event.family)
-    src, dst = canon_ip(event.get("source.ip")), canon_ip(event.get("destination.ip"))
+    src, dst = join_ip(event.get("source.ip")), join_ip(event.get("destination.ip"))
     sport, dport = _num(event.get("source.port")), _num(event.get("destination.port"))
     by_port = PORT_SERVICE.get(dport) if dport is not None else None
     reversed_port = (PORT_SERVICE.get(sport) if sport is not None and dport is not None and dport >= 1024
@@ -589,7 +599,7 @@ class NetworkAdminLogonJoin(Playbook):
             self._net_refused += 1
 
     def _logon(self, event: TypedEvent, kind: str, seq: int) -> None:
-        src = canon_ip(event.get("source.ip"))
+        src = join_ip(event.get("source.ip"))
         if not event.host:
             return
         session = _session_of(event)
@@ -661,7 +671,7 @@ class NetworkAdminLogonJoin(Playbook):
         return entry
 
     def _host_connection(self, event: TypedEvent) -> None:
-        a, b = canon_ip(event.get("source.ip")), canon_ip(event.get("destination.ip"))
+        a, b = join_ip(event.get("source.ip")), join_ip(event.get("destination.ip"))
         ap, bp = _num(event.get("source.port")), _num(event.get("destination.port"))
         if None in (a, b, ap, bp) or not event.host:
             return
@@ -717,8 +727,8 @@ class NetworkAdminLogonJoin(Playbook):
 
     def finalize(self):
         if self._published is None:
-            self.note_coverage("no_findings", "the hunt's published network findings were not available to this "
-                                              "rule, so no session was joined")
+            self.note_coverage("no_findings", NOTE_PREFIX + "the hunt's published network findings were not "
+                                              "available to this rule, so no session was joined")
             return []
         return self._finalize()
 
@@ -764,8 +774,8 @@ class NetworkAdminLogonJoin(Playbook):
         from pathlib import Path
         path = self.persist_path
         if path is None:
-            self.note_coverage("not_kept", "the join's rows were not kept for findings published after the sweep (no "
-                                           "stage directory)")
+            self.note_coverage("not_kept", NOTE_PREFIX + "the join's rows were not kept for findings published "
+                                           "after the sweep (no stage directory)")
             return
         path = Path(path)
         size = spill.path.stat().st_size if spill.path.exists() else 0
