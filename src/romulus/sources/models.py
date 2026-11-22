@@ -5,7 +5,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_serializer, model_validator
 
 
 class Window(BaseModel):
@@ -73,6 +73,15 @@ class SearchIntent(BaseModel):
     max_records: int = Field(default=10_000, ge=1, le=2_000_000)  # raw hits or aggregate buckets
     order: Literal["asc", "desc"] = "asc"       # raw retrieval order; never model supplied
     purpose: str = ""
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        # an intent without an excluded selection serializes as it always has: task ids and fingerprints are digests
+        # of this form, so a resumed or re-run hunt keeps its tasks
+        data = handler(self)
+        if isinstance(data, dict) and data.get("excluding") is None:
+            data.pop("excluding", None)
+        return data
 
     @model_validator(mode="after")
     def _raw_order_only(self):
