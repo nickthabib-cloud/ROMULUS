@@ -336,6 +336,9 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
             raise HTTPException(404) from None
         except ValueError as e:
             raise HTTPException(409, str(e)) from None
+        # the network-to-host join's rows kept for its pass after the packet and baseline stages
+        from romulus.hunt.net_join_pass import discard_rows
+        discard_rows(s.stage_path, hunt_id)
         # generated report files for this hunt, path-checked to stay inside the reports directory
         rdir = (s.reports_dir / hunt_id).resolve()
         if s.reports_dir.resolve() in rdir.parents and rdir.is_dir():

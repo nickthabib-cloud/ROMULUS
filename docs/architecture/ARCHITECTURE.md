@@ -116,7 +116,18 @@ leave no typed host logon.
   the item says so.
 - **Order.** The rule is finalized after every other rule has published (`after_findings`). It reads the hunt's urgent,
   high and lead findings from the store in full, then the session records they cite, and publishes one item per
-  (destination host, client address, protocol). Findings published later (expansion, the agent) are not joined.
+  (destination host, client address, protocol).
+- **After the packet and baseline stages** (`hunt.net_join_pass`). The sweep keeps the join's rows (sessions, logons,
+  host connections, remote logon sessions and their activity, and what each pass judged and published) in
+  `<stage directory>/join/<hunt id>.db`, written whole and moved into place, and only while the stage volume has room
+  above its reserve. A second pass, before ranking, joins the sessions the packet and baseline stages' findings cite
+  (the first-seen administration pair among them) against those rows, reading a cited session the sweep never read
+  from the cited record itself. A session is judged once and an item is republished only when its content changed, as
+  a revision of the same item, so a resume adds nothing twice. Its summary is the `hunt.join_summary` audit; a resume
+  runs the pass until that says finished, and never runs the sweep again to rebuild rows: missing rows leave the later
+  stages' sessions unresolved, named, on the rule's window cell. The rows are removed when the pass finishes, when the
+  hunt is deleted, and at the next hunt's start for hunts that no longer exist or whose pass finished. Findings of
+  expansion reaches and of the AI agent are never joined.
 - **Lane.** The item is a lead labelled as an inferred link, with its key and each logon's offset from the session
   start. It is high only when a typed host finding the hunt published at high or urgent cites a process or share record
   in the joined logon session, and it never touches the network finding's own lane. Cited host records are kept

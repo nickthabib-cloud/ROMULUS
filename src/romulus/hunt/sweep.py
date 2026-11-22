@@ -85,6 +85,7 @@ from romulus.evidence.zeek import ZEEK_INTERIM_SUPERSEDED, ZEEK_NORMALIZER
 from romulus.evidence.zeek_catalog import MALCOLM, SHAPES, ZEEK_LOGS, lookup_log
 from romulus.hunt.controls import HuntStopped
 from romulus.hunt.mentions import MentionScanner
+from romulus.hunt.net_join_pass import rows_path
 from romulus.hunt.publish import (
     LineageCitationFetcher,
     SourceCitationFetcher,
@@ -415,6 +416,8 @@ class Sweep:
                     lambda lane, offset, limit: repo.candidate_page(hunt_id, offset=offset, limit=limit, lane=lane),
                     lambda ids: [TypedEvent.model_validate(row["event"])
                                  for row in repo.citation_events(hunt_id, list(ids))])
+                # its rows are kept for the pass after the packet and baseline stages (romulus.hunt.net_join_pass)
+                pb.persist_path = rows_path(stage_dir, hunt_id) if stage_dir is not None else None
         self._has_windows = any(contract is not None and contract.os_family == "windows"
                                 for contract in contracts.values())
         # Plan only detection stores. Citation owners have no floor and yield their optional cache bytes first.

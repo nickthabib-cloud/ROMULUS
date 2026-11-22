@@ -29,6 +29,10 @@ from romulus.hunt.controls import HuntStopped, StopWatch
 from romulus.hunt.expansion import PER_ANCHOR_SOURCE_QUERIES, ExpansionEngine
 from romulus.hunt.links import LinkFetcher, is_agent_reach
 from romulus.hunt.manifest import build_manifest, inventory_usable, new_hunt_id, normalizer_versions
+from romulus.hunt.net_join_pass import finished as join_finished
+from romulus.hunt.net_join_pass import mark_not_run as mark_join_not_run
+from romulus.hunt.net_join_pass import prune_rows as prune_join_rows
+from romulus.hunt.net_join_pass import run_join_pass
 from romulus.hunt.packets import PACKET_NORMALIZER, run_packet_stage
 from romulus.hunt.pivot import PivotExecutor
 from romulus.hunt.rank import PASS_BEFORE_EXPANSION, PASS_FINAL, run_rank_pass
@@ -515,6 +519,9 @@ def _stages_after_sweep(s: Settings, repo: Repo, client: ElasticClient, hunt_id:
             repo, client, repo.get_hunt(hunt_id), window, contracts, heartbeat, owner_token,
             int(s.baseline_carry_disk_gb * 1e9),
         )
+    # the network-to-host join over the findings the packet and baseline stages published, from the sweep's kept rows
+    if not join_finished(repo, hunt_id) and not stopping(JOIN_STAGE):
+        _join_pass(s, repo, client, hunt_id, heartbeat, owner_token)
     # A resumed hunt ranks again over what is stored; each pass replaces its previous rows, so this is idempotent.
     run_rank_pass(repo, hunt_id, PASS_BEFORE_EXPANSION, owner_token=owner_token, heartbeat=heartbeat)
     if stopping("expansion"):
@@ -533,6 +540,22 @@ def _stages_after_sweep(s: Settings, repo: Repo, client: ElasticClient, hunt_id:
     return packet_summary, baseline_summary, expansion_summary, stop
 
 
+JOIN_STAGE = "network-host join"
+
+
+def _join_pass(s: Settings, repo: Repo, client: ElasticClient, hunt_id: str, heartbeat, owner_token: str) -> dict:
+    """The join's pass after the packet and baseline stages. A failure leaves its summary unfinished (a resume runs
+    it again) and the join's window cell partial, naming the error; the hunt goes on."""
+    try:
+        return run_join_pass(repo, client, hunt_id, s.stage_path, owner_token=owner_token, heartbeat=heartbeat)
+    except Exception as exc:
+        log.exception("network-host join pass failed")
+        summary = {"finished": False, "complete": False, "error": str(exc)[:300]}
+        mark_join_not_run(repo, hunt_id, f"failed: {exc}"[:300], owner_token=owner_token)
+        repo.audit("system", "hunt.join_summary", hunt_id, summary, owner_token=owner_token)
+        return summary
+
+
 def mark_unrun_stages(repo: Repo, hunt_id: str, reason: str, *, not_run: list[str] | None = None,
                       owner_token: str | None = None) -> list[str]:
     """Make every rule a stopped run's skipped stage owns read partial, never "no data in scope" or complete, until a
@@ -548,6 +571,8 @@ def mark_unrun_stages(repo: Repo, hunt_id: str, reason: str, *, not_run: list[st
         not_run = [stage for stage, action in (("packet stage", "hunt.packet_summary"),
                                                ("baseline stage", "hunt.baseline_summary"))
                    if not ((repo.latest_audit(hunt_id, action) or {}).get("detail") or {}).get("finished")]
+        if not join_finished(repo, hunt_id):
+            not_run.append(JOIN_STAGE)
     marked = []
     if "baseline stage" in not_run:
         for item in (manifest.get("baseline") or {}).get("specs") or []:
@@ -566,6 +591,9 @@ def mark_unrun_stages(repo: Repo, hunt_id: str, reason: str, *, not_run: list[st
         mark_not_run(repo, hunt_id, window, targets, packet_targets, f"packet stage {reason}",
                      owner_token=owner_token)
         marked.append("packet stage")
+    if JOIN_STAGE in not_run:
+        mark_join_not_run(repo, hunt_id, reason, owner_token=owner_token)
+        marked.append(JOIN_STAGE)
     return marked
 
 
@@ -731,6 +759,7 @@ def run_hunt(s: Settings, hunt_id: str, on_candidate=None, expand: bool | None =
 
     stage_dir = s.stage_path
     clear_stale_stages(stage_dir)
+    prune_join_rows(stage_dir, repo)
     sweep = Sweep(
         repo, client, hunt_id, window, contracts, on_candidate, heartbeat=heartbeat, stage_dir=stage_dir,
         site_facts=site_facts,

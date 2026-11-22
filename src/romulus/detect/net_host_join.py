@@ -23,6 +23,7 @@ agent) is not joined here.
 """
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 from collections import Counter
@@ -85,6 +86,38 @@ NETWORK_FAMILIES = ("net_flow", "net_session", "net_alert", "ssh_session", "smb_
                     "ntlm_tx", "kerberos_tx", "http_tx", "tls_session")
 HOST_FAMILIES = ("auth", "remote_access", "share_access", "process_exec", "net_socket")
 _UNSET_SESSIONS = {"0", "4294967295", "-1"}
+
+# The join's tables: the sweep's rows (kept after the sweep for the pass after the packet and baseline stages) and
+# what each pass adds. A session record is judged once (res or unres, by its record id); a lead is a (record, finding)
+# pair; pub holds each item's last published content digest, so a pass republishes only what changed.
+JOIN_SCHEMA = {
+    "net": 'eid, client, cport, server, sport, service, start, "end"',
+    "logon": "rid, host, boot, ts, src, sport, kind, code, ltype, svc, outcome, session, account, tseq, blob",
+    "hostconn": "host, ts, ckey, eid, blob",
+    "remote_rows": "host, session, entry, min_ts, boot, PRIMARY KEY (host, session, entry)",
+    "act": "host, session, entry, count, PRIMARY KEY (host, session, entry)",
+    "act_ex": "host, session, entry, ts, eid, blob, PRIMARY KEY (host, session, entry, eid)",
+    "unjoined": "host PRIMARY KEY, seq",
+    "meta": "k PRIMARY KEY, v",
+    "lead": "eid, cid, rule, lane, PRIMARY KEY (eid, cid)",
+    "flag": "host, session, boot, cid, rule, lane, eid, ts",
+    "res": "eid PRIMARY KEY, gkey, host, client, service, tier, rids, offset, keys, identity",
+    "unres": "eid PRIMARY KEY, reason, identity",
+    "pub": "gkey PRIMARY KEY, digest",
+}
+KEPT_TABLES = tuple(JOIN_SCHEMA)
+JOIN_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS net_eid ON net(eid)",
+    "CREATE INDEX IF NOT EXISTS net_client ON net(client, start)",
+    "CREATE INDEX IF NOT EXISTS logon_src ON logon(src, sport, ts)",
+    "CREATE INDEX IF NOT EXISTS logon_host ON logon(host, src, ts)",
+    "CREATE INDEX IF NOT EXISTS logon_rid ON logon(rid)",
+    "CREATE INDEX IF NOT EXISTS hostconn_key ON hostconn(ckey, ts)",
+    "CREATE INDEX IF NOT EXISTS flag_key ON flag(host, session)",
+    "CREATE INDEX IF NOT EXISTS res_key ON res(gkey)",
+)
+NOTE_PREFIX = "network-host join: "
+LIMIT_PREFIX = NOTE_PREFIX + "state limit: "
 
 TIER_WORDS = {
     "endpoint": "the host's own record names the session's client address and client port",
@@ -403,7 +436,9 @@ class NetworkAdminLogonJoin(Playbook):
                           "'Accepted ... from <addr> port <port>' and Linux audit USER_LOGIN addr/ses fields",
         "retrieval": "the sweep retrieves every record of the host and network datasets in each partition, a superset "
                      "of the records this evaluator reads; the network findings and the host findings that flag a "
-                     "session are read from the hunt's store after every other sweep rule has published",
+                     "session are read from the hunt's store after every other sweep rule has published, and again "
+                     "after the packet and baseline stages (their findings, the first-seen administration pair among "
+                     "them, joined against the rows the sweep kept)",
         "window": "logon time within the session's recorded lifetime widened by 300 s on each side (an open-ended "
                   "record: its own time +-300 s); the offset of each joined logon from the session's start is stated",
         "lanes": "lead. High only when a typed host finding this hunt published at high or urgent cites a process or "
@@ -412,7 +447,9 @@ class NetworkAdminLogonJoin(Playbook):
         "state": "every administration session record, every remote-capable host logon record (compact), host "
                  "connection records on administration ports and, per remote logon session, a count and the earliest "
                  "8 process and share records, on the rule's disk spill and keyed stores; a record refused by the "
-                 "hunt's state budget makes the result partial and is named",
+                 "hunt's state budget makes the result partial and is named. The rows are kept in the hunt's stage "
+                 "directory for the pass after the packet and baseline stages and removed when it finishes, when the "
+                 "hunt is deleted, or at the next hunt's start once its pass finished",
     }
 
     def __init__(self):
@@ -434,8 +471,6 @@ class NetworkAdminLogonJoin(Playbook):
         self.activity = KeyedStore(self, "join_session_activity", self.ACTIVITY_HOT)
         # host -> earliest target order that delivered a session-bearing process or share record not yet joinable
         self.unjoined_activity = KeyedStore(self, "join_unjoined_activity", self.HOT)
-        self.unresolved: Counter = Counter()
-        self.tiers: Counter = Counter()
 
     # ------------------------------------------------------------------------------------------------ binding
     def bind_published(self, pages, load_events) -> None:
@@ -620,6 +655,14 @@ class NetworkAdminLogonJoin(Playbook):
                 self.unjoined_activity.put(event.host, seq)
 
     # ------------------------------------------------------------------------------------------------ finalize
+    # Where the sweep keeps the join's rows for the pass after the packet and baseline stages (set by the sweep; None
+    # keeps nothing).
+    persist_path = None
+    # Rules of the stages after the sweep (packet, baseline): their findings may cite records the sweep never read.
+    later_rules: frozenset = frozenset()
+    LATER_REVISION = ("findings published after the sweep (packet and baseline stages) cite sessions of this item, or "
+                      "a host finding flags a record in its logon session")
+
     def finalize(self):
         if self._published is None:
             self.note_coverage("no_findings", "the hunt's published network findings were not available to this "
@@ -630,28 +673,110 @@ class NetworkAdminLogonJoin(Playbook):
     def _finalize(self):
         spill = self._store()
         spill.flush()
-        for sql in ("CREATE INDEX IF NOT EXISTS net_eid ON net(eid)",
-                    "CREATE INDEX IF NOT EXISTS net_client ON net(client, start)",
-                    "CREATE INDEX IF NOT EXISTS logon_src ON logon(src, sport, ts)",
-                    "CREATE INDEX IF NOT EXISTS logon_host ON logon(host, src, ts)",
-                    "CREATE INDEX IF NOT EXISTS hostconn_key ON hostconn(ckey, ts)"):
-            spill.write(sql, [()])
-        spill.table("lead", "eid, cid, rule, lane")
-        spill.table("flag", "host, session, boot, cid, rule, lane, eid, ts")
-        spill.table("res", "gkey, host, client, service, eid, tier, rids, offset, keys, conn")
-        self._collect_findings(spill)
-        spill.flush()
-        spill.write("CREATE INDEX IF NOT EXISTS lead_eid ON lead(eid)", [()])
-        spill.write("CREATE INDEX IF NOT EXISTS flag_key ON flag(host, session)", [()])
-        self._resolve_leads(spill)
-        spill.flush()
-        spill.write("CREATE INDEX IF NOT EXISTS res_key ON res(gkey)", [()])
-        self._summarize()
-        yield from self._matches(spill)
+        self._materialize(spill)
+        yield from self.join_pass(spill, later=False)
+        self._persist(spill)
 
-    def _collect_findings(self, spill) -> None:
+    def _materialize(self, spill) -> None:
+        """The keyed stores as plain tables, so both passes (and the pass after the later stages, from the kept rows)
+        read the same thing."""
+        for name in ("remote_rows", "act", "act_ex", "unjoined", "meta"):
+            spill.write(f"CREATE TABLE IF NOT EXISTS {name} ({JOIN_SCHEMA[name]})", [()])
+        rows: dict[str, list] = {"remote_rows": [], "act": [], "act_ex": [], "unjoined": []}
+
+        def flush(force=False):
+            for name, batch in rows.items():
+                if batch and (force or len(batch) >= 5000):
+                    spill.write(f"INSERT OR IGNORE INTO {name} VALUES ({','.join('?' * len(batch[0]))})", batch)
+                    batch.clear()
+        for (host, session), entries in self.remote.items():
+            for entry_id, min_ts, boot in entries:
+                rows["remote_rows"].append((host, session, entry_id, min_ts, boot))
+            flush()
+        for (host, session, entry_id), state in self.activity.items():
+            rows["act"].append((host, session, entry_id, state[0]))
+            rows["act_ex"].extend((host, session, entry_id, when, eid, blob) for when, eid, blob in state[3])
+            flush()
+        for host, seq in self.unjoined_activity.items():
+            rows["unjoined"].append((host, seq))
+        flush(force=True)
+        spill.write("INSERT OR REPLACE INTO meta VALUES (?, ?)",
+                    [("net_refused", str(self._net_refused)),
+                     ("limits", json.dumps(sorted(self.limit_reasons())))])
+
+    def _persist(self, spill) -> None:
+        """Keep the join's rows for the pass after the packet and baseline stages: written whole to a temporary file
+        beside the kept file and moved into place, so a half-written copy is never read. Kept only while the stage
+        volume has room for it above its reserve; otherwise the later pass finds none and says so."""
+        import os
+        from pathlib import Path
+        path = self.persist_path
+        if path is None:
+            self.note_coverage("not_kept", "the join's rows were not kept for findings published after the sweep (no "
+                                           "stage directory)")
+            return
+        path = Path(path)
+        size = spill.path.stat().st_size if spill.path.exists() else 0
+        headroom = self.state_budget().headroom()
+        if headroom is not None and size > headroom:
+            self.note_limit("kept_rows", "the stage volume had no room to keep the join's rows for findings published "
+                                         "after the sweep; those findings' sessions are left unresolved", records=0)
+            return
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        partial = path.with_name(path.name + ".part")
+        partial.unlink(missing_ok=True)
+        db = spill.db
+        db.commit()
+        db.execute("ATTACH DATABASE ? AS kept", (str(partial),))
+        try:
+            for name in KEPT_TABLES:
+                db.execute(f"CREATE TABLE kept.{name} ({JOIN_SCHEMA[name]})")
+                if db.execute("SELECT 1 FROM main.sqlite_master WHERE type = 'table' AND name = ?",
+                              (name,)).fetchone():
+                    db.execute(f"INSERT OR IGNORE INTO kept.{name} SELECT * FROM main.{name}")
+            for index in JOIN_INDEXES:
+                db.execute(index.replace("CREATE INDEX IF NOT EXISTS ", "CREATE INDEX IF NOT EXISTS kept."))
+            db.commit()
+        except Exception:
+            db.rollback()
+            db.execute("DETACH DATABASE kept")
+            partial.unlink(missing_ok=True)
+            raise
+        db.execute("DETACH DATABASE kept")
+        os.replace(partial, path)
+
+    # ---- the join itself, over the sweep's spill or over the kept rows ------------------------------------------------
+    def join_pass(self, rows, *, later: bool):
+        """Join the sessions the hunt's findings cite that no earlier pass judged, and yield the item of every
+        (destination host, client address, service) whose content changed. `rows` holds the join's tables (`.db`
+        to read, `.write(sql, rows)` to write)."""
+        for name in ("lead", "flag", "res", "unres", "pub", "meta"):
+            rows.write(f"CREATE TABLE IF NOT EXISTS {name} ({JOIN_SCHEMA[name]})", [()])
+        for index in JOIN_INDEXES:
+            rows.write(index, [()])
+        meta = dict(rows.db.execute("SELECT k, v FROM meta").fetchall())
+        self._net_refused = int(meta.get("net_refused") or self._net_refused or 0)
+        rows.write("DELETE FROM flag", [()])
+        self._collect_findings(rows)
+        self._resolve_leads(rows)
+        for number, line in enumerate(self.summary_notes(rows)):
+            if line.startswith(LIMIT_PREFIX):
+                self.note_limit(f"join{number}", line[len(LIMIT_PREFIX):], records=0)
+            else:
+                self.note_coverage(f"join{number}", line)
+        yield from self._matches(rows, later)
+
+    def _insert(self, rows, table: str, batch: list[tuple]) -> None:
+        if batch:
+            rows.write(f"INSERT OR IGNORE INTO {table} VALUES ({','.join('?' * len(batch[0]))})", batch)
+            batch.clear()
+
+    def _collect_findings(self, rows) -> None:
         """The leads (records cited by the hunt's urgent, high and lead findings) and the session records host
-        findings flag at urgent or high. Read in full before anything is published, so paging is stable."""
+        findings flag at urgent or high. Read in full before anything is published, so paging is stable. Findings an
+        expansion reach or the AI agent produced are not leads: expansion follows typed links itself, and agent output
+        is not typed evidence."""
+        leads, flags, later_cited = [], [], set()
         for lane in ("urgent", "high", "lead"):
             offset = 0
             while True:
@@ -661,15 +786,21 @@ class NetworkAdminLogonJoin(Playbook):
                 offset += len(page)
                 flagged_ids: dict[str, tuple] = {}
                 for row in page:
-                    if row.get("rule_id") == self.id or row.get("provenance", "deterministic") != "deterministic":
+                    if (row.get("rule_id") == self.id or row.get("provenance", "deterministic") != "deterministic"
+                            or row.get("source_anchor_id") or row.get("source_case_id")):
                         continue
                     # a record cited only in support of a statement (a lineage ancestor, a span bound) is not
                     # what a host finding flags
                     supporting = set(row.get("context_event_ids") or ())
+                    later = row["rule_id"] in self.later_rules
                     for eid in row.get("event_ids") or []:
-                        spill.add("lead", (str(eid), row["id"], row["rule_id"], lane))
+                        leads.append((str(eid), row["id"], row["rule_id"], lane))
+                        if later:
+                            later_cited.add(str(eid))
                         if lane in ("urgent", "high") and eid not in supporting:
                             flagged_ids.setdefault(str(eid), (row["id"], row["rule_id"], lane))
+                    if len(leads) >= 5000:
+                        self._insert(rows, "lead", leads)
                 ids = sorted(flagged_ids)
                 for start in range(0, len(ids), self.EVENT_BATCH):
                     for event in self._load_events(ids[start:start + self.EVENT_BATCH]):
@@ -678,55 +809,80 @@ class NetworkAdminLogonJoin(Playbook):
                         cid, rule, flag_lane = flagged_ids[event.id]
                         boot = str(event.get("host.boot.id") or "")
                         for session in _process_sessions(event):
-                            spill.add("flag", (event.host, session, boot, cid, rule, flag_lane, event.id,
-                                               event.ts.timestamp()))
+                            flags.append((event.host, session, boot, cid, rule, flag_lane, event.id,
+                                          event.ts.timestamp()))
+                    self._insert(rows, "flag", flags)
                 if hasattr(self, "heartbeat"):
                     self.heartbeat()
+        self._insert(rows, "lead", leads)
+        self._insert(rows, "flag", flags)
+        self._add_cited_sessions(rows, later_cited)
+
+    def _add_cited_sessions(self, rows, cited: set[str]) -> None:
+        """Session records a later stage's finding cites that the sweep never read (the packet stage's own Arkime
+        records, say): typed from the cited record itself, like any the sweep read."""
+        ids = sorted(cited)
+        for start in range(0, len(ids), self.EVENT_BATCH):
+            batch = ids[start:start + self.EVENT_BATCH]
+            known = {row[0] for row in rows.db.execute(
+                f"SELECT eid FROM net WHERE eid IN ({','.join('?' * len(batch))})", tuple(batch))}
+            wanted = [eid for eid in batch if eid not in known]
+            added = []
+            for event in (self._load_events(wanted) if wanted else []):
+                session = admin_session(event) if event.family in NETWORK_FAMILIES else None
+                if isinstance(session, AdminSession):
+                    added.append((session.eid, session.client, session.cport, session.server, session.sport,
+                                  session.service, session.start, session.end))
+            if added:
+                rows.write(f"INSERT INTO net VALUES ({','.join('?' * 8)})", added)
 
     def _logon_rows(self, db, sql: str, params: tuple) -> list[LogonRow]:
         return [LogonRow(*row) for row in db.execute(sql, params)]
 
-    def _lead_sessions(self, spill):
-        """The administration session records the findings cite, in connection order, a page at a time (result rows
-        are written between pages, so no read stays open across a write)."""
-        spill.write("CREATE TABLE leadnet AS SELECT DISTINCT net.eid AS eid, client, cport, server, sport, service, "
-                    "start, \"end\" FROM net JOIN lead ON lead.eid = net.eid "
-                    "ORDER BY client, cport, server, sport, start, net.eid", [()])
+    def _lead_sessions(self, rows):
+        """The administration session records the findings cite that no pass has judged, in connection order, a page
+        at a time (result rows are written between pages, so no read stays open across a write)."""
+        rows.write("DROP TABLE IF EXISTS leadnet", [()])
+        rows.write("CREATE TABLE leadnet AS SELECT DISTINCT net.eid AS eid, client, cport, server, sport, service, "
+                   "start, \"end\" FROM net JOIN lead ON lead.eid = net.eid "
+                   "WHERE net.eid NOT IN (SELECT eid FROM res) AND net.eid NOT IN (SELECT eid FROM unres) "
+                   "ORDER BY client, cport, server, sport, start, net.eid", [()])
         after = 0
         while True:
-            page = spill.db.execute("SELECT rowid, eid, client, cport, server, sport, service, start, \"end\" "
-                                    "FROM leadnet WHERE rowid > ? ORDER BY rowid LIMIT 2000", (after,)).fetchall()
+            page = rows.db.execute("SELECT rowid, eid, client, cport, server, sport, service, start, \"end\" "
+                                   "FROM leadnet WHERE rowid > ? ORDER BY rowid LIMIT 2000", (after,)).fetchall()
             if not page:
                 return
             after = page[-1][0]
-            for row in page:
-                yield row[1:]
+            yield from (row[1:] for row in page)
 
-    def _resolve_leads(self, spill) -> None:
-        db = spill.db
-        last_identity = None
-        for eid, client, cport, server, sport, service, start, end in self._lead_sessions(spill):
+    def _resolve_leads(self, rows) -> None:
+        db = rows.db
+        results, unresolved = [], []
+        for eid, client, cport, server, sport, service, start, end in self._lead_sessions(rows):
             session = AdminSession(eid, client, cport, server, sport, service, start, end)
-            identity = (client, cport, server, sport)
-            outcome = self._resolve(db, session)
+            identity = f"{client}|{cport}|{server}|{sport}"
+            outcome = self._resolve(rows, session)
             if isinstance(outcome, str):
-                if identity != last_identity:
-                    self.unresolved[outcome] += 1
-                last_identity = identity
-                continue
-            host, tier, rows, keys = outcome
-            if identity != last_identity:
-                self.tiers[tier] += 1
-            last_identity = identity
-            first = min(rows, key=lambda row: abs(row.ts - start))
-            spill.add("res", (f"{host}|{client}|{service}", host, client, service, eid, tier,
-                              json.dumps([row.rid for row in rows]), first.ts - start, json.dumps(keys),
-                              f"{cport}|{server}|{sport}"))
+                unresolved.append((eid, outcome, identity))
+            else:
+                host, tier, chosen, keys = outcome
+                first = min(chosen, key=lambda row: abs(row.ts - start))
+                results.append((eid, f"{host}|{client}|{service}", host, client, service, tier,
+                                json.dumps([row.rid for row in chosen]), first.ts - start, json.dumps(keys), identity))
+            if len(results) + len(unresolved) >= 2000:
+                # written between pages of the lead read, which is fully fetched page by page
+                self._insert(rows, "res", results)
+                self._insert(rows, "unres", unresolved)
             if hasattr(self, "heartbeat"):
                 self.heartbeat()
+        self._insert(rows, "res", results)
+        self._insert(rows, "unres", unresolved)
+        del db
 
-    def _resolve(self, db, session: AdminSession):
+    def _resolve(self, rows, session: AdminSession):
         """(host, tier, logon rows, activity keys) for a session, or an unresolved reason."""
+        db = rows.db
         if session.service in NO_HOST_LOGON:
             return "no_host_logon"
         low = session.start - self.SKEW_SECONDS
@@ -744,22 +900,22 @@ class NetworkAdminLogonJoin(Playbook):
         if endpoint:
             if len({row.host for row in endpoint}) > 1:
                 return "ambiguous_endpoint"
-            return self._joined(db, session, endpoint, "endpoint")
-        rows = self._logon_rows(db, f"SELECT {columns} FROM logon WHERE src = ? AND sport IS NULL "
-                                    "AND ts BETWEEN ? AND ? ORDER BY ts, rid LIMIT ?",
-                                (session.client, low, high, self.LOGON_SCAN + 1))
-        if len(rows) > self.LOGON_SCAN:
+            return self._joined(rows, session, endpoint, "endpoint")
+        candidates = self._logon_rows(db, f"SELECT {columns} FROM logon WHERE src = ? AND sport IS NULL "
+                                          "AND ts BETWEEN ? AND ? ORDER BY ts, rid LIMIT ?",
+                                      (session.client, low, high, self.LOGON_SCAN + 1))
+        if len(candidates) > self.LOGON_SCAN:
             return "logon_scan_capped"
-        portless = [row for row in rows if consistent(session.service, session.sport, row)]
+        portless = [row for row in candidates if consistent(session.service, session.sport, row)]
         if not portless:
             ported = self._logon_rows(db, f"SELECT {columns} FROM logon WHERE src = ? AND sport IS NOT NULL "
                                           "AND ts BETWEEN ? AND ? ORDER BY ts, rid LIMIT ?",
                                       (session.client, low, high, self.LOGON_SCAN))
             if any(consistent(session.service, session.sport, row) for row in ported):
                 return "other_connections"
-            if any(_untyped(session.service, row) for row in rows):
+            if any(_untyped(session.service, row) for row in candidates):
                 return "logon_type_missing"
-            return "type_inconsistent" if rows or ported else "no_logon"
+            return "type_inconsistent" if candidates or ported else "no_logon"
         seen = {row[0] for row in db.execute(
             "SELECT DISTINCT host FROM hostconn WHERE ckey = ? AND ts BETWEEN ? AND ? LIMIT 3",
             (_ckey(session.client, session.cport, session.server, session.sport), low, high))}
@@ -768,17 +924,13 @@ class NetworkAdminLogonJoin(Playbook):
         if seen:
             on_host = [row for row in portless if row.host in seen]
             if on_host:
-                return self._joined(db, session, on_host, "host_connection")
+                return self._joined(rows, session, on_host, "host_connection")
             return "connection_host_no_logon"
-        hosts = {row.host for row in portless}
-        if len(hosts) > 1:
+        if len({row.host for row in portless}) > 1:
             return "ambiguous_address"
         if external(session.server):
             # the hosts whose telemetry the hunt reads are the site's; an outside server is not one of them unless
             # a port or the host's own connection record says so
-            if not netdef.current().configured:
-                self.note_coverage("direction", f"{netdef.DIRECTION_ASSUMED_REASON} (address-only joins to servers "
-                                                "read as outside the site were refused)")
             return "external_server"
         if self._net_refused:
             return "pairing_unknown"
@@ -789,16 +941,17 @@ class NetworkAdminLogonJoin(Playbook):
             (session.client, session.server, *services, high, low)).fetchone()
         if others is not None:
             return "ambiguous_pairing"
-        return self._joined(db, session, portless, "address")
+        return self._joined(rows, session, portless, "address")
 
-    def _joined(self, db, session: AdminSession, rows: list[LogonRow], tier: str):
+    def _joined(self, rows, session: AdminSession, candidates: list[LogonRow], tier: str):
         """The joined logon rows (successes first, nearest first, a bounded number) and the logon sessions whose
         activity to read, with the audit login record that carries a session an sshd line lacks."""
-        rows = sorted(rows, key=lambda row: (row.outcome != "success", abs(row.ts - session.start), row.rid))
-        host = rows[0].host
-        chosen = rows[:self.LOGONS_CITED]
+        candidates = sorted(candidates, key=lambda row: (row.outcome != "success", abs(row.ts - session.start),
+                                                         row.rid))
+        host = candidates[0].host
+        chosen = candidates[:self.LOGONS_CITED]
         keys = []
-        for row in chosen:
+        for row in list(chosen):
             if row.outcome != "success":
                 continue
             if row.session is not None:
@@ -809,9 +962,9 @@ class NetworkAdminLogonJoin(Playbook):
             if row.kind != "linux":
                 continue
             companions = self._logon_rows(
-                db, "SELECT rid, host, boot, ts, src, sport, kind, code, ltype, svc, outcome, session, account "
-                    "FROM logon WHERE host = ? AND src = ? AND ts BETWEEN ? AND ? AND session IS NOT NULL "
-                    "AND svc = ? AND outcome = 'success' ORDER BY ts, rid LIMIT 8",
+                rows.db, "SELECT rid, host, boot, ts, src, sport, kind, code, ltype, svc, outcome, session, account "
+                         "FROM logon WHERE host = ? AND src = ? AND ts BETWEEN ? AND ? AND session IS NOT NULL "
+                         "AND svc = ? AND outcome = 'success' ORDER BY ts, rid LIMIT 8",
                 (row.host, row.src, row.ts - self.COMPANION_BEFORE, row.ts + self.COMPANION_AFTER, row.svc))
             if len({(item.session, item.boot) for item in companions}) == 1:
                 companion = companions[0]
@@ -821,45 +974,70 @@ class NetworkAdminLogonJoin(Playbook):
                 if key not in keys:
                     keys.append(key)
             elif companions:
-                self.note_coverage("companion_ambiguous", "an sshd authentication line had several audit login "
-                                                          "sessions from its client within two minutes; its logon "
-                                                          "session's activity was not joined")
+                rows.write("INSERT OR REPLACE INTO meta VALUES (?, ?)", [("companion_ambiguous", "1")])
         return host, tier, chosen, keys
 
-    def _summarize(self) -> None:
-        self.note_coverage("scope", "joins the administration sessions cited by findings the sweep published; findings "
-                                    "the packet and baseline stages, expansion and the AI agent publish later are not "
-                                    "joined")
-        if self.tiers:
-            self.note_coverage("joined", "administration sessions joined to a host logon: " + ", ".join(
-                f"{count} by {tier}" for tier, count in sorted(self.tiers.items())))
-        if self.unresolved:
-            self.note_coverage("unresolved", "administration sessions cited by network findings left unresolved "
-                               "(never a negative): " + "; ".join(
-                                   f"{count}: {UNRESOLVED_WORDS[reason]}"
-                                   for reason, count in sorted(self.unresolved.items())))
-        if self.unresolved.get("logon_scan_capped"):
-            self.note_limit("logon_scan", f"a client logged more than {self.LOGON_SCAN} portless logons within one "
-                                          "session's window; those sessions were not joined", records=0)
-        if self._net_refused:
-            self.note_limit("net_rows", "administration session records the state budget refused are not joined and "
-                                        "make portless pairings undecidable", records=0)
+    def summary_notes(self, rows) -> list[str]:
+        """What the rule's window cell says about the join, from its tables (so every pass states the whole)."""
+        db = rows.db
+        meta = dict(db.execute("SELECT k, v FROM meta").fetchall())
+        notes = [NOTE_PREFIX + "joins the administration sessions cited by the findings of the sweep, the packet stage "
+                               "and the baseline stage; findings of expansion reaches and of the AI agent are not "
+                               "joined"]
+        tiers = db.execute("SELECT tier, count(DISTINCT identity) FROM res GROUP BY tier "
+                           "ORDER BY tier").fetchall()
+        if tiers:
+            notes.append(NOTE_PREFIX + "administration sessions joined to a host logon: "
+                         + ", ".join(f"{count} by {tier}" for tier, count in tiers))
+        unresolved = db.execute("SELECT reason, count(DISTINCT identity) FROM unres GROUP BY reason "
+                                "ORDER BY reason").fetchall()
+        if unresolved:
+            notes.append(NOTE_PREFIX + "administration sessions cited by findings left unresolved (never a negative): "
+                         + "; ".join(f"{count}: {UNRESOLVED_WORDS[reason]}" for reason, count in unresolved))
+        reasons = {reason for reason, _count in unresolved}
+        if "external_server" in reasons and not netdef.current().configured:
+            notes.append(NOTE_PREFIX + f"{netdef.DIRECTION_ASSUMED_REASON} (address-only joins to servers read as "
+                                       "outside the site were refused)")
+        if meta.get("companion_ambiguous"):
+            notes.append(NOTE_PREFIX + "an sshd authentication line had several audit login sessions from its client "
+                                       "within two minutes; its logon session's activity was not joined")
+        if "logon_scan_capped" in reasons:
+            notes.append(NOTE_PREFIX + f"state limit: a client logged more than {self.LOGON_SCAN} logons within one "
+                                       "session's window; those sessions were not joined")
+        if int(meta.get("net_refused") or 0):
+            notes.append(NOTE_PREFIX + "state limit: administration session records the state budget refused are not "
+                                       "joined and make portless pairings undecidable")
+        return notes
+
+    def partial_notes(self, notes: list[str]) -> bool:
+        """Whether the notes name a cap or refusal (the window cell is then partial)."""
+        return any("state limit:" in note for note in notes)
 
     # ------------------------------------------------------------------------------------------------ publishing
-    def _matches(self, spill):
-        """One item per (destination host, client address, service); group keys are read a page at a time."""
-        db = spill.db
+    def _matches(self, rows, later: bool):
+        """One item per (destination host, client address, service), yielded when its content changed since it was
+        last published; group keys are read a page at a time."""
+        db = rows.db
         after = ""
         while True:
-            keys = [row[0] for row in db.execute("SELECT DISTINCT gkey FROM res WHERE gkey > ? ORDER BY gkey "
-                                                 "LIMIT 500", (after,)).fetchall()]
-            if not keys:
+            gkeys = [row[0] for row in db.execute("SELECT DISTINCT gkey FROM res WHERE gkey > ? ORDER BY gkey "
+                                                  "LIMIT 500", (after,)).fetchall()]
+            if not gkeys:
                 return
-            after = keys[-1]
-            for gkey in keys:
-                rows = db.execute("SELECT gkey, host, client, service, eid, tier, rids, offset, keys, conn FROM res "
-                                  "WHERE gkey = ? ORDER BY eid", (gkey,)).fetchall()
-                yield self._match(db, rows)
+            after = gkeys[-1]
+            for gkey in gkeys:
+                group = db.execute("SELECT gkey, host, client, service, eid, tier, rids, offset, keys, identity FROM "
+                                   "res WHERE gkey = ? ORDER BY eid", (gkey,)).fetchall()
+                match = self._match(db, group)
+                digest = hashlib.sha256(json.dumps([match.claim, match.proposed_lane, match.severity,
+                                                    sorted(event.id for event in match.events)]).encode()).hexdigest()
+                known = db.execute("SELECT digest FROM pub WHERE gkey = ?", (gkey,)).fetchone()
+                if known is not None and known[0] == digest:
+                    continue
+                if later or known is not None:
+                    match.revision_reason = self.LATER_REVISION
+                yield match
+                rows.write("INSERT OR REPLACE INTO pub VALUES (?, ?)", [(gkey, digest)])
 
     def _logon_events(self, db, rids: list[int]) -> dict[int, TypedEvent]:
         out = {}
@@ -870,15 +1048,15 @@ class NetworkAdminLogonJoin(Playbook):
                 out[rid] = _compact(blob)
         return out
 
-    def _match(self, db, rows) -> Match:
-        _gkey, host, client, service = rows[0][:4]
-        tiers = Counter(row[5] for row in rows)
+    def _match(self, db, group) -> Match:
+        _gkey, host, client, service = group[0][:4]
+        tiers = Counter(row[5] for row in group)
         tier = min(tiers, key=lambda name: list(TIER_WORDS).index(name))
-        session_ids = list(dict.fromkeys(row[4] for row in rows))
-        connections = len({row[9] for row in rows})
-        rids = list(dict.fromkeys(rid for row in rows for rid in json.loads(row[6])))
-        keys = list(dict.fromkeys(tuple(key) for row in rows for key in json.loads(row[8])))
-        offsets = [row[7] for row in rows]
+        session_ids = list(dict.fromkeys(row[4] for row in group))
+        connections = len({row[9] for row in group})
+        rids = list(dict.fromkeys(rid for row in group for rid in json.loads(row[6])))
+        keys = list(dict.fromkeys(tuple(key) for row in group for key in json.loads(row[8])))
+        offsets = [row[7] for row in group]
         logons = self._logon_events(db, rids)
         logon_events = [logons[rid] for rid in rids[: self.LOGONS_CITED * 2] if rid in logons]
         network_events = self._load_events(session_ids[: self.SESSIONS_CITED]) if self._load_events else []
@@ -889,17 +1067,20 @@ class NetworkAdminLogonJoin(Playbook):
             "ORDER BY rule, cid", tuple(named)).fetchall()
         activity_events, counts, flags, seen = [], [], [], set()
         for key_host, session, boot, when in keys:
-            entry = self._entry_at(key_host, session, boot, when)
+            entry = self._entry_at(db, key_host, session, boot, when)
             if entry is None or (key_host, session, entry[0]) in seen:
                 continue
             seen.add((key_host, session, entry[0]))
-            state = self.activity.peek((key_host, session, entry[0]))
-            if state is not None:
-                counts.append(((key_host, session), state[0]))
-                activity_events += [_compact(blob) for _ts, _id, blob in state[3]]
+            count = db.execute("SELECT count FROM act WHERE host = ? AND session = ? AND entry = ?",
+                               (key_host, session, entry[0])).fetchone()
+            if count is not None:
+                counts.append(((key_host, session), count[0]))
+                activity_events += [_compact(blob) for (blob,) in db.execute(
+                    "SELECT blob FROM act_ex WHERE host = ? AND session = ? AND entry = ? ORDER BY ts, eid",
+                    (key_host, session, entry[0]))]
             for cid, rule, flag_lane, eid, flag_boot, flag_ts in db.execute(
                     "SELECT DISTINCT cid, rule, lane, eid, boot, ts FROM flag WHERE host = ? AND session = ? "
-                    "ORDER BY lane DESC, rule, cid", (key_host, session)).fetchall():
+                    "ORDER BY lane DESC, rule, cid, eid", (key_host, session)).fetchall():
                 if not _boots_conflict(entry[2], flag_boot) and flag_ts >= entry[1] - 1.0:
                     flags.append((cid, rule, flag_lane, eid))
         flag_ids = {flag[3] for flag in flags}
@@ -938,17 +1119,18 @@ class NetworkAdminLogonJoin(Playbook):
         """Whether session-bearing process records of this host that joined no remote logon came from a source target
         read before a joined logon's target: those of the joined session arrived before the logon naming it. Records
         of the logon's own target (read in time order) or a later one were judged with the logon known."""
-        earliest = self.unjoined_activity.peek(host)
+        earliest = db.execute("SELECT seq FROM unjoined WHERE host = ?", (host,)).fetchone()
         if earliest is None or not rids:
             return False
         batch = rids[:900]
         latest = db.execute(f"SELECT max(tseq) FROM logon WHERE rid IN ({','.join('?' * len(batch))})",
                             tuple(batch)).fetchone()[0]
-        return latest is not None and earliest < latest
+        return latest is not None and earliest[0] < latest
 
-    def _entry_at(self, host: str, session: str, boot: str, when: float):
-        """At finalize: the remote logon entry a joined logon record of this session belongs to (read in place)."""
-        fitting = [entry for entry in self.remote.peek((host, session)) or []
+    def _entry_at(self, db, host: str, session: str, boot: str, when: float):
+        """The remote logon entry a joined logon record of this session belongs to."""
+        fitting = [entry for entry in db.execute("SELECT entry, min_ts, boot FROM remote_rows WHERE host = ? AND "
+                                                 "session = ?", (host, session)).fetchall()
                    if not _boots_conflict(entry[2], boot) and entry[1] <= when + 1.0]
         return max(fitting, key=lambda entry: entry[1]) if fitting else None
 
