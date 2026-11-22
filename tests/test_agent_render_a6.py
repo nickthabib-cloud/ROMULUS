@@ -22,7 +22,7 @@ def _docx(tmp_path, monkeypatch, manifest):
     return path
 
 
-def test_old_hunt_docx_bytes_are_unchanged(tmp_path, monkeypatch):
+def test_old_hunt_docx_parts_match_their_pinned_digest(tmp_path, monkeypatch):
     repo, _ = _repo_with_finding()
     manifest = build_manifest(repo, "h1", "test")
     path = _docx(tmp_path, monkeypatch, manifest)

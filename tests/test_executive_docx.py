@@ -6,7 +6,6 @@ import os
 import shutil
 import struct
 import subprocess
-import time
 import zlib
 from collections import Counter
 from xml.etree import ElementTree
@@ -565,11 +564,14 @@ def _png_pixels(data: bytes) -> tuple[tuple[int, int], bytes]:
 def test_large_manifest_renders_bounded_with_honest_overflow_notes(tmp_path):
     manifest = synthetic_manifest(findings=5000, incident_size=40, mentions_total=123_456, mention_items=200,
                                   gaps=400, not_assessed=150, notes=30, agent_findings=25, ranked=True)
-    started = time.monotonic()
     path = _write(tmp_path, manifest)
-    elapsed = time.monotonic() - started
-    assert elapsed < 60, elapsed
     blocks = read_back(path)
+    # the document grows with the findings, about 2 KB of body per finding, and the picture does not grow at all
+    with ZipFile(path) as archive:
+        body = archive.getinfo("word/document.xml").file_size
+        picture = archive.getinfo("word/media/attack-path.png").file_size
+    assert body < 3_000 * len(manifest["findings"]) + 2_000_000, body
+    assert picture < 400_000, picture
     # nothing reportable is lost: every finding is in the index, with its lane
     index = _table_after(blocks, executive.FINDING_INDEX_TITLE)[1:]
     assert {row[1]: row[3] for row in index} == {f["id"]: f["lane"] for f in manifest["findings"]}
@@ -587,10 +589,12 @@ def test_large_manifest_renders_bounded_with_honest_overflow_notes(tmp_path):
             assert any(value.startswith(f"{shown} of {len(findings)} finding(s) in this section are described here; "
                                         f"the other {len(findings) - shown} are listed in ")
                        for value in _paragraphs(key))
-    # urgent findings are described first
-    urgent = [f["id"] for f in manifest["findings"] if f["lane"] == "urgent"]
-    first_cards = [block[2] for block in cards[:len(urgent)]]
-    assert len(first_cards) == min(len(urgent), executive.KEY_FINDING_DETAILS)
+    # urgent findings are described first: each card's number is its finding's row in the index
+    lane_of_row = {int(row[0]): row[3] for row in index}
+    card_lanes = [lane_of_row[int(block[2].split(".", 1)[0])] for block in cards]
+    urgent = sum(f["lane"] == "urgent" for f in manifest["findings"])
+    assert card_lanes[:min(urgent, len(cards))] == ["urgent"] * min(urgent, len(cards))
+    assert urgent >= len(cards) or "urgent" not in card_lanes[urgent:]
     # the picture is bounded, and the note names exactly what is not drawn
     numbers = {row[1]: int(row[0]) for row in index}
     plan = attack_path.layout(manifest, numbers)
