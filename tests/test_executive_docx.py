@@ -512,6 +512,18 @@ def test_picture_links_stay_in_the_gutters_and_never_share_a_stretch(tmp_path):
     assert len(listed) == min(len(plan["unrouted"]), executive.HYPOTHESIS_LINKS)
 
 
+def test_every_legend_line_sample_ends_in_its_arrowhead():
+    canvas = attack_path.Canvas(attack_path.WIDTH, attack_path.LEGEND_H)
+    tips = attack_path._legend(canvas)
+    colours = {"observed": attack_path.OBSERVED, "hypothesis": attack_path.HYPOTHESIS, "time_order": attack_path.GREY}
+    assert set(tips) == set(colours)
+    for name, (x, y) in tips.items():
+        # the head fills a triangle behind its tip: a column of pixels four pixels back is solid for its height
+        column = [bytes(canvas.pixels[((y + dy) * canvas.width + x - 4) * 3:((y + dy) * canvas.width + x - 4) * 3 + 3])
+                  for dy in (-1, 0, 1)]
+        assert all(pixel == colours[name] for pixel in column), name
+
+
 def test_an_unknown_link_strength_is_drawn_as_a_hypothesis():
     assert attack_path.edge_style({"style": "observed"}) == "observed"
     for style in ("inferred", "agent", "agent_hypothesis", "something new", None):

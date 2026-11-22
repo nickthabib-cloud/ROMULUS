@@ -329,7 +329,9 @@ def _box(row: int, column: int) -> tuple[int, int, int, int]:
     return x0, y0, x0 + BOX_W, y0 + BOX_H
 
 
-def _legend(canvas: Canvas) -> None:
+def _legend(canvas: Canvas) -> dict[str, tuple[int, int]]:
+    """Draw the legend; returns where each line sample's arrowhead tip is."""
+    tips = {}
     x, y = 20, 18
     for name, color in (("URGENT", LANE_COLORS["urgent"]), ("HIGH", LANE_COLORS["high"]),
                         ("LEAD", LANE_COLORS["lead"]), ("OTHER", OTHER_LANE)):
@@ -340,14 +342,20 @@ def _legend(canvas: Canvas) -> None:
     x = 20
     canvas.polyline([(x, y + 12), (x + 70, y + 12)], OBSERVED, 4)
     canvas.arrowhead((x + 80, y + 12), (x + 60, y + 12), OBSERVED)
+    tips["observed"] = (x + 80, y + 12)
     x += 100 + canvas.text(x + 100, y + 2, "OBSERVED LINK", INK) + 50
     canvas.polyline([(x, y + 12), (x + 120, y + 12)], HYPOTHESIS, 4, dash=(14, 10))
     canvas.arrowhead((x + 130, y + 12), (x + 110, y + 12), HYPOTHESIS)
+    tips["hypothesis"] = (x + 130, y + 12)
     _tag(canvas, x + 62, y + 12)
     x += 150 + canvas.text(x + 150, y + 2, "HYPOTHESIS (INFERRED, NOT PROVEN)", HYPOTHESIS) + 50
-    canvas.polyline([(x, y + 12), (x + 60, y + 12)], GREY, 2)
+    # the sample is drawn as the connectors between steps are: a thin grey line with its arrowhead
+    canvas.polyline([(x, y + 12), (x + 54, y + 12)], GREY, 2)
+    canvas.arrowhead((x + 64, y + 12), (x + 54, y + 12), GREY, 10)
+    tips["time_order"] = (x + 64, y + 12)
     canvas.text(x + 80, y + 2, "TIME ORDER", INK)
     canvas.rect(0, LEGEND_H - 8, WIDTH, LEGEND_H - 6, LIGHT)
+    return tips
 
 
 def _tag(canvas: Canvas, cx: float, cy: float) -> None:
