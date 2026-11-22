@@ -338,9 +338,20 @@ def _attack_path(body: _Body, m: dict, plan: dict, technical_name: str, image_re
         body.p(f"Drawn: {counts['incidents_drawn']} of {counts['incidents']} incident(s), "
                f"{counts['findings_drawn']} of {counts['findings']} finding(s) in incidents, "
                f"{counts['observed_drawn']} of {counts['observed_links']} observed link(s) and "
-               f"{counts['hypothesis_drawn']} of {counts['hypothesis_links']} hypothesis link(s). What is not drawn "
-               f"is listed in {technical_name} (Incidents), and every finding is in {FINDING_INDEX_TITLE}.",
-               style="Callout")
+               f"{counts['hypothesis_drawn']} of {counts['hypothesis_links']} hypothesis link(s). Every finding is "
+               f"in {FINDING_INDEX_TITLE}; incidents not drawn are in {technical_name} (Incidents).", style="Callout")
+        not_drawn = counts["not_drawn"]
+        for key, text in (
+                ("listed_here", ("link(s) between drawn boxes are not drawn, because their rows are not adjacent "
+                                 "or a box has no free connection point; they are listed under Links not drawn below")),
+                ("beyond_picture", (f"link(s) reach an incident or step that is not drawn; they are in "
+                                    f"{technical_name} (Incidents and Expansion links)")),
+                ("outside_incidents", ("AI-agent link(s) join a finding to an entity, or to a finding in no "
+                                       f"incident; they are in {technical_name} (Agent hypothesis edges)")),
+                ("agent_cites", ("AI-agent citation(s): an agent finding cites the evidence of another finding; "
+                                 f"each agent finding and what it cites are in {technical_name} (Finding details)"))):
+            if not_drawn.get(key):
+                body.p(f"{not_drawn[key]} {text}.", style="ListLine")
     by_id, numbers = plan["by_id"], plan["numbers"]
     open_rows = [row for row in plan["rows"] if open_ends_text(row["incident"]) != "none"]
     if open_rows:
@@ -373,6 +384,17 @@ def _attack_path(body: _Body, m: dict, plan: dict, technical_name: str, image_re
         if len(hypotheses) > HYPOTHESIS_LINKS:
             body.p(f"{len(hypotheses) - HYPOTHESIS_LINKS} more drawn hypothesis link(s) are listed in "
                    f"{technical_name}.", style="Muted")
+    if unrouted := plan["unrouted"]:
+        body.heading("Links not drawn", 2)
+        for link in unrouted[:HYPOTHESIS_LINKS]:
+            kind = "observed link" if link["style"] == "observed" else "hypothesis, not proven"
+            repeat = f", {link['count']} stored links" if link["count"] > 1 else ""
+            body.p(f"F{numbers.get(link['from'], '?')} to F{numbers.get(link['to'], '?')} "
+                   f"({str(link['link_type']).replace('_', ' ') or 'link'}): {kind}{repeat} "
+                   f"(findings {link['from']} and {link['to']}).", style="ListLine")
+        if len(unrouted) > HYPOTHESIS_LINKS:
+            body.p(f"{len(unrouted) - HYPOTHESIS_LINKS} more link(s) between drawn boxes are not drawn; they are in "
+                   f"{technical_name} (Expansion links, Agent hypothesis edges).", style="Muted")
     narrated = [row["incident"] for row in plan["rows"] if len(row["incident"].get("finding_ids") or []) > 1]
     if narrated:
         body.heading("Incident accounts (template, from typed fields)", 2)

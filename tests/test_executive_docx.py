@@ -362,6 +362,98 @@ def test_a_long_incident_account_keeps_its_hypothesis_and_gap_sentences(tmp_path
     assert not any("is drawn." in value for value in text)
 
 
+def _crowded_manifest():
+    """Eight drawn incidents of five steps, every pair within a row linked both ways, every column pair of the
+    first two rows linked, links that skip rows, an agent citation and an agent link to an entity."""
+    manifest = synthetic_manifest(findings=40, incident_size=5, hypothesis_every=0, agent_findings=1)
+    rows = [row["steps"] for row in attack_path.layout(manifest, {})["rows"]]
+    edges = manifest["incident_graph"]["edges"]
+
+    def link(source, target, style, link_type="same_process"):
+        edges.append({"id": f"X{len(edges)}", "link_id": f"X{len(edges)}", "from": source, "to": target,
+                      "link_type": link_type, "style": style, "kind": "expansion",
+                      "incident_role": "evidence" if style == "observed" else "hypothesis"})
+
+    for steps in rows:
+        for a, b in itertools.combinations(steps, 2):
+            link(a, b, "observed")
+            link(a, b, "inferred", "same_account_window")
+    for a, b in itertools.product(rows[0], rows[1]):
+        link(a, b, "inferred", "same_account_window")
+    for target in range(2, len(rows)):
+        link(rows[0][0], rows[target][0], "inferred", "same_account_window")
+    link(rows[0][1], rows[3][1], "observed")
+    agent = next(f["id"] for f in manifest["findings"] if f["provenance"] == "agent")
+    edges.append({"id": f"agent-cite:{agent}:{rows[0][0]}", "from": agent, "to": rows[0][0], "link_id": None,
+                  "link_type": "cited_evidence", "style": "agent", "kind": "agent_hypothesis",
+                  "incident_role": "hypothesis"})
+    edges.append({"id": "AL1", "from": rows[0][0], "to": "E-entity", "link_id": "AL1", "link_type": "same_actor",
+                  "style": "agent", "kind": "agent_hypothesis", "incident_role": "hypothesis"})
+    return manifest
+
+
+def _points_along(points, step=0.5):
+    for (ax, ay), (bx, by) in itertools.pairwise(points):
+        count = max(1, int(max(abs(bx - ax), abs(by - ay)) / step))
+        for index in range(count + 1):
+            yield ax + (bx - ax) * index / count, ay + (by - ay) * index / count
+
+
+def _shares_a_stretch(first, second, *, tolerance=0.5, length=3.0) -> bool:
+    """Whether two segments lie on one line and overlap for more than `length` pixels."""
+    (ax, ay), (bx, by) = first
+    (cx, cy), (dx, dy) = second
+    ux, uy = bx - ax, by - ay
+    norm = (ux * ux + uy * uy) ** 0.5
+    if not norm:
+        return False
+    for px, py in ((cx, cy), (dx, dy)):
+        if abs((px - ax) * uy - (py - ay) * ux) / norm > tolerance:
+            return False
+    along = sorted(((px - ax) * ux + (py - ay) * uy) / norm for px, py in ((cx, cy), (dx, dy)))
+    return min(norm, along[1]) - max(0.0, along[0]) > length
+
+
+def test_picture_links_stay_in_the_gutters_and_never_share_a_stretch(tmp_path):
+    manifest = _crowded_manifest()
+    path = _write(tmp_path, manifest)
+    numbers = {row[1]: int(row[0]) for row in _table_after(read_back(path), executive.FINDING_INDEX_TITLE)[1:]}
+    plan = attack_path.layout(manifest, numbers)
+    boxes = [attack_path._box(index, column) for index, row in enumerate(plan["rows"])
+             for column in range(len(row["steps"]) + (1 if row["more"] else 0))]
+    assert plan["edges"] and plan["unrouted"]
+    for link in plan["edges"]:
+        # no stretch of a link runs through any box, its own two included
+        for x, y in _points_along(link["points"]):
+            assert not any(x0 < x < x1 and y0 < y < y1 for x0, y0, x1, y1 in boxes), (link["from"], link["to"])
+        if link["style"] == "observed":
+            assert link["tag"] is None
+        else:
+            tx, ty = link["tag"]
+            assert not any(tx - 13 < x1 and x0 < tx + 13 and ty - attack_path.TAG_HALF < y1
+                           and y0 < ty + attack_path.TAG_HALF for x0, y0, x1, y1 in boxes)
+    segments = [(index, segment) for index, link in enumerate(plan["edges"])
+                for segment in itertools.pairwise(link["points"])]
+    for (one, first), (two, second) in itertools.combinations(segments, 2):
+        if one != two:
+            assert not _shares_a_stretch(first, second) and not _shares_a_stretch(second, first)
+    # every link is drawn, listed beside the picture, or counted with a pointer; none is lost
+    counts = plan["counts"]
+    graph = manifest["incident_graph"]["edges"]
+    assert counts["observed_links"] + counts["hypothesis_links"] == len(graph)
+    assert (counts["observed_drawn"] + counts["hypothesis_drawn"] + sum(counts["not_drawn"].values())
+            == len(graph))
+    assert counts["not_drawn"]["agent_cites"] == 1 and counts["not_drawn"]["outside_incidents"] == 1
+    assert counts["not_drawn"]["listed_here"] == sum(link["count"] for link in plan["unrouted"])
+    text = _paragraphs(_section(read_back(path), executive.ATTACK_PATH_TITLE))
+    assert any(value.startswith(f"{counts['not_drawn']['listed_here']} link(s) between drawn boxes are not drawn")
+               for value in text)
+    assert "1 AI-agent citation(s): an agent finding cites the evidence of another finding; each agent finding and "\
+           "what it cites are in technical.md (Finding details)." in text
+    listed = [value for value in text if value.startswith("F") and " to F" in value]
+    assert len(listed) == min(len(plan["unrouted"]), executive.HYPOTHESIS_LINKS)
+
+
 def test_an_unknown_link_strength_is_drawn_as_a_hypothesis():
     assert attack_path.edge_style({"style": "observed"}) == "observed"
     for style in ("inferred", "agent", "agent_hypothesis", "something new", None):

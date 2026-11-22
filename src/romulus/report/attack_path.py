@@ -8,7 +8,7 @@ report, only from the picture.
 The picture carries no telemetry: only step numbers (each finding's row in the report's finding index), incident
 row labels, times and fixed legend words, in a built-in pixel font. Every name and claim stays in real document text
 beside it. A link is drawn solid only when it was observed; any other strength (inferred, agent, unknown) is drawn
-dashed and tagged `H`, a hypothesis. Pure standard library and deterministic: the same manifest gives the same bytes.
+dashed and tagged `H`, a hypothesis. Pure standard library and deterministic: the same manifest gives the same pixels.
 """
 from __future__ import annotations
 
@@ -29,6 +29,18 @@ ROW_H = 180
 LABEL_W = 150
 RIGHT = 30
 BOX_W, BOX_H = 176, 84
+TAG_HALF = 14          # half the height of the H tag
+# Each box side has connection points for links leaving and arriving, PORT_SPACING apart, each role offset from the
+# others, so no two links ever start or end on one vertical. Brackets within a row reach at most LEVEL_REACH pixels
+# into the gutter, each on its own level; links between rows run on lanes past that reach.
+PORT_MARGIN, PORT_SPACING = 12, 24
+ROLE_OFFSET = {("bottom", "out"): 0, ("bottom", "in"): 6, ("top", "out"): 12, ("top", "in"): 18}
+PORTS = (BOX_W - 2 * PORT_MARGIN - max(ROLE_OFFSET.values())) // PORT_SPACING + 1
+# the nearest bracket level keeps its H tag clear of the boxes it joins
+LEVEL_MIN, LEVEL_STEP, LEVELS = TAG_HALF + 4, 4, 5
+LEVEL_REACH = LEVEL_MIN + LEVEL_STEP * (LEVELS - 1)
+LANE_TOP, LANE_SPACING = LEVEL_REACH + 4, 4
+LANES = ((ROW_H - BOX_H) - 2 * LANE_TOP) // LANE_SPACING + 1
 
 
 def _rgb(hex_color: str) -> bytes:
@@ -88,12 +100,18 @@ def edge_style(edge: dict) -> str:
     return "observed" if edge.get("style") == "observed" else "hypothesis"
 
 
+# Why a link is not in the picture. Links between two drawn boxes that cannot be drawn without crossing a box are
+# listed in the document beside the picture; the others point to the technical report.
+NOT_DRAWN = ("listed_here", "beyond_picture", "outside_incidents", "agent_cites")
+
+
 def layout(manifest: dict, numbers: dict[str, int]) -> dict:
-    """What the picture draws and what it leaves out. `numbers` maps a finding id to its row in the report's
-    finding index (the label its box carries)."""
+    """What the picture draws and what it leaves out, with the route of every drawn link. `numbers` maps a finding
+    id to its row in the report's finding index (the label its box carries)."""
     graph = manifest.get("incident_graph") or {}
     by_id = {finding["id"]: finding for finding in manifest.get("findings") or []}
     incidents = sorted(graph.get("incidents") or [], key=lambda item: _incident_order(item, by_id))
+    in_incident = {item for incident in incidents for item in incident.get("finding_ids") or []}
     rows, drawn = [], {}
     for index, incident in enumerate(incidents[:MAX_INCIDENTS], 1):
         steps = list(incident.get("timeline") or incident.get("finding_ids") or [])
@@ -103,31 +121,103 @@ def layout(manifest: dict, numbers: dict[str, int]) -> dict:
         rows.append(row)
         for column, item in enumerate(shown):
             drawn[item] = (len(rows) - 1, column)
-    # every stored edge is counted; two edges between the same pair in the same style are drawn as one arrow
-    edges, seen = [], set()
+    # every stored edge is counted once; two edges between the same pair in the same style share one route
     totals = {"observed": 0, "hypothesis": 0}
-    shown = {"observed": 0, "hypothesis": 0}
+    shown_counts = {"observed": 0, "hypothesis": 0}
+    not_drawn = dict.fromkeys(NOT_DRAWN, 0)
+    candidates: dict[tuple, list[dict]] = {}
     for edge in graph.get("edges") or []:
         style = edge_style(edge)
         totals[style] += 1
-        if edge.get("from") not in drawn or edge.get("to") not in drawn or edge.get("from") == edge.get("to"):
-            continue
-        shown[style] += 1
-        key = (edge["from"], edge["to"], style)
-        if key not in seen:
-            seen.add(key)
-            edges.append({"from": edge["from"], "to": edge["to"], "style": style,
-                          "link_type": edge.get("link_type") or ""})
+        source, target = edge.get("from"), edge.get("to")
+        if source in drawn and target in drawn:
+            candidates.setdefault((source, target, style), []).append(edge)
+        elif str(edge.get("id") or "").startswith("agent-cite:"):
+            not_drawn["agent_cites"] += 1
+        elif source not in in_incident or target not in in_incident:
+            not_drawn["outside_incidents"] += 1
+        else:
+            not_drawn["beyond_picture"] += 1
+    routes, listed = _route(sorted(candidates, key=lambda key: (key[2] != "observed", drawn[key[0]], drawn[key[1]],
+                                                                 key[0], key[1])), drawn)
+    for key in routes:
+        shown_counts[key[2]] += len(candidates[key])
+    for key in listed:
+        not_drawn["listed_here"] += len(candidates[key])
+    links = [{"from": key[0], "to": key[1], "style": key[2],
+              "link_type": candidates[key][0].get("link_type") or "", **route} for key, route in routes.items()]
+    unrouted = [{"from": key[0], "to": key[1], "style": key[2], "link_type": candidates[key][0].get("link_type") or "",
+                 "count": len(candidates[key])} for key in listed]
     in_incidents = sum(len(incident.get("finding_ids") or []) for incident in incidents)
     return {
-        "rows": rows, "edges": edges, "drawn": drawn, "numbers": numbers, "by_id": by_id,
+        "rows": rows, "edges": links, "unrouted": unrouted, "drawn": drawn, "numbers": numbers, "by_id": by_id,
         "counts": {
             "incidents": len(incidents), "incidents_drawn": len(rows),
             "findings": in_incidents, "findings_drawn": len(drawn),
-            "observed_links": totals["observed"], "observed_drawn": shown["observed"],
-            "hypothesis_links": totals["hypothesis"], "hypothesis_drawn": shown["hypothesis"],
+            "observed_links": totals["observed"], "observed_drawn": shown_counts["observed"],
+            "hypothesis_links": totals["hypothesis"], "hypothesis_drawn": shown_counts["hypothesis"],
+            "not_drawn": not_drawn,
         },
     }
+
+
+def _route(keys: list[tuple], drawn: dict) -> tuple[dict, list]:
+    """Routes for the links between drawn boxes, kept in the gutters so a link never runs under a box.
+
+    Within a row a link is a bracket above the boxes (observed) or below them (hypothesis), on its own level at most
+    `LEVEL_REACH` pixels from the boxes. Between adjacent rows a link drops from its box, runs along its own lane in the
+    middle of the gutter (past every bracket's reach), and drops into the other box. Every segment is horizontal or
+    vertical, so links only ever cross at right angles. Every connection point belongs to
+    one link and one role (leaving or arriving, on the top or bottom side), and every bracket level and gutter lane
+    to one link, so no
+    two links share a stretch. A link between rows that are not adjacent, a link from a box to itself, or one with no
+    free connection point or lane is not drawn and is returned to be listed in text."""
+    used: dict[tuple, int] = {}
+    routes, listed = {}, []
+    for key in keys:
+        source, target, style = key
+        (row_a, col_a), (row_b, col_b) = drawn[source], drawn[target]
+        a, b = _box(row_a, col_a), _box(row_b, col_b)
+        observed = style == "observed"
+        if source == target or abs(row_a - row_b) > 1:
+            listed.append(key)
+            continue
+        if row_a == row_b:
+            side = "top" if observed else "bottom"
+            needs = [((a, side, "out"), PORTS), ((b, side, "in"), PORTS), (("level", row_a, side), LEVELS)]
+        else:
+            upper = min(row_a, row_b)
+            down = row_b > row_a
+            needs = [((a, "bottom" if down else "top", "out"), PORTS), ((b, "top" if down else "bottom", "in"), PORTS),
+                     (("lane", upper), LANES)]
+        if any(used.get(slot, 0) >= limit for slot, limit in needs):
+            listed.append(key)
+            continue
+        taken = []
+        for slot, _limit in needs:
+            taken.append(used.get(slot, 0))
+            used[slot] = taken[-1] + 1
+        xs = [box[0] + PORT_MARGIN + ROLE_OFFSET[(side, role)] + index * PORT_SPACING
+              for ((box, side, role), _limit), index in zip(needs[:2], taken[:2], strict=True)]
+        if row_a == row_b:
+            # a bracket: up (observed) or down (hypothesis) to its own level in the gutter, across, and back
+            depth = LEVEL_MIN + taken[2] * LEVEL_STEP
+            if observed:
+                y = a[1] - depth
+                points = [(xs[0], a[1] - 2), (xs[0], y), (xs[1], y), (xs[1], b[1] - 4)]
+            else:
+                y = a[3] + depth
+                points = [(xs[0], a[3] + 2), (xs[0], y), (xs[1], y), (xs[1], b[3] + 4)]
+            tag = ((xs[0] + xs[1]) / 2, y)
+        else:
+            gutter_top = _box(min(row_a, row_b), 0)[3]
+            y = gutter_top + LANE_TOP + taken[2] * LANE_SPACING
+            start = (xs[0], a[3] + 2) if row_b > row_a else (xs[0], a[1] - 2)
+            end = (xs[1], b[1] - 4) if row_b > row_a else (xs[1], b[3] + 4)
+            points = [start, (xs[0], y), (xs[1], y), end]
+            tag = ((xs[0] + xs[1]) / 2, y)
+        routes[key] = {"points": points, "tag": None if observed else tag}
+    return routes, listed
 
 
 def everything_drawn(counts: dict) -> bool:
@@ -262,22 +352,10 @@ def _legend(canvas: Canvas) -> None:
 
 def _tag(canvas: Canvas, cx: float, cy: float) -> None:
     """The `H` marker every hypothesis link carries."""
-    x0, y0 = int(cx) - 13, int(cy) - 14
-    canvas.rect(x0, y0, x0 + 26, y0 + 28, WHITE)
-    canvas.frame(x0, y0, x0 + 26, y0 + 28, HYPOTHESIS, 2)
+    x0, y0 = int(cx) - 13, int(cy) - TAG_HALF
+    canvas.rect(x0, y0, x0 + 26, y0 + 2 * TAG_HALF, WHITE)
+    canvas.frame(x0, y0, x0 + 26, y0 + 2 * TAG_HALF, HYPOTHESIS, 2)
     canvas.text(x0 + 6, y0 + 7, "H", HYPOTHESIS, 2)
-
-
-def _curve(start, end, lift: float, steps: int = 24) -> list[tuple[float, float]]:
-    # a positive lift bends the curve below both ends, a negative one above them
-    control = ((start[0] + end[0]) / 2, max(start[1], end[1]) + lift if lift > 0 else
-               min(start[1], end[1]) + lift)
-    out = []
-    for index in range(steps + 1):
-        t = index / steps
-        out.append(((1 - t) ** 2 * start[0] + 2 * (1 - t) * t * control[0] + t * t * end[0],
-                    (1 - t) ** 2 * start[1] + 2 * (1 - t) * t * control[1] + t * t * end[1]))
-    return out
 
 
 def render_png(plan: dict) -> bytes:
@@ -298,37 +376,13 @@ def render_png(plan: dict) -> bytes:
             middle = (left[1] + left[3]) // 2
             canvas.polyline([(left[2] + 4, middle), (right[0] - 6, middle)], GREY, 2)
             canvas.arrowhead((right[0] - 2, middle), (right[0] - 12, middle), GREY, 10)
-    # links under the boxes: observed arcs above a row, hypothesis arcs below it
-    crossing: dict[tuple[int, int], int] = {}
-    tags = []
-    for edge in plan["edges"]:
-        (row_a, col_a), (row_b, col_b) = drawn[edge["from"]], drawn[edge["to"]]
-        a, b = _box(row_a, col_a), _box(row_b, col_b)
-        observed = edge["style"] == "observed"
+    # links under the boxes, along their routes; every route stays in the gutters above, below and between rows
+    for link in plan["edges"]:
+        observed = link["style"] == "observed"
         color = OBSERVED if observed else HYPOTHESIS
-        dash = None if observed else (14, 10)
-        if row_a == row_b:
-            if observed:
-                start, end = ((a[0] + a[2]) / 2, a[1] - 2), ((b[0] + b[2]) / 2 + 10, b[1] - 4)
-                points = _curve(start, end, -70)
-            else:
-                start, end = ((a[0] + a[2]) / 2, a[3] + 2), ((b[0] + b[2]) / 2 - 10, b[3] + 4)
-                points = _curve(start, end, 70)
-        else:
-            # links between rows that share columns are spread sideways, so overlapping dashes never read as solid
-            lane = crossing.get((col_a, col_b), 0)
-            crossing[(col_a, col_b)] = lane + 1
-            shift = (0 if observed else 24) + 18 * (lane % 4) * (1 if lane % 8 < 4 else -1)
-            down = row_b > row_a
-            start = ((a[0] + a[2]) / 2 + shift, a[3] + 2 if down else a[1] - 2)
-            end = ((b[0] + b[2]) / 2 + shift, b[1] - 4 if down else b[3] + 4)
-            points = [start, end]
-        canvas.polyline(points, color, 3, dash)
-        canvas.arrowhead(points[-1], points[-2] if len(points) > 1 else points[0], color)
-        if not observed:
-            middle = points[len(points) // 2] if len(points) > 2 else (
-                (points[0][0] + points[-1][0]) / 2, (points[0][1] + points[-1][1]) / 2)
-            tags.append(middle)
+        points = link["points"]
+        canvas.polyline(points, color, 3, None if observed else (14, 10))
+        canvas.arrowhead(points[-1], points[-2], color)
     for index, row in enumerate(rows):
         for column, item in enumerate(row["steps"]):
             x0, y0, x1, y1 = _box(index, column)
@@ -349,7 +403,8 @@ def render_png(plan: dict) -> bytes:
             scale = 3 if text_width(label, 3) <= BOX_W - 12 else 2
             canvas.text(x0 + (BOX_W - text_width(label, scale)) // 2, y0 + (BOX_H - 7 * scale) // 2, label, GREY,
                         scale)
-    # hypothesis tags last, so no box ever hides one
-    for middle in tags:
-        _tag(canvas, *middle)
+    # hypothesis tags last, so no box or line ever hides one; each sits in a gutter
+    for link in plan["edges"]:
+        if link["tag"] is not None:
+            _tag(canvas, *link["tag"])
     return canvas.png()
