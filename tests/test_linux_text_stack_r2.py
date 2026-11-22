@@ -58,7 +58,8 @@ GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a
  'links': 'd9f0da030bf1447f35601910ec18eb012f4a55a0a8feef7262ab6e745319890e',
  'manifest': 'd7eee59854e647bbff8400b1055887cb94d7eaae2f06512a99d94ffe15273c82',
  'raw': '64be31e697a32f93b1a71657560af514b2d430469cb3be19f44b8827985a7775',
- 'rule_cells': 'ea79843a8700b925e62daa6d49eedd454afa615775a2e1bb8c1f0768901e9eb5',
+ # host.account_or_group_change 7->8 moves only the rule cells (its version); every other digest is unchanged.
+ 'rule_cells': 'af6fa01cdd41ac504da51333a9573b5d56fa02ad55ceb8d4dd72fce626abf732',
  'stats': 'e7d40465da77f85df2ab649392225bdfb16e5b75834447cd6d3a625129032b54',
  'tasks': '31db5bad23dca3ba0a6c4114135053177ece1b46af44576b3198b8967c6762bb'}
 

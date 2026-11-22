@@ -10,9 +10,11 @@ from tests import throughput_fixture as tf
 # Discovery and transfer executions already cited by a folded alert are not repeated as context.
 # Shared execution and lineage state keep the 4 MiB candidate result identical to larger budgets.
 # Evidence version 21 rehashes the event ids (with the version set back to 20 the prior-version digest is 11b53998...).
-CANDIDATE_GOLDENS = {4: (40, 'cd2d3031e3b0b072f35bc5f0273473bd54566ffe2bf3340f285f5e1aa1c7968a'),
- 8: (40, 'cd2d3031e3b0b072f35bc5f0273473bd54566ffe2bf3340f285f5e1aa1c7968a'),
- 16: (40, 'cd2d3031e3b0b072f35bc5f0273473bd54566ffe2bf3340f285f5e1aa1c7968a')}
+# host.account_or_group_change 7->8 moves only that rule's version here (the throughput scenario's candidates
+# digest with the prior versions restored is unchanged).
+CANDIDATE_GOLDENS = {4: (40, '2910177e36ae77129ffe7648eb9661e2073af0a6d68a7fbc29640e81e4f7fd4b'),
+ 8: (40, '2910177e36ae77129ffe7648eb9661e2073af0a6d68a7fbc29640e81e4f7fd4b'),
+ 16: (40, '2910177e36ae77129ffe7648eb9661e2073af0a6d68a7fbc29640e81e4f7fd4b')}
 
 
 @pytest.mark.parametrize("mib", CANDIDATE_GOLDENS)
