@@ -13,6 +13,7 @@ from collections import Counter
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from romulus.detect.netdef import coverage_shown
+from romulus.evidence.mentions import MENTION_LABEL_SHORT
 from romulus.evidence.raw_citation import RAW_LABEL_PLURAL
 from romulus.report import attack_path, ooxml
 from romulus.report.markdown import (
@@ -245,6 +246,16 @@ def _scope(body: _Body, m: dict) -> None:
            "limitations; what was not searched is unknown, not absent.")
 
 
+# a claim that rests on text a record contains says so wherever it is shown
+MENTION_CLAIM_PREFIX = MENTION_LABEL_SHORT[:1].upper() + MENTION_LABEL_SHORT[1:] + ": "
+
+
+def claim_text(finding: dict) -> str:
+    """A finding's claim, labelled as a mention when that is what it rests on (never read as an action)."""
+    claim = str(finding["claim"])
+    return MENTION_CLAIM_PREFIX + claim if finding.get("claim_type") == "mention" else claim
+
+
 def open_ends_text(incident: dict) -> str:
     """What an incident's expansion left open, in a few words ("none" when nothing is open)."""
     ends = incident.get("open_ends") or {}
@@ -267,7 +278,7 @@ def _finding_card(body: _Body, finding: dict, number: int, ranked: bool, technic
     if finding.get("provenance") == "agent":
         body.p(f"{finding.get('label') or 'Agent finding'}: proposed by the AI agent, not confirmed.",
                style="AiCallout")
-    body.p(finding["claim"])
+    body.p(claim_text(finding))
     if raws := finding.get("raw_citations"):
         # source references only: the record text stays in the technical report, fenced
         shown = ", ".join(f"{raw.get('target', '')}/{raw.get('native_id', '')}" if raw["status"] == "retained"
@@ -715,7 +726,7 @@ def _finding_index(body: _Body, m: dict, sections, numbers: dict, technical_name
                  f"{finding.get('severity')} / {finding.get('confidence')}", _time(finding.get("observed_at")),
                  finding.get("rule_title") or finding["rule_id"], _where(finding, ranked),
                  ("Agent finding (AI-proposed, unconfirmed): " if finding.get("provenance") == "agent" else "")
-                 + str(finding["claim"])]
+                 + claim_text(finding)]
                 for title, _intro, findings in sections for finding in findings))
 
 

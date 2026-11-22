@@ -290,6 +290,20 @@ def test_mentions_are_labelled_counted_and_never_findings(tmp_path):
     assert "rr-2" in by_rank["2"][8]
 
 
+def test_a_claim_resting_on_a_mention_is_labelled_as_one_in_card_and_index(tmp_path):
+    manifest = synthetic_manifest(findings=4, agent_findings=1)
+    agent = next(f for f in manifest["findings"] if f["provenance"] == "agent")
+    agent.update(claim_type="mention", claim="the line names mimikatz")
+    blocks = read_back(_write(tmp_path, manifest))
+    label = "Mention (text a record contains, not an action): the line names mimikatz"
+    assert label in _paragraphs(_section(blocks, "Key findings"))
+    row = next(row for row in _table_after(blocks, executive.FINDING_INDEX_TITLE)[1:] if row[1] == agent["id"])
+    assert row[8] == "Agent finding (AI-proposed, unconfirmed): " + label
+    # a typed claim is never labelled a mention
+    assert all(not row[8].startswith("Mention") for row in _table_after(blocks, executive.FINDING_INDEX_TITLE)[1:]
+               if row[1] != agent["id"])
+
+
 def test_ai_output_is_labelled_and_a_hunt_without_the_agent_says_so(tmp_path):
     blocks = read_back(_write(tmp_path, synthetic_manifest(assessment="agent")))
     section = _paragraphs(_section(blocks, "AI assessment"))
