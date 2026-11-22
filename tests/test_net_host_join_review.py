@@ -156,6 +156,36 @@ def test_rows_that_cannot_be_kept_end_nothing_and_are_named(tmp_path):
     assert not list(tmp_path.glob("**/*.part"))
 
 
+# ---- I4: a Windows logon id's span ends at its logoff or its reuse -----------------------------------------------
+
+def test_a_logon_id_reused_after_a_reboot_never_lends_its_activity_or_flag_to_the_joined_logon():
+    from tests.test_windows_c_burst_review import native_event
+    session = flow("s1", cport=50000, sport=445, start=0.0)
+    joined = [logon4624(0.5, port=50000), process4688(2, "C:\\Windows\\System32\\whoami.exe")]
+    console = native_event(4624, {"TargetUserName": "bob", "TargetDomainName": "EXAMPLE", "IpAddress": "-",
+                                  "IpPort": "-", "LogonType": "2", "TargetLogonId": "0x1a2b"},
+                           host="srv01.example.test", offset=5000)
+    later = process4688(5002, "C:\\Windows\\System32\\cmd.exe")
+    _rule, matches = run([[session], [*joined, console, later]],
+                         [finding("F1", [session]), finding("H1", [later], lane="high", rule="win.test_high")])
+    m = matches[0]
+    assert m.proposed_lane == "lead" and "win.test_high" not in m.claim
+    assert "1 process or share record(s)" in m.claim and "cmd.exe" not in m.claim
+
+
+def test_activity_and_flags_after_the_logoff_are_not_the_joined_logons():
+    from tests.test_windows_c_burst_review import native_event
+    session = flow("s1", cport=50000, sport=445, start=0.0)
+    logoff = native_event(4634, {"TargetUserName": "alice", "TargetDomainName": "EXAMPLE", "LogonType": "3",
+                                 "TargetLogonId": "0x1a2b"}, host="srv01.example.test", offset=100)
+    after = process4688(200, "C:\\Windows\\System32\\cmd.exe")
+    host = [logon4624(0.5, port=50000), process4688(2, "C:\\Windows\\System32\\whoami.exe"), logoff, after]
+    _rule, matches = run([[session], host],
+                         [finding("F1", [session]), finding("H1", [after], lane="high", rule="win.test_high")])
+    m = matches[0]
+    assert m.proposed_lane == "lead" and "1 process or share record(s)" in m.claim and "cmd.exe" not in m.claim
+
+
 def test_a_session_only_a_later_stage_read_is_never_paired_by_address():
     from romulus.detect.net_host_join import NetworkAdminLogonJoin
     rule = NetworkAdminLogonJoin()

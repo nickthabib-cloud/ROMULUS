@@ -98,7 +98,7 @@ JOIN_SCHEMA = {
     "net": 'eid, client, cport, server, sport, service, start, "end", origin',
     "logon": "rid, host, boot, ts, src, sport, kind, code, ltype, svc, outcome, session, account, tseq, blob",
     "hostconn": "host, ts, ckey, eid, blob",
-    "remote_rows": "host, session, entry, min_ts, boot, PRIMARY KEY (host, session, entry)",
+    "remote_rows": "host, session, entry, min_ts, boot, end_ts, PRIMARY KEY (host, session, entry)",
     "act": "host, session, entry, count, PRIMARY KEY (host, session, entry)",
     "act_ex": "host, session, entry, ts, eid, blob, PRIMARY KEY (host, session, entry, eid)",
     "unjoined": "host PRIMARY KEY, seq",
@@ -563,6 +563,9 @@ class NetworkAdminLogonJoin(Playbook):
             kind = logon_kind(event)
             if kind is not None:
                 self._logon(event, kind, seq)
+            elif (event.family == "auth" and event.get("auth.action") == "logoff" and event.host
+                  and event_os_family(event) == "windows"):
+                self._logoff(event)
             if event.family == "net_socket":
                 self._host_connection(event)
             if event.family in ("process_exec", "share_access") and event.host:
@@ -587,13 +590,20 @@ class NetworkAdminLogonJoin(Playbook):
 
     def _logon(self, event: TypedEvent, kind: str, seq: int) -> None:
         src = canon_ip(event.get("source.ip"))
-        if not _usable_client(src) or not event.host:
+        if not event.host:
+            return
+        session = _session_of(event)
+        boot = str(event.get("host.boot.id") or "")
+        if not _usable_client(src):
+            # A local logon (console, service, batch) is no remote logon, but one that creates a logon id a remote
+            # logon on this host had (the id reused after a reboot) ends that logon's span.
+            if (kind == "win_logon" and session is not None and event.outcome == Outcome.success
+                    and self.remote.get((event.host, session)) is not None):
+                self._register(event.host, session, boot, event.ts.timestamp(), starts=True)
             return
         if not self._room(1):
             self._host_refused += 1
             return
-        session = _session_of(event)
-        boot = str(event.get("host.boot.id") or "")
         self._rid += 1
         account = logon_account(event) or ""
         row = (self._rid, event.host, boot, event.ts.timestamp(), src, _num(event.get("source.port")), kind,
@@ -604,29 +614,51 @@ class NetworkAdminLogonJoin(Playbook):
             self._host_refused += 1
             return
         if session is not None and event.outcome == Outcome.success:
-            self._register(event.host, session, boot, event.ts.timestamp())
+            self._register(event.host, session, boot, event.ts.timestamp(), starts=kind == "win_logon")
 
-    def _register(self, host: str, session: str, boot: str, when: float) -> None:
+    def _register(self, host: str, session: str, boot: str, when: float, *, starts: bool = False) -> None:
         """Record a remote logon session. Records of one logon (sshd's line and the audit login, 4624 and 5140)
-        share one entry, the earliest time kept; a reboot (both records naming different boots) starts another."""
+        share one entry, the earliest time kept. Another entry starts when both records name different boots, or,
+        for a Windows logon id (whose records carry no boot), when a second 4624 creates the same id on the host:
+        the id was reused after a reboot. Entry: [id, earliest time, boot, created by a 4624, logoff time]."""
         entries = self.remote.get((host, session)) or []
-        for entry in entries:
-            if not _boots_conflict(entry[2], boot):
-                entry[1] = min(entry[1], when)
-                entry[2] = entry[2] or boot
-                return
-        entries = [*entries, [f"{when:.6f}", when, boot]][-self.ENTRIES_KEPT:]
+        fitting = [entry for entry in entries if not _boots_conflict(entry[2], boot)]
+        latest = max(fitting, key=lambda entry: entry[1]) if fitting else None
+        if latest is not None and not (starts and latest[3] and when > latest[1] + 1.0):
+            latest[1] = min(latest[1], when)
+            latest[2] = latest[2] or boot
+            latest[3] = latest[3] or starts
+            return
+        entries = [*entries, [f"{when:.6f}", when, boot, starts, None]][-self.ENTRIES_KEPT:]
         if not self.remote.put((host, session), entries):
             self.note_limit("remote_sessions", "the remote logon sessions' store took no new session; later "
                                                "process records of a new session are not joined to it")
 
+    def _logoff(self, event: TypedEvent) -> None:
+        """A Windows logoff (4634, 4647) ends the latest logon of its id that began before it."""
+        session = _session_of(event)
+        if session is None:
+            return
+        when = event.ts.timestamp()
+        entries = self.remote.get((event.host, session))
+        fitting = [entry for entry in entries or [] if entry[1] <= when + 1.0]
+        if fitting:
+            entry = max(fitting, key=lambda item: item[1])
+            if entry[4] is None or when < entry[4]:
+                entry[4] = when
+
     def _entry(self, host: str, session: str, boot: str, when: float | None):
-        """The remote logon entry a record of this session belongs to: boots agree (or one is unknown) and, for a
-        record with a time, the logon came first (one second of slack for clock rounding). The latest such."""
+        """The remote logon entry a record of this session belongs to: boots agree (or one is unknown), the logon came
+        first and had not logged off (one second of slack each way for clock rounding). The latest such."""
         entries = self.remote.peek((host, session)) if when is None else self.remote.get((host, session))
         fitting = [entry for entry in entries or [] if not _boots_conflict(entry[2], boot)
                    and (when is None or entry[1] <= when + 1.0)]
-        return max(fitting, key=lambda entry: entry[1]) if fitting else None
+        if not fitting:
+            return None
+        entry = max(fitting, key=lambda item: item[1])
+        if when is not None and entry[4] is not None and when > entry[4] + 1.0:
+            return None
+        return entry
 
     def _host_connection(self, event: TypedEvent) -> None:
         a, b = canon_ip(event.get("source.ip")), canon_ip(event.get("destination.ip"))
@@ -710,8 +742,8 @@ class NetworkAdminLogonJoin(Playbook):
                     spill.write(f"INSERT OR IGNORE INTO {name} VALUES ({','.join('?' * len(batch[0]))})", batch)
                     batch.clear()
         for (host, session), entries in self.remote.items():
-            for entry_id, min_ts, boot in entries:
-                rows["remote_rows"].append((host, session, entry_id, min_ts, boot))
+            for entry_id, min_ts, boot, _started, end_ts in entries:
+                rows["remote_rows"].append((host, session, entry_id, min_ts, boot, end_ts))
             flush()
         for (host, session, entry_id), state in self.activity.items():
             rows["act"].append((host, session, entry_id, state[0]))
@@ -1143,7 +1175,10 @@ class NetworkAdminLogonJoin(Playbook):
             for cid, rule, flag_lane, eid, flag_boot, flag_ts in db.execute(
                     "SELECT DISTINCT cid, rule, lane, eid, boot, ts FROM flag WHERE host = ? AND session = ? "
                     "ORDER BY lane DESC, rule, cid, eid", (key_host, session)).fetchall():
-                if not _boots_conflict(entry[2], flag_boot) and flag_ts >= entry[1] - 1.0:
+                # the flagged record belongs to this logon: inside its span (from its start to its logoff or the next
+                # logon of the same id), on a boot that agrees
+                if (not _boots_conflict(entry[2], flag_boot) and flag_ts >= entry[1] - 1.0
+                        and (entry[3] is None or flag_ts < entry[3])):
                     flags.append((cid, rule, flag_lane, eid))
                     raising = raising or tied
         flag_ids = {flag[3] for flag in flags}
@@ -1198,11 +1233,18 @@ class NetworkAdminLogonJoin(Playbook):
         return latest is not None and earliest[0] < latest
 
     def _entry_at(self, db, host: str, session: str, boot: str, when: float):
-        """The remote logon entry a joined logon record of this session belongs to."""
-        fitting = [entry for entry in db.execute("SELECT entry, min_ts, boot FROM remote_rows WHERE host = ? AND "
-                                                 "session = ?", (host, session)).fetchall()
-                   if not _boots_conflict(entry[2], boot) and entry[1] <= when + 1.0]
-        return max(fitting, key=lambda entry: entry[1]) if fitting else None
+        """The remote logon entry a joined logon record of this session belongs to, as (id, start, boot, upper bound):
+        the bound is its logoff, else the next logon of the same id that started after it (a reuse), else none."""
+        rows = db.execute("SELECT entry, min_ts, boot, end_ts FROM remote_rows WHERE host = ? AND session = ?",
+                          (host, session)).fetchall()
+        fitting = [entry for entry in rows if not _boots_conflict(entry[2], boot) and entry[1] <= when + 1.0]
+        if not fitting:
+            return None
+        entry = max(fitting, key=lambda item: item[1])
+        later = [item[1] for item in rows if item[1] > entry[1] and not _boots_conflict(item[2], entry[2])]
+        bounds = [value for value in (entry[3] + 1.0 if entry[3] is not None else None, min(later, default=None))
+                  if value is not None]
+        return entry[0], entry[1], entry[2], min(bounds) if bounds else None
 
     def _predicate(self, network_events, logon_events, tier) -> list[PredicateField]:
         out = []
