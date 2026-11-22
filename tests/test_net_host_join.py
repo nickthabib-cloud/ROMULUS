@@ -246,9 +246,18 @@ def test_logon_from_the_same_source_outside_the_clock_allowance_is_not_joined():
 
 
 def test_timestamp_boundary_is_inclusive_at_the_allowance():
-    session = flow("f1", start=0.0, duration=60.0)
-    _rule, matches = run([[session], [sshd("edge", 60 + 300.0)]], [finding("F1", [session])])
+    # SMB may authenticate again inside a session: its logon is read over the recorded lifetime plus the allowance
+    smb = flow("s1", cport=50000, sport=445, start=0.0, duration=60.0)
+    _rule, matches = run([[smb], [logon4624(60 + 300.0, port=50000)]], [finding("F1", [smb])])
     assert len(matches) == 1 and "+360.0 s" in matches[0].claim
+    _rule, late = run([[smb], [logon4624(60 + 300.5, port=50000)]], [finding("F1", [smb])])
+    assert late == []
+    # SSH authenticates when it opens: around the opening only
+    session = flow("f1", start=0.0, duration=60.0)
+    _rule, matches = run([[session], [sshd("edge", 300.0)]], [finding("F1", [session])])
+    assert len(matches) == 1 and "+300.0 s" in matches[0].claim
+    _rule, late = run([[session], [sshd("late", 300.5)]], [finding("F1", [session])])
+    assert late == []
     _rule, early = run([[session], [sshd("early", -300.0)]], [finding("F1", [session])])
     assert len(early) == 1
     _rule, before = run([[session], [sshd("before", -300.5)]], [finding("F1", [session])])

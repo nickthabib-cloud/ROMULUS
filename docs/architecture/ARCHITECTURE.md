@@ -106,7 +106,10 @@ host's own record of the connection (Sysmon 3 or an audit socket record) plus a 
 produces; or a portless logon on the only host with one in the window, when the client held no other session of that
 logon class to another address. Records written on the client or by a domain controller (4648, 4768, 4769, 4776) are
 never read. The logon must fall within the session's recorded lifetime widened by five minutes (the Windows Kerberos
-clock tolerance, which bounds the host clocks whose domain logons are read). Anything else is unresolved with its
+clock tolerance, which bounds the host clocks whose domain logons are read); for SSH, Telnet and the r-services, which
+authenticate when the connection opens, only within five minutes of the opening. A client endpoint the client also used
+toward another server in the window, and an address-only pairing for a session only a later stage read, are
+unresolved. Anything else is unresolved with its
 reason, counted on the rule's coverage, and never a negative; VNC and X11 sessions are named unresolved, since they
 leave no typed host logon.
 
@@ -130,7 +133,8 @@ leave no typed host logon.
   expansion reaches and of the AI agent are never joined.
 - **Lane.** The item is a lead labelled as an inferred link, with its key and each logon's offset from the session
   start. It is high only when a typed host finding the hunt published at high or urgent cites a process or share record
-  in the joined logon session, and it never touches the network finding's own lane. Cited host records are kept
+  in a logon session the join reached by the client endpoint or the host's own connection record (an address-only
+  join never raises it), and it never touches the network finding's own lane. Cited host records are kept
   compact and their bodies are fetched by native id when the item is published.
 
 ## Linux text logs

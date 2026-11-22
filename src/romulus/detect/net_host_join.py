@@ -13,8 +13,9 @@ records often carry no address of the host itself, so the join assumes no addres
 
 Anything else is unresolved with a named reason, never a negative. The join is an inference: every item says so, shows
 its key and the clock offset, and is a lead. Its lane rises to high only when a typed host finding the hunt already
-published at high or urgent cites a record in the joined logon session; the join alone never raises a lane, and it
-never lowers the network finding, which stands on its own.
+published at high or urgent cites a record in a logon session the join reached by the client endpoint or the host's
+own connection record (an address-only join never raises it); the join alone never raises a lane, and it never lowers
+the network finding, which stands on its own.
 
 Cross-target joins cannot stream (the sweep reads one target to its end before the next), so both sides are kept as
 compact rows on the rule's disk spill and joined at finalize. The network findings to join are read from the hunt's
@@ -63,6 +64,8 @@ SERVICE_ATTACK = {"ssh": "T1021.004", "rdp": "T1021.001", "smb": "T1021.002", "r
 # Services whose sessions leave no logon record any supported host family types (VNC and X11 authenticate inside
 # their own protocol).
 NO_HOST_LOGON = frozenset({"vnc", "x11"})
+# Services that authenticate once, when the connection opens: their logon is read around the opening only.
+CONNECT_AUTH = frozenset({"ssh", "telnet", "rlogin", "rsh", "rexec"})
 
 # ---- what a host's logon evidence is ---------------------------------------------------------------------------------
 # Windows logon types each protocol produces on the server (Microsoft "Audit logon events" / 4624 logon types):
@@ -91,7 +94,7 @@ _UNSET_SESSIONS = {"0", "4294967295", "-1"}
 # what each pass adds. A session record is judged once (res or unres, by its record id); a lead is a (record, finding)
 # pair; pub holds each item's last published content digest, so a pass republishes only what changed.
 JOIN_SCHEMA = {
-    "net": 'eid, client, cport, server, sport, service, start, "end"',
+    "net": 'eid, client, cport, server, sport, service, start, "end", origin',
     "logon": "rid, host, boot, ts, src, sport, kind, code, ltype, svc, outcome, session, account, tseq, blob",
     "hostconn": "host, ts, ckey, eid, blob",
     "remote_rows": "host, session, entry, min_ts, boot, PRIMARY KEY (host, session, entry)",
@@ -145,6 +148,10 @@ UNRESOLVED_WORDS = {
                                  "from the client in the window"),
     "logon_type_missing": ("a Windows logon from the client in the window does not record its logon type, so whether "
                            "the protocol produced it is not decided"),
+    "port_reused": ("the client used the same port toward another server in the window, so the host's logon naming "
+                    "that endpoint may be the other connection's"),
+    "pairing_unread": ("the session was read by a later stage, not the sweep, so the client's other sessions in its "
+                       "source were not all read and a portless logon cannot be paired with it"),
     "external_server": ("the server address is outside the site's internal networks, and no port or host connection "
                         "record ties a host's portless logon to it"),
 }
@@ -220,6 +227,7 @@ class AdminSession:
     service: str
     start: float
     end: float | None
+    origin: str = "sweep"      # "cited": typed from a later stage's cited record, not read by the sweep
 
 
 def admin_session(event: TypedEvent) -> AdminSession | str | None:
@@ -442,8 +450,9 @@ class NetworkAdminLogonJoin(Playbook):
         "window": "logon time within the session's recorded lifetime widened by 300 s on each side (an open-ended "
                   "record: its own time +-300 s); the offset of each joined logon from the session's start is stated",
         "lanes": "lead. High only when a typed host finding this hunt published at high or urgent cites a process or "
-                 "share record in the joined logon session (the item cites it and names it); never above its "
-                 "strongest observed component, never urgent; the network finding keeps its own lane",
+                 "share record in a logon session the join reached by the client endpoint or the host's own "
+                 "connection record (the item cites it and names it); an address-only join never raises the lane; "
+                 "never above its strongest observed component, never urgent; the network finding keeps its own lane",
         "state": "every administration session record, every remote-capable host logon record (compact), host "
                  "connection records on administration ports and, per remote logon session, a count and the earliest "
                  "8 process and share records, on the rule's disk spill and keyed stores; a record refused by the "
@@ -484,7 +493,7 @@ class NetworkAdminLogonJoin(Playbook):
             self._rows_account = self.state_budget().account(f"{self.id}:rows")
         return self._rows_account
 
-    TABLES = (("net", "eid, client, cport, server, sport, service, start, \"end\""),
+    TABLES = (("net", JOIN_SCHEMA["net"]),
               ("logon", "rid, host, boot, ts, src, sport, kind, code, ltype, svc, outcome, session, account, tseq, blob"),
               ("hostconn", "host, ts, ckey, eid, blob"))
 
@@ -569,7 +578,7 @@ class NetworkAdminLogonJoin(Playbook):
             self._net_refused += 1
             return
         if not self._add("net", (session.eid, session.client, session.cport, session.server, session.sport,
-                                 session.service, session.start, session.end)):
+                                 session.service, session.start, session.end, "sweep")):
             self._net_refused += 1
 
     def _logon(self, event: TypedEvent, kind: str, seq: int) -> None:
@@ -832,9 +841,9 @@ class NetworkAdminLogonJoin(Playbook):
                 session = admin_session(event) if event.family in NETWORK_FAMILIES else None
                 if isinstance(session, AdminSession):
                     added.append((session.eid, session.client, session.cport, session.server, session.sport,
-                                  session.service, session.start, session.end))
+                                  session.service, session.start, session.end, "cited"))
             if added:
-                rows.write(f"INSERT INTO net VALUES ({','.join('?' * 8)})", added)
+                rows.write(f"INSERT INTO net VALUES ({','.join('?' * 9)})", added)
 
     def _logon_rows(self, db, sql: str, params: tuple) -> list[LogonRow]:
         return [LogonRow(*row) for row in db.execute(sql, params)]
@@ -844,12 +853,13 @@ class NetworkAdminLogonJoin(Playbook):
         at a time (result rows are written between pages, so no read stays open across a write)."""
         rows.write("DROP TABLE IF EXISTS leadnet", [()])
         rows.write("CREATE TABLE leadnet AS SELECT DISTINCT net.eid AS eid, client, cport, server, sport, service, "
-                   "start, \"end\" FROM net JOIN lead ON lead.eid = net.eid "
+                   "start, \"end\", origin FROM net JOIN lead ON lead.eid = net.eid "
                    "WHERE net.eid NOT IN (SELECT eid FROM res) AND net.eid NOT IN (SELECT eid FROM unres) "
                    "ORDER BY client, cport, server, sport, start, net.eid", [()])
         after = 0
         while True:
-            page = rows.db.execute("SELECT rowid, eid, client, cport, server, sport, service, start, \"end\" "
+            page = rows.db.execute("SELECT rowid, eid, client, cport, server, sport, service, start, \"end\", "
+                                   "origin "
                                    "FROM leadnet WHERE rowid > ? ORDER BY rowid LIMIT 2000", (after,)).fetchall()
             if not page:
                 return
@@ -859,8 +869,8 @@ class NetworkAdminLogonJoin(Playbook):
     def _resolve_leads(self, rows) -> None:
         db = rows.db
         results, unresolved = [], []
-        for eid, client, cport, server, sport, service, start, end in self._lead_sessions(rows):
-            session = AdminSession(eid, client, cport, server, sport, service, start, end)
+        for eid, client, cport, server, sport, service, start, end, origin in self._lead_sessions(rows):
+            session = AdminSession(eid, client, cport, server, sport, service, start, end, origin)
             identity = f"{client}|{cport}|{server}|{sport}"
             outcome = self._resolve(rows, session)
             if isinstance(outcome, str):
@@ -888,10 +898,15 @@ class NetworkAdminLogonJoin(Playbook):
         low = session.start - self.SKEW_SECONDS
         high = (session.end if session.end is not None else session.start) + self.SKEW_SECONDS
         columns = "rid, host, boot, ts, src, sport, kind, code, ltype, svc, outcome, session, account"
-        # The client endpoint first: a busy client (a jump host, a NAT) logs many logons, but few name this port.
+        # The client endpoint first: a busy client (a jump host, a NAT) logs many logons, but few name this port. A
+        # protocol that authenticates when its connection opens (SSH, Telnet, the r-services) logs its logon then, so
+        # its endpoint is read only around the opening: a long session's client port can be used again later for
+        # another connection (Linux shares an ephemeral port across destinations), whose logon is not this one's.
+        end_low = low
+        end_high = session.start + self.SKEW_SECONDS if session.service in CONNECT_AUTH else high
         named = self._logon_rows(
             db, f"SELECT {columns} FROM logon WHERE src = ? AND sport = ? AND ts BETWEEN ? AND ? ORDER BY ts, rid "
-                "LIMIT ?", (session.client, session.cport, low, high, self.LOGON_SCAN + 1))
+                "LIMIT ?", (session.client, session.cport, end_low, end_high, self.LOGON_SCAN + 1))
         if len(named) > self.LOGON_SCAN:
             return "logon_scan_capped"
         endpoint = [row for row in named if consistent(session.service, session.sport, row)]
@@ -900,6 +915,13 @@ class NetworkAdminLogonJoin(Playbook):
         if endpoint:
             if len({row.host for row in endpoint}) > 1:
                 return "ambiguous_endpoint"
+            # the same client endpoint toward another server in the window: the logon may be that connection's
+            reused = db.execute(
+                "SELECT 1 FROM net WHERE client = ? AND cport = ? AND server != ? AND start <= ? "
+                "AND coalesce(\"end\", start) >= ? LIMIT 1",
+                (session.client, session.cport, session.server, end_high, end_low)).fetchone()
+            if reused is not None:
+                return "port_reused"
             return self._joined(rows, session, endpoint, "endpoint")
         candidates = self._logon_rows(db, f"SELECT {columns} FROM logon WHERE src = ? AND sport IS NULL "
                                           "AND ts BETWEEN ? AND ? ORDER BY ts, rid LIMIT ?",
@@ -934,6 +956,10 @@ class NetworkAdminLogonJoin(Playbook):
             return "external_server"
         if self._net_refused:
             return "pairing_unknown"
+        if session.origin != "sweep":
+            # a session a later stage's finding cites that the sweep never read: the client's other sessions in that
+            # source were not all read, so a portless pairing cannot be checked
+            return "pairing_unread"
         services = [name for name, cls in LOGON_CLASS.items() if cls == LOGON_CLASS.get(session.service)]
         others = db.execute(
             f"SELECT 1 FROM net WHERE client = ? AND server != ? AND service IN ({','.join('?' * len(services))}) "
@@ -1055,7 +1081,12 @@ class NetworkAdminLogonJoin(Playbook):
         session_ids = list(dict.fromkeys(row[4] for row in group))
         connections = len({row[9] for row in group})
         rids = list(dict.fromkeys(rid for row in group for rid in json.loads(row[6])))
-        keys = list(dict.fromkeys(tuple(key) for row in group for key in json.loads(row[8])))
+        # each logon session with whether a port or the host's own connection record tied it to a session (an
+        # address-only join never raises the lane)
+        keys: dict[tuple, bool] = {}
+        for row in group:
+            for key in json.loads(row[8]):
+                keys[tuple(key)] = keys.get(tuple(key), False) or row[5] != "address"
         offsets = [row[7] for row in group]
         logons = self._logon_events(db, rids)
         logon_events = [logons[rid] for rid in rids[: self.LOGONS_CITED * 2] if rid in logons]
@@ -1065,8 +1096,8 @@ class NetworkAdminLogonJoin(Playbook):
         findings = db.execute(
             f"SELECT DISTINCT rule, lane, cid FROM lead WHERE eid IN ({','.join('?' * len(named))}) "
             "ORDER BY rule, cid", tuple(named)).fetchall()
-        activity_events, counts, flags, seen = [], [], [], set()
-        for key_host, session, boot, when in keys:
+        activity_events, counts, flags, seen, raising = [], [], [], set(), False
+        for (key_host, session, boot, when), tied in keys.items():
             entry = self._entry_at(db, key_host, session, boot, when)
             if entry is None or (key_host, session, entry[0]) in seen:
                 continue
@@ -1083,15 +1114,16 @@ class NetworkAdminLogonJoin(Playbook):
                     "ORDER BY lane DESC, rule, cid, eid", (key_host, session)).fetchall():
                 if not _boots_conflict(entry[2], flag_boot) and flag_ts >= entry[1] - 1.0:
                     flags.append((cid, rule, flag_lane, eid))
+                    raising = raising or tied
         flag_ids = {flag[3] for flag in flags}
         flagged_events = [event for event in (self._load_events(sorted(flag_ids)[:self.ACTIVITY_KEPT])
                                               if flag_ids and self._load_events else [])
                           if event.id not in {item.id for item in activity_events}]
-        lane = "high" if flags else "lead"
+        lane = "high" if raising else "lead"
         successes = [event for event in logon_events if event.outcome == Outcome.success]
         severity = "high" if successes else "medium"
         claim = self._claim(host, client, service, tier, connections, len(session_ids), findings, logon_events,
-                            offsets, counts, activity_events, flags, network_events)
+                            offsets, counts, activity_events, flags, network_events, raising)
         events = list({event.id: event for event in
                        [*network_events, *logon_events, *activity_events, *flagged_events]}.values())
         predicate = self._predicate(network_events, logon_events, tier)
@@ -1148,7 +1180,7 @@ class NetworkAdminLogonJoin(Playbook):
         return out
 
     def _claim(self, host, client, service, tier, connections, records, findings, logons, offsets, counts,
-               activity, flags, network_events) -> str:
+               activity, flags, network_events, raising=True) -> str:
         cited_by = ", ".join(f"{rule} ({lane})" for rule, lane, _cid in findings[:6])
         if len(findings) > 6:
             cited_by += f" and {len(findings) - 6} more"
@@ -1175,7 +1207,9 @@ class NetworkAdminLogonJoin(Playbook):
                          "about what ran: the host may not record it).")
         if flags:
             named = list(dict.fromkeys(f"{rule} ({lane})" for _cid, rule, lane, _eid in flags))
-            parts.append(f" A typed host finding cites a record in that session: {', '.join(named[:4])}.")
+            parts.append(f" A typed host finding cites a record in that session: {', '.join(named[:4])}"
+                         + ("." if raising else "; the item stays a lead, since only an address-only join reaches "
+                                              "that session and an address-only join never raises the lane."))
         return "".join(parts)
 
 
