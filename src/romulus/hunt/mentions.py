@@ -1,16 +1,19 @@
 """The mention sweep: curated patterns over the raw text of records no normalizer read.
 
 The sweep hands each partition's unread records (`normalize_hits(unread=...)`: records of a dataset or event class no
-normalizer reads, text in no recognized format or too long to parse, and records a normalizer failed on; never a
-duplicate copy of a normalized record) to `MentionScanner.scan`. The scanner reads one text field per record, never a
-serialized record: `message`, NXLog's `Message`, a Windows record's rendered `Event.RenderingInfo.Message`, else
-`event.original`. An `event.original` that is a JSON object is never scanned as text: a journald record's `MESSAGE` is
-read from it, and any other JSON record is counted as not scanned. A record with no text field is counted as not
-scanned too. Every one of the hunt's patterns runs over every line; a pattern's telemetry classes only rank a match on
-a class the pattern names above one on another class of the same strength.
+normalizer reads, text in no recognized format or too long to parse, records a normalizer failed on, Windows records
+on a network target, and the fields of audit records no typed event reads; never a duplicate copy of a normalized
+record), and the records outside the sweep's own selection (`hunt.mention_residue`), to `MentionScanner.scan`. The
+scanner never reads a serialized record: it reads a bounded, documented selection of each record's free-text fields
+by the record's family (`hunt.mention_fields`: message lines, command lines, script blocks, URLs, user agents,
+queries, file paths, a journal record's MESSAGE and _CMDLINE, an audit record's decoded proctitle, cmd and exe), each
+field as its own text. A record of no catalogued family, and a record with no text field, is counted as not scanned;
+a record of a family whose selection is only part of its fields is counted as scanned in part. Every one of the
+hunt's patterns runs over every text; a pattern's telemetry classes only rank a match on a class the pattern names
+above one on another class of the same strength.
 
-Each matching line is grouped once, under the strongest pattern it matches (the others it matches are kept on the
-group as labelled metadata), by (pattern, host, normalized line) in a private SQLite stage under the hunt's stage
+Each matching record is grouped once, under the strongest pattern any of its texts matches (the others it matches are
+kept on the group as labelled metadata), by (pattern, host, normalized text of the field that pattern matched) in a private SQLite stage under the hunt's stage
 directory. The stage is a yielding store of the hunt's state budget: its bytes are in the physical ledger, and when a
 detection store needs room the budget reclaims them (first the weakest groups' kept records, then the weakest groups),
 so detection never refuses a key while the pool holds bytes it can give back. A group keeps its count, first and last
@@ -52,7 +55,6 @@ import tempfile
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
-from xml.etree import ElementTree
 
 from romulus.agent.safety import injection_flags
 from romulus.config import redact_counted
@@ -77,6 +79,13 @@ from romulus.evidence.mentions import (
 )
 from romulus.evidence.raw_citation import build_raw_record, raw_record_id, record_time
 from romulus.evidence.windows import is_windows_source
+from romulus.hunt.mention_fields import (  # noqa: F401 - the reasons are part of this module's coverage vocabulary
+    JSON_ARRAY,
+    JSON_RECORD,
+    NO_TEXT,
+    XML_RECORD,
+    select_texts,
+)
 from romulus.sources.compile import time_unit
 from romulus.store.db import digest
 
@@ -107,13 +116,10 @@ NAMES_SHOWN = 20
 NOTES_SHOWN = 200
 # hosts whose cut lines are counted by name (the rest are counted together)
 CUT_HOSTS_COUNTED = 1_000
+# distinct (family, field) names counted for the coverage summary
+MAX_FIELD_KEYS = 512
 NO_HOST = ""
 _HOST_FIELDS = ("host.name", "host.hostname", "agent.hostname", "computer_name", "winlog.computer_name", "Hostname")
-# reasons a record's text was not scanned
-NO_TEXT = "no text field"
-JSON_RECORD = "event.original is a JSON record with no MESSAGE"
-JSON_ARRAY = "event.original is a JSON array"
-XML_RECORD = "event.original is an XML record"
 # a group whose kept record or whose whole entry the budget reclaimed for a detection store
 DISK_RECLAIMED = "disk_reclaimed_for_detection"
 RECLAIMED_TEXT = ("the record's text was released to give disk to detection; the source keeps the whole record "
@@ -142,43 +148,6 @@ def record_host(source: dict) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()[:MAX_HOST_CHARS]
     return NO_HOST
-
-
-def record_text(source: dict) -> tuple[str, str] | tuple[None, str]:
-    """(the field path, its text) a record is scanned by, or (None, why it is not scanned)."""
-    for path in ("message", "Message", "Event.RenderingInfo.Message"):
-        value = _field(source, path)
-        if isinstance(value, str) and value:
-            return path, value
-    original = _field(source, "event.original")
-    if isinstance(original, str) and original:
-        head = original.lstrip()[:1]
-        if head in ("{", "["):
-            try:
-                parsed = json.loads(original)
-            except ValueError:
-                parsed = None
-            if isinstance(parsed, dict):
-                message = parsed.get("MESSAGE")
-                if isinstance(message, str) and message:
-                    return "event.original#journal:MESSAGE", message
-                return None, JSON_RECORD
-            if isinstance(parsed, list):
-                return None, JSON_ARRAY
-        elif head == "<" and _is_xml(original):
-            return None, XML_RECORD
-        return "event.original", original
-    return None, NO_TEXT
-
-
-def _is_xml(text: str) -> bool:
-    """Whether text is one XML document (an exported event record): it is never scanned as a line. The parser is
-    expat, which bounds entity expansion; the text is at most the record's own field."""
-    try:
-        ElementTree.fromstring(text)
-    except (ElementTree.ParseError, ValueError):
-        return False
-    return True
 
 
 def telemetry_class(source: dict, contract, windows: bool | None = None) -> str:
@@ -230,6 +199,9 @@ class MentionScanner:
         self.stats = Counter()
         self.by_telemetry: Counter = Counter()
         self.not_scanned: Counter = Counter()      # records without scannable text, by reason
+        self.in_part: Counter = Counter()          # records of which only part of the fields were scanned, by reason
+        self.no_free_text: Counter = Counter()     # records of a catalogued family holding none of its text fields
+        self.by_field: Counter = Counter()         # texts scanned, by family and field
         self.caps: dict[str, Counter] = {"per_pattern": Counter(), "per_host": Counter(), "per_hunt": Counter(),
                                          "stage": Counter(), DISK_RECLAIMED: Counter()}
         self.unscanned: list[dict] = []            # partitions the sweep could not read in full (the first NOTES_SHOWN)
@@ -297,7 +269,7 @@ class MentionScanner:
 
     def scan(self, target: str, contract, unread: list[tuple], task_id: str | None) -> None:
         """Scan one partition's unread records: (hit, why no normalizer read it[, whether it is a Windows event
-        record]) as `normalize_hits(unread=...)` lists them."""
+        record[, the audit fields to read]]) as `normalize_hits(unread=...)` lists them."""
         if not unread:
             return
         stats = self.stats
@@ -305,32 +277,57 @@ class MentionScanner:
         for entry in unread:
             hit = entry[0]
             source = hit.get("_source")
-            path, payload = record_text(source) if isinstance(source, dict) else (None, NO_TEXT)
-            if path is None:
-                self.not_scanned[payload] += 1
+            if not isinstance(source, dict):
+                self.not_scanned[NO_TEXT] += 1
                 continue
+            windows = entry[2] if len(entry) > 2 and entry[2] is not None else is_windows_source(source)
+            selection = select_texts(source, windows=windows, only=entry[3] if len(entry) > 3 else None)
+            if not selection.texts:
+                if selection.no_text:
+                    # a record of a catalogued family holding none of its free-text fields: nothing to scan
+                    self.no_free_text[selection.family] += 1
+                else:
+                    self.not_scanned[selection.reason] += 1
+                continue
+            if not selection.complete:
+                self.in_part[selection.reason] += 1
             matcher = self._matcher
             if matcher is None:
                 stats["no_patterns"] += 1
                 continue
-            telemetry = telemetry_class(source, contract, entry[2] if len(entry) > 2 else None)
-            text, past = bound_text(payload)
-            stats["lines_scanned"] += 1
+            telemetry = telemetry_class(source, contract, windows)
+            stats["records_scanned"] += 1
             self.by_telemetry[telemetry] += 1
-            if past:
-                self._note_cut(hit, source, past)
-            unresolved: set[str] = set()
-            located = matcher.locate(text, cut=bool(past), unresolved=unresolved)
-            for note in unresolved:
-                stats["lines_" + note] += 1
-            if not located:
+            # the scan bound holds for a record's texts together; each text is matched on its own
+            room, past_total = MAX_SCAN_CHARS, 0
+            found: dict[int, tuple[int, int]] = {}            # pattern index -> (text index, offset)
+            texts: list[tuple[str, str]] = []
+            for path, payload in selection.texts:
+                if room <= 0:
+                    past_total += len(payload)
+                    continue
+                text, past = bound_text(payload) if len(payload) <= room else (payload[:room], len(payload) - room)
+                room -= len(text)
+                past_total += past
+                stats["lines_scanned"] += 1
+                self._count_field(selection.family, path)
+                unresolved: set[str] = set()
+                located = matcher.locate(text, cut=bool(past), unresolved=unresolved)
+                for note in unresolved:
+                    stats["lines_" + note] += 1
+                for index, offset in located.items():
+                    found.setdefault(index, (len(texts), offset))
+                texts.append((path, text))
+            if past_total:
+                self._note_cut(hit, source, past_total)
+            if not found:
                 continue
             stats["lines_matched"] += 1
             if self._broken:
                 stats["lines_not_staged"] += 1
                 continue
             try:
-                self._keep(target, contract, hit, path, text, located, task_id, telemetry)
+                self._keep(target, contract, hit, texts, found, task_id, telemetry)
             except (sqlite3.Error, OSError) as error:
                 # the stage itself failed: this line and every later match are counted, never kept
                 self._fail(f"the mention stage failed ({type(error).__name__}: {error})"[:300])
@@ -341,6 +338,14 @@ class MentionScanner:
                 self._charge()
             except (sqlite3.Error, OSError) as error:
                 self._fail(f"the mention stage failed ({type(error).__name__}: {error})"[:300])
+
+    def _count_field(self, family: str, path: str) -> None:
+        """Texts scanned by family and field (the field names come from fixed tables, so the counter is bounded)."""
+        key = f"{family}:{path}"[:160]
+        if key in self.by_field or len(self.by_field) < MAX_FIELD_KEYS:
+            self.by_field[key] += 1
+        else:
+            self.by_field["(other fields)"] += 1
 
     def _note_cut(self, hit: dict, source: dict, past: int) -> None:
         self.stats["lines_cut"] += 1
@@ -559,16 +564,18 @@ class MentionScanner:
         excerpt = line[start:start + MAX_LINE_CHARS]
         return excerpt, start, offset - start, len(line)
 
-    def _keep(self, target: str, contract, hit: dict, path: str, text: str, located: dict[int, int],
-              task_id: str | None, telemetry: str) -> None:
+    def _keep(self, target: str, contract, hit: dict, texts: list[tuple[str, str]],
+              found: dict[int, tuple[int, int]], task_id: str | None, telemetry: str) -> None:
         db = self._open()
         host = record_host(hit["_source"])
-        normalized = line_digest(text)
-        # one group per line, under its strongest pattern (the earliest loaded among equals); the rest are metadata
+        # one group per record, under its strongest pattern (the earliest loaded among equals); the rest are metadata.
+        # The group's line is the text of the field that pattern matched.
         patterns = self.patterns.patterns
-        ordered = sorted(located, key=lambda i: (-STRENGTH_RANK[patterns[i].strength],
-                                                 not self._fits(i, telemetry), i))
+        ordered = sorted(found, key=lambda i: (-STRENGTH_RANK[patterns[i].strength],
+                                               not self._fits(i, telemetry), i))
         index, others = ordered[0], json.dumps(ordered[1:])
+        path, text = texts[found[index][0]]
+        normalized = line_digest(text)
         pattern = patterns[index]
         key = hashlib.sha256(json.dumps([pattern.id, host, normalized]).encode()).hexdigest()[:32]
         ts, _text = record_time(hit["_source"], getattr(contract, "time_field", None),
@@ -614,7 +621,7 @@ class MentionScanner:
             redact=self._redact, flagged=injection_flags,
             time_unit=time_unit(contract) if contract is not None else "ms", window=self.window)
         raw["ts"] = _iso(raw["ts"])
-        excerpt, line_offset, match_offset, line_chars = self._excerpt(text, located[index])
+        excerpt, line_offset, match_offset, line_chars = self._excerpt(text, found[index][1])
         self._seq += 1
         try:
             db.execute("INSERT INTO grp (key, pattern, host, strength, n, first_ts, last_ts, seq, telemetry, fit, "
@@ -733,9 +740,12 @@ class MentionScanner:
                            f"{names}{' and others' if len(self.left_out) > 10 else ''}")
         for why, count in sorted(self.not_scanned.items()):
             reasons.append(f"{count} record(s) not scanned: {why}")
+        for why, count in sorted(self.in_part.items()):
+            reasons.append(f"{count} record(s) scanned only in part: {why}")
         if stats["lines_cut"]:
-            reasons.append(f"{stats['lines_cut']} line(s) longer than the scan bound ({MAX_SCAN_CHARS} characters) "
-                           f"were scanned only in part ({stats['chars_not_scanned']} characters not scanned)")
+            reasons.append(f"{stats['lines_cut']} record(s) whose text is longer than the scan bound "
+                           f"({MAX_SCAN_CHARS} characters) were scanned only in part "
+                           f"({stats['chars_not_scanned']} characters not scanned)")
         if lost_lines:
             why = sorted(name for name, view in caps.items())
             if stats["lines_not_staged"] or stats["lines_not_published"]:
@@ -775,7 +785,10 @@ class MentionScanner:
             "reasons": reasons, "patterns": loaded, "pattern_changes": list(self.pin_changes),
             "records_offered": stats["records_offered"], "lines_scanned": stats["lines_scanned"],
             "lines_matched": stats["lines_matched"], "by_telemetry": dict(self.by_telemetry),
-            "not_scanned": {"records": dict(self.not_scanned), "lines_cut_at_bound": stats["lines_cut"],
+            "records_scanned": stats["records_scanned"], "by_field": dict(self.by_field.most_common(MAX_FIELD_KEYS)),
+            "records_without_free_text": dict(self.no_free_text),
+            "not_scanned": {"records": dict(self.not_scanned), "records_in_part": dict(self.in_part),
+                            "lines_cut_at_bound": stats["lines_cut"],
                             "chars_past_bound": stats["chars_not_scanned"],
                             "cut_line_hosts": [{"host": host, "lines": n}
                                                for host, n in self.cut_hosts.most_common(NAMES_SHOWN)],
