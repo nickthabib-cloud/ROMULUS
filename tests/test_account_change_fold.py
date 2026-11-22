@@ -71,7 +71,7 @@ def test_a_provisioning_run_of_200_changes_is_one_item_with_the_lane_of_its_stro
     assert len(out) == 1
     [m] = out
     assert m.group_key.startswith("burst|prov01|") and (m.proposed_lane, m.severity) == ("high", "high")
-    assert "On prov01, 200 account or group change(s) were made in one run" in m.claim
+    assert "On prov01, 200 account or group change(s) were recorded close together in time" in m.claim
     assert "naming 67 distinct account and group name(s)" in m.claim     # 60 users, admin and its 6 groups
     assert ("60 group(s) added, 60 account(s) added, 60 password aging or expiry change(s), 14 password change(s), "
             "6 group membership grant(s)") in m.claim
@@ -377,6 +377,60 @@ def test_a_large_fleet_is_one_item_per_host_and_every_change_is_counted(tmp_path
     assert elapsed < 120, elapsed
 
 
+def test_real_shipper_shapes_of_one_useradd_pair_into_one_change():
+    """The audit ADD_USER line as auditd writes it and useradd's own System-integration syslog line, both typed by
+    the normalizer: one change citing both, the actor from the audit record."""
+    from romulus.evidence.normalize import normalize_hits
+    from tests import linux_shipper_fixtures as fx
+    hits = [*fx.dev_audit(fx.useradd_lines()),
+            fx.syslog("useradd", 1264, "new user: name=eve, UID=1001, GID=1001, home=/home/eve, shell=/bin/bash, "
+                                       "from=/dev/pts/0", "sl-eve", ts=fx.T0 + 6.2)]
+    events, _skips, errors = normalize_hits(hits)
+    assert not errors
+    changes = [e for e in events if e.family == "account_change"]
+    assert len(changes) == 2 and {e.has("audit.record_type") for e in changes} == {True, False}
+    [m] = run(changes)[1]
+    assert {e.id for e in m.events} == {e.id for e in changes}
+    assert "2 account-management record(s)" in m.claim and "an account was added (account 'eve')" in m.claim
+    assert "an unrecorded account" not in m.claim
+
+
+def test_a_nameless_record_pairs_whichever_view_comes_first():
+    for nameless_first in (True, False):
+        nameless = audit("ADD_USER", "create_user", T0 + timedelta(seconds=0 if nameless_first else 2), host="app01",
+                         pid=9040, exe="/usr/sbin/useradd")
+        text = line("useradd", "new user: name=svc4, UID=993, GID=993, home=/srv, shell=/usr/sbin/nologin, "
+                               "from=none", T0 + timedelta(seconds=1), host="app01", pid=9040)
+        pb = AccountOrGroupChange()
+        views = list(pb._views(sorted([nameless, text], key=lambda e: (e.ts, e.id))))
+        assert [len(v) for v in views] == [2], nameless_first
+
+
+def test_a_full_pairing_window_takes_the_oldest_alone_and_says_so(monkeypatch):
+    monkeypatch.setattr(AccountOrGroupChange, "VIEW_OPEN", 2)
+    records = [audit("ADD_USER", "create_user", T0 + timedelta(milliseconds=i), host="app01", pid=9100 + i,
+                     account__name=f"x{i}", exe="/usr/sbin/useradd") for i in range(5)]
+    pb = AccountOrGroupChange()
+    views = list(pb._views(records))
+    assert sorted(len(v) for v in views) == [1] * 5            # nothing lost, nothing paired
+    assert any("more than 2 account tool records of one host were unpaired" in r for r in pb.limit_reasons())
+
+
+def test_more_distinct_names_than_counted_is_a_lower_bound(monkeypatch):
+    monkeypatch.setattr(AccountOrGroupChange, "BURST_TARGET_NAMES", 5)
+    [m] = run(provisioning(users=8, admin_groups=(), passwords=0))[1]             # eight names
+    assert "24 account or group change(s)" in m.claim and "naming more than 5 distinct" in m.claim
+    assert "more than 5 distinct account and group names: the count is a lower bound" in m.notes
+
+
+def test_a_run_item_is_admitted_with_its_lane():
+    from romulus.decide.policy import decide
+    [m] = run(provisioning(users=10))[1]
+    decision = decide(m, "h1")
+    assert decision.admitted and decision.lane == "high" and decision.severity == "high"
+    assert all(not verdict.startswith("fail") for verdict in decision.gates.values())
+
+
 # ---------------------------------------------------------------- ranking: one run counts once
 def _ranked(account_items: int):
     from romulus.hunt.rank import PASS_FINAL, compute_rank_pass
@@ -404,3 +458,32 @@ def test_separate_changes_crowd_the_top_and_one_run_counts_once():
     assert sum(cid.startswith("acct") for cid in separate_top) == 10
     assert sum(cid.startswith("acct") for cid in folded_top) == 1
     assert {"atk0", "atk1", "atk2", "prov-cred"} <= set(folded_top)
+
+
+def test_a_provisioned_fleet_after_the_fold_is_one_reported_item_per_host():
+    """Twelve freshly provisioned hosts, each meeting the evidence bar (the account change and a privilege-use lead
+    of another tactic), and one attacked host with three tactics. Separately, one host's 30 per-change items take
+    the whole reported top ten; folded, each host's run is one item. The fold does not go further: twelve high run
+    items still rank above the attacked host's lead findings, one per provisioned host (a cross-host merge would be
+    a separate decision)."""
+    from romulus.hunt.rank import PASS_FINAL, compute_rank_pass
+    from tests.test_evidence_rank import START, _insert, _repo, _row
+
+    def ranked(per_host: int) -> list[str]:
+        repo = _repo()
+        rows = [_row(f"acct{h:02d}-{i:02d}", "host.account_or_group_change", lane="high", host=f"node{h:02d}",
+                     attack=["T1136.001"], ts=START + timedelta(minutes=h, seconds=i))
+                for h in range(12) for i in range(per_host)]
+        rows += [_row(f"priv{h:02d}", "r.priv", host=f"node{h:02d}", attack=["T1548.003"],
+                      ts=START + timedelta(minutes=h, seconds=40)) for h in range(12)]
+        rows += [_row(f"atk{i}", rule, host="atk", attack=[technique], ts=START + timedelta(hours=3, minutes=i))
+                 for i, (rule, technique) in enumerate((("r.exec", "T1059"), ("r.cred", "T1003"),
+                                                         ("r.c2", "T1071")))]
+        _insert(repo, rows)
+        compute_rank_pass(repo, "h1", PASS_FINAL)
+        return [row["candidate_id"] for row in repo.finding_ranks_page("h1", PASS_FINAL, reported=True, limit=40)]
+
+    separate, folded = ranked(30), ranked(1)
+    assert [cid.split("-")[0] for cid in separate[:10]] == ["acct00"] * 10     # one host fills the top ten
+    assert [cid.split("-")[0] for cid in folded[:12]] == [f"acct{h:02d}" for h in range(12)]  # one item per host
+    assert folded.index("atk0") < len(folded) and len(folded) == 12 + 12 + 3

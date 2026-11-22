@@ -1326,8 +1326,8 @@ class AccountOrGroupChange(Playbook):
     BURST_TARGETS = 3
     BURST_TARGET_NAMES = 4096       # distinct names counted exactly per run; beyond, "more than"
     BURST_CITE = 64                 # changes cited per run (privileged first, then the earliest)
-    PRIVILEGED_NAMED = 2000         # privileged changes named per run (each one, up to this)
-    NAMED = 2000                    # other distinct changes named per run, with repeat counts
+    PRIVILEGED_NAMED = 500          # privileged changes named per run (each one, up to this)
+    NAMED = 500                     # other distinct changes named per run, with repeat counts
     ACTORS_NAMED = 16
     WRITERS_NAMED = 8
     ALONE_HOSTS = 65536             # hosts whose changes published alone are counted by host
@@ -1386,8 +1386,8 @@ class AccountOrGroupChange(Playbook):
                   "web-service lineage are read in time order; a run continues while each change is less than 10 "
                   "minutes after the previous one and less than an hour after the run's first; a run naming at "
                   "least 3 distinct account or group names becomes one item listing exact counts by kind, every "
-                  "privileged change named (up to 2000) and cited first (up to 64 changes cited), other changes "
-                  "named with repeat counts (up to 2000 distinct); a run cut at the hour goes on in the next item, "
+                  "privileged change named (up to 500) and cited first (up to 64 changes cited), other changes "
+                  "named with repeat counts (up to 500 distinct); a run cut at the hour goes on in the next item, "
                   "which says so; a smaller run keeps the per-actor findings",
         "retrieval": "the sweep retrieves every record of the host datasets in each partition (dataset filter "
                      "only), a superset of what this evaluator reads",
@@ -1614,19 +1614,31 @@ class AccountOrGroupChange(Playbook):
         or an audit record and a tool line that are two views of one change (`_view_fit`). Records arrive ordered by
         host, then time; a record waits VIEW_SECONDS for its partner, and at most VIEW_OPEN unpaired records of a
         host wait at once (beyond, the oldest is taken alone and the rule says a pairing may have been missed)."""
-        waiting: dict[tuple, list[TypedEvent]] = {}      # (action, account name or "") -> unpaired records
+        # unpaired records by (action, "name", account name or "") and, with a pid, by (action, "pid", pid): a record
+        # with a name looks up its name and the nameless; a nameless one looks up the nameless and its pid (a
+        # nameless pair needs equal pids), so the pairing does not depend on which view arrives first
+        waiting: dict[tuple, list[TypedEvent]] = {}
         order: deque = deque()                           # unpaired records in time order (paired ones skipped)
         alive: set[str] = set()
         host = None
 
-        def bucket(e: TypedEvent) -> tuple:
-            return str(e.get("account.action")), str(e.get("account.name") or "")
+        def buckets(e: TypedEvent) -> list[tuple]:
+            action, pid = str(e.get("account.action")), e.get("process.pid")
+            return [(action, "name", str(e.get("account.name") or ""))] + (
+                [(action, "pid", pid)] if isinstance(pid, int) else [])
+
+        def lookups(e: TypedEvent) -> list[tuple]:
+            action, name, pid = str(e.get("account.action")), str(e.get("account.name") or ""), e.get("process.pid")
+            if name:
+                return [(action, "name", name), (action, "name", "")]
+            return [(action, "name", "")] + ([(action, "pid", pid)] if isinstance(pid, int) else [])
 
         def take(e: TypedEvent) -> None:
             alive.discard(e.id)
-            waiting[bucket(e)].remove(e)
-            if not waiting[bucket(e)]:
-                del waiting[bucket(e)]
+            for key in buckets(e):
+                waiting[key].remove(e)
+                if not waiting[key]:
+                    del waiting[key]
 
         def oldest() -> TypedEvent | None:
             while order:
@@ -1647,8 +1659,7 @@ class AccountOrGroupChange(Playbook):
                 if e.id in alive:
                     take(e)
                     yield [e]
-            action, name = bucket(record)
-            pool = waiting.get((action, name), []) + (waiting.get((action, ""), []) if name else [])
+            pool = list({other.id: other for key in lookups(record) for other in waiting.get(key, ())}.values())
             best = None
             for other in pool:
                 fit = _view_fit(other, record)
@@ -1660,7 +1671,8 @@ class AccountOrGroupChange(Playbook):
                 yield sorted([best[1], record], key=lambda e: (e.ts, e.id))
                 continue
             alive.add(record.id)
-            waiting.setdefault((action, name), []).append(record)
+            for key in buckets(record):
+                waiting.setdefault(key, []).append(record)
             order.append(record)
             if len(alive) > self.VIEW_OPEN:
                 self.note_limit("views_open", f"more than {self.VIEW_OPEN} account tool records of one host were "
@@ -1806,9 +1818,10 @@ class AccountOrGroupChange(Playbook):
         kinds = ", ".join(f"{n} {_KIND_NOUN.get(kind, kind + ' change(s)')}"
                           for kind, n in sorted(run.kinds.items(), key=lambda item: (-item[1], item[0])))
         count = f"more than {len(run.targets)}" if run.targets_more else str(len(run.targets))
-        claim = (f"On {host}, {run.changes} account or group change(s) were made in one run from {_iso(run.first)} "
-                 f"to {_iso(run.last)} (each less than {self.BURST_GAP / 60:.0f} minutes after the one before), "
-                 f"naming {count} distinct account and group name(s): {kinds}.")
+        claim = (f"On {host}, {run.changes} account or group change(s) were recorded close together in time from "
+                 f"{_iso(run.first)} to {_iso(run.last)}, each less than {self.BURST_GAP / 60:.0f} minutes after the "
+                 f"one before (a run: grouped by time alone, so its changes may come from different processes and "
+                 f"accounts), naming {count} distinct account and group name(s): {kinds}.")
         if run.continued:
             claim += (" The run began earlier: its earlier changes on this host are in the item before this one (one "
                       f"item covers less than {self.BURST_SPAN / 3600:.0f} hour).")
