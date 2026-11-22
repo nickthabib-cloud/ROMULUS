@@ -204,3 +204,75 @@ def test_a_record_with_too_many_fields_or_text_past_the_bound_is_counted_in_part
 def test_selected_fields_never_include_keys_or_structure(source):
     texts = [text for _path, text in select_texts(source).texts]
     assert all("{" not in text and "_CMDLINE" not in text and "command_line" not in text for text in texts)
+
+
+# ---- what normalization offers to the scan ------------------------------------------------------------------------
+
+def _audit_hit(_id: str, raw: str, t: float) -> dict:
+    return {"_id": _id, "_index": TARGET, "_source": {
+        "@timestamp": datetime.fromtimestamp(t, UTC).isoformat(), "message": raw, "host": {"name": "web1"},
+        "event": {"dataset": "linux.audit", "original": raw}}}
+
+
+def test_audit_text_no_typed_event_reads_is_offered_and_the_rest_is_not(tmp_path):
+    from romulus.evidence.normalize import AUDIT_NO_EVENT, AUDIT_PROCTITLE_UNREAD, normalize_hits
+    from tests.test_lineage_observations import SADDR_EXT_554, _syscall
+    t = 1731938400.0
+    # a socket group: its connect is typed (net_socket), its process title (the calling command line) is read by no
+    # typed field and holds attacker text
+    title = chr(0).join(["python3", "-c", "import pty;pty.spawn(1);" + SHELL])
+    socket = [_audit_hit("s1", _syscall(t, 1, nr=42, name="connect", pid=50, ppid=40, exe="/usr/bin/python3",
+                                        comm="python3", a2="10", success="no", exit_code="-115"), t),
+              _audit_hit("s2", f"type=SOCKADDR msg=audit({t:.3f}:1): saddr={SADDR_EXT_554}", t),
+              _audit_hit("s3", f"type=PROCTITLE msg=audit({t:.3f}:1): proctitle={_hex(title)}", t)]
+    # an exec group: its process title is the command line the exec event already reads
+    execve = [_audit_hit("e1", f'type=EXECVE msg=audit({t + 1:.3f}:2): argc=3 a0="bash" a1="-c" a2={_hex(SHELL)}',
+                         t + 1),
+              _audit_hit("e2", _syscall(t + 1, 2, nr=59, name="execve", pid=51, ppid=40, exe="/usr/bin/bash",
+                                        comm="bash"), t + 1),
+              _audit_hit("e3", f"type=PROCTITLE msg=audit({t + 1:.3f}:2): proctitle={_hex('bash')}", t + 1)]
+    # a sudo command record: no typed event, so every free-text field is offered
+    sudo = [_audit_hit("u1", f"type=USER_CMD msg=audit({t + 2:.3f}:3): pid=4 uid=0 auid=1000 ses=2 "
+                             f"msg='cwd=\"/root\" cmd={_hex('MIMIKATZ --dump')} exe=\"/usr/bin/sudo\" res=success'",
+                        t + 2)]
+    unread: list = []
+    events, _skips, errors = normalize_hits([*socket, *execve, *sudo], unread=unread)
+    assert errors == [] and {event.family for event in events} >= {"net_socket", "process_exec"}
+    assert [(entry[0]["_id"], entry[1], entry[3] if len(entry) > 3 else None) for entry in unread] == [
+        ("s3", AUDIT_PROCTITLE_UNREAD, ("proctitle",)), ("u1", AUDIT_NO_EVENT, None)]
+    scanner = _scanner(tmp_path)
+    scanner.scan(TARGET, CONTRACT, unread, None)
+    assert _ids(scanner) == [("mention.test_dev_tcp_redirect", "web1", "PROCTITLE.proctitle"),
+                             ("mention.test_mimikatz", "web1", "USER_CMD.cmd")]
+    assert scanner.summary()["status"] == SCANNED_ALL
+    scanner.close()
+
+
+def test_an_audit_record_that_does_not_parse_is_offered_as_plain_text():
+    from romulus.evidence.normalize import normalize_hits
+    broken = _audit_hit("b1", 'type=SYSCALL msg=audit(1731938400.0:5): comm="x" exe="/tmp/MIMIKATZ', 1731938400.0)
+    unread: list = []
+    _events, _skips, errors = normalize_hits([broken], unread=unread)
+    assert errors and [entry[0]["_id"] for entry in unread] == ["b1"]
+    selection = select_texts(broken["_source"])
+    assert selection.texts and not selection.complete
+
+
+def test_a_windows_record_on_a_network_target_is_offered_and_still_counted_as_not_evaluated(tmp_path):
+    from romulus.evidence.normalize import normalize_hits
+    network = contract_from_types("net-x", {"@timestamp": "date", "event.dataset": "keyword"}, role="network")
+    record = {"_index": "net-x", "_id": "w9", "_source": {
+        "@timestamp": T0.isoformat(), "agent": {"type": "winlogbeat"}, "host": {"name": "dc1"},
+        "winlog": {"channel": "Security", "provider_name": "Microsoft-Windows-Security-Auditing", "event_id": 4688,
+                   "record_id": 1, "computer_name": "dc1",
+                   "event_data": {"NewProcessName": "C:\\t\\m.exe", "CommandLine": "m.exe MIMIKATZ"}},
+        "event": {"code": "4688"}, "message": "A new process has been created. MIMIKATZ"}}
+    unread: list = []
+    events, skips, _errors = normalize_hits([record], contract=network, unread=unread)
+    assert events == [] and skips == {"Windows event records on a network target: not evaluated": 1}
+    assert [(entry[0]["_id"], entry[2]) for entry in unread] == [("w9", True)]
+    scanner = _scanner(tmp_path)
+    scanner.scan("net-x", network, unread, None)
+    assert [scanner.patterns.patterns[row[1]].id for row in scanner.ranked()] == ["mention.test_mimikatz"]
+    assert scanner.summary()["by_telemetry"] == {"windows_text": 1}
+    scanner.close()

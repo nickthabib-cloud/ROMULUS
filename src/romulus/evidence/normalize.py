@@ -3900,6 +3900,33 @@ def _has_windows_text_marker(source: dict) -> bool:
             or any(name in source for name in ("Channel", "EventID", "SourceName")))
 
 
+# What of an audit group's records no typed event reads, and so is offered to the mention scan. A group that made no
+# event (skipped or failed) is read by no rule: every record's free text is offered. A group that made an event reads
+# the records' typed fields; the process title of a group without an EXECVE record (the command line of the process
+# that made a socket, file, module or administrative call) is read by none of them. An exec group's process title is
+# the command line its EXECVE record already gives the event, so it is not offered again.
+AUDIT_NO_EVENT = "audit group made no typed event"
+AUDIT_PROCTITLE_UNREAD = "audit process title: no typed field reads it"
+AUDIT_PROCTITLE_ONLY = ("proctitle",)
+
+
+def _offer_audit_text(members: list[tuple[dict, AuditRecord]], made: list[TypedEvent],
+                      unread: list[tuple]) -> None:
+    offered: set[str] = set()
+    if not made:
+        for hit, _record in members:
+            if hit["_id"] not in offered:
+                offered.add(hit["_id"])
+                unread.append((hit, AUDIT_NO_EVENT, False))
+        return
+    if any(record.type == "EXECVE" for _hit, record in members):
+        return
+    for hit, record in members:
+        if record.type == "PROCTITLE" and hit["_id"] not in offered:
+            offered.add(hit["_id"])
+            unread.append((hit, AUDIT_PROCTITLE_UNREAD, False, AUDIT_PROCTITLE_ONLY))
+
+
 def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                    audit_parse: Callable[[dict, str], AuditRecord] | None = None,
                    rpc_remote_only: bool = False, contract=None,
@@ -3942,8 +3969,11 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
 
     `unread`, when given, receives each record no normalizer read, with why and whether it is a Windows event record:
     a record of a dataset or event class no normalizer reads, text in no recognized format (or too long to parse),
-    and a record a normalizer failed on (the record as cleaned of lone surrogates). A duplicate copy of a record that
-    was read, and an audit record (read in its group), are never listed."""
+    a record a normalizer failed on (the record as cleaned of lone surrogates), and a Windows record on a network
+    target. Of raw audit record lines it receives the records of a group that made no event, a record that could not
+    be parsed, and the process title of a group without an EXECVE record (with a fourth item naming that field, the
+    only one no typed event reads; `_offer_audit_text`). A duplicate copy of a record that was read (a journald copy
+    of an audit record among them) is never listed."""
     events, skips, errors = [], defaultdict(int), []
     windows_events: dict[tuple[tuple[str, ...], str], TypedEvent] = {}
     windows_signatures: dict[tuple[str, ...], set[str]] = defaultdict(set)
@@ -3969,6 +3999,9 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                     skips[reason] += 1
                     if skip_families is not None:
                         skip_families[reason] = frozenset()
+                    if unread is not None:
+                        # no rule reads it here, so its text is offered to the mention scan
+                        unread.append((h, reason, True))
                     continue
                 if is_nxlog_windows(h["_source"]):
                     # NXLog's flat record names no dataset: an error is counted under its channel's families
@@ -4138,11 +4171,18 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
         skips[ZEEK_INTERIM_SUPERSEDED] += len(superseded)
     groups, audit_errors = group_audit(audit_hits, audit_parse)
     errors.extend(audit_errors)
+    if unread is not None and audit_errors:
+        # an audit record that cannot be parsed or rebuilt is read by no rule: its text is offered as it is
+        by_id = {hit["_id"]: hit for hit in audit_hits}
+        for hit_id in dict.fromkeys(hit_id for hit_id, _error in audit_errors):
+            if hit_id in by_id:
+                unread.append((by_id[hit_id], "audit record not parsed", False))
     partners = _boot_partners(audit_copies)
     audit_start, boot_by_hit = len(events), {}
     # an Auditbeat document is one event of its own: never merged with another document's records
-    for (host, ts, serial), members, action in [*((key, members, None) for key, members in groups.items()),
-                                                *event_groups]:
+    for (host, ts, serial), members, action, raw_lines in [
+            *((key, members, None, True) for key, members in groups.items()),
+            *((key, members, action, False) for key, members, action in event_groups)]:
         boot = _partner_boot(partners, host, ts, serial, members) if partners else {}
         if boot:
             boot_by_hit.update({hit["_id"]: boot for hit, _record in members})
@@ -4152,6 +4192,8 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
         unlisted = action is not None and action not in AUDITBEAT_ACTIONS
         group_skips: dict[str, int] = defaultdict(int) if unlisted else skips
         _audit_group(host, members, events, group_skips, errors)
+        if unread is not None and raw_lines:
+            _offer_audit_text(members, events[start:], unread)
         if unlisted:
             if len(events) == start and len(errors) == failed:
                 skips[f"auditbeat action {action} is not normalized"] += 1

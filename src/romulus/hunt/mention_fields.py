@@ -283,6 +283,29 @@ def audit_texts(line: str, only: tuple[str, ...] | None = None) -> Selection:
     return _bounded(Selection(AUDITD, [(path, text) for path, text in texts if text]))
 
 
+def _decoded(value: str) -> str:
+    """A shipper's audit value, decoded when it is still auditd's hex encoding."""
+    if len(value) % 2 == 0 and value and all(char in "0123456789ABCDEFabcdef" for char in value):
+        try:
+            return bytes.fromhex(value).decode("utf-8", errors="replace")
+        except ValueError:
+            return value
+    return value
+
+
+def _shipper_audit(source: dict, only: tuple[str, ...]) -> list[tuple[str, str]]:
+    """Audit fields a shipper indexed by name (Filebeat's auditd module `auditd.log.*`, Auditbeat's `auditd.data.*`,
+    and the process title as ECS `process.title`)."""
+    texts: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for key in only:
+        names = [f"auditd.log.{key}", f"auditd.data.{key}", *(("process.title",) if key == "proctitle" else ())]
+        for name in names:
+            values = [_decoded(value).replace("\x00", " ").strip() for value in _strings(_get(source, name))]
+            _add(texts, name, [value for value in values if value], seen)
+    return texts
+
+
 def _json_texts(obj: dict, source: dict, windows: bool) -> Selection:
     """The selection of a JSON object held in event.original."""
     texts: list[tuple[str, str]] = []
@@ -338,8 +361,8 @@ def select_texts(source: dict, *, windows: bool = False, only: tuple[str, ...] |
     if line is not None and is_audit_line(line):
         return audit_texts(line, only)
     if only is not None:
-        # a restriction names audit fields: a record that is no audit line has none of them
-        return Selection(AUDITD, [], complete=False, reason="an audit record offered by field with no audit line")
+        # a record a shipper indexed as fields (no raw line): the named fields under the shipper's own names
+        return _bounded(Selection(AUDITD, _shipper_audit(source, only)))
     texts: list[tuple[str, str]] = []
     seen: set[str] = set()
     if message is not None:
