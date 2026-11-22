@@ -22,7 +22,6 @@ sweep's left-out datasets, shapes and channels as not offered: they are what thi
 """
 from __future__ import annotations
 
-from romulus.evidence import surrogates
 from romulus.evidence.windows import is_windows_source
 from romulus.hunt.controls import HuntStopped
 from romulus.sources.compile import CompileError, compile_es
@@ -181,11 +180,8 @@ class ResiduePass:
                 sweep.heartbeat()
                 entries = []
                 for hit in hits[:quota - read]:
+                    # the scan reads the record as it may be stored (lone surrogates replaced, credentials masked)
                     source = hit.get("_source")
-                    if isinstance(source, dict):
-                        clean, found = surrogates.sanitize(source)
-                        if found:
-                            source = clean
                     record = {"_id": hit["_id"], "_index": hit["_index"], "_source": source}
                     entries.append((record, RESIDUE_REASON,
                                     is_windows_source(source) if isinstance(source, dict) else False))

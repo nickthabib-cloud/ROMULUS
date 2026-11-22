@@ -260,6 +260,23 @@ def test_audit_text_no_typed_event_reads_is_offered_and_the_rest_is_not(tmp_path
     scanner.close()
 
 
+@pytest.mark.parametrize("shape", ["dev", "filebeat", "agent_fields", "auditbeat_array", "auditd_manager_joined"])
+def test_a_socket_groups_process_title_is_offered_in_every_shipper_shape(shape):
+    from romulus.evidence.normalize import normalize_hits
+    from tests import linux_shipper_fixtures as f
+    lines = f.connect_lines()
+    docs = {"dev": lambda: f.dev_audit(lines), "filebeat": lambda: f.filebeat_audit(lines),
+            "agent_fields": lambda: f.agent_audit(lines),
+            "auditbeat_array": lambda: [f.auditbeat_raw(lines)],
+            "auditd_manager_joined": lambda: [f.auditbeat_raw(lines, joined=True)]}[shape]()
+    unread: list = []
+    events, _skips, errors = normalize_hits(docs, unread=unread)
+    assert errors == [] and [event.family for event in events] == ["net_socket"]
+    titles = [text for entry in unread for _path, text in select_texts(entry[0]["_source"], only=entry[3]).texts]
+    # the calling process's command line, decoded (a shipper's own NUL rendering kept as it wrote it)
+    assert len(titles) == 1 and titles[0].replace("^@", " ") == "curl http://203.0.113.5/"
+
+
 def test_an_audit_record_that_does_not_parse_is_offered_as_plain_text():
     from romulus.evidence.normalize import normalize_hits
     broken = _audit_hit("b1", 'type=SYSCALL msg=audit(1731938400.0:5): comm="x" exe="/tmp/MIMIKATZ', 1731938400.0)

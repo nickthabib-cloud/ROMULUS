@@ -3921,8 +3921,12 @@ def _offer_audit_text(members: list[tuple[dict, AuditRecord]], made: list[TypedE
         return
     if any(record.type == "EXECVE" for _hit, record in members):
         return
+    per_hit = Counter(hit["_id"] for hit, _record in members)
     for hit, record in members:
-        if record.type == "PROCTITLE" and hit["_id"] not in offered:
+        # a PROCTITLE record's line, or a document holding the whole event (Auditbeat, Auditd Manager, a record a
+        # shipper indexed as fields), whose process title the selection reads by the shipper's names
+        whole = per_hit[hit["_id"]] > 1 or record.reconstructed
+        if (record.type == "PROCTITLE" or whole) and hit["_id"] not in offered:
             offered.add(hit["_id"])
             unread.append((hit, AUDIT_PROCTITLE_UNREAD, False, AUDIT_PROCTITLE_ONLY))
 
@@ -4180,9 +4184,8 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
     partners = _boot_partners(audit_copies)
     audit_start, boot_by_hit = len(events), {}
     # an Auditbeat document is one event of its own: never merged with another document's records
-    for (host, ts, serial), members, action, raw_lines in [
-            *((key, members, None, True) for key, members in groups.items()),
-            *((key, members, action, False) for key, members, action in event_groups)]:
+    for (host, ts, serial), members, action in [*((key, members, None) for key, members in groups.items()),
+                                                *event_groups]:
         boot = _partner_boot(partners, host, ts, serial, members) if partners else {}
         if boot:
             boot_by_hit.update({hit["_id"]: boot for hit, _record in members})
@@ -4192,7 +4195,7 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
         unlisted = action is not None and action not in AUDITBEAT_ACTIONS
         group_skips: dict[str, int] = defaultdict(int) if unlisted else skips
         _audit_group(host, members, events, group_skips, errors)
-        if unread is not None and raw_lines:
+        if unread is not None:
             _offer_audit_text(members, events[start:], unread)
         if unlisted:
             if len(events) == start and len(errors) == failed:

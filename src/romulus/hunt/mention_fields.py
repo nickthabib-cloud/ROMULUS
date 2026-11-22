@@ -260,27 +260,46 @@ def _windows_data(source: dict, texts, seen, prefix: str = "") -> None:
         _add(texts, prefix + key, _strings(source.get(key)), seen)
 
 
-def audit_texts(line: str, only: tuple[str, ...] | None = None) -> Selection:
-    """The decoded free-text fields of one raw audit record line."""
-    try:
-        record = parse_record(line)
-    except AuditParseError:
-        return Selection(AUDITD, [("audit line", line)], complete=False, reason=UNREADABLE_AUDIT)
+def audit_lines(value) -> list[str]:
+    """The raw audit record lines a text field holds: one line, several joined by newlines (Auditd Manager), or an
+    array of them (Auditbeat's raw message); empty when its first line is no audit record."""
+    if isinstance(value, str):
+        parts = value.split("\n") if "\n" in value else [value]
+    elif isinstance(value, list):
+        parts = [item for item in value[:MAX_LIST_ITEMS] if isinstance(item, str)]
+    else:
+        return []
+    parts = [part for part in parts if part.strip()]
+    return parts if parts and is_audit_line(parts[0]) else []
+
+
+def audit_texts(lines: list[str], only: tuple[str, ...] | None = None) -> Selection:
+    """The decoded free-text fields of raw audit record lines (`only`: just the fields it names)."""
     texts: list[tuple[str, str]] = []
     seen: set[str] = set()
-    for key in only or AUDIT_FIELDS:
-        value = record.fields.get(key)
-        if isinstance(value, str) and value and value not in ("(null)", "(none)", "?"):
-            # a process title holds its arguments separated by NUL bytes
-            _add(texts, f"{record.type}.{key}", [value.replace("\x00", " ").strip()], seen)
-    if record.type == "EXECVE" and only is None:
+    complete, reason = True, ""
+    for line in lines:
         try:
-            argv = execve_argv(record)
+            record = parse_record(line)
         except AuditParseError:
-            argv = None
-        if argv is not None and argv.args:
-            _add(texts, "EXECVE.argv", [" ".join(argv.args)], seen)
-    return _bounded(Selection(AUDITD, [(path, text) for path, text in texts if text]))
+            if only is None:
+                _add(texts, "audit line", [line], seen)
+                complete, reason = False, UNREADABLE_AUDIT
+            continue
+        for key in only or AUDIT_FIELDS:
+            value = record.fields.get(key)
+            if isinstance(value, str) and value and value not in ("(null)", "(none)", "?"):
+                # a process title holds its arguments separated by NUL bytes
+                _add(texts, f"{record.type}.{key}", [value.replace("\x00", " ").strip()], seen)
+        if record.type == "EXECVE" and only is None:
+            try:
+                argv = execve_argv(record)
+            except AuditParseError:
+                argv = None
+            if argv is not None and argv.args:
+                _add(texts, "EXECVE.argv", [" ".join(argv.args)], seen)
+    return _bounded(Selection(AUDITD, [(path, text) for path, text in texts if text], complete=complete,
+                              reason=reason))
 
 
 def _decoded(value: str) -> str:
@@ -366,12 +385,17 @@ def select_texts(source: dict, *, windows: bool = False, only: tuple[str, ...] |
                     if isinstance(value := _get(source, path), str) and value), None)
     original = _get(source, "event.original")
     original = original if isinstance(original, str) and original else None
-    line = message[1] if message is not None else original
-    if line is not None and is_audit_line(line):
-        return audit_texts(line, only)
-    if only is not None:
-        # a record a shipper indexed as fields (no raw line): the named fields under the shipper's own names
-        return _bounded(Selection(AUDITD, _shipper_audit(source, only)))
+    raw_original = _get(source, "event.original")
+    lines = audit_lines(message[1] if message is not None else raw_original)
+    if lines:
+        return audit_texts(lines, only)
+    if only is not None or isinstance(source.get("auditd"), dict):
+        # an audit record a shipper indexed as fields (no raw line): its audit fields under the shipper's own names,
+        # and its ECS free-text fields
+        texts = _shipper_audit(source, only or AUDIT_FIELDS)
+        if only is None:
+            _paths(source, ECS_FIELDS, texts, {text for _path, text in texts})
+        return _bounded(Selection(AUDITD, texts))
     texts: list[tuple[str, str]] = []
     seen: set[str] = set()
     if message is not None:
