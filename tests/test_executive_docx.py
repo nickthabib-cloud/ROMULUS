@@ -290,6 +290,39 @@ def test_mentions_are_labelled_counted_and_never_findings(tmp_path):
     assert "rr-2" in by_rank["2"][8]
 
 
+def test_agent_records_flags_anchors_ranking_and_notes_are_shown_or_counted(tmp_path):
+    manifest = synthetic_manifest(findings=60)
+    manifest["ai_agent"] = {
+        "hypotheses": [{"id": f"H{n}", "status": "open", "confidence": "low", "statement": f"statement {n}"}
+                       for n in range(executive.AGENT_HYPOTHESES + 3)],
+        "agent_notes": [{"target_kind": "finding", "target_id": "F-000001", "notes": [{"text": "a"}, {"text": "b"}]},
+                        {"target_kind": "hypothesis", "target_id": "H1", "notes": [{"text": "c"}]}]}
+    manifest["investigations"] = {
+        "analyst_flags": [{"case_id": f"C{n}", "message": "Repeated invalid model output requires analyst review."}
+                          for n in range(executive.ANALYST_FLAGS + 2)],
+        "anchor_accounting": {"anchors": [{"id": f"A{n}", "status": ("expanded", "expanded_partial",
+                                                                     "unexpanded")[n % 3]} for n in range(7)]}}
+    manifest["ranking"] = {"pass": "final", "status": "failed", "reason": "the ranking pass ran out of disk"}
+    manifest["findings"][0]["notes"] = [f"note {n}" for n in range(executive.FINDING_NOTES + 1)]
+    manifest["findings"][-2]["notes"] = ["a note on a finding past the described ones"]
+    blocks = read_back(_write(tmp_path, manifest))
+    ai = _section(blocks, "AI assessment")
+    text = _paragraphs(ai)
+    hypotheses = _table_after(ai, "Agent hypotheses (AI-generated, unconfirmed)")[1:]
+    assert len(hypotheses) == executive.AGENT_HYPOTHESES and hypotheses[0] == ["H0", "open", "low", "statement 0"]
+    assert "3 more agent hypothesis(es) are in technical.md (Hypotheses)." in text
+    assert any(value.startswith("3 AI note(s) on 2 item(s)") for value in text)
+    assert "Case C0: Repeated invalid model output requires analyst review." in text
+    assert "2 more case(s) flagged for analyst review are in technical.md (Investigations)." in text
+    key = _paragraphs(_section(blocks, "Key findings"))
+    assert ("Evidence ranking unavailable: the ranking pass ran out of disk. Findings are ordered by each rule's own "
+            "lane.") in key
+    assert "Note: note 0" in key and "1 more note(s) on this finding are in technical.md." in key
+    assert any("where the notes of the 1 of them that carry notes are." in value for value in key)
+    anchors = dict(tuple(row) for row in _table_after(blocks, "Expansion from the strongest findings")[1:])
+    assert anchors == {"expanded": "3", "expanded_partial": "2", "unexpanded": "2"}
+
+
 def test_a_claim_resting_on_a_mention_is_labelled_as_one_in_card_and_index(tmp_path):
     manifest = synthetic_manifest(findings=4, agent_findings=1)
     agent = next(f for f in manifest["findings"] if f["provenance"] == "agent")

@@ -52,6 +52,10 @@ EXECUTIVE_CHECKS = 25
 INCIDENT_SENTENCES = 12
 HYPOTHESIS_LINKS = 40
 ANALYST_LINKS = 20
+# agent hypotheses listed, analyst review flags listed, notes shown per described finding
+AGENT_HYPOTHESES = 25
+ANALYST_FLAGS = 20
+FINDING_NOTES = 5
 FINDING_INDEX_TITLE = "Appendix A: every finding"
 ATTACK_PATH_TITLE = "Attack path"
 NO_ATTACK_PATH = "No reportable finding formed an incident, so there is no attack path to draw."
@@ -309,6 +313,11 @@ def _finding_card(body: _Body, finding: dict, number: int, ranked: bool, technic
                    f"See {technical_name}, Fleet host appendix, finding {finding['id']}, for every retained host.")
     for check in finding.get("next_checks") or []:
         body.p("Recommended check: " + str(check), style="ListLine")
+    notes = finding.get("notes") or []
+    for note in notes[:FINDING_NOTES]:
+        body.p("Note: " + str(note), style="ListLine")
+    if len(notes) > FINDING_NOTES:
+        body.p(f"{len(notes) - FINDING_NOTES} more note(s) on this finding are in {technical_name}.", style="Muted")
 
 
 def _key_findings(body: _Body, m: dict, sections, numbers: dict, technical_name: str) -> None:
@@ -320,6 +329,9 @@ def _key_findings(body: _Body, m: dict, sections, numbers: dict, technical_name:
     else:
         body.p("Urgent findings come first and are reported on their own; then high findings, then investigative "
                "leads, by priority within a lane.")
+        if m.get("ranking"):
+            body.p(f"Evidence ranking unavailable: {m['ranking'].get('reason') or 'not computed'}. Findings are "
+                   "ordered by each rule's own lane.", style="Callout")
     budget = KEY_FINDING_DETAILS
     for title, intro, findings in sections:
         body.heading(title, 2)
@@ -333,9 +345,12 @@ def _key_findings(body: _Body, m: dict, sections, numbers: dict, technical_name:
         for finding in shown:
             _finding_card(body, finding, numbers[finding["id"]], ranked, technical_name)
         if len(shown) < len(findings):
+            rest = findings[len(shown):]
+            noted = sum(bool(finding.get("notes")) for finding in rest)
             body.p(f"{len(shown)} of {len(findings)} finding(s) in this section are described here; the other "
-                   f"{len(findings) - len(shown)} are listed in {FINDING_INDEX_TITLE} with their lane and claim, and "
-                   f"in full in {technical_name}.", style="Callout")
+                   f"{len(rest)} are listed in {FINDING_INDEX_TITLE} with their lane and claim, and in full in "
+                   f"{technical_name}" + (f", where the notes of the {noted} of them that carry notes are"
+                                          if noted else "") + ".", style="Callout")
 
 
 def _attack_path(body: _Body, m: dict, plan: dict, technical_name: str, image_rel: str | None) -> None:
@@ -451,11 +466,42 @@ def _attack_path(body: _Body, m: dict, plan: dict, technical_name: str, image_re
                    style="Muted")
 
 
-def _assessment(body: _Body, m: dict) -> None:
+def _agent_records(body: _Body, m: dict, technical_name: str) -> None:
+    """The agent's hypotheses (AI-generated, labelled), a count of its notes and the cases flagged for analyst
+    review, each bounded with an exact pointer to the technical report."""
+    ai = m.get("ai_agent") or {}
+    hypotheses = ai.get("hypotheses") or []
+    if hypotheses:
+        body.heading("Agent hypotheses (AI-generated, unconfirmed)", 3)
+        shown = hypotheses[:AGENT_HYPOTHESES]
+        body.table(["Hypothesis", "Status", "Confidence", "Statement (AI)"], [1500, 1300, 1200, 5360],
+                   ([str(item.get("id")), str(item.get("status")), str(item.get("confidence")),
+                     str(item.get("statement") or "")] for item in shown))
+        if len(hypotheses) > len(shown):
+            body.p(f"{len(hypotheses) - len(shown)} more agent hypothesis(es) are in {technical_name} (Hypotheses).",
+                   style="Muted")
+    groups = ai.get("agent_notes") or []
+    notes = sum(len(group.get("notes") or []) for group in groups)
+    if notes:
+        body.p(f"{notes} AI note(s) on {len(groups)} item(s) (findings, hypotheses and others) are in "
+               f"{technical_name} (Hypotheses, Finding details and Other AI notes). They are AI-generated and "
+               "unconfirmed.", style="Muted")
+    flags = (m.get("investigations") or {}).get("analyst_flags") or []
+    if flags:
+        body.heading("Analyst review required", 3)
+        for flag in flags[:ANALYST_FLAGS]:
+            body.p(f"Case {flag.get('case_id', 'unknown')}: {flag.get('message', '')}", style="ListLine")
+        if len(flags) > ANALYST_FLAGS:
+            body.p(f"{len(flags) - ANALYST_FLAGS} more case(s) flagged for analyst review are in {technical_name} "
+                   "(Investigations).", style="Muted")
+
+
+def _assessment(body: _Body, m: dict, technical_name: str) -> None:
     assessment = m.get("ai_assessment")
     body.heading("AI assessment")
     if not assessment:
         body.p(NO_AI_ASSESSMENT)
+        _agent_records(body, m, technical_name)
         return
     body.p(assessment.get("header") or "Template narrative.", style="AiCallout")
     if assessment.get("source") == "agent":
@@ -518,6 +564,7 @@ def _assessment(body: _Body, m: dict) -> None:
             statement(sentence)
     checker = assessment.get("checker") or {}
     body.p(f"Checker changes: {json.dumps(checker, sort_keys=True) if checker else 'none'}.", style="Muted")
+    _agent_records(body, m, technical_name)
 
 
 def _triage(body: _Body, m: dict) -> None:
@@ -716,6 +763,15 @@ def _coverage(body: _Body, m: dict, technical_name: str) -> None:
         for link in links:
             body.p(f"{link['link_type']}: {link.get('status', 'unresolved')}; " + "; ".join(link.get("reasons", [])),
                    style="ListLine")
+    anchors = ((m.get("investigations") or {}).get("anchor_accounting") or {}).get("anchors") or []
+    if anchors:
+        body.heading("Expansion from the strongest findings", 2)
+        body.p(f"{len(anchors)} finding(s) were expanded along typed links. An anchor not expanded, or expanded in "
+               f"part, leaves what it links to unknown. Each anchor and its reasons are in {technical_name} "
+               "(Investigations).")
+        body.table(["Anchor status", "Anchors"], [7360, 2000],
+                   ([status, str(count)] for status, count in sorted(Counter(
+                       str(anchor.get("status")) for anchor in anchors).items())))
     if raw := m.get("raw_records"):
         body.p(f"Raw records kept for citation: {raw.get('stored', 0)} stored, {raw.get('refused_at_cap', 0)} not "
                f"stored at the cap, {len(raw.get('broken') or [])} cited but no longer kept.", style="Muted")
@@ -786,7 +842,7 @@ def write(m, path, technical_name):
             _scope(body, m)
             _key_findings(body, m, sections, numbers, technical_name)
             _attack_path(body, m, plan, technical_name, "rIdAttackPath" if image is not None else None)
-            _assessment(body, m)
+            _assessment(body, m, technical_name)
             _triage(body, m)
             _mentions(body, m, technical_name)
             _recommendations(body, m, sections, numbers, technical_name)
