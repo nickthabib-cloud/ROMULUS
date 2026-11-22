@@ -55,8 +55,18 @@ def snippet(line: str, match_offset: int, chars: int) -> tuple[str, int, bool, b
     return line[start:start + chars], match_offset - start, start > 0, start + chars < len(line)
 
 
-def mention_item(row: dict, *, line_chars: int = MANIFEST_LINE_CHARS) -> dict:
-    """One mention as every renderer shows it: the excerpt around its first match, at most `line_chars` long."""
+CITED_BY_NOTE = ("findings that cite the same source record: the mention is shown once, here, beside them; it adds no "
+                 "evidence to them and they do not make it a finding")
+
+
+def citations(repo, hunt_id: str, rows: list[dict]) -> dict[str, dict]:
+    """The findings citing each shown mention's record (`Repo.mention_citations`), read when the pool is shown."""
+    return repo.mention_citations(hunt_id, rows) if rows and hasattr(repo, "mention_citations") else {}
+
+
+def mention_item(row: dict, *, line_chars: int = MANIFEST_LINE_CHARS, cited: dict | None = None) -> dict:
+    """One mention as every renderer shows it: the excerpt around its first match, at most `line_chars` long, with
+    the findings that cite the same record (`cited`, from `citations`)."""
     line = row["line"] or ""
     match_offset = int(row.get("match_offset") or 0)
     shown, at, before, after = snippet(line, match_offset, line_chars)
@@ -79,6 +89,8 @@ def mention_item(row: dict, *, line_chars: int = MANIFEST_LINE_CHARS) -> dict:
         "raw_id": row["raw_id"], "raw_label": RAW_MENTION_LABEL,
         "source_ref": {"target": row["target"], "native_id": row["native_id"]},
         "suspicious_content": bool(row["suspicious_content"]),
+        "cited_by": ({"count": cited["count"], "findings": list(cited["findings"]), "note": CITED_BY_NOTE}
+                     if cited else {"count": 0, "findings": []}),
     }
 
 
@@ -97,6 +109,7 @@ def mentions_view(repo, hunt_id: str, *, limit: int = MANIFEST_MENTIONS) -> dict
     summary = repo.mention_scan(hunt_id)
     total = repo.mention_count(hunt_id) if summary is not None else 0
     rows = repo.mentions(hunt_id, limit=limit) if total else []
+    cited = citations(repo, hunt_id, rows)
     coverage = summary if summary is not None else NOT_SCANNED
     status = coverage.get("status", "not_scanned")
     return {
@@ -105,7 +118,7 @@ def mentions_view(repo, hunt_id: str, *, limit: int = MANIFEST_MENTIONS) -> dict
         "total": total, "shown": len(rows), "not_shown": total - len(rows),
         "order": "pattern strength, then whether the record's telemetry class is one the pattern names, then "
                  "rarity (the pattern's distinct hosts, then its matching lines, fewest first), then first time",
-        "items": [mention_item(row) for row in rows],
+        "items": [mention_item(row, cited=cited.get(row["id"])) for row in rows],
         "losses": losses_view(repo, hunt_id, limit=MANIFEST_LOSSES if limit else 0),
     }
 

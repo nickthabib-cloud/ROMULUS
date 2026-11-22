@@ -647,7 +647,11 @@ def _mentions(body: _Body, m: dict, technical_name: str) -> None:
 
     def record(item):
         ref = item.get("source_ref") or {}
-        return f"{item.get('raw_id')} ({ref.get('target')}/{ref.get('native_id')})"
+        cited = item.get("cited_by") or {}
+        also = (f"; same record cited by {cited['count']} finding(s): "
+                + ", ".join(f"{found['id']} ({found['lane']})" for found in cited.get("findings") or [])
+                if cited.get("count") else "")
+        return f"{item.get('raw_id')} ({ref.get('target')}/{ref.get('native_id')}){also}"
 
     body.table(["#", "Mention (pattern)", "Strength", "Pattern source", "Host", "Record (source)", "Lines",
                 "First seen (UTC)", "Text around the match"],

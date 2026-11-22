@@ -6354,6 +6354,45 @@ class Repo:
             return [dict(row) for row in connection.execute(
                 query.order_by(t.mention.c.rank).limit(max(0, int(limit)))).mappings()]
 
+    def mention_citations(self, hunt_id: str, mentions: list[dict], *, per_mention: int = 5) -> dict[str, dict]:
+        """For each mention (its `id`, `target`, `native_id`, `raw_id`), the hunt's findings that cite the same source
+        record: a typed finding through a typed event made from it, an AI finding through the raw record itself. Up to
+        `per_mention` findings each (lane order), with the exact count. Read when the pool is shown, since findings
+        arrive after the pool is published; it never changes a finding, a lane or the pool."""
+        from romulus.evidence.raw_citation import RAW_GATE
+        if not mentions:
+            return {}
+        store_ids = {raw_id(item["target"], item["native_id"]): item["id"] for item in mentions}
+        cited_raw = {item["raw_id"]: item["id"] for item in mentions}
+        order = "CASE c.lane WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'lead' THEN 2 ELSE 3 END"
+        typed = text(f"""
+            SELECT DISTINCT r.value AS ref, c.id AS id, c.rule_id AS rule_id, c.lane AS lane, {order} AS rank,
+                   c.priority AS priority
+            FROM candidate c, json_each(c.event_ids) e
+            JOIN typed_event te ON te.id = e.value
+            LEFT JOIN event_citation ec ON ec.hunt_id = c.hunt_id AND ec.event_id = te.id,
+            json_each(coalesce(ec.raw_ids, te.raw_ids)) r
+            WHERE c.hunt_id = :hunt AND r.value IN :refs""").bindparams(bindparam("refs", expanding=True))
+        agent = text(f"""
+            SELECT DISTINCT j.value AS ref, c.id AS id, c.rule_id AS rule_id, c.lane AS lane, {order} AS rank,
+                   c.priority AS priority
+            FROM candidate c, json_each(c.gate_results, '$.{RAW_GATE}') j
+            WHERE c.hunt_id = :hunt AND j.value IN :refs""").bindparams(bindparam("refs", expanding=True))
+        found: dict[str, dict[str, tuple]] = {}
+        with self.engine.connect() as connection:
+            for statement, keys in ((typed, store_ids), (agent, cited_raw)):
+                for row in connection.execute(statement, {"hunt": hunt_id, "refs": sorted(keys)}).mappings():
+                    mention = keys[row["ref"]]
+                    found.setdefault(mention, {})[row["id"]] = (row["rank"], -(row["priority"] or 0.0), row["id"],
+                                                                row["rule_id"], row["lane"])
+        out: dict[str, dict] = {}
+        for mention, findings in found.items():
+            ordered = sorted(findings.values())
+            out[mention] = {"count": len(ordered),
+                            "findings": [{"id": fid, "rule_id": rule, "lane": lane}
+                                         for _rank, _priority, fid, rule, lane in ordered[:per_mention]]}
+        return out
+
     def save_agent_assessment(self, row: dict, *, owner_token: str | None = None) -> bool:
         with write_txn(self.engine) as connection:
             self._fence_agent_lease(connection, row["hunt_id"], owner_token)

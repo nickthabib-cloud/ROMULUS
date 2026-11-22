@@ -24,7 +24,8 @@
 <td><a href="{{ head.hunt_url(h.id, '/mentions', pattern=m.pattern.id) }}">{{ m.headline }}</a><br><span class="mono small">{{ m.pattern.id }}</span>
 {% if m.pattern.attack.techniques %}<br><span class="small" title="{{ m.pattern.attack.label }}">Pattern ATT&amp;CK (metadata): {{ m.pattern.attack.techniques | join(', ') }}</span>{% endif %}
 {% if m.also_matched %}<br><span class="small">Also matches (metadata): {% for o in m.also_matched %}<span class="mono">{{ o.id }}</span>{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}
-<br><span class="small">{{ m.rarity.pattern_hosts }} host(s), {{ m.rarity.pattern_lines }} line(s) for this pattern</span></td>
+<br><span class="small">{{ m.rarity.pattern_hosts }} host(s), {{ m.rarity.pattern_lines }} line(s) for this pattern</span>
+{% if m.cited_by.count %}<br><span class="small" title="{{ m.cited_by.note }}">Same record cited by {{ m.cited_by.count }} finding(s): {% for f in m.cited_by.findings %}<a class="mono" href="/findings/{{ f.id | urlencode }}">{{ f.rule_id }}</a> ({{ f.lane }}){% if not loop.last %}, {% endif %}{% endfor %}{% if m.cited_by.count > m.cited_by.findings | length %} and {{ m.cited_by.count - m.cited_by.findings | length }} more{% endif %}</span>{% endif %}</td>
 <td>{% if m.host %}<a class="mono" href="{{ head.hunt_url(h.id, '/mentions', host=m.host) }}">{{ m.host }}</a>{% else %}<span class="small">no host</span>{% endif %}</td>
 <td class="n">{{ m.count }}</td>
 <td class="mono small">{{ m.first_seen or 'not recorded' }}{% if m.last_seen and m.last_seen != m.first_seen %}<br>to {{ m.last_seen }}{% endif %}</td>
