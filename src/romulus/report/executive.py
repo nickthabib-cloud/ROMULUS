@@ -56,6 +56,8 @@ ANALYST_LINKS = 20
 AGENT_HYPOTHESES = 25
 ANALYST_FLAGS = 20
 FINDING_NOTES = 5
+# characters of a structured version value shown (the technical report holds it whole)
+VERSION_CHARS = 600
 FINDING_INDEX_TITLE = "Appendix A: every finding"
 ATTACK_PATH_TITLE = "Attack path"
 NO_ATTACK_PATH = "No reportable finding formed an incident, so there is no attack path to draw."
@@ -797,11 +799,22 @@ def _finding_index(body: _Body, m: dict, sections, numbers: dict, technical_name
                 for title, _intro, findings in sections for finding in findings))
 
 
-def _versions(body: _Body, m: dict) -> None:
+def _version_text(value, technical_name: str) -> str:
+    """A version value as text; a structured one (applied lists, rule sets, pattern files) as compact JSON, cut at
+    VERSION_CHARS with a pointer to the technical report's Versions block, which holds it whole."""
+    if not isinstance(value, (dict, list)):
+        return str(value)
+    text = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    if len(text) <= VERSION_CHARS:
+        return text
+    return f"{text[:VERSION_CHARS]}… ({len(text) - VERSION_CHARS} more characters in {technical_name}, Versions)"
+
+
+def _versions(body: _Body, m: dict, technical_name: str) -> None:
     versions = m.get("versions") or {}
     body.heading("Versions", 2)
     body.table(["Component", "Version"], [3000, 6360],
-               ([key, str(value)] for key, value in sorted(versions.items()) if not isinstance(value, (dict, list))))
+               ([key, _version_text(value, technical_name)] for key, value in sorted(versions.items())))
 
 
 def write(m, path, technical_name):
@@ -848,7 +861,7 @@ def write(m, path, technical_name):
             _recommendations(body, m, sections, numbers, technical_name)
             _coverage(body, m, technical_name)
             _finding_index(body, m, sections, numbers, technical_name)
-            _versions(body, m)
+            _versions(body, m, technical_name)
             body.p(BANNER, style="Banner")
             body.add(ooxml.document_end("rIdHeader", "rIdFooter"))
             body.flush()

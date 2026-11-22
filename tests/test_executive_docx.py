@@ -323,6 +323,17 @@ def test_agent_records_flags_anchors_ranking_and_notes_are_shown_or_counted(tmp_
     assert anchors == {"expanded": "3", "expanded_partial": "2", "unexpanded": "2"}
 
 
+def test_structured_versions_are_shown_not_skipped(tmp_path):
+    manifest = synthetic_manifest(findings=3)
+    manifest["versions"]["mention_patterns"] = {"digest": "ab" * 8, "files": [{"name": "lolbas.yml"}]}
+    manifest["versions"]["sigma_rules"] = {"applied": [{"id": f"rule-{n}"} for n in range(200)]}
+    versions = dict(tuple(row) for row in _table_after(read_back(_write(tmp_path, manifest)), "Versions")[1:])
+    assert set(versions) == set(manifest["versions"])
+    assert versions["mention_patterns"] == '{"digest":"abababababababab","files":[{"name":"lolbas.yml"}]}'
+    assert versions["sigma_rules"].endswith("more characters in technical.md, Versions)")
+    assert len(versions["sigma_rules"]) < executive.VERSION_CHARS + 80
+
+
 def test_a_claim_resting_on_a_mention_is_labelled_as_one_in_card_and_index(tmp_path):
     manifest = synthetic_manifest(findings=4, agent_findings=1)
     agent = next(f for f in manifest["findings"] if f["provenance"] == "agent")
