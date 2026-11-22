@@ -213,8 +213,9 @@ class RankWorkspace:
         fleet finding stands for what each member host did, so every member keeps the rule's evidence (its tactic and
         its rule count) for its other findings, while the finding itself is ranked once, on the entities it names.
         Each membership is timed by the host's own record (the one its list entry names) when the hunt stored it,
-        so co-occurrence on that host reads when the host's own change happened; else by the finding's time."""
-        own_time = "COALESCE((SELECT e.ts FROM typed_event e WHERE e.id = h.first_event_id), c.ts)"
+        so co-occurrence on that host reads when the host's own change happened. A member whose record was not stored
+        has no time: it keeps the rule and its tactics but never co-occurs, since the finding's time is not its own."""
+        own_time = "(SELECT e.ts FROM typed_event e WHERE e.id = h.first_event_id)"
         self._stage_members(f"NOT COALESCE({_ADDRESS_MEMBERS}, 0)", "host", "h.host", agent_provenance, tactics,
                             ts=own_time)
 

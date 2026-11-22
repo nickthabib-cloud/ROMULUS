@@ -1948,7 +1948,7 @@ class AccountOrGroupChange(Playbook):
             self._finish_run(open_runs[cls], runs)
 
     def _finish_run(self, run: _Burst, runs: SpillList) -> None:
-        key = f"burst|{run.host}|{run.first_id}"
+        key = f"burst|{run.host}|{run.first_id}|{run.segment}"
         made: list[Match] = []
         with citation_group(self, made, key, run):
             made.append(self._burst_finding(run))
