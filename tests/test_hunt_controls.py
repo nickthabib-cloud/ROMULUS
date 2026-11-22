@@ -324,14 +324,18 @@ def test_a_stop_after_the_sweep_skips_the_later_stages_and_names_them(tmp_path, 
     monkeypatch.setattr(hunt_run, "_packet_stage", lambda *_a, **_k: pytest.fail("the packet stage ran"))
     monkeypatch.setattr(hunt_run, "_baseline_stage", lambda *_a, **_k: pytest.fail("the baseline stage ran"))
     monkeypatch.setattr(hunt_run, "_run_expansion_safely", lambda *_a, **_k: pytest.fail("expansion ran"))
+    monkeypatch.setattr(hunt_run, "_join_pass", lambda *_a, **_k: pytest.fail("the network-host join ran"))
     monkeypatch.setattr(hunt_run, "run_rank_pass", lambda *_a, **_k: None)
     watch = controls.StopWatch(repo, "h1", ("hunt",), ttl=0)
     packet, baseline, _expansion, stop = hunt_run._stages_after_sweep(s, repo, object(), "h1", None, {}, owner, watch)
     assert stop["stage"] == "packet stage"
-    assert stop["not_run"] == ["packet stage", "baseline stage", "expansion", "AI agent"]
+    assert stop["not_run"] == ["packet stage", "baseline stage", "network-host join", "expansion", "AI agent"]
     assert packet is None and baseline is None
     text = hunt_run.stopped_text(stop)
-    assert "not run: packet stage, baseline stage, expansion, AI agent" in text and "partial" in text
+    assert ("not run: packet stage, baseline stage, network-host join, expansion, AI agent" in text
+            and "partial" in text)
+    cells = [cell for cell in repo.rule_cells("h1", rule_id="corr.network_admin_logon") if cell["partition"] == "window"]
+    assert cells and cells[0]["state"].endswith("partial")
 
 
 # ------------------------------------------------------------------------------------------------- force stop
