@@ -78,6 +78,7 @@ from romulus.evidence.mentions import (
     WINDOWS_TEXT,
 )
 from romulus.evidence.raw_citation import build_raw_record, raw_record_id, record_time
+from romulus.evidence.raw_scrub import clean_source
 from romulus.evidence.windows import is_windows_source
 from romulus.hunt.mention_fields import (  # noqa: F401 - the reasons are part of this module's coverage vocabulary
     JSON_ARRAY,
@@ -304,6 +305,9 @@ class MentionScanner:
                 self.not_scanned[NO_TEXT] += 1
                 continue
             windows = entry[2] if len(entry) > 2 and entry[2] is not None else is_windows_source(source)
+            # the record as it may be stored: credentials of recognized network records masked, lone surrogates
+            # replaced (the excerpt is cut from what is scanned)
+            source = clean_source(source)
             selection = select_texts(source, windows=windows, only=entry[3] if len(entry) > 3 else None)
             if not selection.texts:
                 if selection.no_text:

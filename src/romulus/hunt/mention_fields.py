@@ -306,6 +306,11 @@ def _shipper_audit(source: dict, only: tuple[str, ...]) -> list[tuple[str, str]]
     return texts
 
 
+def _password_command(command) -> bool:
+    """An FTP command whose argument is a credential (its argument is never selected)."""
+    return isinstance(command, str) and command.strip().upper() in ("PASS", "ACCT")
+
+
 def _json_texts(obj: dict, source: dict, windows: bool) -> Selection:
     """The selection of a JSON object held in event.original."""
     texts: list[tuple[str, str]] = []
@@ -318,6 +323,8 @@ def _json_texts(obj: dict, source: dict, windows: bool) -> Selection:
     event_type = obj.get("event_type")
     if isinstance(event_type, str) and any(key in obj for key in ("src_ip", "flow_id", "in_iface", "dest_ip")):
         names = EVE_FIELDS.get(event_type)
+        if names is not None and _password_command(_get(obj, "ftp.command")):
+            names = tuple(name for name in names if name != "ftp.command_data")
         _paths(obj, names if names is not None else _EVE_ALL, texts, seen, prefix + "eve:")
         if names is None:
             return _bounded(Selection(EVE, texts, complete=False,
@@ -330,6 +337,8 @@ def _json_texts(obj: dict, source: dict, windows: bool) -> Selection:
             dataset = _get(source, "event.dataset")
             log = dataset.split(".", 1)[-1] if isinstance(dataset, str) and dataset.startswith("zeek.") else None
         names = ZEEK_FIELDS.get(log or "")
+        if names is not None and _password_command(obj.get("command")):
+            names = tuple(name for name in names if name != "arg")
         _paths(obj, names if names is not None else _ZEEK_ALL, texts, seen, prefix + "zeek:")
         if names is None:
             return _bounded(Selection(ZEEK, texts, complete=False,

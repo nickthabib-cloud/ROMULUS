@@ -197,6 +197,18 @@ def test_a_record_with_too_many_fields_or_text_past_the_bound_is_counted_in_part
     scanner.close()
 
 
+def test_a_credential_is_never_selected_and_a_scrubbed_record_is_scanned_as_stored(tmp_path):
+    eve = {"event_type": "ftp", "src_ip": "10.0.0.5", "flow_id": 3,
+           "ftp": {"command": "PASS", "command_data": "MIMIKATZ-secret"}}
+    assert select_texts({"event.original": json.dumps(eve)}).texts == [("event.original#eve:ftp.command", "PASS")]
+    zeek = {"_path": "ftp", "uid": "C1", "id.orig_h": "10.0.0.5", "command": "pass", "arg": "MIMIKATZ-secret"}
+    assert [path for path, _text in select_texts({"event.original": json.dumps(zeek)}).texts] == [
+        "event.original#zeek:command"]
+    retr = {**eve, "ftp": {"command": "RETR", "command_data": "/tmp/MIMIKATZ.exe"}}
+    assert dict(select_texts({"event.original": json.dumps(retr)}).texts) == {
+        "event.original#eve:ftp.command": "RETR", "event.original#eve:ftp.command_data": "/tmp/MIMIKATZ.exe"}
+
+
 @pytest.mark.parametrize("source", [
     {"event": {"original": json.dumps({"MESSAGE": "x", "_CMDLINE": "MIMIKATZ"})}},
     {"event": {"original": json.dumps({"@timestamp": "t", "process": {"command_line": "MIMIKATZ"}})}},
