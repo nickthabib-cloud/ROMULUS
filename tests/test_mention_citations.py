@@ -51,3 +51,9 @@ def test_a_mention_whose_record_a_finding_cites_is_shown_once_beside_it(tmp_path
     assert {row["id"]: row["lane"] for row in repo.candidates("h1")} == before
     text = "\n".join(markdown._mentions_section({"mentions": view}))
     assert "same record cited by 2 finding(s): typed1 (high), agent1 (lead)" in text
+
+
+def test_the_store_reads_ai_findings_cited_raw_records_under_admissions_key():
+    from romulus.evidence.raw_citation import RAW_GATE
+    from romulus.store.repo import AGENT_RAW_GATE
+    assert AGENT_RAW_GATE == RAW_GATE

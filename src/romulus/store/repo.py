@@ -107,6 +107,10 @@ _RULE_CELL_UPSERT = _rule_cell_upsert()
 _STORED_BOOT = func.json_extract(t.typed_event.c.event, '$.fields."host.boot.id"')
 
 
+# the admission-gate key an AI finding lists its cited raw record ids under (evidence.raw_citation.RAW_GATE)
+AGENT_RAW_GATE = "_agent_raw_records"
+
+
 def raw_id(target: str, native_id: str) -> str:
     return hashlib.sha256(f"{target}/{native_id}".encode()).hexdigest()[:32]
 
@@ -6359,7 +6363,6 @@ class Repo:
         record: a typed finding through a typed event made from it, an AI finding through the raw record itself. Up to
         `per_mention` findings each (lane order), with the exact count. Read when the pool is shown, since findings
         arrive after the pool is published; it never changes a finding, a lane or the pool."""
-        from romulus.evidence.raw_citation import RAW_GATE
         if not mentions:
             return {}
         store_ids = {raw_id(item["target"], item["native_id"]): item["id"] for item in mentions}
@@ -6376,7 +6379,7 @@ class Repo:
         agent = text(f"""
             SELECT DISTINCT j.value AS ref, c.id AS id, c.rule_id AS rule_id, c.lane AS lane, {order} AS rank,
                    c.priority AS priority
-            FROM candidate c, json_each(c.gate_results, '$.{RAW_GATE}') j
+            FROM candidate c, json_each(c.gate_results, '$.{AGENT_RAW_GATE}') j
             WHERE c.hunt_id = :hunt AND j.value IN :refs""").bindparams(bindparam("refs", expanding=True))
         found: dict[str, dict[str, tuple]] = {}
         with self.engine.connect() as connection:

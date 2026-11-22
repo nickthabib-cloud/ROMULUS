@@ -1,7 +1,8 @@
 """Mentions: text a record contains that a curated pattern names, never an action.
 
-A mention is what the mention sweep (`romulus.hunt.mentions`) finds in the raw text (`message`, else
-`event.original`) of a record no normalizer read: a pattern's literal or anchored expression occurs in it. It shows only
+A mention is what the mention sweep (`romulus.hunt.mentions`) finds in the free-text fields of a record no rule reads
+(`romulus.hunt.mention_fields`: message lines, command lines, URLs and the like, never a serialized record): a
+pattern's literal or anchored expression occurs in it. It shows only
 that a record with this text exists. The contract every reader keeps:
 
 - it is labelled as a mention everywhere (report manifest, Markdown, DOCX, web, the agent's dossier);
