@@ -171,6 +171,57 @@ def test_a_windows_record_without_a_rendered_message_is_read_by_its_event_data(t
     scanner.close()
 
 
+@pytest.mark.parametrize(("key", "value"), [
+    ("SourceImage", "C:\\t\\mimikatz.exe"), ("TargetImage", "C:\\t\\mimikatz.exe"), ("StartModule", "mimikatz.dll"),
+    ("StartFunction", "mimikatz"), ("TaskName", "\\mimikatz"), ("ServiceName", "mimikatz"),
+    ("Threat Name", "HackTool:Win32/Mimikatz"), ("Path", "file:_C:\\t\\mimikatz.exe"),
+    ("FilePath", "%OSDRIVE%\\T\\MIMIKATZ.EXE"), ("FullFilePath", "C:\\T\\MIMIKATZ.EXE"),
+    ("Contents", "mimikatz sekurlsa"), ("DestinationHostname", "mimikatz.example"),
+])
+def test_windows_event_data_names_that_carry_attacker_text_are_read(key, value):
+    selection = select_texts({"winlog": {"event_data": {key: value}}, "message": "event"}, windows=True)
+    assert (f"winlog.event_data.{key}", value) in selection.texts
+
+
+@pytest.mark.parametrize(("source", "field"), [
+    ({"message": "x", "dns": {"answers": [{"data": "mimikatz.example"}]}}, "dns.answers.data"),
+    ({"message": "x", "url": {"domain": "mimikatz.example"}}, "url.domain"),
+    ({"message": "x", "registry": {"path": "HKLM\\mimikatz"}}, "registry.path"),
+    ({"message": "x", "file": {"name": "mimikatz.exe"}}, "file.name"),
+    ({"message": "x", "process": {"parent": {"name": "mimikatz.exe"}}}, "process.parent.name"),
+])
+def test_ecs_names_that_carry_attacker_text_are_read(source, field):
+    assert field in dict(select_texts(source).texts)
+
+
+_EVENT_XML = ('<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System><EventID>1</EventID>'
+              '</System><EventData><Data Name="CommandLine">powershell MIMIKATZ</Data>'
+              '<Data Name="SubjectUserSid">S-1-5-18</Data></EventData>{rendering}</Event>')
+
+
+def test_a_windows_record_whose_only_text_is_its_exported_xml_is_read_by_its_event_data(tmp_path):
+    plain = select_texts({"event": {"original": _EVENT_XML.format(rendering="")}})
+    assert plain.texts == [("event.original#xml:EventData.CommandLine", "powershell MIMIKATZ")]
+    assert not plain.complete
+    rendered = select_texts({"event": {"original": _EVENT_XML.format(
+        rendering="<RenderingInfo><Message>A process was created.</Message></RenderingInfo>")}})
+    assert rendered.complete and rendered.texts[0] == ("event.original#xml:RenderingInfo.Message",
+                                                       "A process was created.")
+    scanner = _scanner(tmp_path)
+    scanner.scan(TARGET, CONTRACT, [(_record(1, {"event": {"original": _EVENT_XML.format(rendering="")}},
+                                     host="ws1"), "x", True)], None)
+    assert _ids(scanner) == [("mention.test_mimikatz", "ws1", "event.original#xml:EventData.CommandLine")]
+    scanner.close()
+
+
+def test_an_xml_document_declaring_entities_is_never_parsed():
+    from romulus.hunt.mention_fields import XML_UNREAD
+    bomb = ('<?xml version="1.0"?><!DOCTYPE lolz [<!ENTITY lol "lol"><!ENTITY lol2 "&lol;&lol;">]>'
+            '<Event><EventData><Data Name="CommandLine">&lol2;</Data></EventData></Event>')
+    selection = select_texts({"event": {"original": bomb}})
+    assert selection.texts == [] and selection.reason == XML_UNREAD
+
+
 def test_a_suricata_alert_is_read_by_the_application_block_it_carries_never_by_its_rule_text():
     alert = {"event_type": "alert", "src_ip": "10.0.0.5", "flow_id": 9,
              "alert": {"signature": "ET MIMIKATZ download", "metadata": {"tag": ["MIMIKATZ"]}},

@@ -11,7 +11,9 @@ Families (the first that fits):
   `Event.RenderingInfo.Message`), else an `event.original` that is plain text. Its ECS and Beats free-text fields
   (`ECS_FIELDS`) are read beside it. A Windows record also has its event data's free-text fields read
   (`WINDOWS_DATA_KEYS`, under `winlog.event_data`, `EventData` or NXLog's flat names). A record with none of the
-  message-like fields is read by those fields and counted as scanned in part.
+  message-like fields is read by those fields and counted as scanned in part. A Windows event exported as XML in
+  `event.original` is read by its rendered message and its event data's free-text fields (at most 1 MiB, never a
+  document declaring a DTD or entity).
 - **auditd**: raw Linux audit record lines (one, several joined by newlines, or an array of them). Their hex-encoded
   and quoted untrusted-string fields are decoded (`AUDIT_FIELDS`, and an EXECVE record's arguments joined), never
   the raw hex. A record a shipper indexed as fields is read by the same names under `auditd.log.*` and
@@ -32,7 +34,7 @@ AUTHENTICATE/JOIN keys, Redis AUTH and the like), the argument columns of a Zeek
 an HTTP/2 header whose name is a credential's (Authorization, Cookie, tokens, keys), a message body; and every
 selected text loses a URI's userinfo and a SIP URI's password.
 
-A JSON record of no family above, a JSON array and an XML document are not scanned (counted, with the reason). A family
+A JSON record of no family above, a JSON array and any other XML document are not scanned (counted, with the reason). A family
 record that holds none of its family's fields has no free text to scan: it is counted, and it is not a coverage gap.
 
 Bounds per record: at most `MAX_TEXTS` selected texts (the rest counted as not scanned), at most `MAX_LIST_ITEMS`
@@ -84,6 +86,7 @@ ECS_FIELDS = (
     "powershell.file.script_block_text", "powershell.command.value", "powershell.command.invocation_details.value",
     "syslog.identifier", "log.syslog.appname", "systemd.unit",
     "journald.process.command_line",
+    "dns.answers.data", "url.domain", "registry.path", "file.name", "process.parent.name",
 )
 
 # Windows event data names that hold free text (Sysmon, Security, PowerShell, Task Scheduler, BITS, WMI, service
@@ -94,6 +97,10 @@ WINDOWS_DATA_KEYS = (
     "ImagePath", "TaskContent", "TaskContentNew", "Details", "TargetObject", "PipeName", "ProcessName",
     "NewProcessName", "ParentProcessName", "ObjectName", "ShareName", "RelativeTargetName", "Url", "url",
     "Command", "Consumer", "Destination", "Operation", "Query", "CallerProcessName", "Application",
+    # Sysmon process access and remote threads, DNS and network names, clipboard and file contents (event 15/24),
+    # task and service names, Defender detections, AppLocker paths
+    "SourceImage", "TargetImage", "StartModule", "StartFunction", "DestinationHostname", "Contents",
+    "TaskName", "ServiceName", "Threat Name", "Path", "FilePath", "FullFilePath",
 )
 
 # Decoded audit record fields that hold untrusted strings (auditd's hex-encodable keys that carry text, not ids).
@@ -620,10 +627,9 @@ def select_texts(source: dict, *, windows: bool = False, only: tuple[str, ...] |
         head = original.lstrip()[:1]
         if (selection := _json_field(original, source, windows, "event.original")) is not None:
             return selection
-        if head == "<" and _is_xml(original):
-            return Selection("xml", [], complete=False, reason=XML_RECORD)
-        else:
-            _add(texts, "event.original", [original], seen)
+        if head == "<" and (document := _xml_document(original)) is not None:
+            return _xml_texts(document, source)
+        _add(texts, "event.original", [original], seen)
     lined = bool(texts)
     _paths(source, ECS_FIELDS, texts, seen)
     if windows:
@@ -636,11 +642,47 @@ def select_texts(source: dict, *, windows: bool = False, only: tuple[str, ...] |
     return _bounded(Selection(TEXT, texts))
 
 
-def _is_xml(text: str) -> bool:
-    """Whether text is one XML document (an exported event record): it is never scanned as a line. The parser is
-    expat, which bounds entity expansion; the text is at most the record's own field."""
-    try:
-        ElementTree.fromstring(text)
-    except (ElementTree.ParseError, ValueError):
+# an exported event XML document read for its event data at most this long, and never one declaring a DTD or entity
+MAX_XML_CHARS = 1_048_576
+_XML_DECLARATIONS = re.compile(r"<!(?:DOCTYPE|ENTITY)", re.IGNORECASE)
+XML_UNREAD = "event.original is an XML record that was not read (too long, or declaring a DTD or entity)"
+
+
+def _xml_document(text: str):
+    """The parsed XML document a text field holds, False for one that is not read (bounded, no declarations), or None
+    when the text is no XML document (a line that merely starts with "<")."""
+    if len(text) > MAX_XML_CHARS or _XML_DECLARATIONS.search(text):
         return False
-    return True
+    try:
+        return ElementTree.fromstring(text)
+    except (ElementTree.ParseError, ValueError):
+        return None
+
+
+def _local(tag) -> str:
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
+def _xml_texts(document, source: dict) -> Selection:
+    """A Windows event exported as XML: its rendered message and its event data's free-text fields. Any other XML
+    document is not scanned."""
+    if document is False:
+        return Selection("xml", [], complete=False, reason=XML_UNREAD)
+    texts: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    if _local(document.tag) == "Event":
+        message = None
+        for node in document.iter():
+            name = _local(node.tag)
+            if name == "Message" and message is None and node.text:
+                message = node.text
+            elif name == "Data" and node.get("Name") in WINDOWS_DATA_KEYS and node.text:
+                _add(texts, f"event.original#xml:EventData.{node.get('Name')}", [node.text], seen)
+        if message:
+            texts.insert(0, ("event.original#xml:RenderingInfo.Message", mask_credentials(message)))
+        _paths(source, ECS_FIELDS, texts, seen)
+        if texts:
+            if message:
+                return _bounded(Selection(TEXT, texts))
+            return _bounded(Selection(TEXT, texts, complete=False, reason=NO_LINE))
+    return Selection("xml", [], complete=False, reason=XML_RECORD)
