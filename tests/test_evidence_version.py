@@ -99,7 +99,10 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # per batch (a first part before a complete record, never on the id hash, never with a piece
                    # journald says another program wrote); journald's kernel transport verifies a kernel writer.
                    # Merged with the report of unread records (version 20's last pin): no output of it changed.
-                   21: "4bc42f52c36ac9d0cccf25bc81c2d3cfad0cd71b31bff684f589e8a3064fd07f"}
+                   # Then the report of unread records also lists a Windows record on a network target and the audit
+                   # text no typed event reads (a group that made no event, a record that does not parse, a process
+                   # title outside an exec group): no typed output changed.
+                   21: "ac75cede7cc2c7bb9524dd1693b0d62588d612b5c78989c8854a8faead6782a0"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py", "rpc_catalog.py")
 PINNED_WINDOWS = {
     # A record's host addresses stand beside its stable source identifier, so clones that share the identifier
@@ -169,10 +172,11 @@ ARKIME_EVIDENCE_FILES = ("normalize.py", "arkime_protocols.py", "raw_scrub.py", 
 # typing of text alert lines and the evidence version that types them: EVE and Arkime records are read as before.
 # Nor do the Linux daemon families (privilege brokers, account tools, kernel taint notices, BIND transfers) and the
 # evidence version that types them.
-# Nor does the dispatcher's optional report of the records no normalizer read.
-PINNED_SURICATA = {"suricata-eve@2": "8da31641e54822d776fb17d298a8bf9fec1568b28356c2db2f548d86fdca094c",
+# Nor does the dispatcher's optional report of the records no normalizer read, nor that report's audit text and
+# Windows records on a network target.
+PINNED_SURICATA = {"suricata-eve@2": "5f7be0de55ab68bc641dd1070b98b2d6a48e4c171d2641abe90effaa5955654b",
                    "suricata-eve@1": "8aba0c3bbb2061eef70c0c9dd77e5ab49a42bbed9a68b01ba4b4eeffad181e38"}
-PINNED_ARKIME = {"arkime@1": "b8d461973ea532bf50bbbe5a5b81c398c9f6369bc2c9bd47d44a743de3097e65"}
+PINNED_ARKIME = {"arkime@1": "c6970d3bf33048e2bccdfdbfc5fe03150e7caeb41df4a79c4655fa061aaa9d83"}
 
 
 # The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events, and TCP connections rebuilt
