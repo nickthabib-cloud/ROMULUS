@@ -91,6 +91,18 @@ def test_get_evidence_names_the_findings_that_already_cite_each_record():
     assert book.alias_for("F", "finding-01") in collect_issued_aliases(result, tool_name="get_evidence")
 
 
+def test_cited_by_findings_are_in_report_order_not_id_order():
+    repo = _hunt()
+    book = AliasBook(repo, "h1")
+    row = next(item for item in repo.candidates("h1") if item["id"] == "finding-01")
+    # a lead whose id sorts before the high finding citing the same record
+    repo.save_candidate({**{key: value for key, value in row.items() if key not in ("created_at",)},
+                         "id": "a-lead", "lane": "lead", "priority": 1.0, "group_key": "a-lead"})
+    entry = Toolbox(repo, "h1").execute("get_evidence", {"evidence": [book.alias_for("E", "event-1")]})
+    [item] = entry["data"]["evidence"]
+    assert item["cited_by_findings"] == [book.alias_for("F", "finding-01"), book.alias_for("F", "a-lead")]
+
+
 class _Scripted(ScriptedProvider):
     """Orient opens one hypothesis on finding-01; each investigate session reads the finding, its evidence, records
     the evidence as support and finishes; the assessment gets the body."""

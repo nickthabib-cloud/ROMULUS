@@ -29,6 +29,7 @@ from romulus.agent.dossier import (
     MATERIALIZE_LINK_BYTES_LIMIT,
     MATERIALIZE_LINK_LIMIT,
     REPORTABLE_LANES,
+    _report_key,
     rank_label,
 )
 from romulus.agent.models import EntityRef, PivotResult
@@ -105,8 +106,10 @@ class ListCoverageArgs(_Args):
     cursor: str | None = Field(default=None, pattern=r"^C[0-9a-f]{20}$", description=_CURSOR)
 
 
-# The reportable findings get_evidence names as already citing a typed record (more are flagged, not listed).
+# The reportable findings get_evidence names as already citing a typed record, best first in report order (more are
+# flagged, not listed), chosen from at most EVIDENCE_CITED_BY_SCAN of the findings citing it.
 EVIDENCE_CITED_BY_LIMIT = 5
+EVIDENCE_CITED_BY_SCAN = 200
 LIST_MENTIONS_PAGE_SIZE = 25
 LIST_MENTIONS_DESCRIPTION = (
     "Page the hunt's mention pool: lines of records no normalizer read where a curated pattern's text occurs, in pool "
@@ -1114,6 +1117,21 @@ class Toolbox:
         ), counts={"returned": 1, "total": 1},
                        data={"finding": finding})
 
+    def _citing_findings(self, event_id: str) -> list[str]:
+        """The reportable deterministic findings citing a typed event, in report order (the final ranking when it
+        ran, else lane and priority), from the first EVIDENCE_CITED_BY_SCAN the event index returns."""
+        ids =self.repo.candidate_ids_for_event(self.hunt_id, event_id, ("urgent", "high", "lead"),
+                                                EVIDENCE_CITED_BY_SCAN)
+        if len(ids) <= 1:
+            return ids
+        rows = self.repo.candidates_by_ids(ids, hunt_id=self.hunt_id)
+        if self.repo.has_rank_pass(self.hunt_id, FINAL_RANK_PASS):
+            ranks = self.repo.finding_ranks_for(self.hunt_id, FINAL_RANK_PASS, [row["id"] for row in rows])
+            keys = {row["id"]: _report_key(row, ranks.get(row["id"])) for row in rows}
+        else:
+            keys = {row["id"]: (0, 0, _candidate_key(row)) for row in rows}
+        return sorted(keys, key=lambda item: keys[item])
+
     def _get_evidence(self, args: GetEvidenceArgs) -> dict:
         resolved = [(alias, self.aliases.resolve(alias, {"E", "Q"})) for alias in args.evidence]
         rows = {row["id"]: row for row in self.repo.citation_events(
@@ -1161,8 +1179,7 @@ class Toolbox:
             # the deterministic findings that already cite this record (through the candidate-event index): what is
             # already reported, so the session widens from it rather than proving it again. None citing it says only
             # that no finding cites it, never that it is benign
-            citing = self.repo.candidate_ids_for_event(self.hunt_id, event_id, ("urgent", "high", "lead"),
-                                                       EVIDENCE_CITED_BY_LIMIT + 1)
+            citing = self._citing_findings(event_id)
             data.append({
                 "alias": alias, "family": row["family"], "time": str(row["ts"]), "host": row["host"],
                 "cited_by_findings": [self.aliases.alias_for("F", item) for item in citing[:EVIDENCE_CITED_BY_LIMIT]],
