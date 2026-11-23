@@ -3,14 +3,16 @@
 Only DNS question, TLS SNI and HTTP Host fields supply names. A reversed-label
 trie walks each name once: O(name length + labels + matches), independent of the
 catalog size. Lists of names are observations in one record, not transactions.
-SQLite retains one row and at most two compact witnesses per entry/source pair;
-finalization streams groups and fleet membership. Source addresses count network
+SQLite retains one row and at most two compact witnesses per entry/source pair,
+each with the raw records it cites, so a witness chosen at finalize cites records
+the hunt retains; finalization streams groups and fleet membership. Source addresses count network
 clients, not verified machine identities: NAT and shared resolvers can hide hosts.
 """
 from __future__ import annotations
 
 import json
 import re
+import zlib
 from collections.abc import Iterable
 from datetime import UTC
 from pathlib import Path
@@ -27,6 +29,12 @@ CATALOG_PATH = Path(__file__).resolve().parents[3] / "content/network/services.j
 MAX_CATALOG_BYTES = 4 * 1024 * 1024
 MAX_SUFFIXES = 50_000
 MAX_CITATION_BYTES = 64 * 1024
+# A witness's raw records are kept beside it (compressed) so the finding can cite them after the partition that
+# held them is gone. The bound is per witness and generous for one DNS, TLS, HTTP or session record; a larger copy
+# is not kept and the publish path fetches the body from the source by its native id instead.
+MAX_RAW_COPY_BYTES = 256 * 1024
+WITNESS_NOTE = ("Cited witnesses record only the source address and the matched name field; the raw records they "
+                "cite are retained with the finding.")
 MAX_NAMES_PER_RECORD = 1024
 _LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _SLUG = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
@@ -153,7 +161,7 @@ def _source(event: TypedEvent):
 class ServiceCatalog(Playbook):
     id = "network.service_catalog"
     title = "Remote access, tunnel, callback or file-sharing service name observed"
-    version = "3"
+    version = "4"
     families = ("dns_query", "tls_session", "http_tx", "net_session")
     required_fields = ("source.ip",)
     kind = "aggregate"
@@ -178,6 +186,7 @@ class ServiceCatalog(Playbook):
         self.catalog = catalog if catalog is not None else load_catalog()
         self._ready = False
         self._external = 0
+        self._raw_unkept = 0
         self._approval_trie = None
         self._approved_ids = frozenset()
         self._approved_suffixes = {}
@@ -208,7 +217,7 @@ class ServiceCatalog(Playbook):
             # a Python host set or a separate counter that could partly commit.
             spill.table("service_groups", "entry TEXT NOT NULL, approved INTEGER NOT NULL, source TEXT NOT NULL, "
                         "first_rank TEXT NOT NULL, "
-                        "last_rank TEXT NOT NULL, first_event BLOB, last_event BLOB, "
+                        "last_rank TEXT NOT NULL, first_event BLOB, last_event BLOB, first_raw BLOB, last_raw BLOB, "
                         "PRIMARY KEY(entry, approved, source)")
             register_store(self, spill)
             self._ready = True
@@ -225,13 +234,51 @@ class ServiceCatalog(Playbook):
                     not isinstance(name, str) or len(name) > 254 for name in names))):
             payload = None
         else:
-            view = event.model_copy(update={"fields": {key: event.fields[key] for key in ("source.ip", field)}})
+            # The compact caveat routes the witness through the publish path's hydration: the raw copy kept below
+            # is verified against the recorded digest there, and a witness without one is fetched by native id.
+            view = event.model_copy(update={"fields": {key: event.fields[key] for key in ("source.ip", field)},
+                                            "caveats": list(dict.fromkeys([*event.caveats, COMPACT_CITATION_NOTE]))})
             payload = compact_event(view)
             if len(payload) > MAX_CITATION_BYTES:
                 payload = None
         if payload is None:
             self.note_limit("service_citations", "Service presence retained; a witness exceeded the compact citation bound")
+            return None, None
+        return payload, self._raw_copy(event)
+
+    def _raw_copy(self, event):
+        """The witness's raw records from the partition being read, compressed, or None when one of its references
+        is not in the partition, the copy exceeds its bound or the hunt's state budget is short. A copy is citation
+        bytes only: without it the publish path fetches the witness body from the source by native id."""
+        copies = self.raw_of(event)
+        payload = None
+        if (event.raw and all(ref.key in copies for ref in event.raw)
+                and not self.state_budget().new_key_reason(None)):
+            try:
+                # Exact JSON or nothing: a copy altered to serialize would be stored under the original digest.
+                payload = zlib.compress(json.dumps(copies, separators=(",", ":")).encode(), 1)
+            except (TypeError, ValueError):
+                payload = None
+        if payload is None or len(payload) > MAX_RAW_COPY_BYTES:
+            self._raw_unkept += 1
+            return None
         return payload
+
+    @staticmethod
+    def _write_witness(spill, key, rank, witness):
+        blob, raw = witness
+        spill.write("INSERT INTO service_groups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(entry,approved,source) DO UPDATE SET "
+                    "first_rank=min(first_rank,excluded.first_rank), "
+                    "last_rank=max(last_rank,excluded.last_rank), "
+                    "first_event=CASE WHEN excluded.first_rank < first_rank THEN excluded.first_event "
+                    "ELSE first_event END, "
+                    "first_raw=CASE WHEN excluded.first_rank < first_rank THEN excluded.first_raw "
+                    "ELSE first_raw END, "
+                    "last_event=CASE WHEN excluded.last_rank > last_rank THEN excluded.last_event "
+                    "ELSE last_event END, "
+                    "last_raw=CASE WHEN excluded.last_rank > last_rank THEN excluded.last_raw "
+                    "ELSE last_raw END", [(*key, rank, rank, blob, blob, raw, raw)])
 
     def consume(self, events):
         self._prepare_approvals()
@@ -286,6 +333,7 @@ class ServiceCatalog(Playbook):
                     self.evaluated += 1
                 continue
             accepted = not omitted
+            cited = {}  # one witness per name field of this record, whatever number of entries it names
             for (entry, approved), field in matches.items():
                 try:
                     spill = self._db()
@@ -295,17 +343,19 @@ class ServiceCatalog(Playbook):
                     rank = event.ts.astimezone(UTC).isoformat(timespec="microseconds") + "|" + event.id
                     if before is not None and before[0] <= rank <= before[1]:
                         continue
-                    blob = self._citation(event, field)
-                    spill.write("INSERT INTO service_groups VALUES (?, ?, ?, ?, ?, ?, ?) "
-                                "ON CONFLICT(entry,approved,source) DO UPDATE SET "
-                                "first_rank=min(first_rank,excluded.first_rank), "
-                                "last_rank=max(last_rank,excluded.last_rank), "
-                                "first_event=CASE WHEN excluded.first_rank < first_rank THEN excluded.first_event "
-                                "ELSE first_event END, "
-                                "last_event=CASE WHEN excluded.last_rank > last_rank THEN excluded.last_event "
-                                "ELSE last_event END", [(*key, rank, rank, blob, blob)])
+                    if field not in cited:
+                        cited[field] = self._citation(event, field)
+                    witness = cited[field]
+                    try:
+                        self._write_witness(spill, key, rank, witness)
+                    except StateExhausted:
+                        if witness[1] is None:
+                            raise
+                        # A raw copy is citation bytes: it never costs the source its membership row.
+                        self._raw_unkept += 1
+                        self._write_witness(spill, key, rank, (witness[0], None))
                     if before is None and not approved:
-                        yield self._match(entry, str(source), (blob, blob), 1, final=False)
+                        yield self._match(entry, str(source), (witness, witness), 1, final=False)
                 except StateExhausted as error:
                     if accepted:
                         self.refuse("service_state", str(error))
@@ -315,23 +365,35 @@ class ServiceCatalog(Playbook):
                     # Matching already established a positive. Even when the
                     # aggregate cannot grow, publish its bounded live witness
                     # under the same source identity; fleet coverage is partial.
-                    blob = self._citation(event, field)
-                    yield self._match(entry, None if approved else str(source), (blob, blob), 1,
+                    if field not in cited:
+                        cited[field] = self._citation(event, field)
+                    witness = cited[field]
+                    yield self._match(entry, None if approved else str(source), (witness, witness), 1,
                                       final=False, approved=approved, known_source=str(source))
             if accepted:
                 self.evaluated += 1
 
-    def _match(self, entry, source, blobs, count, *, final, approved=False, known_source=None):
+    def _match(self, entry, source, witnesses, count, *, final, approved=False, known_source=None):
+        """`witnesses`: (compact witness, its compressed raw copies or None) pairs, first and last."""
         item = self.catalog.entries[entry]
         events = []
-        for blob in blobs:
+        raw_copies = {}
+        unkept = 0
+        for blob, raw in witnesses:
             if blob is not None:
                 event = expand_event(blob)
                 if not events or event.id != events[0].id:
                     events.append(event)
+                    if raw is None:
+                        unkept += 1
+                    else:
+                        raw_copies.update(json.loads(zlib.decompress(raw)))
         predicate = [pf(event, field) for event in events for field in ("source.ip", *NAME_FIELDS)
                      if event.has(field)]
-        notes = [COMPACT_CITATION_NOTE, "A name observation does not establish execution, session success or data transfer.",
+        # A witness without a kept raw copy keeps its native reference; the publish path fetches its body from the
+        # source and says so on the finding when it cannot.
+        notes = [COMPACT_CITATION_NOTE if unkept else WITNESS_NOTE,
+                 "A name observation does not establish execution, session success or data transfer.",
                  "Distinct internal source addresses are counted; NAT and shared resolvers can hide multiple hosts.",
                  f"Service catalog version {self.catalog.version}; category {item['category']}."]
         if item.get("notes"):
@@ -370,7 +432,7 @@ class ServiceCatalog(Playbook):
             ("ip", str(address), "src") for event in events if (address := _source(event)) is not None))
         if not entities and known_source is not None:
             entities = [("ip", known_source, "src")]
-        return Match(self.id, claim, self.claim_type, events, predicate, events[-1].ts if events else None,
+        match = Match(self.id, claim, self.claim_type, events, predicate, events[-1].ts if events else None,
                      "high" if item["category"] in {"remote_access", "tunnelling", "ide_tunnel"} else "medium",
                      "lead", "high", entities=entities, notes=notes,
                      group_key=group_key, bounded_revision=True,
@@ -380,6 +442,8 @@ class ServiceCatalog(Playbook):
                      aggregate_summary={"source_host_count": count, "rare_service": int(count <= 2 and not self.capped),
                                         "source_count_complete": int(final and not self.capped)},
                      attack=tuple(item["attack"]))
+        match.raw_copies = raw_copies
+        return match
 
     def _hosts(self, entry, approved):
         for (source,) in self._spill.db.execute("SELECT source FROM service_groups WHERE entry=? AND approved=? "
@@ -389,6 +453,10 @@ class ServiceCatalog(Playbook):
     def finalize(self):
         if self._external:
             self.note_coverage("external_sources", f"{self._external} record(s) had sources outside the internal networks.")
+        if self._raw_unkept:
+            self.note_coverage("service_raw_copies", f"{self._raw_unkept} witness raw cop(ies) were not kept by the rule "
+                               "(not in the partition read, over the per-witness bound, or the hunt's state budget "
+                               "was short); a cited witness without one is fetched from the source by native id.")
         if not self._ready:
             return
         # The aggregate has at most one count per catalog entry. SQLite sorts on
@@ -396,18 +464,18 @@ class ServiceCatalog(Playbook):
         counts = self._spill.db.execute("SELECT entry, approved, count(*) AS hosts FROM service_groups "
                                         "GROUP BY entry, approved ORDER BY (count(*) > 2), count(*), entry, approved")
         for entry, approved, count in counts:
-            first_blob = last_blob = None
+            first_witness = last_witness = (None, None)
             first_rank = last_rank = None
-            for source, first_time, last_time, first, last in self._spill.db.execute(
-                    "SELECT source, first_rank, last_rank, first_event, last_event FROM service_groups "
-                    "WHERE entry=? AND approved=? ORDER BY source", (entry, approved)):
+            for source, first_time, last_time, first, last, first_raw, last_raw in self._spill.db.execute(
+                    "SELECT source, first_rank, last_rank, first_event, last_event, first_raw, last_raw "
+                    "FROM service_groups WHERE entry=? AND approved=? ORDER BY source", (entry, approved)):
                 if first_rank is None or first_time < first_rank:
-                    first_rank, first_blob = first_time, first
+                    first_rank, first_witness = first_time, (first, first_raw)
                 if last_rank is None or last_time > last_rank:
-                    last_rank, last_blob = last_time, last
+                    last_rank, last_witness = last_time, (last, last_raw)
                 if not approved:
-                    yield self._match(entry, source, (first, last), count, final=True)
-            yield self._match(entry, None, (first_blob, last_blob), count, final=True, approved=bool(approved))
+                    yield self._match(entry, source, ((first, first_raw), (last, last_raw)), count, final=True)
+            yield self._match(entry, None, (first_witness, last_witness), count, final=True, approved=bool(approved))
 
     def finalize_fallback(self, reason):
         self.note_limit("service_finalize", reason)
