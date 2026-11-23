@@ -158,6 +158,19 @@ class WindowsCitationFetcher:
             match.claim += " " + note
 
 
+def _verified_sources(match: Match, raw_sources: dict[str, dict]) -> dict[str, dict]:
+    """The raw copies stored with a finding: the rule's own copies and the sources given, less any copy of a compact
+    witness that does not verify against the digest its reference recorded. Hydration keeps such a witness compact
+    and says its body was not retrieved; its unverified copy is never stored as the retained record."""
+    sources = {**match.raw_copies, **raw_sources}
+    unverified = {ref.key for event in match.events if COMPACT_CITATION_NOTE in event.caveats for ref in event.raw
+                  if ref.digest and ref.key in sources and raw_digest(sources[ref.key]) != ref.digest}
+    if not unverified:
+        return sources
+    match.raw_copies = {key: body for key, body in match.raw_copies.items() if key not in unverified}
+    return {key: body for key, body in sources.items() if key not in unverified}
+
+
 def _exec_record(hits: list[dict], boot: list | tuple | None = None) -> TypedEvent | None:
     """Rebuild the one process_exec view from its raw audit records and sweep-assigned boot id."""
     events, _skips, errors = normalize_hits(hits)
@@ -484,8 +497,7 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
     else:
         SourceCitationFetcher(None).hydrate(match, raw_sources)
     decision = decide(match, hunt_id)
-    if match.raw_copies:
-        raw_sources = {**match.raw_copies, **raw_sources}
+    raw_sources = _verified_sources(match, raw_sources)
     repo.save_evidence(hunt_id, match.events, raw_sources, task_id, owner_token=owner_token)
     event_ids = [event.id for event in match.events]
     context_event_ids = sorted({event.id for event in match.events} & match.context_ids)

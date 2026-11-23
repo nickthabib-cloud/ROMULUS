@@ -350,3 +350,43 @@ def test_kept_copies_live_on_disk_not_in_memory_at_20k_sources(tmp_path, network
     assert small["kept"] >= 2_000 and large["kept"] >= 20_000
     assert large["peak"] <= small["peak"] + 2_000_000
     assert large["disk"] > small["disk"] * 5
+
+
+# ---- publication -------------------------------------------------------------------------------------------------
+
+def published(rule, bodies, recorded):
+    """Publish the rule's matches for one record whose reference recorded the digest of `recorded` while the
+    partition held `bodies`, with no source to fetch from; each finding with its report-manifest citations."""
+    from romulus.evidence.normalize import raw_digest
+    from romulus.hunt.publish import SourceCitationFetcher, publish_match
+    from tests.test_sweep import _repo
+    witness = event(1).model_copy(update={"raw": [RawRef(target="idx", native_id="1", digest=raw_digest(recorded))]})
+    rule.citation_fetcher = SourceCitationFetcher(None)
+    rule.bind_raw({"idx/1": bodies}, "idx")
+    matches = list(rule.consume([witness]))
+    rule.bind_raw({})
+    matches += list(rule.finalize())
+    repo = _repo()
+    for match in matches:
+        match.fleet_hosts = tuple(match.fleet_hosts)
+        publish_match(repo, "h1", rule, match, None, {})
+    return repo, [(candidate, _citations(repo, candidate)) for candidate in repo.candidates("h1")]
+
+
+def test_a_kept_copy_that_verifies_is_retained(rule):
+    body = {"n": 1, "message": "a1.ngrok-free.app"}
+    _repo, found = published(rule, body, body)
+    assert found and all(item["status"] == "retained" for _candidate, cited in found for item in cited)
+
+
+def test_a_kept_copy_that_fails_its_digest_is_never_stored_as_retained(rule):
+    """The partition held a body other than the one the reference recorded: the finding says its body was not
+    retrieved and the citation has no copy; the altered body is never stored as the record."""
+    from romulus.store.repo import raw_id
+    recorded = {"n": 1, "message": "a1.ngrok-free.app"}
+    repo, found = published(rule, {"n": 1, "message": "altered"}, recorded)
+    assert found
+    for candidate, cited in found:
+        assert cited and all(item["status"] == "broken: raw copy missing" for item in cited)
+        assert "Citation body not retrieved" in candidate["claim"]
+    assert repo.raw_records([raw_id("idx", "1")]) == []
