@@ -21,6 +21,7 @@ from romulus.agent.admission import (
     typed_alias_arguments,
 )
 from romulus.agent.assessment import SECRET_GUARD_SUMMARY, assess_output, run_assessment, template_assessment
+from romulus.agent.clusters import ClusterView, hunt_clusters, unexplained_clusters
 from romulus.agent.context import SessionResults, issued_in, session_tag, strip_reasoning
 from romulus.agent.dossier import build_dossier
 from romulus.agent.grounding import triage_context
@@ -45,7 +46,6 @@ from romulus.agent.toolbox import Toolbox
 from romulus.agent.triage import latest_summary
 from romulus.config import Settings, redact_text
 from romulus.hunt.rank import place_late_findings
-from romulus.report.incidents import build_incident_graph
 from romulus.store.db import digest, utcnow
 from romulus.store.repo import TRIAGE_PURPOSE, Repo, is_lease_lost
 
@@ -470,38 +470,49 @@ def _id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:20]}"
 
 
-def _candidate_views(repo: Repo, hunt_id: str) -> list[dict]:
-    return [{"id": row["id"], "lane": row["lane"], "rule_id": row["rule_id"],
-             "observed_at": str(row["ts"]) if row["ts"] is not None else None,
-             "entities": row.get("entities") or [], "event_ids": row.get("event_ids") or [],
-             "citations": [], "source_link_id": row.get("source_link_id")}
-            for row in repo.candidates(hunt_id, ["urgent", "high", "lead"])]
+def _pending(settings: Settings, hypothesis: dict, repo: Repo | None = None) -> bool:
+    """Whether an open hypothesis still waits for investigation, with sessions to spare: never worked, worked with
+    questions left, or (given `repo`) its last session did not finish (a budget stop, a stop, a failure). A hypothesis
+    its last session finished with no open question is done."""
+    if hypothesis["status"] != "open":
+        return False
+    sessions = int(hypothesis.get("sessions_run") or 0)
+    if sessions >= settings.agent_max_sessions_per_hypothesis:
+        return False
+    if sessions == 0 or _has_open_questions(hypothesis):
+        return True
+    if repo is None:
+        return False
+    ran = [row for row in repo.agent_sessions(hypothesis["hunt_id"], hypothesis_id=hypothesis["id"],
+                                              purpose="investigate") if row["state"] != "running"]
+    return bool(ran) and ran[-1]["state"] != "finished"
 
 
-def _controller_open_hypotheses(settings, repo, hunt_id: str, session_id: str, admission: AgentAdmission) -> None:
-    if repo.agent_hypotheses(hunt_id):
-        return
-    candidates = repo.candidates(hunt_id, ["urgent", "high", "lead"])
-    if not candidates:
-        return
-    graph = build_incident_graph(repo, hunt_id, _candidate_views(repo, hunt_id))
-    by_id = {row["id"]: row for row in candidates}
-    lane_priority = {"urgent": 3, "high": 2, "lead": 1}
-    ordered = sorted(graph["incidents"], key=lambda incident: (
-        -max((lane_priority.get(by_id[item]["lane"], 0) for item in incident["finding_ids"] if item in by_id),
-             default=0), incident["id"]))
-    existing_support = {row["target_id"] for hypothesis in repo.agent_hypotheses(hunt_id)
-                        for row in repo.agent_hypothesis_cites(hypothesis_id=hypothesis["id"])
-                        if row["role"] == "support" and row["target_kind"] == "finding"}
-    for incident in ordered:
-        if len(repo.agent_hypotheses(hunt_id)) >= min(settings.agent_max_initial_hypotheses,
-                                                      settings.agent_max_hypotheses):
-            break
-        top = min((by_id[item] for item in incident["finding_ids"] if item in by_id),
-                  key=lambda row: (-lane_priority.get(row["lane"], 0), -float(row["priority"]), row["id"]))
-        if top["id"] in existing_support:
-            continue
-        incident_alias = admission.aliases.alias_for("I", incident["id"])
+def _pending_cluster_hypotheses(settings: Settings, repo: Repo, hunt_id: str) -> int:
+    """The pending hypotheses that examine a cluster: those citing a finding, evidence or an expansion link. One that
+    cites none of them (a mention-led hypothesis, or one orient opened without citing) explains no cluster, so it never
+    holds a cluster's place; the hunt's hypothesis cap bounds them all together."""
+    return sum(1 for row in repo.agent_hypotheses(hunt_id) if _pending(settings, row, repo)
+               and any(cite["target_kind"] in ("finding", "evidence", "link")
+                       for cite in repo.agent_hypothesis_cites(hypothesis_id=row["id"])))
+
+
+def _controller_open_hypotheses(settings, repo, hunt_id: str, session_id: str, admission: AgentAdmission, *,
+                                view: ClusterView | None = None) -> int:
+    """Open a hypothesis for each unexplained cluster (`romulus.agent.clusters`: no hypothesis cites any of its
+    findings, its links or its findings' evidence), best first in report order, while fewer than
+    AGENT_MAX_INITIAL_HYPOTHESES cluster hypotheses are pending and the hunt's hypothesis cap allows. Called after
+    orient and whenever the scheduler runs out of pending hypotheses, so an orient that opened only a few never leaves
+    the other clusters unexamined while budget remains. Returns how many it opened."""
+    cap = min(settings.agent_max_initial_hypotheses, settings.agent_max_hypotheses)
+    room = cap - _pending_cluster_hypotheses(settings, repo, hunt_id)
+    if room <= 0:
+        return 0
+    view = view if view is not None else hunt_clusters(repo, hunt_id)
+    opened = 0
+    for cluster in unexplained_clusters(repo, hunt_id, view)[:room]:
+        top = cluster.top
+        incident_alias = admission.aliases.alias_for("I", cluster.key)
         statement = f"Investigate incident {incident_alias}: {top['claim']}"
         if len(statement) < 10:
             statement = f"Investigate incident {incident_alias} and review its cited finding."
@@ -509,7 +520,8 @@ def _controller_open_hypotheses(settings, repo, hunt_id: str, session_id: str, a
             admission.create_controller_hypothesis(statement, finding_id=top["id"], alias=incident_alias)
         except ValueError:
             break
-        existing_support.add(top["id"])
+        opened += 1
+    return opened
 
 
 def _hypothesis_context(repo: Repo, hunt_id: str, hypothesis: dict, summaries: list[dict],
@@ -1224,8 +1236,10 @@ def _has_open_questions(hypothesis: dict) -> bool:
 
 
 def _next_hypotheses(settings: Settings, repo: Repo, hunt_id: str) -> list[dict]:
-    rows = [row for row in repo.agent_hypotheses(hunt_id) if row["status"] == "open" and
-            int(row.get("sessions_run") or 0) < settings.agent_max_sessions_per_hypothesis]
+    """The next round: of the pending hypotheses (`_pending`), those with the fewest sessions, in priority order. A
+    hypothesis its last session finished with no open question is not worked again: another session would re-prove
+    what is already recorded, and the budget goes to hypotheses with questions left and to unexplained clusters."""
+    rows = [row for row in repo.agent_hypotheses(hunt_id) if _pending(settings, row, repo)]
     if not rows:
         return []
     minimum = min(int(row.get("sessions_run") or 0) for row in rows)
@@ -1234,10 +1248,8 @@ def _next_hypotheses(settings: Settings, repo: Repo, hunt_id: str) -> list[dict]
     return sorted(round_rows, key=lambda row: _priority(repo, hunt_id, row, touched))
 
 
-def _investigation_done(repo: Repo, hunt_id: str) -> bool:
-    open_rows = [row for row in repo.agent_hypotheses(hunt_id) if row["status"] == "open"]
-    return not open_rows or all(int(row.get("sessions_run") or 0) >= 1 and not _has_open_questions(row)
-                                for row in open_rows)
+def _investigation_done(settings: Settings, repo: Repo, hunt_id: str) -> bool:
+    return not any(_pending(settings, row, repo) for row in repo.agent_hypotheses(hunt_id))
 
 
 def _recover_running_sessions(repo: Repo, hunt_id: str, *, owner_token=None) -> None:
@@ -1472,13 +1484,30 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
         if orient.get("reason") == ORIENT_SHARE_LIMIT:
             limits_hit.add(ORIENT_SHARE_LIMIT)
             reasons.remove(ORIENT_SHARE_LIMIT)
+
+    clusters: list[ClusterView] = []
+
+    def top_up() -> int:
+        """Open hypotheses for unexplained clusters (the controller's, under the latest orient session), when the
+        hunt has reportable findings and orient has run; the cluster graph is built once per run."""
         orient_rows = repo.agent_sessions(hunt_id, purpose="orient")
-        latest_orient = orient_rows[-1] if orient_rows else None
-        if latest_orient and not str(orient.get("reason") or "").startswith("controller_error"):
-            admission = AgentAdmission(settings, repo, hunt_id, latest_orient["id"], owner_token=owner_token,
-                                       purpose="orient")
-            _controller_open_hypotheses(settings, repo, hunt_id, latest_orient["id"], admission)
-            limits_hit.update(admission.limits_hit)
+        if not reportable_count or not orient_rows:
+            return 0
+        pending = _pending_cluster_hypotheses(settings, repo, hunt_id)
+        if pending >= min(settings.agent_max_initial_hypotheses, settings.agent_max_hypotheses):
+            return 0
+        if not clusters:
+            clusters.append(hunt_clusters(repo, hunt_id))
+        admission = AgentAdmission(settings, repo, hunt_id, orient_rows[-1]["id"], owner_token=owner_token,
+                                   purpose="orient")
+        opened = _controller_open_hypotheses(settings, repo, hunt_id, orient_rows[-1]["id"], admission,
+                                             view=clusters[0])
+        limits_hit.update(admission.limits_hit)
+        if clusters and clusters[0].partial:
+            limits_hit.add(clusters[0].partial["reason"])
+        if opened:
+            log.info("agent controller opened %d hypotheses for unexplained clusters of hunt %s", opened, hunt_id)
+        return opened
 
     consecutive_outages = 1 if reportable_count and not orient_finished and orient.get("provider_unavailable") else 0
     stop_scheduling = str(orient.get("reason") or "").startswith("controller_error") or bool(stopped)
@@ -1487,6 +1516,9 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
         stopped = gate.stopped()
         if stopped:
             break
+        # every unexplained cluster gets a hypothesis while fewer than the initial cap are pending: an orient that
+        # opened only a few (or a continuation whose hypotheses are all worked) never leaves the rest unexamined
+        top_up()
         batch = _next_hypotheses(settings, repo, hunt_id)
         if not batch:
             break
@@ -1544,7 +1576,7 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
         if not any(after.get(key, count) > count for key, count in before.items()):
             reasons.append("no_progress")
             break
-        if _investigation_done(repo, hunt_id):
+        if _investigation_done(settings, repo, hunt_id) and not top_up():
             break
 
     stopped = stopped or gate.stopped() or next(
