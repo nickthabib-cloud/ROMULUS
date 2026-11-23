@@ -400,6 +400,19 @@ def test_the_kept_record_of_a_mention_is_scrubbed_whatever_recognised_its_family
     scanner.close()
 
 
+def test_a_mentions_citation_digests_the_cleaned_record_and_keeps_the_scrubbed_text(tmp_path):
+    from romulus.evidence.raw_scrub import clean_source
+    from romulus.store.db import digest
+    record = _record(1, _CREDENTIAL_CASES["eve http2 credential headers"])
+    scanner = _scanner(tmp_path)
+    scanner.scan(TARGET, CONTRACT, [(record, "x")], None)
+    raw = json.loads(next(scanner.ranked())[7])
+    # the digest is that of the record as the store cleans it (as every stored raw record's), not of the scrubbed form
+    assert raw["digest"] == digest(clean_source(record["_source"]))
+    assert _SECRET not in raw["text"]
+    scanner.close()
+
+
 def test_json_held_in_the_message_is_read_by_its_family_never_as_a_serialized_line(tmp_path):
     from romulus.hunt.mention_fields import JSON_MESSAGE
     alert = {"event_type": "alert", "src_ip": "1.2.3.4", "flow_id": 1, "alert": {"signature": "ET MIMIKATZ"}}

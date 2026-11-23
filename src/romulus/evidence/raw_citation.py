@@ -98,16 +98,18 @@ def record_time(source: dict, time_field: str | None, *, unit: str = "ms",
 
 def build_raw_record(hunt_id: str, hit: dict, *, source_kind: str, time_field: str | None, session_id: str | None,
                      task_id: str | None, query_digest: str, query_text: str, redact, flagged,
-                     time_unit: str = "ms", window: tuple[datetime, datetime] | None = None) -> dict:
+                     time_unit: str = "ms", window: tuple[datetime, datetime] | None = None,
+                     kept_source: dict | None = None) -> dict:
     """The stored row for one returned record (`hit` has _index, _id and _source). `redact` removes configured
     secrets from a JSON-like value; `flagged` says whether a value carries instruction-shaped text (it is given the
     cleaned, redacted record, its strings read one by one). The digest is of the record as the source returned it;
     the text kept is cleaned (recognized credentials masked) and redacted. `time_unit` and `window` are the target's
-    epoch unit and the hunt window (`record_time`)."""
+    epoch unit and the hunt window (`record_time`). `kept_source`, when given, is the form whose text is kept (a
+    caller that masked more than the store's cleaning does); the digest stays that of `hit`'s record."""
     if source_kind not in SOURCE_KINDS:
         raise ValueError(f"unknown raw record source kind {source_kind}")
     source = hit["_source"]
-    kept = redact(clean_source(source))
+    kept = redact(clean_source(source if kept_source is None else kept_source))
     full = json.dumps(kept, ensure_ascii=False, sort_keys=True, default=str)
     text, cut = _bounded_bytes(full, MAX_RAW_TEXT_BYTES)
     ts, time_text = record_time(source, time_field, unit=time_unit, window=window)

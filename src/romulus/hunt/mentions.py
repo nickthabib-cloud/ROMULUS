@@ -312,8 +312,11 @@ class MentionScanner:
             # the record as it may be stored: credentials of recognized network records masked (a Zeek or EVE line
             # in its text field included, whatever recognized it), lone surrogates replaced; the excerpt is cut from
             # what is scanned, and the kept record is this one
-            source = scrub_source(clean_source(source))
-            hit = {**hit, "_source": source}
+            cleaned = clean_source(source)
+            source = scrub_source(cleaned)
+            # the citation's digest is of the cleaned record, as every stored raw record's is; its kept text is of
+            # the scrubbed one
+            hit = {**hit, "_source": cleaned}
             selection = select_texts(source, windows=windows, only=entry[3] if len(entry) > 3 else None)
             if not selection.texts:
                 if selection.no_text:
@@ -363,7 +366,7 @@ class MentionScanner:
                 stats["lines_not_staged"] += 1
                 continue
             try:
-                self._keep(target, contract, hit, texts, found, task_id, telemetry, residue)
+                self._keep(target, contract, hit, texts, found, task_id, telemetry, residue, source)
             except (sqlite3.Error, OSError) as error:
                 # the stage itself failed: this line and every later match are counted, never kept
                 self._fail(f"the mention stage failed ({type(error).__name__}: {error})"[:300])
@@ -601,7 +604,8 @@ class MentionScanner:
         return excerpt, start, offset - start, len(line)
 
     def _keep(self, target: str, contract, hit: dict, texts: list[tuple[str, str]],
-              found: dict[int, tuple[int, int]], task_id: str | None, telemetry: str, residue: bool = False) -> None:
+              found: dict[int, tuple[int, int]], task_id: str | None, telemetry: str, residue: bool = False,
+              kept: dict | None = None) -> None:
         db = self._open()
         host = record_host(hit["_source"])
         # one group per record, under its strongest pattern (the earliest loaded among equals); the rest are metadata.
@@ -655,7 +659,7 @@ class MentionScanner:
             query_text=(f"mention sweep: pattern {pattern.id} matched the record's {path} in the deterministic "
                         + (f"read of {target}'s records outside the sweep's selection" if residue
                            else f"sweep of {target}")),
-            redact=self._redact, flagged=injection_flags,
+            redact=self._redact, flagged=injection_flags, kept_source=kept,
             time_unit=time_unit(contract) if contract is not None else "ms", window=self.window)
         raw["ts"] = _iso(raw["ts"])
         excerpt, line_offset, match_offset, line_chars = self._excerpt(text, found[index][1])
