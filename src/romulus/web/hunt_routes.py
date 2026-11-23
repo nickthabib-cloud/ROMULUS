@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from romulus.agent.provider import egress_banners
 from romulus.report.manifest import coverage_for_hunt, internal_networks_view, investigations_for_hunt
-from romulus.report.mentions import coverage_lines, mention_item, mentions_view
+from romulus.report.mentions import citations, coverage_lines, mention_item, mentions_view
 from romulus.web import agent_views, hunt_views
 from romulus.web.auth import csrf_ok
 from romulus.web.control_routes import CONTROL_MESSAGES, controls_view, stop_banner
@@ -87,7 +87,9 @@ def register_hunt_routes(app, repo, s, need, hunt_page):
         rows = repo.mentions(hunt_id, after_rank=after, limit=MENTION_PAGE + 1, pattern_id=pattern or None,
                              host=host or None)
         more = len(rows) > MENTION_PAGE
-        items = [mention_item(row, line_chars=MENTION_LINE_CHARS) for row in rows[:MENTION_PAGE]]
+        cited = citations(repo, hunt_id, rows[:MENTION_PAGE])
+        items = [mention_item(row, line_chars=MENTION_LINE_CHARS, cited=cited.get(row["id"]))
+                 for row in rows[:MENTION_PAGE]]
         next_url = (hunt_views.hunt_url(hunt_id, "/mentions", after=items[-1]["rank"], pattern=pattern, host=host)
                     if more and items else "")
         return hunt_page(request, "hunt_mentions.html", u, h, "mentions", mv=view, items=items, next_url=next_url,
