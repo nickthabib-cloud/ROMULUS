@@ -406,6 +406,10 @@ from tests import throughput_fixture as tf
 # The network-to-host join (pack@63) publishes nothing in this scenario (the three administration sessions network
 # findings cite stay unresolved: no host logged a logon from their clients): it adds its rule cells, its manifest
 # card and the audit of its pass after the packet and baseline stages, and nothing else.
+# network.service_catalog 3->4 (each witness keeps its raw records so a witness chosen at finalize cites a retained
+# record) and pack@64 move only its rule version in rule_cells: the rule reports nothing in this scenario. Marking
+# compact a cited record whose raw copy is not in hand at publication moves no digest here: every finding of this
+# scenario already cites records whose copies are in hand.
 GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
  # Fleet member hosts staged as memberships add two ranking statements: only the audit's rank query count moved.
  # The ranking version rank@1 -> rank@2 (fleet member hosts keep the rule's evidence, timed by their own record) moves
@@ -430,7 +434,7 @@ GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe55
  'links': '5fa22b4162492394955b6b1873f566f427a58dfd7529c0df73e87a6da8daa76f',
  'manifest': '80b4e7aafef66b946cf1bbdd652bc748feae1e943fe7a7c458ef1877b121302d',
  'raw': 'd924f62eebd5ee88c8142c690333924450c3344b18210ddfe87b8e486127dd35',
- 'rule_cells': '88bb9bcbd0a6f2f26f13da91e5f07d79681f73e2fdf75b34481dc973af6eda5e',
+ 'rule_cells': '901fd3bf864345e6f4868a7aea7b5c1cdb828a4c44f329e9d3f47cd980e13240',
  'stats': '3cab287a0e842808a55545533e3005e8ebaf22bebf7af112b62598c7bd3c3ca6',
  'tasks': '1e1eeb69d05da151bec8f6dff43c1863a4eb43a288f84c1ba35168311b303360'}
 # The rule-estimate stack's digests (expansion seeded by the urgent and high lanes, as before evidence ranking;
@@ -455,7 +459,7 @@ GOLDEN_STACK_BY_RULE_ESTIMATE = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e
  'links': '5fa22b4162492394955b6b1873f566f427a58dfd7529c0df73e87a6da8daa76f',
  'manifest': 'b2a3be821d41130d4ae063e588b683ee63c6ddafdb16296cb00a6de84bb0fe23',
  'raw': 'd924f62eebd5ee88c8142c690333924450c3344b18210ddfe87b8e486127dd35',
- 'rule_cells': '88bb9bcbd0a6f2f26f13da91e5f07d79681f73e2fdf75b34481dc973af6eda5e',
+ 'rule_cells': '901fd3bf864345e6f4868a7aea7b5c1cdb828a4c44f329e9d3f47cd980e13240',
  'stats': '3cab287a0e842808a55545533e3005e8ebaf22bebf7af112b62598c7bd3c3ca6',
  'tasks': '1e1eeb69d05da151bec8f6dff43c1863a4eb43a288f84c1ba35168311b303360'}
 GOLDEN_CANDIDATES_BY_RULE_ESTIMATE = GOLDEN_STACK_BY_RULE_ESTIMATE['candidates']
