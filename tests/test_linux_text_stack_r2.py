@@ -41,6 +41,7 @@ UNKNOWN_REASON = "text line in no recognized format: custom.unknown"
 # The network-to-host join adds its rule cells, its manifest card and its later pass's audit; it publishes nothing here.
 # The mention scan reads each record's free-text fields by family and counts the records outside the sweep's
 # selection: only the mention coverage in stats, the sweep summary audit and the manifest moved.
+# The mentions view then states how its finding link is found (cited_by_scope): only the manifest digest moved.
 GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a6dadaa59988bdf81e',
  # Fleet member hosts staged as memberships add two ranking statements: only the audit's rank query count moved.
  # The ranking version rank@1 -> rank@2 (fleet member hosts keep the rule's evidence, timed by their own record) moves
@@ -63,7 +64,7 @@ GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a
  'events': 'f0d612c20f67d030a43e835b8ef639a78c824b51fff59c169d3d5219700de383',
  'expansion': 'dae7cbd7929a4cb94bb232a7343d4d70f62885a979b52714b87bd3641a92169b',
  'links': 'd9f0da030bf1447f35601910ec18eb012f4a55a0a8feef7262ab6e745319890e',
- 'manifest': 'f50ff04831650ee28f08f10575df1562dffb2a08619a3640cb0e9539bebedee9',
+ 'manifest': '66d445663ff89e6c876aebe44a171f0ccb099873a4d8c9b4452b1adb178a852d',
  'raw': '64be31e697a32f93b1a71657560af514b2d430469cb3be19f44b8827985a7775',
  # host.account_or_group_change 7->8 moves only the rule cells (its version); every other digest is unchanged.
  'rule_cells': '8fa891a3f1146e00c43ffedf09c1ab1e9b7161ed833d9c1b21a491a240417838',

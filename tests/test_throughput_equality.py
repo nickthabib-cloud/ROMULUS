@@ -411,6 +411,7 @@ from tests import throughput_fixture as tf
 # selection: only the mention coverage in the sweep's stats, its summary audit record and the manifest moved
 # (no pattern is loaded in tests, so nothing is kept); candidates, events, links and the non-baseline semantic
 # projection are unchanged.
+# The mentions view then states how its finding link is found (cited_by_scope): only the manifest digest moved.
 GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
  # Fleet member hosts staged as memberships add two ranking statements: only the audit's rank query count moved.
  # The ranking version rank@1 -> rank@2 (fleet member hosts keep the rule's evidence, timed by their own record) moves
@@ -433,7 +434,7 @@ GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe55
  'events': '9b9544ad6f24d002f3f71d874518df5ecee3d968e12ec1fd5c9dce2345d7a87f',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
  'links': '5fa22b4162492394955b6b1873f566f427a58dfd7529c0df73e87a6da8daa76f',
- 'manifest': '016f90b8ad57951542fef2adef939a8be9f568b6c42ab647e5f4ee04145fcf4b',
+ 'manifest': 'e620af8e0e1bf456a08c1ce9f182000cda69875e7c08864315a67e1e7dde6cd7',
  'raw': 'd924f62eebd5ee88c8142c690333924450c3344b18210ddfe87b8e486127dd35',
  'rule_cells': '88bb9bcbd0a6f2f26f13da91e5f07d79681f73e2fdf75b34481dc973af6eda5e',
  'stats': 'd9b4e9300012bd2993dcc874e105eb1dfcdf40626ea74849433f3d100309051e',
@@ -458,7 +459,7 @@ GOLDEN_STACK_BY_RULE_ESTIMATE = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e
  'events': '9b9544ad6f24d002f3f71d874518df5ecee3d968e12ec1fd5c9dce2345d7a87f',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
  'links': '5fa22b4162492394955b6b1873f566f427a58dfd7529c0df73e87a6da8daa76f',
- 'manifest': '2ae8d083f759382d480866408fe478879ea5dcbe0064cdaf6eefdcdec2e900f4',
+ 'manifest': '4bdcb7cbec68bce866ae6fb5c70bad499bfee3314cfe2a3916d3371d3d0d1161',
  'raw': 'd924f62eebd5ee88c8142c690333924450c3344b18210ddfe87b8e486127dd35',
  'rule_cells': '88bb9bcbd0a6f2f26f13da91e5f07d79681f73e2fdf75b34481dc973af6eda5e',
  'stats': 'd9b4e9300012bd2993dcc874e105eb1dfcdf40626ea74849433f3d100309051e',
