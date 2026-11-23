@@ -308,6 +308,7 @@ class MentionScanner:
             # the record as it may be stored: credentials of recognized network records masked, lone surrogates
             # replaced (the excerpt is cut from what is scanned)
             source = clean_source(source)
+            hit = {**hit, "_source": source}
             selection = select_texts(source, windows=windows, only=entry[3] if len(entry) > 3 else None)
             if not selection.texts:
                 if selection.no_text:

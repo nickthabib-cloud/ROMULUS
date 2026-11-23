@@ -10,7 +10,8 @@ Families (the first that fits):
 - **text**: a record with a message-like field (`message`, NXLog's `Message`, a Windows record's rendered
   `Event.RenderingInfo.Message`), else an `event.original` that is plain text. Its ECS and Beats free-text fields
   (`ECS_FIELDS`) are read beside it. A Windows record also has its event data's free-text fields read
-  (`WINDOWS_DATA_KEYS`, under `winlog.event_data`, `EventData` or NXLog's flat names).
+  (`WINDOWS_DATA_KEYS`, under `winlog.event_data`, `EventData` or NXLog's flat names). A record with none of the
+  message-like fields is read by those fields and counted as scanned in part.
 - **auditd**: raw Linux audit record lines (one, several joined by newlines, or an array of them). Their hex-encoded
   and quoted untrusted-string fields are decoded (`AUDIT_FIELDS`, and an EXECVE record's arguments joined), never
   the raw hex. A record a shipper indexed as fields is read by the same names under `auditd.log.*` and
@@ -47,6 +48,7 @@ MAX_DEPTH = 8
 TEXT, AUDITD, JOURNALD, EVE, ZEEK, ECS_JSON = "text", "auditd", "journald", "suricata_eve", "zeek", "ecs_json"
 
 NO_TEXT = "no text field"
+NO_LINE = "a record without a message line: only its catalogued free-text fields were scanned"
 JSON_RECORD = "event.original is a JSON record of no catalogued family"
 JSON_ARRAY = "event.original is a JSON array"
 XML_RECORD = "event.original is an XML record"
@@ -118,11 +120,14 @@ EVE_FIELDS: dict[str, tuple[str, ...]] = {
     "mqtt": ("mqtt.publish.topic", "mqtt.connect.client_id", "mqtt.subscribe.topics.topic"),
     "pgsql": ("pgsql.request.simple_query",),
     "rfb": ("rfb.server_security_failure_reason",),
-    # event types without free text: counters, flow records, decoder and protocol anomaly names
-    "stats": (), "flow": (), "netflow": (), "anomaly": (), "alert": (), "drop": (), "modbus": (), "dnp3": (),
-    "ike": (), "snmp": (), "bittorrent-dht": (), "frame": (), "arp": (),
+    # event types without free text: counters, flow records, industrial and key-exchange metadata
+    "stats": (), "flow": (), "netflow": (), "modbus": (), "dnp3": (), "ike": (), "snmp": (), "bittorrent-dht": (),
+    "frame": (), "arp": (),
 }
 _EVE_ALL = tuple(dict.fromkeys(name for names in EVE_FIELDS.values() for name in names))
+# an alert, a drop and an anomaly carry the application-layer block of the transaction they fired on (http, dns, tls,
+# fileinfo, smtp...): they are read by every catalogued field
+EVE_FIELDS.update({"alert": _EVE_ALL, "drop": _EVE_ALL, "anomaly": _EVE_ALL})
 
 # Zeek free-text fields by log (Zeek base-script log documentation). `snmp.community` and other secrets are left out.
 ZEEK_FIELDS: dict[str, tuple[str, ...]] = {
@@ -427,11 +432,15 @@ def select_texts(source: dict, *, windows: bool = False, only: tuple[str, ...] |
             return Selection("xml", [], complete=False, reason=XML_RECORD)
         else:
             _add(texts, "event.original", [original], seen)
+    lined = bool(texts)
     _paths(source, ECS_FIELDS, texts, seen)
     if windows:
         _windows_data(source, texts, seen)
     if not texts:
         return Selection(TEXT, [], complete=False, reason=NO_TEXT)
+    if not lined:
+        # no message line: the catalogued fields are read, and whatever else the record holds is not
+        return _bounded(Selection(TEXT, texts, complete=False, reason=NO_LINE))
     return _bounded(Selection(TEXT, texts))
 
 

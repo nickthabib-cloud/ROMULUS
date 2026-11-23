@@ -18,6 +18,7 @@ from romulus.hunt.mention_fields import (
     JOURNALD,
     JSON_RECORD,
     MAX_TEXTS,
+    NO_LINE,
     ZEEK,
     select_texts,
 )
@@ -162,7 +163,33 @@ def test_a_windows_record_without_a_rendered_message_is_read_by_its_event_data(t
     scanner = _scanner(tmp_path)
     scanner.scan(TARGET, CONTRACT, [(_record(1, source, host="ws1"), "x", True)], None)
     assert _ids(scanner) == [("mention.test_mimikatz", "ws1", "winlog.event_data.CommandLine")]
-    assert scanner.summary()["by_telemetry"] == {"windows_text": 1}
+    summary = scanner.summary()
+    assert summary["by_telemetry"] == {"windows_text": 1}
+    # with no message line, the record's other event data is not read: scanned in part, never "every offered record"
+    assert not selection.complete and summary["not_scanned"]["records_in_part"] == {NO_LINE: 1}
+    assert summary["status"] == "partial" and f"1 record(s) scanned only in part: {NO_LINE}" in summary["reasons"]
+    scanner.close()
+
+
+def test_a_suricata_alert_is_read_by_the_application_block_it_carries_never_by_its_rule_text():
+    alert = {"event_type": "alert", "src_ip": "10.0.0.5", "flow_id": 9,
+             "alert": {"signature": "ET MIMIKATZ download", "metadata": {"tag": ["MIMIKATZ"]}},
+             "http": {"url": "/x.ps1", "http_user_agent": "MIMIKATZ"}}
+    selection = select_texts({"event.original": json.dumps(alert)})
+    assert selection.complete and dict(selection.texts) == {"event.original#eve:http.url": "/x.ps1",
+                                                            "event.original#eve:http.http_user_agent": "MIMIKATZ"}
+
+
+def test_a_lone_surrogate_in_a_record_never_costs_the_page(tmp_path):
+    hits = [_record(1, {"message": "MIMIKATZ \ud800 here"}, host="ws\udc00one"),
+            _record(2, {"message": f"x {SHELL}"}, host="web2")]
+    scanner = _scanner(tmp_path)
+    scanner.scan(TARGET, CONTRACT, [(hit, "x") for hit in hits], None, residue=True)
+    rows = list(scanner.ranked())
+    assert sorted(scanner.patterns.patterns[row[1]].id for row in rows) == ["mention.test_dev_tcp_redirect",
+                                                                          "mention.test_mimikatz"]
+    assert all("\ud800" not in row[8] and "\udc00" not in row[2] for row in rows)
+    assert scanner.summary()["status"] == SCANNED_ALL
     scanner.close()
 
 
