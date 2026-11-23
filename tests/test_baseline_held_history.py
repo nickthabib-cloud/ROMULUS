@@ -14,6 +14,8 @@ import pytest
 from romulus.baseline.lookback import LookbackBudget, LookbackWriter
 from romulus.baseline.snapshot import SnapshotPlanner
 from romulus.baseline.spec import KeyContext
+from romulus.config import Settings
+from romulus.hunt import controls
 from romulus.hunt import run as hunt_run
 from romulus.hunt.run import _finish
 from romulus.store.repo import Repo
@@ -183,6 +185,67 @@ def test_a_lookback_over_a_stopped_hunts_hours_is_unhunted_history_without_what_
     assert {(row["origin"], row["source_hunt_id"], row["hunted"]) for row in segments} == {("lookback", None, 0)}
     counted = {item["key"]["executable"] for row in segments for item in repo.baseline_counts(row["id"])}
     assert "/tmp/.x/implant-a" not in counted
+    # Known residual: what the stopped hunt's unrun stages would have cited is not in its ledger, so a lookback over
+    # its hours counts it like any history nobody hunted. Holding the hunt's own segments does not change that.
+    assert "/tmp/.x/implant-b" in counted
+
+
+# ---- through the real stop and the stages after the sweep ---------------------------------------------------
+
+def test_a_stop_honoured_before_the_baseline_stage_holds_the_writer_and_the_resumed_stages_write(tmp_path,
+                                                                                                monkeypatch):
+    """The stop's not-run list comes from the run's own stop check, and the resumed stages publish the later
+    finding: the wiring from `_stages_after_sweep` into `_finish`, not hand-built summaries."""
+    reference = _reference()
+    settings = Settings(home=tmp_path)
+    repo = _repo()
+    _window(repo)
+    owner = repo.get_hunt("hunt-a")["lease_owner"]
+    sweep = {"finished": True, "complete": True, "partial_reasons": [], "stats": {}}
+    repo.audit("system", "hunt.sweep_summary", "hunt-a", sweep, owner_token=owner)
+    monkeypatch.setattr(hunt_run, "run_rank_pass", lambda *_a, **_k: None)
+    monkeypatch.setattr(hunt_run, "_packet_stage", lambda *_a, **_k: dict(PACKETS))
+    repo.audit("system", "hunt.packet_summary", "hunt-a", dict(PACKETS), owner_token=owner)
+
+    def never(*_args, **_kwargs):
+        pytest.fail("a stage the stop skipped ran")
+
+    for name in ("_baseline_stage", "_join_pass", "_run_expansion_safely"):
+        monkeypatch.setattr(hunt_run, name, never)
+    repo.request_hunt_stop("hunt-a", "hunt", "web:alice")
+    watch = controls.StopWatch(repo, "hunt-a", ("hunt",), ttl=0)
+    packet, baseline, expansion, stop = hunt_run._stages_after_sweep(
+        settings, repo, object(), "hunt-a", None, {}, owner, watch, packet_summary=dict(PACKETS))
+    assert stop["stage"] == "baseline stage"
+    result = _finish(repo, "hunt-a", {"status": "disabled", "mode": "off"}, sweep, packet_summary=packet,
+                     baseline_summary=baseline, expansion_summary=expansion, owner_token=owner, stopped=stop)
+
+    assert result["execution_state"] == "partial"
+    assert _writer(repo)["status"] == "held" and repo.baseline_segments() == []
+
+    # the resume: the stop is cleared and the stages that did not run now run and publish
+    before = repo.latest_stop("hunt-a")["id"]
+    owner = repo.claim_hunt("hunt-a", 600, resume=True)["lease_owner"]
+    repo.clear_stops("hunt-a", "cli:web:alice", up_to_id=before)
+
+    def baseline_stage(*_args, **_kwargs):
+        _later_stage_finding(repo)
+        return dict(BASELINE)
+
+    monkeypatch.setattr(hunt_run, "_baseline_stage", baseline_stage)
+    monkeypatch.setattr(hunt_run, "_join_pass", lambda *_a, **_k: repo.audit(
+        "system", "hunt.join_summary", "hunt-a", {"finished": True, "complete": True}))
+    monkeypatch.setattr(hunt_run, "_run_expansion_safely", lambda *_a, **_k: dict(EXPANDED))
+    recorded = repo.latest_audit("hunt-a", "hunt.baseline_summary")["detail"]
+    packet, baseline, expansion, stop = hunt_run._stages_after_sweep(
+        settings, repo, object(), "hunt-a", None, {}, owner, controls.StopWatch(repo, "hunt-a", ("hunt",), ttl=0),
+        packet_summary=dict(PACKETS), baseline_summary=recorded)
+    assert stop is None
+    _finish(repo, "hunt-a", {"status": "disabled", "mode": "off"}, sweep, packet_summary=packet,
+            baseline_summary=baseline, expansion_summary=expansion, owner_token=owner)
+
+    assert _writer(repo)["status"] == "complete"
+    assert _history(repo) == reference
 
 
 # ---- a crash between writing and publishing ------------------------------------------------------------------
@@ -273,6 +336,7 @@ def test_a_resume_stopped_again_mid_expansion_keeps_the_material_and_the_next_re
     ({"join": {"finished": False, "complete": False, "error": "boom"}}, ["network-host join"]),
 ])
 def test_a_record_citing_stage_that_did_not_finish_holds_the_writer(ending, stages):
+    ending = dict(ending)
     repo = _repo()
     _window(repo)
     if "join" in ending:
@@ -299,6 +363,7 @@ def test_a_record_citing_stage_that_did_not_finish_holds_the_writer(ending, stag
 def test_a_run_whose_record_citing_stages_all_ran_to_their_end_writes(ending):
     """Partial coverage is not an unfinished stage: an expansion cut by its budget, a packet stage that could not
     read everything, or a baseline stage with history gaps each ran to its end, and a resume would not run it."""
+    ending = dict(ending)
     repo = _repo()
     _window(repo)
     _later_stage_finding(repo)
