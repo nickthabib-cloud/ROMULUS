@@ -7,6 +7,7 @@
 {% set stop = h.stop_reason | replace('\n', ' ') %}
 <div class="notice warn"><span><b>Stopped:</b> {{ stop | truncate(160) }}</span><a class="end" href="{{ url(h.id, '/run') }}#stop-reason">Run details</a></div>
 {% endif %}
+{% if ov.history_held %}<div class="notice warn"><span><b>Baseline history:</b> {{ ov.history_held }}</span><a class="end" href="{{ url(h.id, '/coverage') }}">Coverage</a></div>{% endif %}
 {% if internal_networks.warning %}{% set checks = internal_networks.warning_checks or [] %}<div class="notice warn"><span><b>Internal networks:</b> {% if checks %}the {{ checks | join(', ') }} {{ 'check' if checks | length == 1 else 'checks' }} reported a warning.{% else %}a check reported a warning.{% endif %}</span><a class="end" href="{{ url(h.id, '/run') }}#internal-networks">Run details</a></div>{% endif %}
 {% if ov.remote_calls or ov.remote_configured %}<div class="notice"><span><b>Model egress:</b> {% if ov.remote_calls %}telemetry excerpts were sent to a remote model endpoint.{% else %}the AI agent was configured with a remote model endpoint; no telemetry was sent to it.{% endif %}</span><a class="end" href="{{ url(h.id, '/run') }}#model-egress">Run details</a></div>{% endif %}
 {% if ov.analyst_flags %}

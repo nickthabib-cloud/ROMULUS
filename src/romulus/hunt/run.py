@@ -24,11 +24,17 @@ from romulus.config import Settings
 from romulus.detect import netdef
 from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.hunt.baseline_stage import run_baseline_stage
-from romulus.hunt.baseline_writer import DEFAULT_RETAIN_BYTES, run_hunt_segment_writer
+from romulus.hunt.baseline_writer import (
+    DEFAULT_RETAIN_BYTES,
+    mark_history_incomplete,
+    refresh_cited_exclusions,
+    run_hunt_segment_writer,
+)
 from romulus.hunt.controls import HuntStopped, StopWatch
 from romulus.hunt.expansion import PER_ANCHOR_SOURCE_QUERIES, ExpansionEngine
 from romulus.hunt.links import LinkFetcher, is_agent_reach
 from romulus.hunt.manifest import build_manifest, inventory_usable, new_hunt_id, normalizer_versions
+from romulus.hunt.net_join_pass import SUMMARY_ACTION as JOIN_SUMMARY_ACTION
 from romulus.hunt.net_join_pass import finished as join_finished
 from romulus.hunt.net_join_pass import mark_not_run as mark_join_not_run
 from romulus.hunt.net_join_pass import prune_rows as prune_join_rows
@@ -386,16 +392,24 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
         partial_reasons.append(f"baseline_stage:{baseline_status}")
     if packets_incomplete:
         partial_reasons.append(f"packet_stage:{packet_status}")
-    partial = (missing_summary or not sweep_complete or packets_incomplete or baseline_failed
+    unfinished = unfinished_citing_stages(repo, hunt_id, packet_summary=packet_summary,
+                                          expansion_summary=expansion_summary, stopped=stopped)
+    # a failed network-host join pass leaves its sessions unjoined: the hunt stays partial, so a resume runs it again
+    join_failed = JOIN_STAGE in unfinished and JOIN_STAGE not in (stopped or {}).get("not_run", [])
+    if join_failed:
+        partial_reasons.append("network_host_join:failed")
+    partial = (missing_summary or not sweep_complete or packets_incomplete or baseline_failed or join_failed
                or (expansion_summary or {}).get("status") in {"partial", "failed"} or bool(stopped))
     try:
         # The writer decides per hour from each hour's own window cells, so a hunt left partial by another stage still
         # writes the hours whose baseline inputs were complete; whether it is partial decides only how long its window
-        # material is kept (for a resume).
+        # material is kept (for a resume). A run whose record-citing stages did not all run to their end writes none:
+        # its findings, and so the keys history must leave out, are not all known yet.
         segment_summary = run_hunt_segment_writer(
             repo, hunt_id, hunt_partial=partial,
             baseline_finished=bool((baseline_summary or {}).get("finished")),
             retain_budget_bytes=(DEFAULT_RETAIN_BYTES if retain_budget_bytes is None else retain_budget_bytes),
+            unfinished_stages=unfinished,
         )
     except Exception as exc:
         log.exception("hunt-derived baseline segment writer failed")
@@ -422,6 +436,8 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
         reasons.append(f"packet stage {packet_status}: {detail}"[:200])
     if baseline_failed:
         reasons.append(f"baseline stage {baseline_status}: source, staging, or execution failure")
+    if join_failed:
+        reasons.append("network-host join pass failed; resuming the hunt runs it again")
     if expansion_summary and expansion_summary.get("stop_reason"):
         reasons.append(f"expansion: {expansion_summary['stop_reason']}")
     # Retain the legacy report projection alongside the richer AI-specific summary.
@@ -446,6 +462,31 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
         "expansion": expansion_summary or {},
         **({"stopped": stopped} if stopped else {}),
     }
+
+
+def unfinished_citing_stages(repo: Repo, hunt_id: str, *, packet_summary: dict | None,
+                             expansion_summary: dict | None, stopped: dict | None) -> list[str]:
+    """The stages after the sweep that publish findings citing records and did not run to their end in this run:
+    the ones a stop kept from running, a packet stage or network-host join pass that did not finish (failed), and
+    an expansion that failed or was stopped part way. A resume runs each of them again. An expansion cut by its
+    budget or depth ran to its end. The baseline stage is judged by the writer from its own summary.
+
+    The AI agent is not one of them here: it runs after the deterministic finish whether or not the hunt stopped."""
+    stages = [stage for stage in (stopped or {}).get("not_run", []) if stage != AGENT_STAGE]
+
+    def add(stage: str) -> None:
+        if stage not in stages:
+            stages.append(stage)
+
+    if packet_summary and not packet_summary.get("finished"):
+        add("packet stage")
+    join = (repo.latest_audit(hunt_id, JOIN_SUMMARY_ACTION) or {}).get("detail")
+    if join is not None and not join.get("finished"):
+        add(JOIN_STAGE)
+    if expansion_summary and (expansion_summary.get("status") in {"failed", "not_run"}
+                              or expansion_summary.get("stopped")):
+        add("expansion")
+    return stages
 
 
 def stopped_text(stopped: dict) -> str:
@@ -534,13 +575,14 @@ def _stages_after_sweep(s: Settings, repo: Repo, client: ElasticClient, hunt_id:
     run_rank_pass(repo, hunt_id, PASS_FINAL, owner_token=owner_token, heartbeat=heartbeat)
     if stop is not None:
         if ((repo.get_hunt(hunt_id) or {}).get("manifest") or {}).get("ai_agent", {}).get("requested"):
-            not_run.append("AI agent")
+            not_run.append(AGENT_STAGE)
         stop["not_run"] = not_run
         mark_unrun_stages(repo, hunt_id, "not run: stopped by analyst", not_run=not_run, owner_token=owner_token)
     return packet_summary, baseline_summary, expansion_summary, stop
 
 
 JOIN_STAGE = "network-host join"
+AGENT_STAGE = "AI agent"
 
 
 def _join_pass(s: Settings, repo: Repo, client: ElasticClient, hunt_id: str, heartbeat, owner_token: str) -> dict:
@@ -738,6 +780,9 @@ def run_hunt(s: Settings, hunt_id: str, on_candidate=None, expand: bool | None =
         repo.heartbeat_hunt(hunt_id, _lease_seconds(s), owner_token=claimed_owner)
         claimed = hunt
     owner_token = claimed["lease_owner"]
+    # until a finish whose record-citing stages all ran to their end clears it, this hunt's hours hold findings
+    # whose cited keys are not all known: no later hunt's history over them reads as normal
+    mark_history_incomplete(repo, hunt_id)
     h = repo.get_hunt(hunt_id)
     m = h["manifest"]
     window = Window(start=datetime.fromisoformat(m["window"]["start"]), end=datetime.fromisoformat(m["window"]["end"]))
@@ -883,7 +928,8 @@ def _with_agent_result(result: dict, repo: Repo, summary: dict, *, settings: Set
     triage = (_triage_after_agent(settings, repo, result["hunt_id"], manifest or {}, summary)
               if settings is not None else None)
     combined = {**result, "ai_agent": summary,
-                "agent": {"status": summary.get("status", "unknown"), "stop_reason": summary.get("reason")}}
+                "agent": {"status": summary.get("status", "unknown"), "stop_reason": summary.get("reason")},
+                "baseline_exclusions": exclusions_after_agent(repo, result["hunt_id"])}
     if triage is not None:
         combined["ai_triage"] = triage
     try:
@@ -892,6 +938,28 @@ def _with_agent_result(result: dict, repo: Repo, summary: dict, *, settings: Set
     except Exception:
         log.exception("could not read the refreshed agent result")
     return combined
+
+
+AGENT_EXCLUSIONS_ACTION = "hunt.agent_baseline_exclusions"
+
+
+def exclusions_after_agent(repo: Repo, hunt_id: str) -> dict:
+    """Leave out of baseline history every record the AI agent's findings cite, whatever the agent's outcome (a
+    failed or stopped agent keeps the findings it stored). A failure leaves the ledger and history as they were,
+    is recorded in the audit, and never changes the hunt's result. It runs again only when this hunt's agent
+    finishes again (a continuation or resume of its agent): a hunt that is not resumed keeps the AI-cited records
+    in history."""
+    try:
+        summary = refresh_cited_exclusions(repo, hunt_id)
+    except Exception as exc:  # history upkeep must never sink the agent's result
+        log.exception("baseline exclusions after the AI agent failed")
+        summary = {"status": "failed", "reason": f"baseline exclusions after the AI agent failed: {exc}"[:300]}
+    if summary.get("status") not in {"disabled", "no_agent_findings"}:
+        try:
+            repo.audit("system", AGENT_EXCLUSIONS_ACTION, hunt_id, summary)
+        except Exception:
+            log.exception("could not record the baseline exclusions after the AI agent")
+    return summary
 
 
 class AgentModelMismatch(ValueError):
@@ -1054,6 +1122,8 @@ def resume_hunt(s: Settings, hunt_id: str, *, force_model: bool = False, continu
     if forced is not None:
         # recorded only now, under the lease: a refused resume switched nothing
         repo.audit("system", AGENT_MODEL_FORCED, hunt_id, forced, owner_token=owner_token)
+    if not agent_only:
+        mark_history_incomplete(repo, hunt_id)          # a run recorded before the marks existed has none
     hunt = repo.get_hunt(hunt_id)
     manifest = hunt["manifest"]
     if agent_only:
@@ -1083,7 +1153,9 @@ def resume_hunt(s: Settings, hunt_id: str, *, force_model: bool = False, continu
                                             owner_token=owner_token, summary=summary)
                 except Exception:
                     log.exception("could not record local agent recovery failure")
-            return {**base_result, "agent": summary, "ai_agent": summary}
+            # what the agent stored before it failed still leaves history
+            return {**base_result, "agent": summary, "ai_agent": summary,
+                    "baseline_exclusions": exclusions_after_agent(repo, hunt_id)}
     # A pending template handoff is local work. Keep existing partial investigation recovery on its
     # original path, and resolve readiness once so a changing configuration cannot open a source path.
     if agent_only and agent_run.get("state") == "pending":

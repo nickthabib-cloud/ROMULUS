@@ -264,6 +264,10 @@ def _stored_utc(value: datetime | None) -> datetime | None:
     return value.replace(tzinfo=UTC) if value is not None and value.tzinfo is None else value
 
 
+class ExclusionsChanged(ValueError):
+    """A build's exclusions no longer hold the durable cited-key union over its hours."""
+
+
 def _with_utc(row, columns: tuple[str, ...]) -> dict:
     out = dict(row)
     for name in columns:
@@ -1062,6 +1066,9 @@ class Repo:
             # hunts' snapshots name them), and the hunt id on them remains as provenance. Its cited-key exclusion
             # ledger stays too, so the segments' exclusion digests stay current. Only a segment it was still
             # building is unfinished work of this hunt alone, and is revoked.
+            # a deleted hunt no longer holds history back: its marks go with it
+            rm("baseline_exclusions_incomplete", t.baseline_exclusions_incomplete.delete().where(
+                t.baseline_exclusions_incomplete.c.hunt_id == hunt_id))
             rm("baseline_segments_revoked", t.baseline_segment.update().where(
                 t.baseline_segment.c.built_by_hunt_id == hunt_id, t.baseline_segment.c.status == "building",
             ).values(status="revoked"))
@@ -2685,10 +2692,13 @@ class Repo:
                 yield dict(row)
             after = rows[-1]["host"]
 
-    def candidates(self, hunt_id: str, lanes: list[str] | None = None) -> list[dict]:
+    def candidates(self, hunt_id: str, lanes: list[str] | None = None, *,
+                   provenance: str | None = None) -> list[dict]:
         q = select(t.candidate).where(t.candidate.c.hunt_id == hunt_id)
         if lanes:
             q = q.where(t.candidate.c.lane.in_(lanes))
+        if provenance is not None:
+            q = q.where(t.candidate.c.provenance == provenance)
         with self.engine.connect() as c:
             return [dict(r) for r in c.execute(q).mappings()]
 
@@ -3723,8 +3733,7 @@ class Repo:
         tally.check()
         return longest
 
-    def finalize_baseline_segment(self, segment_id: str) -> str:
-        """Digest a completed build without a write lock, then expose it in one metadata update."""
+    def _segment_rows_digest(self, segment_id: str) -> str:
         digest = _RowsDigest()
         for kind, columns, rows in (
                 ("count", _COUNT_COLUMNS, self.baseline_counts(segment_id)),
@@ -3732,8 +3741,88 @@ class Repo:
                 ("event", _EVENT_HOUR_COLUMNS, self.baseline_segment_event_hours(segment_id))):
             for chunk in _chunks(rows, BASELINE_PAGE):
                 digest.add(kind, columns, chunk)
-        value = digest.hexdigest()
+        return digest.hexdigest()
+
+    @staticmethod
+    def _missing_exclusion(c, segment_id: str) -> str | None:
+        """A cited key of the durable union over a building segment's span that its exclusions lack, or None.
+
+        Read inside the activation's write transaction, so no ledger write can fall between the check and the
+        activation: a build whose exclusions were read before another hunt cited more keys is never published."""
+        s, e = t.baseline_segment.c, t.baseline_hunt_exclusion.c
+        row = c.execute(select(s.site, s.target, s.spec_id, s.spec_version, s.key_version, s.start, s.end,
+                               s.excluded_keys).where(s.id == segment_id)).mappings().first()
+        if row is None:
+            return None
+        excluded = set(row["excluded_keys"] or [])
+        for (key,) in c.execute(select(e.key_digest).where(
+                e.site == row["site"], e.target == row["target"], e.spec_id == row["spec_id"],
+                e.spec_version == row["spec_version"], e.key_version == row["key_version"],
+                e.start < row["end"], e.end > row["start"]).distinct()):
+            if key not in excluded:
+                return key
+        return None
+
+    def publish_derived_baseline_segment(self, segment_id: str, *, replaces: str, replaces_digest: str) -> str:
+        """Expose a completed derived build in place of the segment it replaces, in one transaction.
+
+        The replaced segment is retired first, and only while it is still active with the exclusions it was judged
+        on; the build is activated only when that retirement happened and its exclusions still hold every key of
+        the durable union over its span. So the two are never both active, never both out of cover, and a build
+        made from an older reading of the union never becomes cover. Returns "published", "superseded" (the replaced
+        segment had already left cover) or "union_changed"; on either refusal nothing changes and the caller
+        discards the build. Raises when the build is not building."""
+        value = self._segment_rows_digest(segment_id)
+        s = t.baseline_segment.c
         with write_txn(self.engine) as c:
+            if self._missing_exclusion(c, segment_id) is not None:
+                return "union_changed"
+            if not c.execute(t.baseline_segment.update().where(
+                    s.id == replaces, s.status == "active", s.exclusion_digest == replaces_digest,
+            ).values(status="stale")).rowcount:
+                return "superseded"
+            if not c.execute(t.baseline_segment.update().where(s.id == segment_id, s.status == "building")
+                             .values(rows_digest=value, status="active")).rowcount:
+                raise ValueError(f"baseline segment {segment_id} is not building")
+            return "published"
+
+    def discard_baseline_build(self, segment_id: str, built_by_hunt_id: str) -> bool:
+        """Drop one unpublished build its owner gave up on (child rows in bounded chunks, then the row), so the id
+        stays free for an identical later build. Returns whether the row was removed."""
+        s = t.baseline_segment.c
+        owned = and_(s.id == segment_id, s.status == "building", s.built_by_hunt_id == built_by_hunt_id)
+        with self.engine.connect() as c:
+            if c.execute(select(s.id).where(owned)).first() is None:
+                return False
+        self._drop_baseline_children(segment_id)
+        with write_txn(self.engine) as c:
+            return bool(c.execute(t.baseline_segment.delete().where(owned)).rowcount)
+
+    def baseline_segment_state(self, segment_id: str) -> tuple[str, str] | None:
+        """(status, exclusion digest) of one segment, or None."""
+        s = t.baseline_segment.c
+        with self.engine.connect() as c:
+            row = c.execute(select(s.status, s.exclusion_digest).where(s.id == segment_id)).first()
+        return None if row is None else (row[0], row[1])
+
+    def stale_baseline_segment(self, segment_id: str, exclusion_digest: str) -> bool:
+        """Retire one active segment judged on `exclusion_digest`; False when it is no longer that."""
+        s = t.baseline_segment.c
+        with write_txn(self.engine) as c:
+            return bool(c.execute(t.baseline_segment.update().where(
+                s.id == segment_id, s.status == "active", s.exclusion_digest == exclusion_digest,
+            ).values(status="stale")).rowcount)
+
+    def finalize_baseline_segment(self, segment_id: str) -> str:
+        """Digest a completed build without a write lock, then expose it in one metadata update.
+
+        Raises ExclusionsChanged, changing nothing, when the durable cited-key union over its span holds a key its
+        exclusions lack (another hunt cited it after this build read the union)."""
+        value = self._segment_rows_digest(segment_id)
+        with write_txn(self.engine) as c:
+            if (key := self._missing_exclusion(c, segment_id)) is not None:
+                raise ExclusionsChanged(f"baseline segment {segment_id}: cited key {key} joined the union over its "
+                                        "hours after the build read it")
             result = c.execute(t.baseline_segment.update().where(
                 t.baseline_segment.c.id == segment_id,
                 t.baseline_segment.c.status == "building",
@@ -3913,17 +4002,20 @@ class Repo:
         return {key_id: found.get(key_id, 0) for key_id in key_ids}
 
     def baseline_key_history_counts(self, key_ids: list[str], scope_kind: str, scope: str, hunt_id: str,
-                                    spec_id: str, span: tuple[datetime, datetime] | None = None) -> dict[str, int]:
+                                    spec_id: str, span: tuple[datetime, datetime] | None = None, *,
+                                    complete_only: bool = False) -> dict[str, int]:
         """The summed history count of each key of a bounded batch in one scope, in one query; absent keys are 0.
 
-        Equal, key by key, to summing `baseline_key_history` rows."""
+        Equal, key by key, to summing `baseline_key_history` rows. With `complete_only`, only the member segments
+        the snapshot did not flag as covering hours whose finding-associated exclusions were incomplete."""
         if not key_ids:
             return {}
         c = t.baseline_count.c
+        complete = ((t.baseline_snapshot_segment.c.exclusions_incomplete.is_(False),) if complete_only else ())
         query = (select(c.key_id, func.sum(c.count))
                  .join(t.baseline_snapshot_segment, _snapshot_member(c.segment_id, hunt_id, spec_id))
                  .where(c.key_id.in_(sorted(set(key_ids))), c.scope_kind == scope_kind, c.scope == scope,
-                        *_count_in_span(c, span))
+                        *_count_in_span(c, span), *complete)
                  .group_by(c.key_id))
         with self.engine.connect() as connection:
             found = {str(key_id): int(total) for key_id, total in connection.execute(query)}
@@ -4020,6 +4112,15 @@ class Repo:
                 inserted = c.execute(member, chunk).rowcount
                 if inserted != len(chunk):
                     raise ValueError("snapshot names an unknown baseline segment")
+            # members over hours whose finding-associated exclusions were incomplete, as the coverage names them
+            m = t.baseline_snapshot_segment.c
+            flag = (t.baseline_snapshot_segment.update()
+                    .where(m.hunt_id == row["hunt_id"], m.segment_id == bindparam("sid"))
+                    .values(exclusions_incomplete=True))
+            flagged = sorted({segment_id for item in (row.get("coverage") or {}).values()
+                              for segment_id in (item.get("incomplete") or {}).get("segment_ids") or []})
+            for chunk in _chunks(({"sid": segment_id} for segment_id in flagged), BASELINE_CHUNK):
+                c.execute(flag, chunk)
             return True
 
     def baseline_snapshot(self, hunt_id: str) -> dict | None:
@@ -5580,6 +5681,86 @@ class Repo:
             for chunk in _chunks(rows, BASELINE_CHUNK):
                 connection.execute(t.baseline_hunt_exclusion.insert(), chunk)
 
+    def mark_baseline_exclusions_incomplete(self, hunt_id: str, *, site: str, start: datetime, end: datetime,
+                                            pairs: dict[tuple[str, str], str],
+                                            spec_versions: dict[str, tuple[str, str]]) -> None:
+        """Record that one hunt's finding-associated exclusions over its window are not all known, per (target,
+        spec), with why; a later mark of the same pair replaces its reason and versions. One transaction."""
+        start, end = _utc(start, "incomplete start"), _utc(end, "incomplete end")
+        if start >= end:
+            raise ValueError("baseline incomplete-exclusion start before end is required")
+        now = utcnow()
+        rows = [{"hunt_id": hunt_id, "site": site, "target": target, "spec_id": spec_id,
+                 "spec_version": spec_versions[spec_id][0], "key_version": spec_versions[spec_id][1],
+                 "start": start, "end": end, "reason": str(reason)[:500], "marked_at": now}
+                for (target, spec_id), reason in sorted(pairs.items())]
+        if not rows:
+            return
+        statement = insert(t.baseline_exclusions_incomplete)
+        statement = statement.on_conflict_do_update(
+            index_elements=["hunt_id", "target", "spec_id"],
+            set_={name: statement.excluded[name] for name in
+                  ("site", "spec_version", "key_version", "start", "end", "reason", "marked_at")},
+        )
+        with write_txn(self.engine) as connection:
+            for chunk in _chunks(iter(rows), BASELINE_CHUNK):
+                connection.execute(statement, chunk)
+
+    def clear_baseline_exclusions_incomplete(self, hunt_id: str, *, keep: set[tuple[str, str]] | None = None) -> int:
+        """Drop one hunt's incomplete-exclusion marks, except the (target, spec) pairs in `keep`."""
+        table = t.baseline_exclusions_incomplete.c
+        with write_txn(self.engine) as connection:
+            removed = 0
+            for row in connection.execute(select(table.target, table.spec_id).where(
+                    table.hunt_id == hunt_id)).all():
+                if keep and (row[0], row[1]) in keep:
+                    continue
+                removed += connection.execute(t.baseline_exclusions_incomplete.delete().where(
+                    table.hunt_id == hunt_id, table.target == row[0], table.spec_id == row[1])).rowcount
+            return removed
+
+    def baseline_exclusions_incomplete(self, *, site: str | None = None, target: str | None = None,
+                                       spec_id: str | None = None, spec_version: str | None = None,
+                                       key_version: str | None = None, start: datetime | None = None,
+                                       end: datetime | None = None, hunt_id: str | None = None) -> list[dict]:
+        """Incomplete-exclusion marks, narrowed by any of site, target, spec and versions, an overlapping span, or
+        one hunt; in (hunt, target, spec) order."""
+        table = t.baseline_exclusions_incomplete.c
+        query = select(t.baseline_exclusions_incomplete)
+        for column, value in ((table.site, site), (table.target, target), (table.spec_id, spec_id),
+                              (table.spec_version, spec_version), (table.key_version, key_version),
+                              (table.hunt_id, hunt_id)):
+            if value is not None:
+                query = query.where(column == value)
+        if start is not None:
+            query = query.where(table.end > _utc(start, "incomplete query start"))
+        if end is not None:
+            query = query.where(table.start < _utc(end, "incomplete query end"))
+        query = query.order_by(table.hunt_id, table.target, table.spec_id)
+        with self.engine.connect() as connection:
+            return [_with_utc(row, ("start", "end", "marked_at")) for row in connection.execute(query).mappings()]
+
+    def add_baseline_hunt_exclusions(self, hunt_id: str, *, site: str, start: datetime, end: datetime,
+                                     exclusions: dict[tuple[str, str], set[str]],
+                                     spec_versions: dict[str, tuple[str, str]]) -> None:
+        """Add keys to one hunt's cited-key ledger, keeping every key it already holds (one transaction)."""
+        start, end = _utc(start, "exclusion start"), _utc(end, "exclusion end")
+        if start >= end:
+            raise ValueError("baseline exclusion start before end is required")
+        rows = (
+            {
+                "hunt_id": hunt_id, "site": site, "target": target, "spec_id": spec_id,
+                "spec_version": spec_versions[spec_id][0], "key_version": spec_versions[spec_id][1],
+                "key_digest": key_digest, "start": start, "end": end,
+            }
+            for (target, spec_id), keys in sorted(exclusions.items())
+            for key_digest in sorted(keys)
+        )
+        statement = _insert_ignore(t.baseline_hunt_exclusion, ("hunt_id", "target", "spec_id", "key_digest"))
+        with write_txn(self.engine) as connection:
+            for chunk in _chunks(rows, BASELINE_CHUNK):
+                connection.execute(statement, chunk)
+
     def baseline_exclusion_keys(self, *, site: str, target: str, spec_id: str,
                                 spec_version: str, key_version: str,
                                 start: datetime, end: datetime) -> list[str]:
@@ -5606,25 +5787,40 @@ class Repo:
                                                chunk: int = 500) -> int:
         """Mark active overlapping segments stale when the durable cited-key union changed.
 
-        Segments and exclusions are read without the write lock. The exclusion rows of one (target, spec,
-        versions) are read once and each segment's union is computed from them; the changed segments are then
-        flipped in short transactions of `chunk` ids. A flip only applies to a segment still active with the
-        exclusion digest it was judged on, so a concurrent rewrite is never staled on stale information.
+        The changed segments are flipped in short transactions of `chunk` ids. A flip only applies to a segment
+        still active with the exclusion digest it was judged on, so a concurrent rewrite is never staled on stale
+        information.
         """
+        changed = [(row["id"], row["exclusion_digest"])
+                   for row in self.baseline_exclusion_changes(site=site, start=start, end=end)]
+        stale = 0
+        segment = t.baseline_segment.c
+        for index in range(0, len(changed), chunk):
+            with write_txn(self.engine) as connection:
+                for segment_id, digest in changed[index:index + chunk]:
+                    stale += connection.execute(t.baseline_segment.update().where(
+                        segment.id == segment_id, segment.status == "active",
+                        segment.exclusion_digest == digest,
+                    ).values(status="stale")).rowcount
+        return stale
+
+    def baseline_exclusion_changes(self, *, site: str, start: datetime, end: datetime) -> list[dict]:
+        """Active segments overlapping [start, end) whose stored exclusions differ from the durable cited-key
+        union over their span: each segment row (child rows aside) with `keys`, that union in sorted order.
+
+        Segments and exclusions are read without the write lock. The exclusion rows of one (target, spec,
+        versions) are read once and each segment's union is computed from them."""
         start, end = _utc(start, "staleness start"), _utc(end, "staleness end")
         segment, exclusion = t.baseline_segment.c, t.baseline_hunt_exclusion.c
         with self.engine.connect() as connection:
-            segments = list(connection.execute(select(
-                segment.id, segment.target, segment.spec_id, segment.spec_version, segment.key_version,
-                segment.start, segment.end, segment.excluded_keys, segment.exclusion_digest,
-            ).where(
+            segments = list(connection.execute(select(t.baseline_segment).where(
                 segment.site == site, segment.status == "active", segment.start < end, segment.end > start,
             ).order_by(segment.target, segment.spec_id, segment.spec_version, segment.key_version,
                        segment.id)).mappings())
-        changed: list[tuple[str, str]] = []
+        changed: list[dict] = []
         group = lambda row: (row["target"], row["spec_id"], row["spec_version"], row["key_version"])
         for (target, spec_id, spec_version, key_version), rows in groupby(segments, key=group):
-            rows = [_with_utc(row, ("start", "end")) for row in rows]
+            rows = [_with_utc(row, _SEGMENT_TIMES) for row in rows]
             low, high = min(row["start"] for row in rows), max(row["end"] for row in rows)
             with self.engine.connect() as connection:
                 cited = [(key, _stored_utc(first), _stored_utc(last)) for key, first, last in connection.execute(
@@ -5637,16 +5833,8 @@ class Repo:
                 keys = sorted({key for key, first, last in cited if first < row["end"] and last > row["start"]})
                 if (keys != sorted(row["excluded_keys"] or [])
                         or self._baseline_exclusion_digest(keys) != row["exclusion_digest"]):
-                    changed.append((row["id"], row["exclusion_digest"]))
-        stale = 0
-        for index in range(0, len(changed), chunk):
-            with write_txn(self.engine) as connection:
-                for segment_id, digest in changed[index:index + chunk]:
-                    stale += connection.execute(t.baseline_segment.update().where(
-                        segment.id == segment_id, segment.status == "active",
-                        segment.exclusion_digest == digest,
-                    ).values(status="stale")).rowcount
-        return stale
+                    changed.append({**row, "keys": keys})
+        return changed
 
     def baseline_observations(self, hunt_id: str, *, page_size: int = BASELINE_PAGE) -> Iterator[dict]:
         """A hunt's observations in key order (spec, version, scope, key digest), paged."""

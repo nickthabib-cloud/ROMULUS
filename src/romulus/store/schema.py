@@ -998,6 +998,8 @@ baseline_snapshot_segment = Table(
     Column("spec_id", String, nullable=False),
     Column("segment_id", String, ForeignKey("baseline_segment.id", ondelete="RESTRICT"), nullable=False),
     Column("target", String, nullable=False),
+    # the segment covers hours whose finding-associated exclusions were incomplete when the snapshot was frozen
+    Column("exclusions_incomplete", Boolean, nullable=False, default=False, server_default="0"),
     PrimaryKeyConstraint("hunt_id", "spec_id", "segment_id", name="pk_baseline_snapshot_segment"),
 )
 Index("ix_baseline_snapshot_segment_segment", baseline_snapshot_segment.c.segment_id)
@@ -1351,6 +1353,30 @@ baseline_hunt_exclusion = Table(
         "hunt_id", "target", "spec_id", "key_digest", name="pk_baseline_hunt_exclusion",
     ),
     CheckConstraint("end > start", name="ck_baseline_hunt_exclusion_span"),
+)
+# Hours whose finding-associated exclusions are not all known: one row per hunt, target and spec from the hunt's start
+# until a finish whose record-citing stages all ran to their end (or the hunt's deletion). No key to hunt, like the
+# ledger it qualifies.
+baseline_exclusions_incomplete = Table(
+    "baseline_exclusions_incomplete", metadata,
+    Column("hunt_id", String, nullable=False),
+    Column("site", String, nullable=False),
+    Column("target", String, nullable=False),
+    Column("spec_id", String, nullable=False),
+    Column("spec_version", String, nullable=False),
+    Column("key_version", String, nullable=False),
+    Column("start", DateTime(timezone=True), nullable=False),
+    Column("end", DateTime(timezone=True), nullable=False),
+    Column("reason", Text, nullable=False),
+    Column("marked_at", DateTime(timezone=True), nullable=False),
+    PrimaryKeyConstraint("hunt_id", "target", "spec_id", name="pk_baseline_exclusions_incomplete"),
+    CheckConstraint("end > start", name="ck_baseline_exclusions_incomplete_span"),
+)
+Index(
+    "ix_baseline_exclusions_incomplete_overlap", baseline_exclusions_incomplete.c.site,
+    baseline_exclusions_incomplete.c.target, baseline_exclusions_incomplete.c.spec_id,
+    baseline_exclusions_incomplete.c.spec_version, baseline_exclusions_incomplete.c.key_version,
+    baseline_exclusions_incomplete.c.start, baseline_exclusions_incomplete.c.end,
 )
 Index(
     "ix_baseline_hunt_exclusion_overlap", baseline_hunt_exclusion.c.site,

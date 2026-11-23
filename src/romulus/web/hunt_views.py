@@ -10,7 +10,7 @@ from urllib.parse import quote, urlencode
 
 from sqlalchemy import func, select
 
-from romulus.report.manifest import UNRESOLVED_STATES
+from romulus.report.manifest import UNRESOLVED_STATES, held_history
 from romulus.store import schema as t
 from romulus.store.repo import FINAL_RANK_PASS
 from romulus.web import agent_views
@@ -150,7 +150,8 @@ def overview(repo, hunt: dict) -> dict:
             "analyst_flags": [{"case_id": agent_views.clip(flag.get("case_id"), 200),
                                "message": agent_views.clip(flag.get("message") or flag.get("reason"), 600)}
                               for flag in flags[:20] if isinstance(flag, dict)],
-            "analyst_flags_more": max(0, len(flags) - 20)}
+            "analyst_flags_more": max(0, len(flags) - 20),
+            "history_held": held_history(repo, hunt_id)}
 
 
 def reports(repo, hunt_id: str) -> list[dict]:

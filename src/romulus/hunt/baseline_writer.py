@@ -5,6 +5,17 @@ all complete and cover it is written, whatever happened in unrelated stages (exp
 hour with any incomplete input is never written and stays honestly absent from history. Each maximal run of written
 hours is one segment.
 
+A run that ended before every stage whose findings cite records ran to its end (an analyst's stop, a stage that
+failed) publishes no segment at all. Its findings are incomplete, so the keys of finding-associated activity that
+history must leave out are not all known yet: written now, its counts would carry them as normal history for every
+later hunt until a resume replaced them, and for good if none ever did. Its exclusion ledger is still recorded (a
+lookback over its hours leaves out what it did find, and older segments those keys contradict go stale), and its
+window counter material is kept, so the resumed run's finish writes the segments from complete exclusions.
+
+When the cited-key union over a segment's hours grows (a later hunt, a resume, or the AI agent after the finish
+cites more), the segment is replaced by one derived from its own rows less the new keys, published in the same
+transaction that retires it, so history never loses an hour to the change.
+
 The hunt's window counter material is released once the writer has run for a finished hunt. A partial (resumable)
 hunt keeps it only until its resumed run finishes, charged to one store-wide disk budget that releases the oldest
 retained material first, so it is never unbounded.
@@ -20,10 +31,11 @@ from romulus.baseline.carry import CarryInStore, PendingResolver
 from romulus.baseline.lookback import exclusion_digest, segment_content_id
 from romulus.baseline.spec import SPEC_BY_ID, KeyContext, Pending
 from romulus.detect import netdef
+from romulus.evidence.raw_citation import RAW_GATE
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.site_networks import contradiction_reason
 from romulus.store.db import utcnow
-from romulus.store.repo import BASELINE_EVENTS_BASIS, Repo
+from romulus.store.repo import BASELINE_EVENTS_BASIS, ExclusionsChanged, Repo
 
 _HOUR = timedelta(hours=1)
 # Window counter material that finished hunts keep for a resume, across all hunts of the store.
@@ -163,15 +175,18 @@ def writable_runs(cells: list[dict], spans: dict[str, tuple[datetime, datetime]]
 
 
 def _cited_exclusions(repo: Repo, hunt_id: str, targets: set[str], spec_ids: set[str],
+                      candidates: list[dict] | None = None,
                       ) -> tuple[dict[tuple[str, str], set[str]], dict[tuple[str, str], str]]:
     """The keys of every record urgent, high and lead findings cite, per (target, spec), and the (target, spec)
     pairs whose cited keys cannot all be known.
 
     A finding's context records count: they are often the attack chain itself. A cited record that is not
     retained, or an exec-pair child whose parent cannot be resolved, could hold any key, so its pairs are
-    blocked rather than written with the key possibly still inside.
+    blocked rather than written with the key possibly still inside. `candidates` narrows the findings read (by
+    default every urgent, high and lead finding of the hunt).
     """
-    candidates = repo.candidates(hunt_id, ["urgent", "high", "lead"])
+    if candidates is None:
+        candidates = repo.candidates(hunt_id, ["urgent", "high", "lead"])
     event_ids = sorted({event_id for row in candidates
                         for event_id in [*(row.get("event_ids") or []), *(row.get("context_event_ids") or [])]})
     found: dict[tuple[str, str], set[str]] = {}
@@ -228,9 +243,42 @@ def _direction_failure(repo: Repo, hunt_id: str) -> str | None:
     return contradiction_reason(check) if isinstance(check, dict) else None
 
 
+UNFINISHED_REASON = "the hunt has not finished the stages whose findings cite records"
+
+
+def mark_history_incomplete(repo: Repo, hunt_id: str, reason: str = UNFINISHED_REASON) -> int:
+    """Mark every (target, spec) of a hunt's window as having incomplete finding-associated exclusions, from the
+    moment it starts running: whatever ends the run before a finish that clears them (a stop, a crash, a failure)
+    leaves its hours marked, so no later hunt's history over them reads as normal. Returns the pairs marked."""
+    hunt = repo.get_hunt(hunt_id)
+    manifest = (hunt or {}).get("manifest") or {}
+    config = manifest.get("baseline") or {}
+    specs = sorted(str(item["id"]) for item in config.get("specs") or [] if str(item["id"]) in SPEC_BY_ID)
+    if not specs or not config.get("site") or not manifest.get("window"):
+        return 0
+    start, end = _window(manifest)
+    targets = sorted(set(manifest.get("targets") or []))
+    pairs = {(target, spec_id): reason for target in targets for spec_id in specs}
+    repo.mark_baseline_exclusions_incomplete(
+        hunt_id, site=str(config["site"]), start=start, end=end, pairs=pairs,
+        spec_versions={spec_id: (SPEC_BY_ID[spec_id].version, SPEC_BY_ID[spec_id].key_version)
+                       for spec_id in specs})
+    return len(pairs)
+
+
+def held_reason(stages: list[str], *, material_kept: bool = True) -> str:
+    """Why a run that did not finish every record-citing stage writes no history, and whether a resume can."""
+    why = (f"no segment written: {', '.join(stages)} did not run to its end, so the keys of finding-associated "
+           "activity to leave out of history are not all known")
+    if material_kept:
+        return f"{why}; the resumed hunt's finish writes them"
+    return (f"{why}; its window counter material was released under the disk budget, so resuming the hunt will "
+            "not write these hours' history either")
+
+
 def run_hunt_segment_writer(repo: Repo, hunt_id: str, *, hunt_partial: bool, baseline_finished: bool = True,
-                            retain_budget_bytes: int = DEFAULT_RETAIN_BYTES,
-                            now: datetime | None = None) -> dict:
+                            retain_budget_bytes: int = DEFAULT_RETAIN_BYTES, now: datetime | None = None,
+                            unfinished_stages: list[str] | tuple[str, ...] = ()) -> dict:
     """Write the hunt-derived baseline cut hour by hour, then settle the window counter material.
 
     Every (target, spec) reaches one decision: the runs of hours written (or already in the store), and the hours
@@ -238,6 +286,10 @@ def run_hunt_segment_writer(repo: Repo, hunt_id: str, *, hunt_partial: bool, bas
     the finish of a resumed run of a hunt whose material an earlier finish kept; otherwise it is kept for a resume
     and charged to the disk budget. A baseline stage that has not finished keeps it while the budget allows, since its
     resumed judgement reads it.
+
+    `unfinished_stages` names the stages whose findings cite records and that did not run to their end in this run
+    (an unfinished baseline stage is always one). Then nothing is written (`status` "held"): the exclusion ledger is
+    still replaced and staleness applied, and the material is kept for the resumed finish.
     """
     hunt = repo.get_hunt(hunt_id)
     if hunt is None:
@@ -251,17 +303,44 @@ def run_hunt_segment_writer(repo: Repo, hunt_id: str, *, hunt_partial: bool, bas
             "status": "disabled", "written": 0, "stale": 0,
             "max_write_seconds": 0.0, "specs": {},
         }
+    held = list(dict.fromkeys(unfinished_stages))
+    if not baseline_finished and "baseline stage" not in held:
+        held.append("baseline stage")
     start, end = _window(manifest)
     targets = sorted(set(manifest.get("targets") or []))
     site = str(config.get("site") or "")
     current_exclusions, blocked = _cited_exclusions(repo, hunt_id, set(targets), set(specs))
+    versions = {spec_id: (SPEC_BY_ID[spec_id].version, SPEC_BY_ID[spec_id].key_version) for spec_id in specs}
     repo.replace_baseline_hunt_exclusions(
-        hunt_id, site=site, start=start, end=end, exclusions=current_exclusions,
-        spec_versions={spec_id: (SPEC_BY_ID[spec_id].version, SPEC_BY_ID[spec_id].key_version)
-                       for spec_id in specs},
+        hunt_id, site=site, start=start, end=end, exclusions=current_exclusions, spec_versions=versions,
     )
-    stale = repo.stale_baseline_segments_for_exclusions(site=site, start=start, end=end)
+    # The incomplete-exclusion marks follow the ledger just written: a held run keeps every (target, spec) marked;
+    # a finished one clears them, except the pairs whose cited keys cannot all be known.
+    if held:
+        repo.mark_baseline_exclusions_incomplete(
+            hunt_id, site=site, start=start, end=end, spec_versions=versions,
+            pairs={(target, spec_id): held_reason(held) for target in targets for spec_id in specs})
+    else:
+        repo.clear_baseline_exclusions_incomplete(hunt_id, keep=set(blocked))
+        repo.mark_baseline_exclusions_incomplete(hunt_id, site=site, start=start, end=end, spec_versions=versions,
+                                                 pairs=dict(blocked))
+    changes = apply_exclusion_changes(repo, site=site, start=start, end=end, built_by=hunt_id)
+    stale = changes["stale"]
+    # stated only when the union changed some segment, so an unchanged store reads as before
+    changed = {"exclusion_changes": changes} if changes["derived"] or changes["rebuilt_from_source"] else {}
     repo.cleanup_baseline_building(before=now - timedelta(hours=1))
+    if held:
+        material = _settle_material(
+            repo, hunt_id, specs, targets, hunt_partial=True, baseline_finished=baseline_finished,
+            budget=retain_budget_bytes, now=now, held=held_reason(held),
+        )
+        reason = held_reason(held, material_kept=bool(material.get("kept")))
+        return {
+            "status": "held", "written": 0, "stale": stale, "max_write_seconds": 0.0,
+            "held": {"stages": held, "reason": reason},
+            "specs": {spec_id: {"written": 0, "reason": reason} for spec_id in specs}, "material": material,
+            **changed,
+        }
     normalizer = str(manifest.get("normalizer") or "unknown")
     network = manifest.get("internal_networks") or {}
     networks_configured = network.get("source") == "configured"
@@ -300,8 +379,165 @@ def run_hunt_segment_writer(repo: Repo, hunt_id: str, *, hunt_partial: bool, bas
         )
     return {
         "status": "complete", "written": written, "stale": stale,
-        "max_write_seconds": longest, "specs": summaries, "material": material,
+        "max_write_seconds": longest, "specs": summaries, "material": material, **changed,
     }
+
+
+# How many fallback reasons a summary names; the count is always exact.
+_FALLBACKS_NAMED = 10
+# Passes over the changed segments: a derivation that lost a race to another hunt's (its replaced segment left cover,
+# or the union grew before publication) is read again and derived from whatever is then active. Each pass is
+# bounded by the active segments over the window; what still changes after the last pass is retired, named.
+_DERIVE_PASSES = 4
+
+
+def apply_exclusion_changes(repo: Repo, *, site: str, start: datetime, end: datetime, built_by: str) -> dict:
+    """Bring every active segment overlapping [start, end) up to the durable cited-key union.
+
+    A segment whose new exclusions hold every key it already excluded is replaced by one derived from its own rows:
+    the same span, scope hours and event hours (so the same rate series and liveness), its count rows less the newly
+    excluded keys, a new content-derived id and the new exclusion digest. That is exactly what its writer would have
+    written had the keys been known, and history loses no hour. The union is read again just before each build, and
+    the build is published only if, inside the publishing transaction, the segment it replaces is still active as
+    read and the union still holds no key the build lacks; a build that lost such a race is discarded and the
+    segment read again on the next pass. Otherwise (the union no longer holds a key the segment excluded, its spec
+    version or counting basis is no longer current, the derivation failed, or the union kept changing for every
+    pass) the segment is retired, and a later lookback rebuilds its hours from source; each such fallback is named.
+
+    `stale` counts every segment retired, derived or not."""
+    derived = retired = 0
+    fallbacks: list[str] = []
+    for _pass in range(_DERIVE_PASSES):
+        raced = False
+        for change in repo.baseline_exclusion_changes(site=site, start=start, end=end):
+            try:
+                outcome = _derive_segment(repo, change, built_by=built_by)
+            except Exception as error:  # noqa: BLE001 - a failed derivation falls back to retiring the segment
+                outcome = f"derivation failed: {error}"[:300]
+            if outcome == "published":
+                derived += 1
+                retired += 1
+            elif outcome == "already":
+                retired += 1
+            elif outcome == "raced":
+                raced = True
+            elif repo.stale_baseline_segment(change["id"], change["exclusion_digest"]):
+                retired += 1
+                fallbacks.append(f"{change['id']}: {outcome}")
+        if not raced:
+            break
+    else:
+        for change in repo.baseline_exclusion_changes(site=site, start=start, end=end):
+            if repo.stale_baseline_segment(change["id"], change["exclusion_digest"]):
+                retired += 1
+                fallbacks.append(f"{change['id']}: the cited-key union over its hours kept changing for "
+                                 f"{_DERIVE_PASSES} passes")
+    return {"derived": derived, "stale": retired, "rebuilt_from_source": len(fallbacks),
+            "fallbacks": fallbacks[:_FALLBACKS_NAMED]}
+
+
+def _derive_segment(repo: Repo, change: dict, *, built_by: str) -> str:
+    """Replace one segment by its derivation under the current union: "published", "already" (an identical
+    derivation is active, and the segment was retired by this call or an earlier one), "raced" (read it again), or
+    why it cannot be derived."""
+    spec = SPEC_BY_ID.get(change["spec_id"])
+    if spec is None or (spec.version, spec.key_version) != (change["spec_version"], change["key_version"]):
+        return "its spec version is no longer current, so it cannot be re-identified"
+    if change["events_basis"] != BASELINE_EVENTS_BASIS:
+        return f"it was counted on events basis {change['events_basis']}, which is no longer current"
+    if change["origin"] not in ("hunt", "lookback"):
+        return f"origin {change['origin']} cannot be derived"
+    old = change["id"]
+    if repo.baseline_segment_state(old) != ("active", change["exclusion_digest"]):
+        return "raced"
+    # the union as it stands now, not as the pass read it
+    keys = set(repo.baseline_exclusion_keys(
+        site=change["site"], target=change["target"], spec_id=change["spec_id"],
+        spec_version=change["spec_version"], key_version=change["key_version"],
+        start=change["start"], end=change["end"],
+    ))
+    if not set(change["excluded_keys"] or []) <= keys:
+        return "the cited-key union no longer holds every key it excluded"
+    digest = exclusion_digest(sorted(keys))
+    segment_id = repo.usable_baseline_segment_id(segment_content_id(
+        site=change["site"], target=change["target"], spec=spec, start=change["start"], end=change["end"],
+        normalizer=change["normalizer"], exclusion_digest=digest, excluded_keys=sorted(keys),
+        origin=change["origin"], network_digest=change["network_digest"],
+    ))
+    row = {name: change[name] for name in (
+        "site", "target", "spec_id", "spec_version", "key_version", "normalizer", "start", "end", "bucket",
+        "origin", "source_hunt_id", "hunted", "network_digest", "events_total", "events_basis", "first_event_hour")}
+    # each build is stamped when it begins, so another hunt's cleanup never takes it for abandoned mid-pass
+    row.update(id=segment_id, built_by_hunt_id=built_by, exclusion_digest=digest, excluded_keys=sorted(keys),
+               status="building", created_at=utcnow())
+    state = repo.begin_baseline_segment(row, reclaim_owner=True)
+    if state == "active":
+        repo.stale_baseline_segment(old, change["exclusion_digest"])
+        return "already"
+    if state != "begun":
+        return f"its replacement {segment_id} is {state}"
+    repo.append_baseline_segment_rows(
+        segment_id,
+        ({**item, "segment_id": segment_id} for item in repo.baseline_counts(old) if item["key_digest"] not in keys),
+        ({**item, "segment_id": segment_id} for item in repo.baseline_scope_hours(old)),
+        ({**item, "segment_id": segment_id} for item in repo.baseline_segment_event_hours(old)),
+    )
+    outcome = repo.publish_derived_baseline_segment(segment_id, replaces=old,
+                                                    replaces_digest=change["exclusion_digest"])
+    if outcome != "published":
+        repo.discard_baseline_build(segment_id, built_by)
+        return "raced"
+    return "published"
+
+
+def refresh_cited_exclusions(repo: Repo, hunt_id: str) -> dict:
+    """Leave out of history every record the hunt's AI findings cite: they are published after the finish wrote the
+    hunt's segments. Their keys are added to the hunt's exclusion ledger (never replacing a key it holds) and the
+    overlapping segments the union changes are derived (or retired, named).
+
+    Only AI findings are read, so the refresh can only add exclusions: a key out of history can only make a later
+    hunt judge it new, never quieter. A (target, spec) whose AI-cited keys cannot all be known retires this hunt's own
+    segments of it, as the writer would not have written them. A finding that cites only raw records (no typed event)
+    names no key and is counted. Idempotent: a second run changes nothing. Without an AI finding, nothing is read or
+    written."""
+    hunt = repo.get_hunt(hunt_id)
+    if hunt is None:
+        raise KeyError(hunt_id)
+    manifest = hunt["manifest"]
+    config = manifest.get("baseline") or {}
+    specs = sorted(str(item["id"]) for item in config.get("specs") or [])
+    if not specs or not config.get("site"):
+        return {"status": "disabled"}
+    findings = repo.candidates(hunt_id, ["urgent", "high", "lead"], provenance="agent")
+    if not findings:
+        return {"status": "no_agent_findings"}
+    start, end = _window(manifest)
+    targets = sorted(set(manifest.get("targets") or []))
+    site = str(config.get("site") or "")
+    exclusions, blocked = _cited_exclusions(repo, hunt_id, set(targets), set(specs), candidates=findings)
+    repo.add_baseline_hunt_exclusions(
+        hunt_id, site=site, start=start, end=end, exclusions=exclusions,
+        spec_versions={spec_id: (SPEC_BY_ID[spec_id].version, SPEC_BY_ID[spec_id].key_version)
+                       for spec_id in specs},
+    )
+    # a pair whose AI-cited keys cannot all be known stays marked: a lookback over its hours proves nothing normal
+    repo.mark_baseline_exclusions_incomplete(
+        hunt_id, site=site, start=start, end=end, pairs=dict(blocked),
+        spec_versions={spec_id: (SPEC_BY_ID[spec_id].version, SPEC_BY_ID[spec_id].key_version)
+                       for spec_id in specs})
+    changes = apply_exclusion_changes(repo, site=site, start=start, end=end, built_by=hunt_id)
+    blocked_retired = 0
+    for (target, spec_id) in sorted(blocked):
+        for row in repo.baseline_segments(site=site, target=target, spec_id=spec_id, statuses=["active"]):
+            if row["source_hunt_id"] == hunt_id and row["start"] < end and row["end"] > start:
+                blocked_retired += int(repo.stale_baseline_segment(row["id"], row["exclusion_digest"]))
+    raw_only = sum(1 for row in findings
+                   if not (row.get("event_ids") or row.get("context_event_ids"))
+                   and (row.get("gate_results") or {}).get(RAW_GATE))
+    return {"status": "complete", "findings": len(findings), "raw_only_findings": raw_only,
+            "keys": sum(len(keys) for keys in exclusions.values()), **changes,
+            "blocked": {f"{target}|{spec_id}": reason for (target, spec_id), reason in sorted(blocked.items())},
+            "blocked_retired": blocked_retired}
 
 
 def _write_target(repo: Repo, hunt_id: str, spec, target: str, *, site: str,
@@ -394,6 +630,21 @@ def _write_run(repo: Repo, hunt_id: str, spec, target: str, run: tuple[datetime,
                         if spans[cell["partition"]][0] < run[1] and spans[cell["partition"]][1] > run[0])
         if evaluated:
             return "window material has no per-hour event totals", 0, 0.0
+    # A build whose exclusions another hunt outgrew before its publication is refused inside the publishing
+    # transaction; it is discarded and built once more from the union as it then stands.
+    for _attempt in range(2):
+        try:
+            return _build_run(repo, hunt_id, spec, target, run, site=site, normalizer=normalizer,
+                              network_digest=network_digest, now=now, legacy_tokens=legacy_tokens,
+                              event_total=event_total, first_hour=first_hour, event_hours=event_hours)
+        except ExclusionsChanged:
+            continue
+    return "the cited-key union over these hours changed while it was written twice", 0, 0.0
+
+
+def _build_run(repo: Repo, hunt_id: str, spec, target: str, run: tuple[datetime, datetime], *, site: str,
+               normalizer: str, network_digest: str | None, now: datetime, legacy_tokens: bool, event_total: int,
+               first_hour: datetime | None, event_hours: list[dict]) -> tuple[str | None, int, float]:
     excluded = set(repo.baseline_exclusion_keys(
         site=site, target=target, spec_id=spec.id, spec_version=spec.version,
         key_version=spec.key_version, start=run[0], end=run[1],
@@ -413,7 +664,7 @@ def _write_run(repo: Repo, hunt_id: str, spec, target: str, run: tuple[datetime,
         "exclusion_digest": digest, "excluded_keys": sorted(excluded), "hunted": 1,
         "network_digest": network_digest if spec.requires_configured_networks else None,
         "events_total": event_total, "events_basis": BASELINE_EVENTS_BASIS, "first_event_hour": first_hour,
-        "status": "building", "created_at": now,
+        "status": "building", "created_at": max(now, utcnow()),
     }
     state = repo.begin_baseline_segment(row, reclaim_owner=True)
     if state == "active":
@@ -435,7 +686,11 @@ def _write_run(repo: Repo, hunt_id: str, spec, target: str, run: tuple[datetime,
          )),
         event_hours,
     )
-    repo.finalize_baseline_segment(segment_id)
+    try:
+        repo.finalize_baseline_segment(segment_id)
+    except ExclusionsChanged:
+        repo.discard_baseline_build(segment_id, hunt_id)
+        raise
     return None, 1, seconds
 
 
@@ -469,10 +724,13 @@ def _lease_active(hunt: dict, now: datetime, agent_run: dict | None = None) -> b
 
 
 def _settle_material(repo: Repo, hunt_id: str, specs: list[str], targets: list[str], *, hunt_partial: bool,
-                     baseline_finished: bool, budget: int, now: datetime, keep: bool = False) -> dict:
+                     baseline_finished: bool, budget: int, now: datetime, keep: bool = False,
+                     held: str | None = None) -> dict:
     """Release this hunt's window counter material or keep it for a resume, then hold the store to the budget.
 
-    With `keep` (the writer was interrupted) the material is kept and charged whatever the hunt's state."""
+    With `keep` (the writer was interrupted) the material is kept and charged whatever the hunt's state. With `held`
+    (why this run wrote nothing) it is kept for the resumed finish that writes, even when an earlier finish kept it:
+    released now, nothing could ever write this window's history."""
     retained = repo.baseline_window_retention(hunt_id)
     pairs = {(spec_id, target) for spec_id in specs for target in targets}
     if keep:
@@ -480,10 +738,10 @@ def _settle_material(repo: Repo, hunt_id: str, specs: list[str], targets: list[s
         why = "kept: the segment writer was interrupted before it decided every hour"
         repo.retain_baseline_window_material(hunt_id, bytes_=size, retained_at=now, reason=why)
         decision = {"kept": True, "reason": why, "bytes": size}
-    elif baseline_finished and not hunt_partial:
+    elif baseline_finished and not hunt_partial and held is None:
         _release_hunt(repo, hunt_id, pairs, "the hunt finished complete and its segment writer ran")
         decision = {"kept": False, "reason": "the hunt finished complete"}
-    elif baseline_finished and retained is not None:
+    elif baseline_finished and retained is not None and held is None:
         _release_hunt(repo, hunt_id, pairs, "the resumed hunt finished and its segment writer ran")
         decision = {"kept": False, "reason": "the resumed hunt finished; material is kept through one resume"}
     else:
@@ -491,6 +749,8 @@ def _settle_material(repo: Repo, hunt_id: str, specs: list[str], targets: list[s
         # Nothing guarantees a resume: the budget is what bounds how long the material stays.
         why = ("kept while the hunt can still resume" if baseline_finished
                else "kept while the hunt can still resume: its resumed baseline stage judges from it")
+        if held is not None:
+            why += "; its resumed finish writes the history this run held back"
         why += f"; {_RELEASED_BY}"
         repo.retain_baseline_window_material(hunt_id, bytes_=size, retained_at=now, reason=why)
         decision = {"kept": True, "reason": why, "bytes": size}

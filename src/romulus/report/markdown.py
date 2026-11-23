@@ -1005,6 +1005,8 @@ def _render_body(m: dict, banner: str = BANNER) -> str:
                 f"| {esc(spec['id'])} | {esc(spec['status'])} | {spec['unresolved_count']} | "
                 f"{esc(json.dumps(spec['verdicts'], sort_keys=True))} |"
             )
+    if baseline.get("history_held"):
+        out += ["", f"**Baseline history held back:** {esc(baseline['history_held'])}"]
     gaps = m["coverage"].get("gaps") or []
     out += ["", "### Coverage gaps", "",
             ("Every source partition or link where at least one rule was not fully searched, and why. These are the "

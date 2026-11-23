@@ -303,9 +303,10 @@ def test_resume_then_finish_rewrites_with_the_new_citations_and_releases_the_mat
     _finish_partial_for_expansion(repo)
 
     writer = repo.latest_audit("hunt-a", "hunt.baseline_summary")["detail"]["segment_writer"]
-    assert writer["stale"] == 1 and writer["written"] == 1
+    # the old segment is derived under the new citation; the rewrite from the material is that same segment
+    assert writer["stale"] == 1 and writer["exclusion_changes"]["derived"] == 1 and writer["written"] == 0
     assert next(row for row in repo.baseline_segments() if row["id"] == old["id"])["status"] == "stale"
-    active = repo.baseline_segments(statuses=["active"])[0]
+    (active,) = repo.baseline_segments(statuses=["active"])
     assert {row["key"]["executable"] for row in repo.baseline_counts(active["id"])} == {"/usr/bin/id"}
     assert writer["material"]["kept"] is False
     assert repo.baseline_window_material_pairs("hunt-a") == []

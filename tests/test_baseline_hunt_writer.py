@@ -259,7 +259,7 @@ def test_exclusion_union_is_scoped_to_the_spec_and_key_versions():
     ) == []
 
 
-def test_partial_later_hunt_stales_the_old_segment_and_lookback_refills_with_union_exclusions():
+def test_partial_later_hunt_derives_the_old_segment_under_the_union_and_lookback_has_nothing_to_refill():
     repo = _repo()
     routine = _event("routine", "/usr/bin/id", 5)
     cited = _event("cited", "/tmp/implant", 65)
@@ -270,19 +270,21 @@ def test_partial_later_hunt_stales_the_old_segment_and_lookback_refills_with_uni
     _candidate(repo, cited, hunt_id="hunt-b", candidate_id="finding-b")
 
     skipped = run_hunt_segment_writer(repo, "hunt-b", hunt_partial=True)
-    assert skipped["stale"] == 1
-    assert repo.baseline_segments(statuses=["active"]) == []
+    assert skipped["stale"] == 1 and skipped["exclusion_changes"]["derived"] == 1
+    # the old segment is replaced by its own rows less the newly cited key: its hours never leave cover
+    active = repo.baseline_segments(statuses=["active"])
+    assert len(active) == 1 and active[0]["excluded_keys"]
+    stored = [count for row in active for count in repo.baseline_counts(row["id"])]
+    assert {row["key"]["executable"] for row in stored} == {"/usr/bin/id"}
 
+    source = FakeHistory([routine, cited])
     result = LookbackWriter(
-        repo, FakeHistory([routine, cited]), site="site-a", specs=[SPEC], normalizer="fixture@1",
+        repo, source, site="site-a", specs=[SPEC], normalizer="fixture@1",
         budget=LookbackBudget(queries=20, records=20, seconds=20), now=lambda: END,
     ).fill(hunt_id="hunt-b", targets=["host-index"], start=START, end=END)
 
-    assert result.complete == 2 and result.gaps == ()
-    active = repo.baseline_segments(statuses=["active"])
-    assert len(active) == 2 and all(row["excluded_keys"] for row in active)
-    stored = [count for row in active for count in repo.baseline_counts(row["id"])]
-    assert {row["key"]["executable"] for row in stored} == {"/usr/bin/id"}
+    assert result.gaps == () and source.fetches == []
+    assert repo.baseline_segments(statuses=["active"]) == active
 
 
 def test_exec_pair_citation_resolves_against_the_network_index_carry_before_exclusion():
