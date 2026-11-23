@@ -393,7 +393,7 @@ def _shipper_audit(source: dict, only: tuple[str, ...]) -> list[tuple[str, str]]
 CREDENTIAL_COMMANDS = frozenset(_FTP_CREDENTIAL_COMMANDS) | frozenset(
     name for spec in _ZEEK_COMMAND_ARGUMENTS.values() for name in (*spec.present, *spec.unknown))
 # Zeek's argument columns of a command, never read when the command is a credential one or the log is not known
-_ZEEK_ARGUMENTS = ("arg", "value", "addl")
+_ZEEK_ARGUMENTS = ("arg", "value", "addl", "argument", "filter")
 # Header names whose values are credentials or session secrets (a name holding any of these words)
 _CREDENTIAL_HEADER_WORDS = ("auth", "cookie", "token", "secret", "pass", "key", "session", "credential", "signature")
 

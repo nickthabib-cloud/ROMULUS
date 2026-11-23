@@ -334,6 +334,10 @@ _CREDENTIAL_CASES = {
                                                         "command": "ADAT", "arg": _SECRET})}},
     "zeek unknown log argument": {"event": {"original": json.dumps({"_path": "custom", "uid": "C1",
                                                                      "id.orig_h": "10.0.0.5", "arg": _SECRET})}},
+    "zeek unknown log argument column": {"event": {"original": json.dumps({
+        "_path": "custom_auth", "uid": "C1", "id.orig_h": "10.0.0.5", "argument": _SECRET, "username": "bob"})}},
+    "zeek unknown log filter column": {"event": {"original": json.dumps({
+        "_path": "custom_dir", "uid": "C1", "id.orig_h": "10.0.0.5", "filter": f"(userPassword={_SECRET})"})}},
     "zeek uri userinfo": {"event": {"original": json.dumps({"_path": "http", "uid": "C1", "id.orig_h": "10.0.0.5",
                                                             "uri": f"http://bob:{_SECRET}@x/y"})}},
     "zeek in message": {"message": json.dumps({"_path": "irc", "uid": "C1", "id.orig_h": "10.0.0.5",
