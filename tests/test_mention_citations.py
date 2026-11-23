@@ -57,3 +57,69 @@ def test_the_store_reads_ai_findings_cited_raw_records_under_admissions_key():
     from romulus.evidence.raw_citation import RAW_GATE
     from romulus.store.repo import AGENT_RAW_GATE
     assert AGENT_RAW_GATE == RAW_GATE
+
+
+def test_the_link_reads_only_the_shown_records_neighbourhood_at_scale(tmp_path):
+    """100,000 findings on other records: the page's lookup stays bounded by the page (index probes), never by the
+    hunt."""
+    import time
+
+    from romulus.store import schema as t
+    from romulus.store.repo import raw_id
+    from tests.test_mention_sweep import _repo
+    repo = _repo(tmp_path / "h.sqlite")
+    hits = [_record(n, {"message": f"MIMIKATZ {n}"}, host=f"web{n}") for n in range(50)]
+    scanner = _scanner(tmp_path / "s")
+    scanner.scan(TARGET, CONTRACT, [(hit, "x") for hit in hits], None)
+    scanner.publish(repo)
+    scanner.close()
+    count, per = 100_000, 5
+    with repo.engine.begin() as connection:
+        connection.execute(t.typed_event.insert(), [{
+            "id": f"ev{i}", "hunt_id": "h1", "family": "x", "ts": T0, "host": f"other{i % 997}", "event": {}, "normalizer": "n",
+            "raw_ids": [raw_id("logs", f"r{i}")]} for i in range(count * per)])
+        # the one event made from one mention's record
+        connection.execute(t.typed_event.insert().values(
+            id="own", hunt_id="h1", family="x", ts=T0, host="web7", event={}, normalizer="n",
+            raw_ids=[raw_id(TARGET, "c7")]))
+        connection.execute(t.candidate.insert(), [{
+            "id": f"c{i}", "hunt_id": "h1", "rule_id": "r", "rule_version": "1", "claim": "c", "claim_type": "observed_action",
+            "event_ids": [f"ev{i * per + j}" for j in range(per)], "predicate_fields": [], "entities": [], "ts": T0,
+            "severity": "high", "confidence": "high", "lane": "lead", "priority": 1.0, "priority_reasons": [],
+            "benign_alternatives": [], "next_checks": [], "gate_results": {}, "provenance": "deterministic", "created_at": T0}
+            for i in range(count)])
+    _finding(repo, "linked", "high", events=["own"])
+    mentions = repo.mentions("h1", limit=50)
+    began = time.perf_counter()
+    out = repo.mention_citations("h1", mentions)
+    took = time.perf_counter() - began
+    linked = next(row["id"] for row in mentions if row["native_id"] == "c7")
+    assert out == {linked: {"count": 1, "findings": [{"id": "linked", "rule_id": "rule.linked", "lane": "high"}]}}
+    assert took < 0.25, took
+
+
+def test_a_socket_finding_on_a_real_audit_group_links_the_process_title_mention(tmp_path):
+    """Through the real normalizer and store: the socket event cites the PROCTITLE record the mention keeps."""
+    from romulus.evidence.normalize import normalize_hits
+    from romulus.report.mentions import mentions_view
+    from tests.test_lineage_observations import SADDR_EXT_554, _syscall
+    from tests.test_mention_coverage import _audit_hit
+    from tests.test_mention_sweep import _repo
+    repo = _repo()
+    when = T0.timestamp() + 5
+    title = chr(0).join(["python3", "-c", SHELL])
+    hits = [_audit_hit("s1", _syscall(when, 1, nr=42, name="connect", pid=50, ppid=40, exe="/usr/bin/python3",
+                                      comm="python3", a2="10", success="no", exit_code="-115"), when),
+            _audit_hit("s2", f"type=SOCKADDR msg=audit({when:.3f}:1): saddr={SADDR_EXT_554}", when),
+            _audit_hit("s3", f"type=PROCTITLE msg=audit({when:.3f}:1): proctitle={_hex(title)}", when)]
+    unread: list = []
+    events, _skips, errors = normalize_hits(hits, unread=unread)
+    assert errors == [] and [event.family for event in events] == ["net_socket"]
+    repo.save_evidence("h1", events, {f"{hit['_index']}/{hit['_id']}": hit["_source"] for hit in hits}, None)
+    scanner = _scanner(tmp_path)
+    scanner.scan(TARGET, CONTRACT, unread, None)
+    scanner.publish(repo)
+    scanner.close()
+    _finding(repo, "socket1", "high", events=[events[0].id])
+    item = mentions_view(repo, "h1")["items"][0]
+    assert item["cited_by"]["findings"] == [{"id": "socket1", "rule_id": "rule.socket1", "lane": "high"}]

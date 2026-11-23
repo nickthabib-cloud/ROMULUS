@@ -109,6 +109,9 @@ _STORED_BOOT = func.json_extract(t.typed_event.c.event, '$.fields."host.boot.id"
 
 # the admission-gate key an AI finding lists its cited raw record ids under (evidence.raw_citation.RAW_GATE)
 AGENT_RAW_GATE = "_agent_raw_records"
+# how far a typed event made from a mention's record may be from the record's own time (a shipper's time field and the
+# producer's record time differ by the shipping lag)
+MENTION_EVENT_SKEW = timedelta(minutes=5)
 
 
 def raw_id(target: str, native_id: str) -> str:
@@ -6359,35 +6362,60 @@ class Repo:
                 query.order_by(t.mention.c.rank).limit(max(0, int(limit)))).mappings()]
 
     def mention_citations(self, hunt_id: str, mentions: list[dict], *, per_mention: int = 5) -> dict[str, dict]:
-        """For each mention (its `id`, `target`, `native_id`, `raw_id`), the hunt's findings that cite the same source
-        record: a typed finding through a typed event made from it, an AI finding through the raw record itself. Up to
-        `per_mention` findings each (lane order), with the exact count. Read when the pool is shown, since findings
-        arrive after the pool is published; it never changes a finding, a lane or the pool."""
+        """For each mention shown (its `id`, `host`, `target`, `native_id`, `raw_id`), the hunt's findings that cite
+        the same source record: a typed finding through a typed event made from it, an AI finding through the raw
+        record itself. Up to `per_mention` findings each (lane order), with the exact count. Read when the pool is
+        shown, since findings arrive after the pool is published; it never changes a finding, a lane or the pool.
+
+        Bounded by the page, never by the hunt: a typed event made from the record is looked up on the record's host
+        (its spellings) within MENTION_EVENT_SKEW of the record's own time, through the typed events' (hunt, host,
+        time) index of every hunt that may own it, and its findings through the candidate-event index. A record
+        whose time is not known is linked to AI findings only."""
         if not mentions:
             return {}
-        store_ids = {raw_id(item["target"], item["native_id"]): item["id"] for item in mentions}
-        cited_raw = {item["raw_id"]: item["id"] for item in mentions}
+        raws = {row["id"]: row["ts"] for row in self.agent_raw_records(hunt_id, [item["raw_id"] for item in mentions])}
         order = "CASE c.lane WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'lead' THEN 2 ELSE 3 END"
+        events = text("""
+            SELECT te.id AS id FROM typed_event te
+            LEFT JOIN event_citation ec ON ec.hunt_id = :hunt AND ec.event_id = te.id
+            WHERE te.hunt_id IN :hunts AND te.host IN :hosts AND te.ts BETWEEN :lo AND :hi
+              AND EXISTS (SELECT 1 FROM json_each(coalesce(ec.raw_ids, te.raw_ids)) r WHERE r.value = :ref)
+            """).bindparams(bindparam("hunts", expanding=True), bindparam("hosts", expanding=True),
+                            bindparam("lo", type_=DateTime(timezone=True)),
+                            bindparam("hi", type_=DateTime(timezone=True)))
         typed = text(f"""
-            SELECT DISTINCT r.value AS ref, c.id AS id, c.rule_id AS rule_id, c.lane AS lane, {order} AS rank,
-                   c.priority AS priority
-            FROM candidate c, json_each(c.event_ids) e
-            JOIN typed_event te ON te.id = e.value
-            LEFT JOIN event_citation ec ON ec.hunt_id = c.hunt_id AND ec.event_id = te.id,
-            json_each(coalesce(ec.raw_ids, te.raw_ids)) r
-            WHERE c.hunt_id = :hunt AND r.value IN :refs""").bindparams(bindparam("refs", expanding=True))
+            SELECT DISTINCT c.id AS id, c.rule_id AS rule_id, c.lane AS lane, {order} AS rank, c.priority AS priority
+            FROM candidate_event ce JOIN candidate c ON c.id = ce.candidate_id
+            WHERE ce.hunt_id = :hunt AND ce.event_id IN :events""").bindparams(bindparam("events", expanding=True))
         agent = text(f"""
             SELECT DISTINCT j.value AS ref, c.id AS id, c.rule_id AS rule_id, c.lane AS lane, {order} AS rank,
                    c.priority AS priority
             FROM candidate c, json_each(c.gate_results, '$.{AGENT_RAW_GATE}') j
-            WHERE c.hunt_id = :hunt AND j.value IN :refs""").bindparams(bindparam("refs", expanding=True))
+            WHERE c.hunt_id = :hunt AND c.provenance = 'agent' AND j.value IN :refs""").bindparams(
+            bindparam("refs", expanding=True))
         found: dict[str, dict[str, tuple]] = {}
+
+        def keep(mention: str, row) -> None:
+            found.setdefault(mention, {})[row["id"]] = (row["rank"], -(row["priority"] or 0.0), row["id"],
+                                                        row["rule_id"], row["lane"])
         with self.engine.connect() as connection:
-            for statement, keys in ((typed, store_ids), (agent, cited_raw)):
-                for row in connection.execute(statement, {"hunt": hunt_id, "refs": sorted(keys)}).mappings():
-                    mention = keys[row["ref"]]
-                    found.setdefault(mention, {})[row["id"]] = (row["rank"], -(row["priority"] or 0.0), row["id"],
-                                                                row["rule_id"], row["lane"])
+            hunts = [row[0] for row in connection.execute(select(t.hunt.c.id))]
+            for item in mentions:
+                when = raws.get(item["raw_id"])
+                host = str(item.get("host") or "")
+                if when is None or not host:
+                    continue
+                short = host.split(".", 1)[0]
+                hosts = sorted({host, host.lower(), short, short.lower()})
+                ids = [row[0] for row in connection.execute(events, {
+                    "hunt": hunt_id, "hunts": hunts, "hosts": hosts, "lo": when - MENTION_EVENT_SKEW,
+                    "hi": when + MENTION_EVENT_SKEW, "ref": raw_id(item["target"], item["native_id"])})]
+                for start in range(0, len(ids), 500):
+                    for row in connection.execute(typed, {"hunt": hunt_id, "events": ids[start:start + 500]}).mappings():
+                        keep(item["id"], row)
+            cited_raw = {item["raw_id"]: item["id"] for item in mentions}
+            for row in connection.execute(agent, {"hunt": hunt_id, "refs": sorted(cited_raw)}).mappings():
+                keep(cited_raw[row["ref"]], row)
         out: dict[str, dict] = {}
         for mention, findings in found.items():
             ordered = sorted(findings.values())
