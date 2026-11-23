@@ -5,6 +5,13 @@ all complete and cover it is written, whatever happened in unrelated stages (exp
 hour with any incomplete input is never written and stays honestly absent from history. Each maximal run of written
 hours is one segment.
 
+A run that ended before every stage whose findings cite records ran to its end (an analyst's stop, a stage that
+failed) publishes no segment at all. Its findings are incomplete, so the keys of finding-associated activity that
+history must leave out are not all known yet: written now, its counts would carry them as normal history for every
+later hunt until a resume replaced them, and for good if none ever did. Its exclusion ledger is still recorded (a
+lookback over its hours leaves out what it did find, and older segments those keys contradict go stale), and its
+window counter material is kept, so the resumed run's finish writes the segments from complete exclusions.
+
 The hunt's window counter material is released once the writer has run for a finished hunt. A partial (resumable)
 hunt keeps it only until its resumed run finishes, charged to one store-wide disk budget that releases the oldest
 retained material first, so it is never unbounded.
@@ -228,9 +235,15 @@ def _direction_failure(repo: Repo, hunt_id: str) -> str | None:
     return contradiction_reason(check) if isinstance(check, dict) else None
 
 
+def held_reason(stages: list[str]) -> str:
+    """Why a run that did not finish every record-citing stage writes no history."""
+    return (f"no segment written: {', '.join(stages)} did not run to its end, so the keys of finding-associated "
+            "activity to leave out of history are not all known; the resumed hunt's finish writes them")
+
+
 def run_hunt_segment_writer(repo: Repo, hunt_id: str, *, hunt_partial: bool, baseline_finished: bool = True,
-                            retain_budget_bytes: int = DEFAULT_RETAIN_BYTES,
-                            now: datetime | None = None) -> dict:
+                            retain_budget_bytes: int = DEFAULT_RETAIN_BYTES, now: datetime | None = None,
+                            unfinished_stages: list[str] | tuple[str, ...] = ()) -> dict:
     """Write the hunt-derived baseline cut hour by hour, then settle the window counter material.
 
     Every (target, spec) reaches one decision: the runs of hours written (or already in the store), and the hours
@@ -238,6 +251,10 @@ def run_hunt_segment_writer(repo: Repo, hunt_id: str, *, hunt_partial: bool, bas
     the finish of a resumed run of a hunt whose material an earlier finish kept; otherwise it is kept for a resume
     and charged to the disk budget. A baseline stage that has not finished keeps it while the budget allows, since its
     resumed judgement reads it.
+
+    `unfinished_stages` names the stages whose findings cite records and that did not run to their end in this run
+    (an unfinished baseline stage is always one). Then nothing is written (`status` "held"): the exclusion ledger is
+    still replaced and staleness applied, and the material is kept for the resumed finish.
     """
     hunt = repo.get_hunt(hunt_id)
     if hunt is None:
@@ -251,6 +268,9 @@ def run_hunt_segment_writer(repo: Repo, hunt_id: str, *, hunt_partial: bool, bas
             "status": "disabled", "written": 0, "stale": 0,
             "max_write_seconds": 0.0, "specs": {},
         }
+    held = list(dict.fromkeys(unfinished_stages))
+    if not baseline_finished and "baseline stage" not in held:
+        held.append("baseline stage")
     start, end = _window(manifest)
     targets = sorted(set(manifest.get("targets") or []))
     site = str(config.get("site") or "")
@@ -262,6 +282,17 @@ def run_hunt_segment_writer(repo: Repo, hunt_id: str, *, hunt_partial: bool, bas
     )
     stale = repo.stale_baseline_segments_for_exclusions(site=site, start=start, end=end)
     repo.cleanup_baseline_building(before=now - timedelta(hours=1))
+    if held:
+        reason = held_reason(held)
+        material = _settle_material(
+            repo, hunt_id, specs, targets, hunt_partial=True, baseline_finished=baseline_finished,
+            budget=retain_budget_bytes, now=now, held=reason,
+        )
+        return {
+            "status": "held", "written": 0, "stale": stale, "max_write_seconds": 0.0,
+            "held": {"stages": held, "reason": reason},
+            "specs": {spec_id: {"written": 0, "reason": reason} for spec_id in specs}, "material": material,
+        }
     normalizer = str(manifest.get("normalizer") or "unknown")
     network = manifest.get("internal_networks") or {}
     networks_configured = network.get("source") == "configured"
@@ -469,10 +500,13 @@ def _lease_active(hunt: dict, now: datetime, agent_run: dict | None = None) -> b
 
 
 def _settle_material(repo: Repo, hunt_id: str, specs: list[str], targets: list[str], *, hunt_partial: bool,
-                     baseline_finished: bool, budget: int, now: datetime, keep: bool = False) -> dict:
+                     baseline_finished: bool, budget: int, now: datetime, keep: bool = False,
+                     held: str | None = None) -> dict:
     """Release this hunt's window counter material or keep it for a resume, then hold the store to the budget.
 
-    With `keep` (the writer was interrupted) the material is kept and charged whatever the hunt's state."""
+    With `keep` (the writer was interrupted) the material is kept and charged whatever the hunt's state. With `held`
+    (why this run wrote nothing) it is kept for the resumed finish that writes, even when an earlier finish kept it:
+    released now, nothing could ever write this window's history."""
     retained = repo.baseline_window_retention(hunt_id)
     pairs = {(spec_id, target) for spec_id in specs for target in targets}
     if keep:
@@ -480,10 +514,10 @@ def _settle_material(repo: Repo, hunt_id: str, specs: list[str], targets: list[s
         why = "kept: the segment writer was interrupted before it decided every hour"
         repo.retain_baseline_window_material(hunt_id, bytes_=size, retained_at=now, reason=why)
         decision = {"kept": True, "reason": why, "bytes": size}
-    elif baseline_finished and not hunt_partial:
+    elif baseline_finished and not hunt_partial and held is None:
         _release_hunt(repo, hunt_id, pairs, "the hunt finished complete and its segment writer ran")
         decision = {"kept": False, "reason": "the hunt finished complete"}
-    elif baseline_finished and retained is not None:
+    elif baseline_finished and retained is not None and held is None:
         _release_hunt(repo, hunt_id, pairs, "the resumed hunt finished and its segment writer ran")
         decision = {"kept": False, "reason": "the resumed hunt finished; material is kept through one resume"}
     else:
@@ -491,6 +525,8 @@ def _settle_material(repo: Repo, hunt_id: str, specs: list[str], targets: list[s
         # Nothing guarantees a resume: the budget is what bounds how long the material stays.
         why = ("kept while the hunt can still resume" if baseline_finished
                else "kept while the hunt can still resume: its resumed baseline stage judges from it")
+        if held is not None:
+            why += "; its resumed finish writes the history this run held back"
         why += f"; {_RELEASED_BY}"
         repo.retain_baseline_window_material(hunt_id, bytes_=size, retained_at=now, reason=why)
         decision = {"kept": True, "reason": why, "bytes": size}
