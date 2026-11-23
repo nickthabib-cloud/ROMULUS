@@ -214,6 +214,48 @@ def test_a_windows_record_whose_only_text_is_its_exported_xml_is_read_by_its_eve
     scanner.close()
 
 
+_EVE_STATS = {"timestamp": "2022-01-15T10:00:00.000000+0000", "event_type": "stats",
+              "stats": {"uptime": 3600, "capture": {"kernel_packets": 10, "kernel_drops": 0},
+                        "decoder": {"pkts": 10, "bytes": 1200}}}
+
+
+@pytest.mark.parametrize("source", [
+    # the EVE line as Suricata writes it, kept in event.original (no shipper marker)
+    {"event": {"original": json.dumps(_EVE_STATS)}},
+    # Filebeat's suricata module: the line in event.original, the record a metric
+    {"event": {"module": "suricata", "dataset": "suricata.eve", "kind": "metric",
+               "original": json.dumps(_EVE_STATS)}},
+    # the Agent's Suricata integration with the line in message
+    {"data_stream": {"dataset": "suricata.eve"}, "event": {"kind": "metric"}, "message": json.dumps(_EVE_STATS)},
+    # a shipper that kept only the parsed fields
+    {"event": {"module": "suricata", "dataset": "suricata.eve", "kind": "metric"},
+     "suricata": {"eve": {"event_type": "stats", "stats": {"uptime": 3600}}}},
+    # a per-type dataset, fields only
+    {"event": {"dataset": "suricata.eve.stats", "kind": "metric"}, "suricata": {"eve": {"stats": {"uptime": 1}}}},
+    # a stats line whose shipper names Suricata, even without its own block
+    {"event": {"module": "suricata", "original": json.dumps({"timestamp": "t", "event_type": "stats"})}},
+])
+def test_suricata_stats_records_in_every_shipper_shape_have_no_free_text_and_are_no_gap(tmp_path, source):
+    selection = select_texts(source)
+    assert selection.family == EVE and selection.no_text, selection
+    scanner = _scanner(tmp_path)
+    scanner.scan(TARGET, CONTRACT, [(_record(1, source), "x")], None)
+    summary = scanner.summary()
+    assert summary["records_without_free_text"] == {EVE: 1} and summary["not_scanned"]["records"] == {}
+    assert summary["status"] == SCANNED_ALL
+    scanner.close()
+
+
+@pytest.mark.parametrize("original", [
+    {"time": "2022-01-15T10:00:00", "user": "bob", "action": "login", "page": "/horde"},
+    {"event_type": "click", "user": "bob", "target": "/inbox"},
+    {"timestamp": "t", "event_type": "stats", "pages": 3},
+])
+def test_other_json_records_with_no_family_stay_not_scanned(original):
+    selection = select_texts({"event": {"original": json.dumps(original)}})
+    assert selection.texts == [] and selection.reason == JSON_RECORD and not selection.complete
+
+
 def test_zeek_ldap_logs_are_read_by_their_documented_fields():
     search = {"_path": "ldap_search", "uid": "C1", "id.orig_h": "10.0.0.5", "base_object": "CN=MIMIKATZ,DC=x"}
     selection = select_texts({"event": {"original": json.dumps(search)}})
