@@ -236,6 +236,65 @@ def test_a_credential_is_never_selected_and_a_scrubbed_record_is_scanned_as_stor
         "event.original#eve:ftp.command": "RETR", "event.original#eve:ftp.command_data": "/tmp/MIMIKATZ.exe"}
 
 
+_SECRET = "S3cretPw77"
+_CREDENTIAL_CASES = {
+    "zeek irc PASS": {"event": {"original": json.dumps({"_path": "irc", "uid": "C1", "id.orig_h": "10.0.0.5",
+                                                        "command": "PASS", "value": _SECRET, "nick": "bob"})}},
+    "zeek irc PASS by dataset": {"event": {"dataset": "zeek.irc", "original": json.dumps({
+        "uid": "C1", "id.orig_h": "10.0.0.5", "command": "PASS", "value": _SECRET})}},
+    "zeek mysql IDENTIFIED BY": {"event": {"original": json.dumps({
+        "_path": "mysql", "uid": "C1", "id.orig_h": "10.0.0.5", "cmd": "query",
+        "arg": f"CREATE USER x IDENTIFIED BY '{_SECRET}'"})}},
+    "zeek ftp ADAT": {"event": {"original": json.dumps({"_path": "ftp", "uid": "C1", "id.orig_h": "10.0.0.5",
+                                                        "command": "ADAT", "arg": _SECRET})}},
+    "zeek unknown log argument": {"event": {"original": json.dumps({"_path": "custom", "uid": "C1",
+                                                                     "id.orig_h": "10.0.0.5", "arg": _SECRET})}},
+    "zeek uri userinfo": {"event": {"original": json.dumps({"_path": "http", "uid": "C1", "id.orig_h": "10.0.0.5",
+                                                            "uri": f"http://bob:{_SECRET}@x/y"})}},
+    "zeek in message": {"message": json.dumps({"_path": "irc", "uid": "C1", "id.orig_h": "10.0.0.5",
+                                               "command": "PASS", "value": _SECRET})},
+    "eve http2 credential headers": {"event": {"original": json.dumps({
+        "event_type": "http2", "src_ip": "1.2.3.4", "flow_id": 1, "http2": {"request_headers": [
+            {"name": "authorization", "value": f"Basic {_SECRET}"}, {"name": "cookie", "value": f"s={_SECRET}"},
+            {"name": "Proxy-Authorization", "value": _SECRET}, {"name": "set-cookie", "value": _SECRET},
+            {"name": "user-agent", "value": "MIMIKATZ"}]}})}},
+    "eve request body": {"event": {"original": json.dumps({
+        "event_type": "http", "src_ip": "1.2.3.4", "flow_id": 1,
+        "http": {"url": "/login", "http_request_body_printable": f"user=bob&password={_SECRET}"}})}},
+    "eve sip userinfo": {"event": {"original": json.dumps({
+        "event_type": "sip", "src_ip": "1.2.3.4", "flow_id": 1,
+        "sip": {"request_line": f"REGISTER sip:bob:{_SECRET}@x SIP/2.0", "uri": f"sip:bob:{_SECRET}@x"}})}},
+    "eve ftp ADAT": {"event": {"original": json.dumps({"event_type": "ftp", "src_ip": "1.2.3.4", "flow_id": 1,
+                                                       "ftp": {"command": "ADAT", "command_data": _SECRET}})}},
+    "eve pgsql password": {"event": {"original": json.dumps({
+        "event_type": "pgsql", "src_ip": "1.2.3.4", "flow_id": 1,
+        "pgsql": {"request": {"simple_query": f"ALTER ROLE x PASSWORD '{_SECRET}'"}}})}},
+    "ecs url userinfo": {"message": "GET", "url": {"full": f"http://bob:{_SECRET}@host/x",
+                                                   "original": f"http://bob:{_SECRET}@host/x", "password": _SECRET}},
+}
+
+
+@pytest.mark.parametrize("case", sorted(_CREDENTIAL_CASES))
+def test_a_telemetry_credential_is_neither_scanned_nor_kept(case):
+    from romulus.evidence.raw_scrub import clean_source
+    from romulus.hunt.mention_fields import scrub_source
+    stored = scrub_source(clean_source(_CREDENTIAL_CASES[case]))
+    assert _SECRET not in json.dumps(stored)
+    assert all(_SECRET not in text for _path, text in select_texts(stored).texts)
+    # even unscrubbed, the selection never reads a credential position
+    assert all(_SECRET not in text for _path, text in select_texts(_CREDENTIAL_CASES[case]).texts
+               if case not in {"zeek mysql IDENTIFIED BY", "eve pgsql password", "zeek uri userinfo"})
+
+
+def test_the_kept_record_of_a_mention_is_scrubbed_whatever_recognised_its_family(tmp_path):
+    scanner = _scanner(tmp_path)
+    scanner.scan(TARGET, CONTRACT, [(_record(1, _CREDENTIAL_CASES["eve http2 credential headers"]), "x")], None)
+    rows = list(scanner.ranked())
+    assert [scanner.patterns.patterns[row[1]].id for row in rows] == ["mention.test_mimikatz"]
+    assert _SECRET not in rows[0][7] and _SECRET not in rows[0][8]
+    scanner.close()
+
+
 def test_json_held_in_the_message_is_read_by_its_family_never_as_a_serialized_line(tmp_path):
     from romulus.hunt.mention_fields import JSON_MESSAGE
     alert = {"event_type": "alert", "src_ip": "1.2.3.4", "flow_id": 1, "alert": {"signature": "ET MIMIKATZ"}}

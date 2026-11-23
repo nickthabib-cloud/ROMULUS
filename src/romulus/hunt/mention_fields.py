@@ -25,6 +25,13 @@ Families (the first that fits):
 - **ecs_json**: an ECS-shaped JSON document in `event.original` (top-level names ECS or the Beats namespaces): its
   `ECS_FIELDS` and Windows event data. A document with other top-level names is scanned only in part.
 
+Credentials. Before selection, a Zeek or EVE object held in `message` or `event.original` goes through its producer's
+scrubber whatever recognised it (`scrub_source`), and the record the mention keeps is that scrubbed one. Never
+selected: the argument of a credential command (the producers' own sets: FTP PASS/ACCT/ADAT, IRC PASS/OPER/
+AUTHENTICATE/JOIN keys, Redis AUTH and the like), the argument columns of a Zeek log no table describes, the value of
+an HTTP/2 header whose name is a credential's (Authorization, Cookie, tokens, keys), a message body; and every
+selected text loses a URI's userinfo and a SIP URI's password.
+
 A JSON record of no family above, a JSON array and an XML document are not scanned (counted, with the reason). A family
 record that holds none of its family's fields has no free text to scan: it is counted, and it is not a coverage gap.
 
@@ -34,11 +41,17 @@ values of one list field, a JSON path walk of at most `MAX_DEPTH` levels; the sc
 """
 from __future__ import annotations
 
+import copy
 import json
+import re
 from dataclasses import dataclass, field
 from xml.etree import ElementTree
 
 from romulus.evidence.auditd import AuditParseError, execve_argv, is_audit_line, parse_record
+from romulus.evidence.suricata_protocols import _FTP_CREDENTIAL_COMMANDS, scrub_suricata_source
+from romulus.evidence.zeek import _COMMAND_ARGUMENTS as _ZEEK_COMMAND_ARGUMENTS
+from romulus.evidence.zeek import scrub_zeek_source
+from romulus.evidence.zeek_credentials import REDACTED, scrub_sql, strip_sip_password, strip_uri_userinfo
 
 MAX_TEXTS = 32
 MAX_LIST_ITEMS = 64
@@ -95,8 +108,9 @@ _JOURNAL_MARKERS = ("MESSAGE", "__CURSOR", "__REALTIME_TIMESTAMP", "_BOOT_ID", "
 # Suricata EVE free-text fields by event type (Suricata EVE JSON format documentation). A list value (an array of
 # objects or strings) is read item by item. `alert.signature` and `alert.metadata` are the sensor's rule text, not
 # attacker text, and are left out; a record's packet payload is not a log field and is left out.
-_EVE_HTTP = ("http.hostname", "http.url", "http.http_user_agent", "http.http_refer", "http.redirect",
-             "http.http_request_body_printable")
+# A message body is not read (it can hold a form's password); HTTP/2 header values are read by name, never those of a
+# credential header (`_http2_headers`).
+_EVE_HTTP = ("http.hostname", "http.url", "http.http_user_agent", "http.http_refer", "http.redirect")
 EVE_FIELDS: dict[str, tuple[str, ...]] = {
     "http": _EVE_HTTP,
     "fileinfo": (*_EVE_HTTP, "fileinfo.filename", "smtp.helo", "smtp.mail_from", "smtp.rcpt_to", "email.subject",
@@ -118,7 +132,7 @@ EVE_FIELDS: dict[str, tuple[str, ...]] = {
     "sip": ("sip.uri", "sip.request_line", "sip.response_line"),
     "rdp": ("rdp.client.client_name", "rdp.cookie"),
     "dhcp": ("dhcp.hostname", "dhcp.client_id"),
-    "http2": ("http2.request_headers.value", "http2.response_headers.value"),
+    "http2": (),
     "mqtt": ("mqtt.publish.topic", "mqtt.connect.client_id", "mqtt.subscribe.topics.topic"),
     "pgsql": ("pgsql.request.simple_query",),
     "rfb": ("rfb.server_security_failure_reason",),
@@ -239,6 +253,7 @@ def _walk(node, parts: list[str], depth: int = 0) -> list[str]:
 
 def _add(texts: list[tuple[str, str]], path: str, values: list[str], seen: set[str]) -> None:
     for value in values:
+        value = mask_credentials(value)
         if value in seen:
             continue                     # the same text twice in one record is scanned once
         seen.add(value)
@@ -334,9 +349,164 @@ def _shipper_audit(source: dict, only: tuple[str, ...]) -> list[tuple[str, str]]
     return texts
 
 
+# Commands whose argument is, or may hold, a credential: the producers' own sets (Suricata's FTP commands; Zeek's FTP,
+# IRC, Redis and MySQL commands), so the scan never reads what their scrubbers would mask.
+CREDENTIAL_COMMANDS = frozenset(_FTP_CREDENTIAL_COMMANDS) | frozenset(
+    name for spec in _ZEEK_COMMAND_ARGUMENTS.values() for name in (*spec.present, *spec.unknown))
+# Zeek's argument columns of a command, never read when the command is a credential one or the log is not known
+_ZEEK_ARGUMENTS = ("arg", "value", "addl")
+# Header names whose values are credentials or session secrets (a name holding any of these words)
+_CREDENTIAL_HEADER_WORDS = ("auth", "cookie", "token", "secret", "pass", "key", "session", "credential", "signature")
+
+
+_BODY_CUE = re.compile(r"pass|pwd|token|secret|auth|key=|session", re.IGNORECASE)
+
+
+def _is_eve(obj: dict) -> bool:
+    return isinstance(obj.get("event_type"), str) and any(key in obj for key in ("src_ip", "flow_id", "in_iface",
+                                                                                 "dest_ip"))
+
+
+def _zeek_log(obj: dict, source: dict):
+    """A Zeek object's log name (None when it is Zeek but the log is not named), or False when it is not Zeek."""
+    log = obj.get("_path") if isinstance(obj.get("_path"), str) else None
+    if log is None and not ("uid" in obj and ("id.orig_h" in obj or isinstance(obj.get("id"), dict))):
+        return False
+    if log is None:
+        dataset = _get(source, "event.dataset")
+        log = dataset.split(".", 1)[-1] if isinstance(dataset, str) and dataset.startswith("zeek.") else None
+    return log
+
+
 def _password_command(command) -> bool:
-    """An FTP command whose argument is a credential (its argument is never selected)."""
-    return isinstance(command, str) and command.strip().upper() in ("PASS", "ACCT")
+    """A command whose argument is, or may hold, a credential (its argument is never selected)."""
+    return isinstance(command, str) and command.strip().upper() in CREDENTIAL_COMMANDS
+
+
+def _credential_header(name) -> bool:
+    return not isinstance(name, str) or any(word in name.lower() for word in _CREDENTIAL_HEADER_WORDS)
+
+
+def _http2_headers(obj: dict, texts, seen, prefix: str) -> None:
+    """HTTP/2 header values, by name, never a credential header's."""
+    http2 = obj.get("http2")
+    if not isinstance(http2, dict):
+        return
+    for block in ("request_headers", "response_headers"):
+        headers = http2.get(block)
+        for header in headers[:MAX_LIST_ITEMS] if isinstance(headers, list) else ():
+            if isinstance(header, dict) and not _credential_header(header.get("name")):
+                _add(texts, f"{prefix}http2.{block}.{header.get('name')}"[:120], _strings(header.get("value")), seen)
+
+
+def mask_credentials(text: str) -> str:
+    """A selected text without the credentials free text can carry: a URI's userinfo, a SIP URI's password."""
+    if "@" not in text:
+        return text
+    text, _removed, _password = strip_uri_userinfo(text)
+    sip, _removed = strip_sip_password(text)
+    return text if sip is None else sip
+
+
+def _scrubbed_json(obj: dict, source: dict) -> dict | None:
+    """A Zeek or Suricata EVE object with every credential its producer's scrubber masks, and the free-text
+    credentials the mention scan would otherwise read (HTTP/2 credential headers, a message body holding a password
+    cue, SIP and URI passwords, SQL password literals); None when nothing changed."""
+    if _is_eve(obj):
+        payload = json.dumps(obj)
+        scrubbed = scrub_suricata_source({"event": {"dataset": "suricata.eve", "original": payload}})
+        out = json.loads(scrubbed["event"]["original"]) if scrubbed["event"]["original"] != payload else obj
+        changed = out is not obj
+        if not changed:
+            out = json.loads(payload)
+        http2 = out.get("http2")
+        for block in ("request_headers", "response_headers"):
+            headers = http2.get(block) if isinstance(http2, dict) else None
+            for header in headers if isinstance(headers, list) else ():
+                if isinstance(header, dict) and _credential_header(header.get("name")) and header.get("value") not in (
+                        None, "", REDACTED):
+                    header["value"] = REDACTED
+                    changed = True
+        for block, key in (("http", "http_request_body_printable"), ("http", "http_request_body"),
+                           ("http", "http_response_body_printable"), ("http", "http_response_body")):
+            body = out.get(block) if isinstance(out.get(block), dict) else {}
+            value = body.get(key)
+            if isinstance(value, str) and _BODY_CUE.search(value):
+                body[key] = REDACTED
+                changed = True
+        sip = out.get("sip")
+        for key in ("uri", "request_line", "response_line", "from", "to"):
+            value = sip.get(key) if isinstance(sip, dict) else None
+            if isinstance(value, str):
+                stripped, removed = strip_sip_password(value)
+                if stripped is None or removed:
+                    sip[key] = REDACTED if stripped is None else stripped
+                    changed = True
+        pgsql = (out.get("pgsql") or {}).get("request") if isinstance(out.get("pgsql"), dict) else None
+        if isinstance(pgsql, dict) and isinstance(pgsql.get("simple_query"), str):
+            scrubbed_sql = scrub_sql(pgsql["simple_query"])
+            if scrubbed_sql.text != pgsql["simple_query"]:
+                pgsql["simple_query"] = scrubbed_sql.text if scrubbed_sql.text is not None else REDACTED
+                changed = True
+        return out if changed else None
+    log = _zeek_log(obj, source)
+    if log is False:
+        return None
+    candidate = dict(obj)
+    injected = "_path" not in candidate and isinstance(log, str)
+    if injected:
+        candidate["_path"] = log
+    scrubbed = scrub_zeek_source(candidate)
+    if log not in ZEEK_FIELDS:
+        # a log no table here describes: its argument and password columns are not kept
+        hidden = {key: REDACTED for key in (*_ZEEK_ARGUMENTS, "password")
+                  if scrubbed.get(key) not in (None, "", REDACTED, "-")}
+        if hidden:
+            scrubbed = {**scrubbed, **hidden}
+    if scrubbed is candidate:
+        return None
+    if injected:
+        scrubbed = {key: value for key, value in scrubbed.items() if key != "_path"}
+    return scrubbed
+
+
+def scrub_source(source: dict) -> dict:
+    """The record as the mention scan reads and keeps it: a Zeek or Suricata EVE object held in `message` or
+    `event.original` scrubbed by its producer's scrubber whatever recognised it (a record whose shipper markers the
+    store's cleaning did not recognise included), plus the free-text credentials `_scrubbed_json` masks. The same
+    object when nothing changed."""
+    out = source
+    for name in ("message", "event.original"):
+        flat = name in source
+        value = source.get(name) if flat else _get(source, name)
+        if not isinstance(value, str) or value.lstrip()[:1] != "{":
+            continue
+        try:
+            obj = json.loads(value)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict) or (scrubbed := _scrubbed_json(obj, source)) is None:
+            continue
+        text = json.dumps(scrubbed, ensure_ascii=False)
+        if out is source:
+            out = copy.deepcopy(source)
+        if flat or "." not in name:
+            out[name] = text
+        else:
+            out["event"]["original"] = text
+    # an ECS URL's userinfo and password
+    url = out.get("url") if isinstance(out.get("url"), dict) else None
+    if url is not None:
+        masked = {key: strip_uri_userinfo(url[key])[0] for key in ("full", "original")
+                  if isinstance(url.get(key), str) and "@" in url[key]}
+        masked = {key: value for key, value in masked.items() if value != url[key]}
+        if url.get("password") not in (None, "", REDACTED):
+            masked["password"] = REDACTED
+        if masked:
+            if out is source:
+                out = copy.deepcopy(source)
+            out["url"].update(masked)
+    return out
 
 
 def _json_texts(obj: dict, source: dict, windows: bool, field: str = "event.original") -> Selection:
@@ -350,26 +520,27 @@ def _json_texts(obj: dict, source: dict, windows: bool, field: str = "event.orig
             _add(texts, f"{prefix}journal:{key}", _strings(obj.get(key)), seen)
         return _bounded(Selection(JOURNALD, texts))
     event_type = obj.get("event_type")
-    if isinstance(event_type, str) and any(key in obj for key in ("src_ip", "flow_id", "in_iface", "dest_ip")):
-        names = EVE_FIELDS.get(event_type)
-        if names is not None and _password_command(_get(obj, "ftp.command")):
-            names = tuple(name for name in names if name != "ftp.command_data")
-        _paths(obj, names if names is not None else _EVE_ALL, texts, seen, prefix + "eve:")
-        if names is None:
+    if _is_eve(obj):
+        known = event_type in EVE_FIELDS
+        names = EVE_FIELDS.get(event_type, _EVE_ALL)
+        if _password_command(_get(obj, "ftp.command")) or _password_command(_get(obj, "ftp_data.command")):
+            names = tuple(name for name in names if name not in ("ftp.command_data", "ftp_data.filename"))
+        _paths(obj, names, texts, seen, prefix + "eve:")
+        _http2_headers(obj, texts, seen, prefix + "eve:")
+        if not known:
             return _bounded(Selection(EVE, texts, complete=False,
                                       reason="a Suricata EVE event type outside the catalogued table: scanned by the "
                                              "table's free-text fields only"))
         return _bounded(Selection(EVE, texts))
-    log = obj.get("_path") if isinstance(obj.get("_path"), str) else None
-    if "uid" in obj and ("id.orig_h" in obj or isinstance(obj.get("id"), dict)) or log is not None:
-        if log is None:
-            dataset = _get(source, "event.dataset")
-            log = dataset.split(".", 1)[-1] if isinstance(dataset, str) and dataset.startswith("zeek.") else None
-        names = ZEEK_FIELDS.get(log or "")
-        if names is not None and _password_command(obj.get("command")):
-            names = tuple(name for name in names if name != "arg")
-        _paths(obj, names if names is not None else _ZEEK_ALL, texts, seen, prefix + "zeek:")
-        if names is None:
+    log = _zeek_log(obj, source)
+    if log is not False:
+        known = log in ZEEK_FIELDS
+        names = ZEEK_FIELDS[log] if known else _ZEEK_ALL
+        if not known or _password_command(obj.get("command")):
+            # a credential command's arguments, or the argument columns of a log the scrubber may not know
+            names = tuple(name for name in names if name not in _ZEEK_ARGUMENTS)
+        _paths(obj, names, texts, seen, prefix + "zeek:")
+        if not known:
             return _bounded(Selection(ZEEK, texts, complete=False,
                                       reason="a Zeek log outside the catalogued table: scanned by the table's "
                                              "free-text fields only"))

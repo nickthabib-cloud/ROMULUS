@@ -85,6 +85,7 @@ from romulus.hunt.mention_fields import (  # noqa: F401 - the reasons are part o
     JSON_RECORD,
     NO_TEXT,
     XML_RECORD,
+    scrub_source,
     select_texts,
 )
 from romulus.sources.compile import time_unit
@@ -307,9 +308,10 @@ class MentionScanner:
                 self.not_scanned[NO_TEXT] += 1
                 continue
             windows = entry[2] if len(entry) > 2 and entry[2] is not None else is_windows_source(source)
-            # the record as it may be stored: credentials of recognized network records masked, lone surrogates
-            # replaced (the excerpt is cut from what is scanned)
-            source = clean_source(source)
+            # the record as it may be stored: credentials of recognized network records masked (a Zeek or EVE line
+            # in its text field included, whatever recognized it), lone surrogates replaced; the excerpt is cut from
+            # what is scanned, and the kept record is this one
+            source = scrub_source(clean_source(source))
             hit = {**hit, "_source": source}
             selection = select_texts(source, windows=windows, only=entry[3] if len(entry) > 3 else None)
             if not selection.texts:
