@@ -107,6 +107,10 @@ _RULE_CELL_UPSERT = _rule_cell_upsert()
 _STORED_BOOT = func.json_extract(t.typed_event.c.event, '$.fields."host.boot.id"')
 
 
+# the admission-gate key an AI finding lists its cited raw record ids under (evidence.raw_citation.RAW_GATE)
+AGENT_RAW_GATE = "_agent_raw_records"
+
+
 def raw_id(target: str, native_id: str) -> str:
     return hashlib.sha256(f"{target}/{native_id}".encode()).hexdigest()[:32]
 
@@ -6353,6 +6357,52 @@ class Repo:
         with self.engine.connect() as connection:
             return [dict(row) for row in connection.execute(
                 query.order_by(t.mention.c.rank).limit(max(0, int(limit)))).mappings()]
+
+    def mention_citations(self, hunt_id: str, mentions: list[dict], *, per_mention: int = 5) -> dict[str, dict]:
+        """For each mention shown (its `id`, `raw_id`, `linked_events`), the hunt's findings that cite the same source
+        record: a typed finding citing a typed event the normalizer made from the record when it offered the record
+        to the scan (an audit group's process title: `linked_events`), or an AI finding citing the raw record itself.
+        Up to `per_mention` findings each (lane order), with the exact count of those findings. A typed event made
+        from the record by another path (an expansion reading it again) is not linked. Read when the pool is shown,
+        since findings arrive after the pool is published; bounded by the page (the candidate-event index for its
+        linked events, the hunt's AI findings for its raw records); it never changes a finding, a lane or the pool."""
+        if not mentions:
+            return {}
+        order = "CASE c.lane WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'lead' THEN 2 ELSE 3 END"
+        typed = text(f"""
+            SELECT DISTINCT ce.event_id AS ref, c.id AS id, c.rule_id AS rule_id, c.lane AS lane, {order} AS rank,
+                   c.priority AS priority
+            FROM candidate_event ce JOIN candidate c ON c.id = ce.candidate_id
+            WHERE ce.hunt_id = :hunt AND ce.event_id IN :refs""").bindparams(bindparam("refs", expanding=True))
+        agent = text(f"""
+            SELECT DISTINCT j.value AS ref, c.id AS id, c.rule_id AS rule_id, c.lane AS lane, {order} AS rank,
+                   c.priority AS priority
+            FROM candidate c, json_each(c.gate_results, '$.{AGENT_RAW_GATE}') j
+            WHERE c.hunt_id = :hunt AND c.provenance = 'agent' AND j.value IN :refs""").bindparams(
+            bindparam("refs", expanding=True))
+        by_event: dict[str, set[str]] = {}
+        for item in mentions:
+            for event_id in item.get("linked_events") or ():
+                by_event.setdefault(str(event_id), set()).add(item["id"])
+        by_raw = {item["raw_id"]: item["id"] for item in mentions}
+        found: dict[str, dict[str, tuple]] = {}
+        with self.engine.connect() as connection:
+            refs = sorted(by_event)
+            for start in range(0, len(refs), 500):
+                for row in connection.execute(typed, {"hunt": hunt_id, "refs": refs[start:start + 500]}).mappings():
+                    for mention in by_event[row["ref"]]:
+                        found.setdefault(mention, {})[row["id"]] = (
+                            row["rank"], -(row["priority"] or 0.0), row["id"], row["rule_id"], row["lane"])
+            for row in connection.execute(agent, {"hunt": hunt_id, "refs": sorted(by_raw)}).mappings():
+                found.setdefault(by_raw[row["ref"]], {})[row["id"]] = (
+                    row["rank"], -(row["priority"] or 0.0), row["id"], row["rule_id"], row["lane"])
+        out: dict[str, dict] = {}
+        for mention, findings in found.items():
+            ordered = sorted(findings.values())
+            out[mention] = {"count": len(ordered),
+                            "findings": [{"id": fid, "rule_id": rule, "lane": lane}
+                                         for _rank, _priority, fid, rule, lane in ordered[:per_mention]]}
+        return out
 
     def save_agent_assessment(self, row: dict, *, owner_token: str | None = None) -> bool:
         with write_txn(self.engine) as connection:

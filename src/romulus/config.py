@@ -71,6 +71,9 @@ class Settings(BaseModel):
     eval_root: Path | None = None
     # the mention pattern directory (content/mentions when unset)
     mention_dir: Path | None = None
+    # records outside the sweep's selection the mention sweep reads per source target (0: none are read; the pool
+    # then names them as not offered). Past it the smallest datasets are read whole first and the rest share it.
+    mention_residue_records: int = Field(default=1_000_000, ge=0, le=100_000_000)
 
     es_url: str = "http://127.0.0.1:9200"
     es_flavor: str = "elasticsearch"
@@ -352,7 +355,7 @@ class Settings(BaseModel):
 
 ENV_MAP = {
     "ROMULUS_HOME": "home", "ROMULUS_SITE": "site", "ROMULUS_EVAL_ROOT": "eval_root",
-    "ROMULUS_MENTION_DIR": "mention_dir",
+    "ROMULUS_MENTION_DIR": "mention_dir", "ROMULUS_MENTION_RESIDUE_RECORDS": "mention_residue_records",
     "ROMULUS_WEB_BIND": "web_bind", "ROMULUS_SECRET_KEY": "secret_key",
     "ROMULUS_WEB_TLS_CERT": "web_tls_cert", "ROMULUS_WEB_TLS_KEY": "web_tls_key",
     "OLLAMA_URL": "ollama_url", "OLLAMA_MODEL_TRIAGE": "ollama_model_triage",

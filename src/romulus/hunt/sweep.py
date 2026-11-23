@@ -2190,6 +2190,9 @@ class Sweep:
                 for pb in self.pack if "windows" in pb.os_families])
         if zeek_ranges := [w for w, _ in parts]:
             self.__dict__.setdefault("_zeek_visibility_ranges",{})[target] = zeek_ranges
+        # the selection the target's records were fetched by: the mention sweep reads the records outside it
+        # (`mention_residue`)
+        self.__dict__.setdefault("_mention_selections", {})[target] = (list(filters), [list(g) for g in any_of or []])
         # persist every planned (rule x target x partition) cell first: anything never executed
         # stays visibly 'planned' and can never be read as a complete negative
         for start in range(0, len(parts), PLANNED_CHUNK):
@@ -3346,6 +3349,24 @@ class Sweep:
         self.publish_mentions()
         self.close_stage()
 
+    def mention_residue(self, target: str) -> None:
+        """Read the target's records outside the sweep's selection into the mention scan (`hunt.mention_residue`),
+        after the target's partitions. Nothing here is normalized or evaluated; a failure costs the pool its
+        coverage of those records, never the sweep."""
+        scanner = getattr(self, "mentions", None)
+        selection = getattr(self, "_mention_selections", {}).get(target)
+        if scanner is None or selection is None or scanner._matcher is None:
+            return
+        from romulus.hunt.mention_residue import ResiduePass
+        try:
+            ResiduePass(self, target, *selection).run()
+        except HuntStopped:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the mention pool never ends the sweep
+            scanner.note_residue(target, records=None, read=0, counted=False,
+                                 reason=f"reading the records outside the sweep's selection failed "
+                                        f"({type(exc).__name__}: {exc})"[:300])
+
     def _mention_unscanned(self, target: str, partition: str, reason: str) -> None:
         scanner = getattr(self, "mentions", None)
         if scanner is not None:
@@ -3362,22 +3383,35 @@ class Sweep:
           unavailable, every channel outside the catalog's, not inventoried."""
         from romulus.evidence.windows_catalog import WINDOWS_CHANNELS
         scanner.left_out = []
+        # A target whose records outside the selection were counted exactly (and read, or counted as not read):
+        # its datasets, shapes and channels the selection leaves out are those records. Only a selected dataset the
+        # source query did not return in full stays named here.
+        counted = getattr(scanner, "residue_counted", lambda _target: False)
         for target, datasets in sorted((self.stats.get("linux_text_not_retrieved") or {}).items()):
+            if counted(target):
+                continue
             for name, reason in sorted(datasets.items()):
                 scanner.note_left_out(target, "dataset", name, None, reason)
         for target, rows in sorted((self.stats.get("dataset_reconciliation") or {}).items()):
             for row in rows:
                 if row.get("records") == 0:
                     continue                 # none of its records falls in the window: nothing there was left out
+                if counted(target) and not (str(row.get("reason") or "").startswith("not retrieved: selected")
+                                            or row.get("records") is None):
+                    continue
                 scanner.note_left_out(target, "dataset", row.get("dataset"), row.get("records"),
                                       f"{row.get('reason')} ({row.get('count_scope')})")
         for stat in ("linux_shapes_not_assessed", "windows_shapes_not_assessed"):
             for target, notes in sorted((self.stats.get(stat) or {}).items()):
+                if counted(target):
+                    continue
                 for note in notes:
                     shape, _sep, why = str(note).partition(": ")
                     scanner.note_left_out(target, "shape", shape, None, why or str(note))
         channels = {channel.casefold() for channel in WINDOWS_CHANNELS if channel}
         for target, classes in sorted((self.stats.get("windows_unassessed") or {}).items()):
+            if counted(target):
+                continue
             selective = target in getattr(self, "_windows_selective", set())
             by_channel: dict[str, int] = {}
             for item in classes:
@@ -3389,6 +3423,8 @@ class Sweep:
                           else "a channel outside the ones the sweep reads")
                 scanner.note_left_out(target, "channel", channel, records, reason)
         for target, reasons in sorted((getattr(self, "_windows_inventory_reasons", None) or {}).items()):
+            if counted(target):
+                continue
             for state in ("unavailable", "incomplete"):
                 if any(str(reason).startswith(f"event class inventory {state}") for reason in reasons):
                     scanner.note_left_out(
