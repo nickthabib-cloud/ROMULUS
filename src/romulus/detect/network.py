@@ -3,6 +3,7 @@ accumulated across every partition, so bursts spanning partition boundaries are 
 from __future__ import annotations
 
 from typing import ClassVar
+from urllib.parse import urlsplit
 
 from romulus.detect.alert_lanes import BENIGN_LOW_PRIORITY_CATEGORIES, alert_stack_lane, attack_tagged
 from romulus.detect.base import Match, Playbook, pf
@@ -475,32 +476,81 @@ class DnsSubdomainEnumeration(_Grouped):
 
 class ToolUserAgentHttp(_Grouped):
     """Positive-only: the user agent is self-reported, attacker-controlled text, so its absence
-    proves nothing; the prefix list also cannot see tools whose agent string does not start with the name."""
+    proves nothing; the prefix list also cannot see tools whose agent string does not start with the name.
+
+    Reads sensor HTTP transactions (`http_tx`) and web-server or proxy access-log lines (`http_access`). An access-log
+    line names no server address: the server is the host whose log holds the line (origin-form request targets), or,
+    for a forward proxy's line, the host of the absolute-form URL it fetched."""
     id = "net.tool_user_agent_http"
-    version = "4"
+    version = "5"
     URLS_NAMED = 3
     AGENTS_NAMED = 3            # recorded user agents quoted, each with a cited record
     AGENTS_COUNTED = 50         # distinct recorded user agents counted per group; beyond it, "and possibly more"
     assures_negative = False
     title = "HTTP requests whose user agent begins with a known command-line tool name"
-    families = ("http_tx",)
-    required_fields = ("source.ip", "destination.ip", "user_agent.original")
+    families = ("http_tx", "http_access")
+    required_fields = ("source.ip", "user_agent.original")
+    # A sensor transaction also needs its server address; an access-log line's server is the logging host.
+    REQUIRED_BY_FAMILY: ClassVar[dict[str, tuple[str, ...]]] = {"http_tx": ("destination.ip",), "http_access": ()}
     severity, lane = "low", "lead"
     attack = ("T1105",)
-    benign = ("health checks, package managers, monitoring scripts",)
+    benign = ("health checks, package managers, monitoring scripts",
+              "site uptime probes and API clients written with curl, Python or Go HTTP libraries")
     next_checks = ("process executions on the source host at the same time", "file_transfer for what was fetched")
+    card: ClassVar[dict] = {
+        "behavior": "HTTP requests whose self-reported user agent begins with a command-line tool's own identifier "
+                    "(curl, wget, python-requests, Go net/http, PowerShell, nmap, sqlmap, nikto, ffuf, gobuster, ...)",
+        "telemetry": "http_tx (Zeek/Suricata HTTP: source.ip, destination.ip, user_agent.original, url.original, "
+                     "http.hostname) and http_access (Apache/nginx combined access logs and proxy logs that record a "
+                     "user agent: source.ip, user_agent.original, url.original; the server is the logging host). "
+                     "Both are present in the lab profile",
+        "fidelity": "a self-reported string, never proof of the tool: any client can send it, and a tool can send "
+                    "another agent",
+        "benign_and_cost": "health checks, package managers, monitoring and API scripts; one grouped lead per "
+                           "(client, server, tool token)",
+        "query_cost": "none beyond the sweep",
+        "next_pivot": "process executions on the client at the same time; what the requests fetched",
+        "adds": "web servers with no sensor in front of them: their own access logs show the same agent strings",
+        "research_basis": "the tools' published default user agents; ATT&CK Enterprise 20.0 T1105",
+        "retrieval": "the sweep retrieves every record of the target in each partition with no field filter, a "
+                     "superset of what this evaluator reads",
+        "lanes": "lead, severity low: the string alone shows a tool may have been used, nothing about what it did",
+    }
+
+    @staticmethod
+    def _access_server(e) -> str | None:
+        """The server an access-log line's request went to: the logging host for an origin-form target, the URL's
+        host for a proxy's absolute-form target, None when neither is recorded."""
+        target = e.get("url.original")
+        if isinstance(target, str) and target and not target.startswith(("/", "*")):
+            # absolute form (a proxy's GET http://site/...) or authority form (a proxy's CONNECT site:443)
+            try:
+                host = urlsplit(target if "://" in target.split("?", 1)[0] else "//" + target).hostname
+            except ValueError:
+                host = None
+            return host or None
+        return e.host or None
 
     def consume(self, events):
         for e in self.applicable(events):
             ua = e.get("user_agent.original")
-            if not isinstance(ua, str):
+            needed = self.REQUIRED_BY_FAMILY.get(e.family, ())
+            if not isinstance(ua, str) or any(e.get(name) in (None, "", [], {}) for name in needed):
                 self.evaluated -= 1
                 self.missing_required += 1
                 continue
             recorded, ua = ua, ua.lower()
             if not ua.startswith(TOOL_UA_PREFIXES):
                 continue
-            key = (e.get("source.ip"), e.get("destination.ip"), e.get("http.hostname"), ua.split(" ")[0])
+            if e.family == "http_access":
+                server = self._access_server(e)
+                if server is None:
+                    self.evaluated -= 1
+                    self.missing_required += 1
+                    continue
+                key = ("access", e.get("source.ip"), server, ua.split(" ")[0])
+            else:
+                key = (e.get("source.ip"), e.get("destination.ip"), e.get("http.hostname"), ua.split(" ")[0])
             state = self.keep(key, e)
             if state is None:
                 continue
@@ -521,7 +571,12 @@ class ToolUserAgentHttp(_Grouped):
         for key, state in self.reported():
             with citation_group(self, out, key, state):
                 evs, missing, context = self.cite(state)
-                src, dst, hostname, ua = key
+                access = key[0] == "access"
+                if access:
+                    _kind, src, dst, ua = key
+                    hostname = None
+                else:
+                    src, dst, hostname, ua = key
                 urls = sorted(u for u in state.names("urls", self.URLS_NAMED).values())
                 every = len([u for u in state.bag("urls") if u])
                 # the user agents as recorded (each quoted one with a cited record); the grouping token is not a value
@@ -530,14 +585,23 @@ class ToolUserAgentHttp(_Grouped):
                 quoted = ", ".join(f"'{agent}'" for agent in agents) + (
                     more(len(agents), n_agents) if n_agents < self.AGENTS_COUNTED else " and possibly more")
                 tools = " or ".join(sorted(state.bag("tools")))
-                claim = (f"{state.count} HTTP request(s) from {src} to {dst} (Host: {hostname}) with user agent(s) "
+                if not access:
+                    where = f"from {src} to {dst} (Host: {hostname})"
+                elif dst == evs[0].host:
+                    where = f"from {src} recorded in the access log of {dst}"
+                else:
+                    where = f"from {src} to {dst} recorded in the proxy access log on {evs[0].host}"
+                claim = (f"{state.count} HTTP request(s) {where} with user agent(s) "
                          f"{quoted} ({self.span(state)}), which matched the {tools} tool signature; URLs include {urls}"
                          + (more(len(urls), every) if every < 50 else " and possibly more") + "."
                          + self.told(evs, state, missing, "requests", "request") + " The user agent is self-reported.")
-                out.append(Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "user_agent.original"),
-                                                                         pf(evs[0], "source.ip")],
+                predicate = [pf(evs[0], "user_agent.original"), pf(evs[0], "source.ip")]
+                if access and evs[0].has("url.original"):
+                    predicate.append(pf(evs[0], "url.original"))
+                out.append(Match(self.id, claim, self.claim_type, evs, predicate,
                                  evs[0].ts, self.severity, self.lane, "medium", evs[0].entities(),
-                                 group_key=f"{src}|{dst}|{ua}", context_ids=context))
+                                 group_key=f"access|{dst}|{src}|{ua}" if access else f"{src}|{dst}|{ua}",
+                                 context_ids=context))
         return out
 
 
