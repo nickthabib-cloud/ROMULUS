@@ -37,8 +37,7 @@ MAX_CITATION_BYTES = 64 * 1024
 MAX_RAW_COPY_BYTES = 256 * 1024
 # Per-row overhead charged for a kept copy beside its body (key, row header, page slack).
 COPY_ROW_BYTES = 64
-WITNESS_NOTE = ("Cited witnesses record only the source address and the matched name field; the raw records they "
-                "cite are retained with the finding.")
+WITNESS_NOTE = "Cited witnesses record only the source address and the matched name field."
 MAX_NAMES_PER_RECORD = 1024
 _LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _SLUG = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
@@ -507,8 +506,8 @@ class ServiceCatalog(Playbook):
         predicate = [pf(event, field) for event in events for field in ("source.ip", *NAME_FIELDS)
                      if event.has(field)]
         # A witness without a kept raw copy keeps its native reference; the publish path fetches its body from the
-        # source and says so on the finding when it cannot.
-        notes = [COMPACT_CITATION_NOTE if unkept else WITNESS_NOTE,
+        # source, drops the compact note when it did and says so on the finding when it cannot.
+        notes = [WITNESS_NOTE, *((COMPACT_CITATION_NOTE,) if unkept else ()),
                  "A name observation does not establish execution, session success or data transfer.",
                  "Distinct internal source addresses are counted; NAT and shared resolvers can hide multiple hosts.",
                  f"Service catalog version {self.catalog.version}; category {item['category']}."]

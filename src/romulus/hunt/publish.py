@@ -496,6 +496,9 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
         fetcher.hydrate(match, raw_sources)
     else:
         SourceCitationFetcher(None).hydrate(match, raw_sources)
+    if COMPACT_CITATION_NOTE in match.notes and not any(COMPACT_CITATION_NOTE in event.caveats for event in match.events):
+        # every compact witness's body was found or fetched: the finding no longer says it was not retained
+        match.notes = [note for note in match.notes if note != COMPACT_CITATION_NOTE]
     decision = decide(match, hunt_id)
     raw_sources = _verified_sources(match, raw_sources)
     repo.save_evidence(hunt_id, match.events, raw_sources, task_id, owner_token=owner_token)

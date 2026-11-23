@@ -222,7 +222,7 @@ def test_a_copy_over_its_bound_is_not_kept_and_the_finding_says_its_body_is_fetc
     matches = drive(rule, [[event(1)], [event(90)]], size=4096)
     fleet = next(m for m in matches if m.group_key == "ngrok|fleet")
     assert fleet.raw_copies == {} and [e.id for e in fleet.events] == ["event-1", "event-90"]
-    assert COMPACT_CITATION_NOTE in fleet.notes and sc.WITNESS_NOTE not in fleet.notes
+    assert COMPACT_CITATION_NOTE in fleet.notes and sc.WITNESS_NOTE in fleet.notes
     assert all(COMPACT_CITATION_NOTE in e.caveats and e.raw for e in fleet.events)
     assert "service_raw_copies" in rule.__dict__.get("_cov_notes", {}) and not rule.limits
 
@@ -354,14 +354,15 @@ def test_kept_copies_live_on_disk_not_in_memory_at_20k_sources(tmp_path, network
 
 # ---- publication -------------------------------------------------------------------------------------------------
 
-def published(rule, bodies, recorded):
+def published(rule, bodies, recorded, source=None):
     """Publish the rule's matches for one record whose reference recorded the digest of `recorded` while the
-    partition held `bodies`, with no source to fetch from; each finding with its report-manifest citations."""
+    partition held `bodies`, fetching by id from `source` (none: nothing to fetch from); each finding with its
+    report-manifest citations."""
     from romulus.evidence.normalize import raw_digest
     from romulus.hunt.publish import SourceCitationFetcher, publish_match
     from tests.test_sweep import _repo
     witness = event(1).model_copy(update={"raw": [RawRef(target="idx", native_id="1", digest=raw_digest(recorded))]})
-    rule.citation_fetcher = SourceCitationFetcher(None)
+    rule.citation_fetcher = SourceCitationFetcher(source)
     rule.bind_raw({"idx/1": bodies}, "idx")
     matches = list(rule.consume([witness]))
     rule.bind_raw({})
@@ -390,3 +391,29 @@ def test_a_kept_copy_that_fails_its_digest_is_never_stored_as_retained(rule):
         assert cited and all(item["status"] == "broken: raw copy missing" for item in cited)
         assert "Citation body not retrieved" in candidate["claim"]
     assert repo.raw_records([raw_id("idx", "1")]) == []
+
+
+class ServingSource:
+    def __init__(self, body):
+        self.body = body
+
+    def search(self, index, body):
+        return {"hits": {"hits": [{"_index": "idx", "_id": "1", "_source": self.body}]}}
+
+
+@pytest.mark.parametrize("serves", [True, False], ids=["fetched", "not-retrieved"])
+def test_the_compact_note_stays_only_while_a_body_is_missing(rule, monkeypatch, serves):
+    """A copy the rule did not keep is fetched by id: once fetched, the finding no longer says the body was not
+    retained; when the fetch finds nothing, the note and the not-retrieved statement stay."""
+    monkeypatch.setattr(sc, "MAX_RAW_COPY_BYTES", 0)
+    recorded = {"n": 1, "message": "a1.ngrok-free.app"}
+    _repo, found = published(rule, recorded, recorded, ServingSource(recorded) if serves else None)
+    finals = [(candidate, cited) for candidate, cited in found if candidate["group_key"].endswith("|fleet")]
+    assert finals
+    for candidate, cited in finals:
+        text = json.dumps(candidate, default=str)
+        if serves:
+            assert all(item["status"] == "retained" for item in cited)
+            assert sc.COMPACT_CITATION_NOTE not in text and "not retrieved" not in text
+        else:
+            assert sc.COMPACT_CITATION_NOTE in text and "Citation body not retrieved" in text
