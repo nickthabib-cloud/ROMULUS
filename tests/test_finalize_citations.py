@@ -168,3 +168,34 @@ def test_the_registered_pack_when_the_source_cannot_serve_finalize_witnesses(tmp
     broken = [rule for rule, items in citations(repo).items() for _candidate, cited in items
               for item in cited if item["status"] != "retained"]
     assert broken == []
+
+
+def test_an_authentication_witness_is_fetched_once_and_never_stored_unverified():
+    """A Windows burst witness kept by reference (no digest) is left to the Windows citation pass, which checks the
+    fetched body field by field. Marked compact as well, the digest-checked fetch would fetch it a second time and
+    accept any body for a reference that records no digest."""
+    from datetime import UTC, datetime
+
+    from romulus.detect.base import Match
+    from romulus.evidence.typed import RawRef, TypedEvent, fv
+    from romulus.hunt.citations import AUTH_WITNESS_NOTE_PREFIX, COMPACT_CITATION_NOTE
+
+    witness = TypedEvent(id="burst-1", family="auth", ts=datetime(2024, 11, 18, 14, tzinfo=UTC), host="dc1",
+                         fields={"user.name": fv("alice", "w1:winlog.event_data.TargetUserName")},
+                         raw=[RawRef(target="winlogbeat-x", native_id="w1")], normalizer="windows-ecs@23",
+                         caveats=[AUTH_WITNESS_NOTE_PREFIX + "; compact recorded fields and native reference retained."])
+    match = Match("synthetic.burst", "claim", "observed_action", [witness], [], witness.ts, "high", "lead", "medium")
+    sw.Sweep._mark_uncopied(match, {})
+    assert COMPACT_CITATION_NOTE not in match.events[0].caveats
+
+    class Source:
+        searches = 0
+
+        def search(self, index, body):
+            type(self).searches += 1
+            # a body that is not the cited record: the field-by-field check must refuse it
+            return {"hits": {"hits": [{"_index": "winlogbeat-x", "_id": "w1", "_source": {"unrelated": True}}]}}
+
+    WindowsCitationFetcher(Source()).hydrate(match, {})
+    assert Source.searches == 1
+    assert match.raw_copies == {} and match.events[0].caveats[0].startswith(AUTH_WITNESS_NOTE_PREFIX)

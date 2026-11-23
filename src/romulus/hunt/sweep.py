@@ -83,7 +83,7 @@ from romulus.evidence.windows_catalog import (
 from romulus.evidence.windows_reassembly import SCRIPT_FINALIZE_BATCH_SIZE, ScriptBlockAssembler
 from romulus.evidence.zeek import ZEEK_INTERIM_SUPERSEDED, ZEEK_NORMALIZER
 from romulus.evidence.zeek_catalog import MALCOLM, SHAPES, ZEEK_LOGS, lookup_log
-from romulus.hunt.citations import COMPACT_CITATION_NOTE
+from romulus.hunt.citations import AUTH_WITNESS_NOTE_PREFIX, COMPACT_CITATION_NOTE
 from romulus.hunt.controls import HuntStopped
 from romulus.hunt.mentions import MentionScanner
 from romulus.hunt.net_join_pass import rows_path
@@ -560,9 +560,13 @@ class Sweep:
         """Mark compact a cited record whose raw copy is in none of the partition read, the rule's own copies and the
         event stage (a witness an aggregate chose from an earlier partition), so publication finds the copy the hunt
         retained or fetches its body by native id, and says so on the finding when it cannot. Unmarked, the record
-        would be cited with no raw copy at all. Events are replaced, never changed in place: a rule may hold them."""
+        would be cited with no raw copy at all. Events are replaced, never changed in place: a rule may hold them.
+        An authentication witness kept by reference is left to the Windows citation pass, which checks the fetched
+        body field by field; its reference records no digest, so the by-id fetch would accept any body."""
         marked = {}
         for event in m.events:
+            if any(note.startswith(AUTH_WITNESS_NOTE_PREFIX) for note in event.caveats):
+                continue
             if COMPACT_CITATION_NOTE not in event.caveats and any(ref.key not in raw_sources for ref in event.raw):
                 marked[event.id] = event.model_copy(update={"caveats": [*event.caveats, COMPACT_CITATION_NOTE]})
         if marked:

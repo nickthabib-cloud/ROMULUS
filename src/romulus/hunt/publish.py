@@ -13,7 +13,7 @@ from romulus.detect.observed import pointer_body
 from romulus.errors import SourceError
 from romulus.evidence.normalize import normalize_hits, observed_record, raw_digest
 from romulus.evidence.typed import TypedEvent, fv
-from romulus.hunt.citations import COMPACT_CITATION_NOTE
+from romulus.hunt.citations import AUTH_WITNESS_NOTE_PREFIX, COMPACT_CITATION_NOTE
 from romulus.store.repo import Repo, raw_id
 
 LINEAGE_CITATION_BATCH = 500
@@ -108,7 +108,7 @@ class WindowsCitationFetcher:
     def hydrate(self, match: Match, raw_sources=None) -> None:
         SourceCitationFetcher(self.client).hydrate(match, raw_sources)
         compact = [event for event in match.events if any(
-            note.startswith("Authentication witness body not retrieved") for note in event.caveats)]
+            note.startswith(AUTH_WITNESS_NOTE_PREFIX) for note in event.caveats)]
         if not compact:
             return
         wanted = {}
@@ -479,7 +479,7 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
                              repo.citation_events(hunt_id,missing[start:start+LINEAGE_CITATION_BATCH]))
         attach(match,witnesses,limited=True)
     compact = [event for event in match.events if COMPACT_CITATION_NOTE in event.caveats or any(
-        note.startswith("Authentication witness body not retrieved") for note in event.caveats)]
+        note.startswith(AUTH_WITNESS_NOTE_PREFIX) for note in event.caveats)]
     if compact:
         refs = {raw_id(ref.target, ref.native_id): ref for event in compact for ref in event.raw
                 if ref.key not in raw_sources}
