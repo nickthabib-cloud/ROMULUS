@@ -333,6 +333,13 @@ def build_query(intent: SearchIntent, contract: FieldContract) -> dict:
             groups.append({"bool": {"filter": [_pred(p, contract, os_family=group_os) for p in group]}})
         query["bool"]["should"] = groups
         query["bool"]["minimum_should_match"] = 1
+    if intent.excluding is not None:
+        if not intent.excluding.filters and not intent.excluding.any_of:
+            raise CompileError("an excluded selection that selects every record leaves nothing to search")
+        # the very query the excluded selection compiles to (same window, same per-group field resolution), negated
+        selected = intent.model_copy(update={"filters": intent.excluding.filters,
+                                             "any_of": intent.excluding.any_of, "excluding": None})
+        query["bool"]["must_not"] = [build_query(selected, contract)]
     return query
 
 

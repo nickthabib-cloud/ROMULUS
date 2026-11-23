@@ -821,6 +821,10 @@ def run_hunt(s: Settings, hunt_id: str, on_candidate=None, expand: bool | None =
                     raise HuntStopped(stopped)
                 started.append(target)
                 sweep.run_target(target)
+                # the records outside the sweep's selection, for the mention scan only
+                residue = getattr(sweep, "mention_residue", None)
+                if residue is not None:
+                    residue(target)
         except HuntStopped as stop:
             return _stopped_in_sweep(repo, hunt_id, sweep, m["targets"], started, stop, watch, owner_token)
         sweep.finalize()

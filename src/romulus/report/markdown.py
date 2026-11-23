@@ -160,6 +160,10 @@ def _mentions_section(m: dict) -> list[str]:
         flag = " (flagged: possible prompt injection)" if item.get("suspicious_content") else ""
         also = item.get("also_matched") or []
         also_text = f"; also matches {', '.join(other['id'] for other in also)}" if also else ""
+        cited = item.get("cited_by") or {}
+        if cited.get("count"):
+            also_text += (f"; same record cited by {cited['count']} finding(s): "
+                          + ", ".join(f"{found['id']} ({found['lane']})" for found in cited["findings"]))
         out.append(f"| {item['rank']} | {cell(pattern['strength'])} | {cell(item['headline'])} "
                    f"(`{cell(pattern['id'])}`{cell(also_text)}) | "
                    f"{cell(', '.join(pattern['attack']['techniques']) or 'none')} | "

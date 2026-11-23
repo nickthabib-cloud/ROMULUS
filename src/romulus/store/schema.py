@@ -226,6 +226,9 @@ mention = Table(
     Column("line_cut", Boolean, nullable=False),
     Column("suspicious_content", Boolean, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
+    # typed events the normalizer made from the cited record when it offered it (an audit group's process title):
+    # the findings citing them are shown beside the mention (Repo.mention_citations)
+    Column("linked_events", JSON),
     CheckConstraint("strength IN ('strong','medium','weak')", name="ck_mention_strength"),
     UniqueConstraint("hunt_id", "rank", name="uq_mention_rank"),
 )
