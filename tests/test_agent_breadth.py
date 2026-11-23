@@ -322,3 +322,8 @@ def test_past_the_cluster_cap_the_view_is_partial_and_names_what_was_not_cluster
     # the top of the lane and priority order is clustered; the rest is counted, never read as explained
     assert [cluster.top["id"] for cluster in view.clusters] == ["c-h3", "c-h2"]
     assert view.partial == {"reason": "cap:cluster_findings:2", "findings_not_clustered": 3}
+    # a run over it names the cap: its clusters were all worked, but not every finding was clustered
+    s = Settings(home=tmp_path, agent_triage="off")
+    result = _run(s, repo, _ByKind(_finish(), context=1_000_000))
+    assert result.state == "partial" and "cap:cluster_findings:2" in result.reason
+    assert "unexplained_clusters" not in result.reason

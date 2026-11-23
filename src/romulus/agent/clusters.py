@@ -10,8 +10,10 @@ an action.
 
 Clusters are ranked as the report orders their best finding: by the hunt's final ranking when it ran (confirmed,
 reported, ranked but not reported), else by lane and priority. The graph is built over at most CLUSTER_FINDING_LIMIT
-findings, the top of that order; past it the view is partial and says how many findings were not clustered, so a cap
-is never read as "every cluster is explained".
+findings: past that many, the findings clustered are the top of the store's lane and priority order (read in keyset
+pages, so the selection stays bounded without loading the ranking for every finding), and the clusters among them are
+ranked as above. The view is then partial and says how many findings were not clustered, so a cap is never read as
+"every cluster is explained"; the run records the cap and how many clusters were left unexplained.
 """
 from __future__ import annotations
 
