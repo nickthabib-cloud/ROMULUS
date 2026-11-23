@@ -142,8 +142,8 @@ def _stage_indicators(repo, manifest, view, directory, settings) -> dict:
         for key in files:
             with NamedTemporaryFile(dir=directory, prefix=".report-", suffix=".tmp", delete=False) as output:
                 staged[key] = Path(output.name)
-        with iocs.collect(repo, manifest["findings"], manifest.get("internal_networks"), settings=settings,
-                          scratch=directory) as table:
+        with iocs.collect(repo, manifest["findings"], manifest.get("internal_networks"),
+                          hunt_id=manifest["hunt"]["id"], settings=settings, scratch=directory) as table:
             if table.digest() != view["digest"]:
                 raise iocs.ExportMismatch("the indicator rows differ from the report manifest's digest")
             with staged["iocs_csv"].open("w", encoding="utf-8", newline="") as output:

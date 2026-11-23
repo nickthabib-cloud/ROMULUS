@@ -416,6 +416,9 @@ from tests import throughput_fixture as tf
 # (no pattern is loaded in tests, so nothing is kept); candidates, events, links and the non-baseline semantic
 # projection are unchanged.
 # The mentions view then states how its finding link is found (cited_by_scope): only the manifest digest moved.
+# The manifest gains its partner sections (`recommendations` from the findings' ATT&CK mitigations, `indicators`
+# summarising the indicator export): only the manifest digest moved, and with those two keys removed it is the
+# earlier one (MANIFEST_BEFORE_PARTNER_SECTIONS).
 GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
  # Fleet member hosts staged as memberships add two ranking statements: only the audit's rank query count moved.
  # The ranking version rank@1 -> rank@2 (fleet member hosts keep the rule's evidence, timed by their own record) moves
@@ -438,7 +441,7 @@ GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe55
  'events': '9b9544ad6f24d002f3f71d874518df5ecee3d968e12ec1fd5c9dce2345d7a87f',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
  'links': '5fa22b4162492394955b6b1873f566f427a58dfd7529c0df73e87a6da8daa76f',
- 'manifest': 'e620af8e0e1bf456a08c1ce9f182000cda69875e7c08864315a67e1e7dde6cd7',
+ 'manifest': '91e0f1a735c67aced8416eb24d69efab034ca490bcba03e7131e734a31a43d7a',
  'raw': 'd924f62eebd5ee88c8142c690333924450c3344b18210ddfe87b8e486127dd35',
  'rule_cells': '901fd3bf864345e6f4868a7aea7b5c1cdb828a4c44f329e9d3f47cd980e13240',
  'stats': 'd9b4e9300012bd2993dcc874e105eb1dfcdf40626ea74849433f3d100309051e',
@@ -463,12 +466,22 @@ GOLDEN_STACK_BY_RULE_ESTIMATE = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e
  'events': '9b9544ad6f24d002f3f71d874518df5ecee3d968e12ec1fd5c9dce2345d7a87f',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
  'links': '5fa22b4162492394955b6b1873f566f427a58dfd7529c0df73e87a6da8daa76f',
- 'manifest': '4bdcb7cbec68bce866ae6fb5c70bad499bfee3314cfe2a3916d3371d3d0d1161',
+ 'manifest': 'fe40b1689f1cce174cd2439c21cd89dc2b28913add9bfc44607efc9ccdd1f340',
  'raw': 'd924f62eebd5ee88c8142c690333924450c3344b18210ddfe87b8e486127dd35',
  'rule_cells': '901fd3bf864345e6f4868a7aea7b5c1cdb828a4c44f329e9d3f47cd980e13240',
  'stats': 'd9b4e9300012bd2993dcc874e105eb1dfcdf40626ea74849433f3d100309051e',
  'tasks': '1e1eeb69d05da151bec8f6dff43c1863a4eb43a288f84c1ba35168311b303360'}
 GOLDEN_CANDIDATES_BY_RULE_ESTIMATE = GOLDEN_STACK_BY_RULE_ESTIMATE['candidates']
+# the two stacks' manifest digests without the partner sections, as captured before they existed
+MANIFEST_BEFORE_PARTNER_SECTIONS = ('e620af8e0e1bf456a08c1ce9f182000cda69875e7c08864315a67e1e7dde6cd7',
+                                    '4bdcb7cbec68bce866ae6fb5c70bad499bfee3314cfe2a3916d3371d3d0d1161')
+
+
+def _manifest_digest_before_partner_sections(snapshot: dict) -> str:
+    stripped = json.loads(json.dumps(snapshot))
+    for key in ("recommendations", "indicators"):
+        stripped["manifest"].pop(key)
+    return tf.deterministic_golden_digests(stripped)["manifest"]
 GOLDEN_NON_BASELINE_SEMANTICS_BY_RULE_ESTIMATE = {'candidates': {'all_fields': '01298210f34ad208d907cc81e2b3dd0d7a1813ccda18e812398b6fa0df8edda8',
                 'benign_alternatives': '16fd65da86c5d4c29ea644b96abb0c02d4b84558e0cb9687e295da52785e42ea',
                 'claim': '51beb7acd2901c1cf055d36792edda30fd960e0dd79cb4d456908a10c87f805d',
@@ -738,6 +751,7 @@ def test_the_sweep_and_expansion_stack_reproduces_the_captured_result(stacks):
     assert snapshot["manifest"]["findings"]
     _assert_every_citation_resolves_with_raw(snapshot)
     assert tf.deterministic_golden_digests(snapshot) == GOLDEN_STACK
+    assert _manifest_digest_before_partner_sections(snapshot) == MANIFEST_BEFORE_PARTNER_SECTIONS[0]
     assert _non_baseline_semantic_digests(snapshot) == GOLDEN_NON_BASELINE_SEMANTICS
     assert all(finding.get("rank") is not None for finding in snapshot["manifest"]["findings"])
     assert snapshot["manifest"]["ranking"]["status"] == "complete"
@@ -751,6 +765,7 @@ def test_the_stack_seeded_by_the_rule_estimate_is_unchanged_by_ranking(stacks):
     assert tf.deterministic_golden_digests(tf.with_prior_versions(snapshot))["candidates"] == (
         "1ba3a7d45c7a29301e9ee253f8bee2f2fa1bbe288d5769f958940e4dfbb1878b")
     assert tf.deterministic_golden_digests(snapshot) == GOLDEN_STACK_BY_RULE_ESTIMATE
+    assert _manifest_digest_before_partner_sections(snapshot) == MANIFEST_BEFORE_PARTNER_SECTIONS[1]
     assert _non_baseline_semantic_digests(snapshot) == GOLDEN_NON_BASELINE_SEMANTICS_BY_RULE_ESTIMATE
 
 

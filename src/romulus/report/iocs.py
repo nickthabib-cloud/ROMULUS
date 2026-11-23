@@ -52,6 +52,7 @@ STIX_ROLES = 20
 MAX_TEXT = 4096
 FINDING_BATCH = 200
 EVENT_BATCH = 500
+ROW_BATCH = 5_000
 SCOPES = ("external", "unknown", "not_applicable", "internal")
 
 # typed field -> (indicator kind, role); a list value is read element by element
@@ -265,9 +266,20 @@ def finding_values(finding: dict) -> Iterator[tuple[str, object, str, str]]:
                 yield kind, value, role, name
 
 
-def _subject_event_ids(finding: dict) -> list[str]:
-    return list(dict.fromkeys(str(cite["event_id"]) for cite in finding.get("citations") or ()
-                              if isinstance(cite, dict) and cite.get("event_id")))
+def _subject_event_ids(finding: dict, context: set[str]) -> list[str]:
+    """The records a finding is about: the events it cites except those cited only as context for its claim (a
+    lineage ancestor, a record bounding a stated span), as `romulus.hunt.publish.subject_event_ids` reads them."""
+    cited = list(dict.fromkeys(str(cite["event_id"]) for cite in finding.get("citations") or ()
+                               if isinstance(cite, dict) and cite.get("event_id")))
+    return [event_id for event_id in cited if event_id not in context] or cited
+
+
+def _context_ids(repo, findings: list[dict]) -> dict[str, set[str]]:
+    """Each finding's context-only event ids, read from its stored candidate."""
+    if not hasattr(repo, "candidate_graph_inputs"):
+        return {}
+    return {row["id"]: set(row.get("context_event_ids") or ())
+            for row in repo.candidate_graph_inputs([finding["id"] for finding in findings])}
 
 
 def _site_networks(record: dict | None) -> tuple[SiteNetworks | None, dict]:
@@ -291,6 +303,7 @@ class IndicatorTable:
         self.db, self.networks_view, self.secrets_checked = db, networks_view, secrets_checked
         self.withheld: Counter = Counter()
         self.counts: Counter = Counter()
+        self.hunt_id: str | None = None
 
     def rows(self) -> Iterator[tuple]:
         """Every row with its finding and its indicator's aggregates, in export order."""
@@ -333,6 +346,8 @@ class IndicatorTable:
                        "findings": self.counts["findings"], "findings_with_indicators": self.db.execute(
                            "SELECT count(DISTINCT seq) FROM row").fetchone()[0],
                        "mention_findings_skipped": self.counts["mention_findings"],
+                       "fleet_members_read": self.counts["fleet_members"],
+                       "fleet_members_not_read": self.counts["fleet_members_not_read"],
                        "events_not_retained": self.counts["events_not_retained"], "by_kind": by_kind},
             "withheld": {kind: dict(sorted(reasons.items())) for kind, reasons in sorted(_nest(self.withheld).items())},
             "internal_networks": self.networks_view, "secrets_checked": self.secrets_checked,
@@ -348,8 +363,10 @@ def _nest(counter: Counter) -> dict[str, Counter]:
 
 
 @contextmanager
-def collect(repo, findings: Iterable[dict], internal_networks: dict | None, *, settings=None, scratch=None):
-    """Gather the indicator rows of `findings` (reportable findings, report order) into an `IndicatorTable`."""
+def collect(repo, findings: Iterable[dict], internal_networks: dict | None, *, hunt_id: str | None = None,
+            settings=None, scratch=None):
+    """Gather the indicator rows of `findings` (reportable findings, report order) into an `IndicatorTable`. With
+    `hunt_id`, a fleet finding's members are read from its host appendix as well."""
     networks, networks_view = _site_networks(internal_networks)
     check = _Checker(networks, _secrets(settings))
     with scratch_db(scratch) as db:
@@ -358,6 +375,7 @@ def collect(repo, findings: Iterable[dict], internal_networks: dict | None, *, s
         db.execute("CREATE TABLE row (kind TEXT, value TEXT, role TEXT, field TEXT, seq INTEGER, "
                    "PRIMARY KEY (kind, value, role, field, seq)) WITHOUT ROWID")
         table = IndicatorTable(db, networks_view, settings is not None)
+        table.hunt_id = hunt_id
         batch: list[tuple[int, dict]] = []
         for seq, finding in enumerate(findings):
             table.counts["findings"] += 1
@@ -380,8 +398,26 @@ def collect(repo, findings: Iterable[dict], internal_networks: dict | None, *, s
         yield table
 
 
+def _fleet_values(repo, table: IndicatorTable, finding: dict) -> Iterator[tuple[str, object, str, str]]:
+    """The members a fleet finding stands for, from its immutable host appendix: hosts, or addresses."""
+    ref = finding.get("fleet_hosts")
+    if not ref:
+        return
+    if table.hunt_id is None or not hasattr(repo, "report_hosts"):
+        table.counts["fleet_members_not_read"] += int(ref.get("count") or 0)
+        return
+    kind, role = (("ip", "fleet member address") if finding.get("fleet_member_kind") in (
+        "external_address", "internal_address") else ("hostname", "fleet member host"))
+    for row in repo.report_hosts(table.hunt_id, ref["sha256"]):
+        table.counts["fleet_members"] += 1
+        yield kind, row["host"], role, "fleet_hosts"
+
+
 def _add_batch(repo, db, batch: list[tuple[int, dict]], check: _Checker, table: IndicatorTable) -> None:
-    wanted = list(dict.fromkeys(event_id for _seq, finding in batch for event_id in _subject_event_ids(finding)))
+    context = _context_ids(repo, [finding for _seq, finding in batch])
+    subjects = {finding["id"]: _subject_event_ids(finding, context.get(finding["id"], set()))
+                for _seq, finding in batch}
+    wanted = list(dict.fromkeys(event_id for ids in subjects.values() for event_id in ids))
     events: dict[str, dict] = {}
     for start in range(0, len(wanted), EVENT_BATCH):
         for row in repo.events_by_ids(wanted[start:start + EVENT_BATCH]):
@@ -393,8 +429,8 @@ def _add_batch(repo, db, batch: list[tuple[int, dict]], check: _Checker, table: 
         db.execute("INSERT INTO finding VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (
             seq, finding["id"], finding.get("lane"), finding.get("severity"), finding.get("confidence"),
             finding.get("provenance") or "deterministic", finding.get("rule_id"), _utc(finding.get("observed_at"))))
-        sources = [finding_values(finding)]
-        for event_id in _subject_event_ids(finding):
+        sources = [finding_values(finding), _fleet_values(repo, table, finding)]
+        for event_id in subjects[finding["id"]]:
             if event_id in events:
                 sources.append(event_values(events[event_id]))
             else:
@@ -406,6 +442,9 @@ def _add_batch(repo, db, batch: list[tuple[int, dict]], check: _Checker, table: 
                     table.withheld[(kind, detail)] += 1
                     continue
                 rows.append((exported, detail, role, field, seq))
+                if len(rows) >= ROW_BATCH:          # a fleet appendix can hold many members: insert as they come
+                    db.executemany("INSERT OR IGNORE INTO row VALUES (?, ?, ?, ?, ?)", rows)
+                    rows = []
     db.executemany("INSERT OR IGNORE INTO row VALUES (?, ?, ?, ?, ?)", rows)
 
 

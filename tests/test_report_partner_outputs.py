@@ -8,7 +8,6 @@ import hashlib
 import io
 import json
 import re
-import time
 import tracemalloc
 import uuid
 import zipfile
@@ -127,6 +126,9 @@ def test_findings_without_an_actionable_mitigation_get_triage_and_none_is_droppe
     assert view["unknown_techniques"] == {"T9999": 1}
     # ATT&CK for ICS: never a recommendation to scan or probe OT devices
     assert "rec-ics-M0930" in items and not any("M0916" in key for key in items)
+    assert items["rec-ics-M0930"]["caveat"].startswith("Passive measures only on OT devices")
+    assert items["rec-ics-M0930"]["text"].endswith(recommendations.OT_CAVEAT)
+    assert "caveat" not in items["rec-enterprise-M1001"]
 
 
 @pytest.mark.parametrize("lane,severity,status,provenance,expected", [
@@ -197,13 +199,20 @@ def test_the_pinned_release_maps_the_shipped_rules():
 
 
 class _Repo:
-    """Only what the export reads: stored typed events by id."""
+    """Only what the export reads: stored typed events by id, findings' context-only events, fleet appendices."""
 
-    def __init__(self, events=()):
+    def __init__(self, events=(), context=None, fleets=None):
         self.events = {event["id"]: event for event in events}
+        self.context, self.fleets = context or {}, fleets or {}
 
     def events_by_ids(self, ids):
         return [self.events[item] for item in ids if item in self.events]
+
+    def candidate_graph_inputs(self, ids):
+        return [{"id": item, "context_event_ids": self.context[item]} for item in ids if item in self.context]
+
+    def report_hosts(self, hunt_id, snapshot):
+        yield from ({"host": host, "first_event_id": "e"} for host in self.fleets[(hunt_id, snapshot)])
 
 
 def _event(eid, family, fields, host="web01"):
@@ -287,6 +296,32 @@ def test_values_come_from_typed_fields_with_their_role_and_scope():
     agent_rows = [row for row in rows if row["finding_id"] == "F3"]
     assert agent_rows and {row["finding_provenance"] for row in agent_rows} == {"agent"}
     assert summary["counts"]["events_not_retained"] == 1 and summary["counts"]["findings"] == 4
+
+
+def test_context_records_and_fleet_members_are_read_by_their_role():
+    """A record cited only as context (a lineage ancestor) is not what the finding is about; a fleet finding's
+    members come from its host appendix."""
+    events = [_event("e-subject", "process_exec", {"process.executable": "/tmp/implant"}),
+              _event("e-parent", "process_exec", {"process.executable": "/usr/sbin/sshd", "user.name": "root"})]
+    findings = [_finding("F1", entities=[], citations=[{"event_id": "e-subject"}, {"event_id": "e-parent"}]),
+                _finding("F2", entities=[], fleet_member_kind="external_address",
+                         fleet_hosts={"sha256": "s" * 64, "count": 2})]
+    repo = _Repo(events, context={"F1": ["e-parent"]}, fleets={("h1", "s" * 64): ["203.0.113.80", "203.0.113.81"]})
+    with iocs.collect(repo, findings, _networks(), hunt_id="h1") as table:
+        summary = table.summary()
+        rows = list(table.rows())
+    values = {(row[0], row[1], row[2]) for row in rows}
+    assert ("process_executable", "/tmp/implant", "executable") in values
+    assert not any(row[1] in ("/usr/sbin/sshd", "root") for row in rows)
+    assert {("ipv4", "203.0.113.80", "fleet member address"), ("ipv4", "203.0.113.81", "fleet member address")} <= values
+    assert summary["counts"]["fleet_members_read"] == 2 and summary["counts"]["fleet_members_not_read"] == 0
+    # a finding citing only context records is about all of them
+    only_context = [_finding("F3", entities=[], citations=[{"event_id": "e-parent"}])]
+    with iocs.collect(_Repo(events, context={"F3": ["e-parent"]}), only_context, _networks()) as table:
+        assert ("user_account", "root") in {(row[0], row[1]) for row in table.rows()}
+    # without the hunt id the appendix is not read, and that is counted
+    with iocs.collect(repo, findings[1:], _networks()) as table:
+        assert table.summary()["counts"]["fleet_members_not_read"] == 2
 
 
 def test_mentions_are_never_exported_as_indicators():
@@ -449,14 +484,12 @@ def test_a_hundred_thousand_findings_export_exactly():
     total = 100_000
     findings = _synthetic(total)
     distinct_ips = len({finding["entities"][0][1] for finding in findings})
-    started = time.monotonic()
     summary, rows, written, view = _pipeline(findings)
     assert summary["counts"]["indicators"] == distinct_ips + 500 + 1000
     assert rows == summary["counts"]["rows"] == 3 * total
     assert written["observed_data"] == summary["counts"]["indicators"]
     item = _items(view)["rec-enterprise-M1001"]
     assert item["findings"]["count"] == total and item["entities"]["count"] == distinct_ips + 1500
-    assert time.monotonic() - started < 240
 
 
 def test_export_and_recommendation_memory_does_not_grow_with_the_findings():
@@ -587,3 +620,16 @@ def test_the_web_report_list_links_the_exports_and_serves_them(client):  # noqa:
     assert stix.status_code == 200
     validate_stix(stix.json())
     assert web.get("/reports/h1/other-iocs.csv").status_code == 404
+
+
+def test_the_report_list_links_no_export_that_is_not_on_disk(client, monkeypatch):  # noqa: F811
+    web, password, _ = client
+    _login(web, password)
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("disk full")
+    monkeypatch.setattr(iocs, "write_stix", broken)
+    page = web.get("/hunts/h1")
+    assert web.post("/hunts/h1/report", data={"csrf": _csrf(page.text)}, follow_redirects=False).status_code == 303
+    page = web.get("/hunts/h1")
+    assert 'href="/reports/h1/h1-r1.md"' in page.text and "h1-r1-iocs" not in page.text

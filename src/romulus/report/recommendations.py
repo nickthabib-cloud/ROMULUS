@@ -35,6 +35,10 @@ MENTION_IDS = 50
 # ATT&CK for ICS mitigations that would mean actively probing OT devices: ROMULUS recommends passive measures only
 OT_ACTIVE_PROBING = frozenset({"M0916"})
 CLEARED = frozenset({"benign", "expected_activity"})
+# every recommendation from ATT&CK for ICS carries this: ATT&CK's wording (audits or scans of systems) is never an
+# instruction to touch control devices
+OT_CAVEAT = ("Passive measures only on OT devices: do not scan, probe or actively query controllers or field devices; "
+             "use configuration reviews, vendor information and logs, under the asset owner's change procedures.")
 TRIAGE_TEXT = ("Verify and scope these findings: confirm with the system owners whether the activity was authorized, "
                "identify every affected host and account, and contain what is not authorized. ATT&CK maps no "
                "actionable mitigation to them.")
@@ -212,7 +216,8 @@ def build(findings: list[dict], rules: dict, *, index=None, scratch=None) -> dic
                     "mitigation": {"id": mitigation_id, "name": mitigation.name, "domain": domain,
                                    "summary": mitigation.summary, "url": mitigation.url,
                                    "stix_id": mitigation.stix_id},
-                    "text": f"{mitigation.name} ({mitigation_id}): {mitigation.summary}",
+                    "text": f"{mitigation.name} ({mitigation_id}): {mitigation.summary}"
+                            + (f" {OT_CAVEAT}" if domain == "ics" else ""),
                     "techniques": {"count": len(techniques), "items": [
                         {"id": technique_id, "name": technique_rows[(domain, technique_id)]["name"],
                          "findings": count, "basis": technique_rows[(domain, technique_id)]["basis"],
@@ -220,6 +225,8 @@ def build(findings: list[dict], rules: dict, *, index=None, scratch=None) -> dic
                         for technique_id, count in techniques[:TECHNIQUES]],
                         "more": max(0, len(techniques) - TECHNIQUES)},
                 })
+                if domain == "ics":
+                    item["caveat"] = OT_CAVEAT
             else:
                 item.update({"id": f"rec-triage-{key[1]}", "kind": "triage", "text": TRIAGE_TEXT,
                              "reasons": {name: built.reasons[name] for name in TRIAGE_REASONS if built.reasons[name]}})

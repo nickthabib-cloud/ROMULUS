@@ -818,11 +818,12 @@ def recommendations_view(findings: list[dict], metadata: dict) -> dict:
                 "reason": f"{type(exc).__name__}: {exc}"[:300]}
 
 
-def indicators_view(repo: Repo, findings: list[dict], internal_networks: dict | None, settings=None) -> dict:
+def indicators_view(repo: Repo, hunt_id: str, findings: list[dict], internal_networks: dict | None,
+                    settings=None) -> dict:
     """The indicator export's summary: exact counts, a preview and the digest the exported files must match. A
     failure is named in the report (and no export is written for it); it never blocks the report."""
     try:
-        with iocs.collect(repo, findings, internal_networks, settings=settings) as table:
+        with iocs.collect(repo, findings, internal_networks, hunt_id=hunt_id, settings=settings) as table:
             return table.summary()
     except Exception as exc:  # noqa: BLE001 - an optional export never blocks the authoritative report
         return {"label": iocs.LABEL, "status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"[:300]}
@@ -982,7 +983,7 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str, *, settings=None) -> di
         m["integrity"]["incomplete_fleet_host_lists"] = fleet_gaps
         m["integrity"]["finalizable"] = False
     # values seen in the findings' typed evidence, exported beside the report as STIX 2.1 and CSV
-    m["indicators"] = indicators_view(repo, findings, m["internal_networks"], settings)
+    m["indicators"] = indicators_view(repo, hunt_id, findings, m["internal_networks"], settings)
     return _jsonable(m)
 
 
@@ -1519,7 +1520,7 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
     # the partner sections from the deterministic findings alone, by content keys: the AI's findings sit under `ai`
     canonical["recommendations"] = recommendations_view(
         canonical["findings"], hunt_rule_metadata(repo, manifest=repo.get_hunt(hunt_id)["manifest"]))
-    canonical["indicators"] = indicators_view(repo, deterministic_views, manifest["internal_networks"])
+    canonical["indicators"] = indicators_view(repo, hunt_id, deterministic_views, manifest["internal_networks"])
     canonical["indicators"].pop("digest", None)      # it covers hunt-scoped finding ids
     for finding in canonical["findings"]:
         gates = finding.get("gates") or {}

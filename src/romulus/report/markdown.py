@@ -93,6 +93,8 @@ def _recommendations_section(m: dict) -> list[str]:
                         f"**{cell(mitigation['name'])} ({cell(mitigation['id'])})**: {cell(mitigation['summary'])}")
                 techniques = item.get("techniques") or {}
                 listed = (techniques.get("items") or [])[:ROW_TECHNIQUES]
+                if item.get("caveat"):
+                    what += f" _{cell(item['caveat'])}_"
                 technique_text = "; ".join(
                     f"{cell(row['id'])} {cell(row['name'])} ({row['findings']})"
                     + ("" if row.get("basis") == "technique" else f", via {cell(row['basis'])}")
