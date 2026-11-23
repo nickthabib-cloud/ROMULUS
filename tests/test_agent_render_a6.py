@@ -22,9 +22,16 @@ def _docx(tmp_path, monkeypatch, manifest):
     return path
 
 
+# The partner sections (recommendations, indicator export) are pinned by their own goldens
+# (test_report_unranked_golden, test_report_partner_outputs); without them an old hunt renders exactly as it did.
+PARTNER_SECTIONS = ("recommendations", "indicators")
+
+
 def test_old_hunt_docx_parts_match_their_pinned_digest(tmp_path, monkeypatch):
     repo, _ = _repo_with_finding()
     manifest = build_manifest(repo, "h1", "test")
+    for key in PARTNER_SECTIONS:
+        manifest.pop(key)
     path = _docx(tmp_path, monkeypatch, manifest)
     # the digest of every text part's content, in package order: compressed bytes (the package's and the picture's)
     # depend on the zlib build, so the picture is checked by its own tests
@@ -45,6 +52,8 @@ def test_old_hunt_json_and_markdown_are_unchanged(monkeypatch):
         monkeypatch.setattr(module, "utcnow", lambda: T)
     repo, _ = _repo_with_finding()
     result = build_manifest(repo, "h1", "test")
+    for key in PARTNER_SECTIONS:
+        result.pop(key)
     result["revision"] = {"number": 1, "id": "h1-r1", "supersedes": None}
     assert hashlib.sha256(json.dumps(result, indent=2, sort_keys=True).encode()).hexdigest() == (
         "385fcc8611505ba2c10fb36935040fc7711561e5a1834d18c3e90449e0c54d6e")

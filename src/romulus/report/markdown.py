@@ -149,7 +149,9 @@ def indicator_files(m: dict) -> dict:
     files = view.get("files") or {}
     if view.get("status") != "complete" or not files:
         return {}
-    stem = m["revision"]["id"]
+    revision = m.get("revision") or {}
+    # a revision's id is `<hunt>-r<number>` (a manifest rendered before publication may carry only the number)
+    stem = revision.get("id") or f"{m['hunt']['id']}-r{revision.get('number', 0)}"
     return {"STIX 2.1 bundle": stem + files["stix_suffix"], "CSV": stem + files["csv_suffix"]}
 
 

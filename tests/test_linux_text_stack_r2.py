@@ -6,6 +6,7 @@ Postfix: https://github.com/vdukhovni/postfix/blob/master/postfix/src/global/log
 OpenVPN: https://github.com/OpenVPN/openvpn/blob/release/2.6/src/openvpn/multi.c#L432-L474
 https://github.com/OpenVPN/openvpn/blob/release/2.6/src/openvpn/socket.c#L2236-L2244
 """
+import json
 from collections import Counter
 from datetime import timedelta
 
@@ -42,6 +43,8 @@ UNKNOWN_REASON = "text line in no recognized format: custom.unknown"
 # The mention scan reads each record's free-text fields by family and counts the records outside the sweep's
 # selection: only the mention coverage in stats, the sweep summary audit and the manifest moved.
 # The mentions view then states how its finding link is found (cited_by_scope): only the manifest digest moved.
+# The manifest gains its partner sections (`recommendations`, `indicators`): only the manifest digest moved, and with
+# those two keys removed it is the earlier one (MANIFEST_BEFORE_PARTNER_SECTIONS).
 GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a6dadaa59988bdf81e',
  # Fleet member hosts staged as memberships add two ranking statements: only the audit's rank query count moved.
  # The ranking version rank@1 -> rank@2 (fleet member hosts keep the rule's evidence, timed by their own record) moves
@@ -64,7 +67,7 @@ GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a
  'events': 'f0d612c20f67d030a43e835b8ef639a78c824b51fff59c169d3d5219700de383',
  'expansion': 'dae7cbd7929a4cb94bb232a7343d4d70f62885a979b52714b87bd3641a92169b',
  'links': 'd9f0da030bf1447f35601910ec18eb012f4a55a0a8feef7262ab6e745319890e',
- 'manifest': '66d445663ff89e6c876aebe44a171f0ccb099873a4d8c9b4452b1adb178a852d',
+ 'manifest': '24906db3fdfb10ea7f18227f40134f132ec6f8f904014f69a93a5fde0482697d',
  'raw': '64be31e697a32f93b1a71657560af514b2d430469cb3be19f44b8827985a7775',
  # host.account_or_group_change 7->8 moves only the rule cells (its version); every other digest is unchanged.
  'rule_cells': 'b760e8ae1ebbb7884616ee13c688282d85693054fd3126e44496331437fc2bfa',
@@ -182,10 +185,17 @@ def _assert_text_result(snapshot, trace, docs):
     assert not any(row["state"] in {"evaluated_partial", "match_on_partial", "executed_failed"} for row in unrelated)
 
 
+MANIFEST_BEFORE_PARTNER_SECTIONS = "66d445663ff89e6c876aebe44a171f0ccb099873a4d8c9b4452b1adb178a852d"
+
+
 def test_linux_text_whole_stack_retrieval_findings_and_partial_coverage(tmp_path, monkeypatch):
     snapshot, trace, docs = run_text_stack(tmp_path / "forward", monkeypatch)
     _assert_text_result(snapshot, trace, docs)
     assert tf.deterministic_golden_digests(snapshot) == GOLDEN_TEXT_STACK
+    stripped = json.loads(json.dumps(snapshot))
+    for key in ("recommendations", "indicators"):
+        stripped["manifest"].pop(key)
+    assert tf.deterministic_golden_digests(stripped)["manifest"] == MANIFEST_BEFORE_PARTNER_SECTIONS
 
 
 def test_the_text_stack_candidates_moved_only_by_rule_versions(tmp_path, monkeypatch):
