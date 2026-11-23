@@ -439,6 +439,9 @@ class ServiceCatalog(Playbook):
                      revision_reason="Final service source span and fleet count" if final and source else "",
                      citation_unavailable=not events, fleet_hosts=fleet, fleet_host_count=count if source is None else 0,
                      fleet_hosts_complete=source is None and final and not self.capped,
+                     # Members are internal source addresses, never host names: ranking resolves each to the host
+                     # whose own telemetry carries it (else keeps the address) and stages it as that host.
+                     fleet_member_kind="internal_address" if source is None else "host",
                      aggregate_summary={"source_host_count": count, "rare_service": int(count <= 2 and not self.capped),
                                         "source_count_complete": int(final and not self.capped)},
                      attack=tuple(item["attack"]))

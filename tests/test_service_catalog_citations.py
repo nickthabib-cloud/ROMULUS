@@ -152,6 +152,10 @@ def test_witnesses_chosen_at_finalize_cite_retained_records_from_every_producer(
         finalize_witness_from_late_partition += any(c["native_id"] in late_ids for c in citations)
     # each service's last witness is from the second partition and was cited only at finalize
     assert finalize_witness_from_late_partition >= len(expected_fleets)
+    # fleet members are internal source addresses, resolved to hosts by the ranking, never host names themselves
+    for key, candidate in found.items():
+        kind = (candidate["gate_results"] or {}).get("_fleet_member_kind")
+        assert kind == ("internal_address" if key.endswith("|fleet") else None), (key, kind)
     # the approved service's fleet finding was never published live: both witnesses are kept copies
     anydesk = _citations(repo, found["anydesk|fleet"])
     assert {c["native_id"] for c in anydesk} == {"malcolm-ssl-0", "malcolm-ssl-1"}
