@@ -23,7 +23,7 @@ from romulus.agent.admission import (
 from romulus.agent.assessment import SECRET_GUARD_SUMMARY, assess_output, run_assessment, template_assessment
 from romulus.agent.clusters import ClusterView, hunt_clusters, unexplained_clusters
 from romulus.agent.context import SessionResults, issued_in, session_tag, strip_reasoning
-from romulus.agent.dossier import build_dossier
+from romulus.agent.dossier import build_dossier, mention_hint, mention_seed
 from romulus.agent.grounding import triage_context
 from romulus.agent.provider import (
     AgentBudget,
@@ -731,10 +731,26 @@ def _investigate_messages(repo: Repo, hunt_id: str, hypothesis: dict, prompts: d
     context = _hypothesis_context(repo, hunt_id, hypothesis, _summaries(repo, hunt_id, hypothesis["id"]),
                                   owner_token=owner_token)
     dossier = build_dossier(repo, hunt_id, token_budget=1000, owner_token=owner_token)
+    opening = {"dossier_header": {"header": dossier.payload.get("header"), "scope": dossier.payload.get("scope")},
+               "hypothesis": context}
+    # the mention pool, when it holds anything, with the groups on the hosts the hypothesis's findings name: the
+    # per-hunt hint goes in this card, never the system prompt or tool definitions, so the cached prefix holds
+    hint = mention_hint(repo, hunt_id, _cited_hosts(repo, hunt_id, hypothesis["id"]))
+    if hint is not None:
+        opening["mention_pool"] = hint
     return context, [{"role": "system", "content": prompts["system.md"] + "\n\n" + prompts["investigate.md"]},
-                     {"role": "user", "content": json.dumps({"dossier_header": {
-                         "header": dossier.payload.get("header"), "scope": dossier.payload.get("scope")},
-                         "hypothesis": context}, sort_keys=True, ensure_ascii=False, default=str)}]
+                     {"role": "user", "content": json.dumps(opening, sort_keys=True, ensure_ascii=False,
+                                                            default=str)}]
+
+
+def _cited_hosts(repo: Repo, hunt_id: str, hypothesis_id: str) -> list[str]:
+    """The hosts the findings a hypothesis cites name, in cite order (typed entities only)."""
+    ids = [str(row["target_id"]) for row in repo.agent_hypothesis_cites(hypothesis_id=hypothesis_id)
+           if row["target_kind"] == "finding"]
+    rows = {row["id"]: row for row in repo.candidates_by_ids(ids, hunt_id=hunt_id)} if ids else {}
+    hosts = [str(item[1]) for finding_id in ids for item in (rows.get(finding_id) or {}).get("entities") or []
+             if isinstance(item, (list, tuple)) and len(item) >= 2 and item[0] == "host" and item[1]]
+    return list(dict.fromkeys(hosts))
 
 
 def first_investigate_prompt(repo: Repo, hunt_id: str, hypothesis: dict, prompts: dict[str, str], tools: list, *,
@@ -871,6 +887,8 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                     "dossier page beside its output allowance. Added budget raises the share and lets it run."),
                     ORIENT_SHARE_LIMIT)
             room = min(room, share_room)
+            # the strong and medium mention groups ride beside the first page, whatever that page holds
+            seed = mention_seed(repo, hunt_id)
             # Pagination estimates canonical data; measure the actual request envelope too.
             for _ in range(4):
                 dossier = build_dossier(repo, hunt_id, token_budget=room, owner_token=owner_token,
@@ -878,6 +896,8 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 page = dossier.page(1)
                 user = {"message": "Dossier index page 1 of " + str(len(dossier.pages)) +
                         "; call list_findings for the rest.", "page": page}
+                if seed is not None:
+                    user["mention_pool"] = seed
                 messages = [{"role": "system", "content": system_text + "\n\n" + orientation},
                             {"role": "user", "content": json.dumps(user, sort_keys=True, ensure_ascii=False,
                                                                   default=str, separators=(",", ":"))}]
