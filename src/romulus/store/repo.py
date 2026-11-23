@@ -260,6 +260,10 @@ def _stored_utc(value: datetime | None) -> datetime | None:
     return value.replace(tzinfo=UTC) if value is not None and value.tzinfo is None else value
 
 
+class ExclusionsChanged(ValueError):
+    """A build's exclusions no longer hold the durable cited-key union over its hours."""
+
+
 def _with_utc(row, columns: tuple[str, ...]) -> dict:
     out = dict(row)
     for name in columns:
@@ -2681,10 +2685,13 @@ class Repo:
                 yield dict(row)
             after = rows[-1]["host"]
 
-    def candidates(self, hunt_id: str, lanes: list[str] | None = None) -> list[dict]:
+    def candidates(self, hunt_id: str, lanes: list[str] | None = None, *,
+                   provenance: str | None = None) -> list[dict]:
         q = select(t.candidate).where(t.candidate.c.hunt_id == hunt_id)
         if lanes:
             q = q.where(t.candidate.c.lane.in_(lanes))
+        if provenance is not None:
+            q = q.where(t.candidate.c.provenance == provenance)
         with self.engine.connect() as c:
             return [dict(r) for r in c.execute(q).mappings()]
 
@@ -3729,19 +3736,67 @@ class Repo:
                 digest.add(kind, columns, chunk)
         return digest.hexdigest()
 
-    def publish_derived_baseline_segment(self, segment_id: str, *, replaces: str, replaces_digest: str) -> bool:
-        """Expose a completed derived build and retire the segment it replaces in one transaction, so the two are
-        never both active and never both out of cover. The replaced segment is retired only while it is still
-        active with the exclusions it was judged on; returns whether it was. Raises when the build is not building."""
+    @staticmethod
+    def _missing_exclusion(c, segment_id: str) -> str | None:
+        """A cited key of the durable union over a building segment's span that its exclusions lack, or None.
+
+        Read inside the activation's write transaction, so no ledger write can fall between the check and the
+        activation: a build whose exclusions were read before another hunt cited more keys is never published."""
+        s, e = t.baseline_segment.c, t.baseline_hunt_exclusion.c
+        row = c.execute(select(s.site, s.target, s.spec_id, s.spec_version, s.key_version, s.start, s.end,
+                               s.excluded_keys).where(s.id == segment_id)).mappings().first()
+        if row is None:
+            return None
+        excluded = set(row["excluded_keys"] or [])
+        for (key,) in c.execute(select(e.key_digest).where(
+                e.site == row["site"], e.target == row["target"], e.spec_id == row["spec_id"],
+                e.spec_version == row["spec_version"], e.key_version == row["key_version"],
+                e.start < row["end"], e.end > row["start"]).distinct()):
+            if key not in excluded:
+                return key
+        return None
+
+    def publish_derived_baseline_segment(self, segment_id: str, *, replaces: str, replaces_digest: str) -> str:
+        """Expose a completed derived build in place of the segment it replaces, in one transaction.
+
+        The replaced segment is retired first, and only while it is still active with the exclusions it was judged
+        on; the build is activated only when that retirement happened and its exclusions still hold every key of
+        the durable union over its span. So the two are never both active, never both out of cover, and a build
+        made from an older reading of the union never becomes cover. Returns "published", "superseded" (the replaced
+        segment had already left cover) or "union_changed"; on either refusal nothing changes and the caller
+        discards the build. Raises when the build is not building."""
         value = self._segment_rows_digest(segment_id)
         s = t.baseline_segment.c
         with write_txn(self.engine) as c:
+            if self._missing_exclusion(c, segment_id) is not None:
+                return "union_changed"
+            if not c.execute(t.baseline_segment.update().where(
+                    s.id == replaces, s.status == "active", s.exclusion_digest == replaces_digest,
+            ).values(status="stale")).rowcount:
+                return "superseded"
             if not c.execute(t.baseline_segment.update().where(s.id == segment_id, s.status == "building")
                              .values(rows_digest=value, status="active")).rowcount:
                 raise ValueError(f"baseline segment {segment_id} is not building")
-            return bool(c.execute(t.baseline_segment.update().where(
-                s.id == replaces, s.status == "active", s.exclusion_digest == replaces_digest,
-            ).values(status="stale")).rowcount)
+            return "published"
+
+    def discard_baseline_build(self, segment_id: str, built_by_hunt_id: str) -> bool:
+        """Drop one unpublished build its owner gave up on (child rows in bounded chunks, then the row), so the id
+        stays free for an identical later build. Returns whether the row was removed."""
+        s = t.baseline_segment.c
+        owned = and_(s.id == segment_id, s.status == "building", s.built_by_hunt_id == built_by_hunt_id)
+        with self.engine.connect() as c:
+            if c.execute(select(s.id).where(owned)).first() is None:
+                return False
+        self._drop_baseline_children(segment_id)
+        with write_txn(self.engine) as c:
+            return bool(c.execute(t.baseline_segment.delete().where(owned)).rowcount)
+
+    def baseline_segment_state(self, segment_id: str) -> tuple[str, str] | None:
+        """(status, exclusion digest) of one segment, or None."""
+        s = t.baseline_segment.c
+        with self.engine.connect() as c:
+            row = c.execute(select(s.status, s.exclusion_digest).where(s.id == segment_id)).first()
+        return None if row is None else (row[0], row[1])
 
     def stale_baseline_segment(self, segment_id: str, exclusion_digest: str) -> bool:
         """Retire one active segment judged on `exclusion_digest`; False when it is no longer that."""
@@ -3752,9 +3807,15 @@ class Repo:
             ).values(status="stale")).rowcount)
 
     def finalize_baseline_segment(self, segment_id: str) -> str:
-        """Digest a completed build without a write lock, then expose it in one metadata update."""
+        """Digest a completed build without a write lock, then expose it in one metadata update.
+
+        Raises ExclusionsChanged, changing nothing, when the durable cited-key union over its span holds a key its
+        exclusions lack (another hunt cited it after this build read the union)."""
         value = self._segment_rows_digest(segment_id)
         with write_txn(self.engine) as c:
+            if (key := self._missing_exclusion(c, segment_id)) is not None:
+                raise ExclusionsChanged(f"baseline segment {segment_id}: cited key {key} joined the union over its "
+                                        "hours after the build read it")
             result = c.execute(t.baseline_segment.update().where(
                 t.baseline_segment.c.id == segment_id,
                 t.baseline_segment.c.status == "building",

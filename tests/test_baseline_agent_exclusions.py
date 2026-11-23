@@ -207,8 +207,7 @@ def test_a_union_that_dropped_a_key_falls_back_to_retiring_and_names_it():
         spec_versions={SPEC.id: (SPEC.version, SPEC.key_version)},
     )
 
-    changes = apply_exclusion_changes(repo, site="site-a", start=START, end=START + 2 * H, built_by="hunt-a",
-                                      now=START + 3 * H)
+    changes = apply_exclusion_changes(repo, site="site-a", start=START, end=START + 2 * H, built_by="hunt-a")
 
     assert changes["derived"] == 0 and changes["stale"] == changes["rebuilt_from_source"] >= 1
     assert all("no longer holds every key" in item for item in changes["fallbacks"])
@@ -235,7 +234,7 @@ def test_a_lookback_segment_over_the_cited_hours_is_derived_too_and_stays_unhunt
     assert {row["origin"] for row in repo.baseline_segments(statuses=["active"])} == {"lookback"}
     _agent_finding(repo, [LATER_IMPLANT])
 
-    summary = refresh_cited_exclusions(repo, "hunt-a", now=START + 4 * H)
+    summary = refresh_cited_exclusions(repo, "hunt-a")
 
     active = repo.baseline_segments(statuses=["active"])
     assert summary["derived"] == 2 and len(active) == 2
@@ -258,7 +257,7 @@ def test_twenty_thousand_keys_with_hundreds_cited_by_the_agent_equal_the_run_tha
 
     repo = _finished_with_agent_pending(extra=volume)
     _agent_finding(repo, [LATER_IMPLANT, *cited])
-    summary = refresh_cited_exclusions(repo, "hunt-a", now=START + timedelta(days=1))
+    summary = refresh_cited_exclusions(repo, "hunt-a")
 
     assert summary["derived"] == len(reference) and summary["rebuilt_from_source"] == 0
     assert _history(repo) == reference
