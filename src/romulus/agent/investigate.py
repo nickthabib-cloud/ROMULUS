@@ -110,6 +110,12 @@ MIN_ORIENT_PAGE_TOKENS = 2_000
 SECRET_GUARD_REASON = "secret_guard"
 # The end reason of a session whose replayed reasoning the provider refused again after it was removed.
 REASONING_REJECTED_REASON = "reasoning_binding_rejected"
+# The scheduling stops after this many rounds in a row whose every session failed, under SESSIONS_FAILED_REASON.
+FAILED_ROUNDS_LIMIT = 2
+# The end states of a session the budget or an analyst cut short: its hypothesis stays pending (a continuation with
+# added budget works it again).
+CUT_SHORT_STATES = frozenset({"budget", "interrupted"})
+SESSIONS_FAILED_REASON = "sessions_failed"
 # The reason an analyst's stop request ended a session or the phase (a stopped session's state is `interrupted`).
 # A run stopped this way is resumable: `hunt resume` continues it from its persisted work.
 STOPPED_REASON = "stopped_by_analyst"
@@ -473,8 +479,9 @@ def _id(prefix: str) -> str:
 
 def _pending(settings: Settings, hypothesis: dict, repo: Repo | None = None) -> bool:
     """Whether an open hypothesis still waits for investigation, with sessions to spare: never worked, worked with
-    questions left, or (given `repo`) its last session did not finish (a budget stop, a stop, a failure). A hypothesis
-    its last session finished with no open question is done."""
+    questions left, or (given `repo`) its last session was cut short by the budget or an analyst's stop
+    (CUT_SHORT_STATES). A hypothesis whose last session ended any other way with no open question is done: another
+    session would re-prove what it recorded, or repeat a failure, a refusal or a secret-guard end."""
     if hypothesis["status"] != "open":
         return False
     sessions = int(hypothesis.get("sessions_run") or 0)
@@ -486,7 +493,7 @@ def _pending(settings: Settings, hypothesis: dict, repo: Repo | None = None) -> 
         return False
     ran = [row for row in repo.agent_sessions(hypothesis["hunt_id"], hypothesis_id=hypothesis["id"],
                                               purpose="investigate") if row["state"] != "running"]
-    return bool(ran) and ran[-1]["state"] != "finished"
+    return bool(ran) and ran[-1]["state"] in CUT_SHORT_STATES
 
 
 def _pending_cluster_hypotheses(settings: Settings, repo: Repo, hunt_id: str) -> int:
@@ -1549,6 +1556,7 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
     consecutive_outages = 1 if reportable_count and not orient_finished and orient.get("provider_unavailable") else 0
     stop_scheduling = str(orient.get("reason") or "").startswith("controller_error") or bool(stopped)
     probe_tools = _session_tools(Toolbox(repo, hunt_id))
+    failed_rounds = 0
     while not stop_scheduling:
         stopped = gate.stopped()
         if stopped:
@@ -1612,6 +1620,12 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
         after = {row["id"]: int(row.get("sessions_run") or 0) for row in repo.agent_hypotheses(hunt_id)}
         if not any(after.get(key, count) > count for key, count in before.items()):
             reasons.append("no_progress")
+            break
+        # a provider that fails every session (an error that is not an outage) must not be fed one new cluster
+        # hypothesis after another: two rounds in a row of failed sessions end the scheduling
+        failed_rounds = failed_rounds + 1 if all(row.get("state") == "failed" for row in completed) else 0
+        if failed_rounds >= FAILED_ROUNDS_LIMIT:
+            reasons.append(SESSIONS_FAILED_REASON)
             break
         if _investigation_done(settings, repo, hunt_id) and not top_up():
             break

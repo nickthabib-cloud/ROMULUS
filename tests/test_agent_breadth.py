@@ -137,6 +137,27 @@ def test_hypotheses_citing_nothing_never_hold_a_clusters_place(tmp_path):
     assert unexplained_clusters(repo, "h1") == []
 
 
+def test_a_provider_failing_every_session_is_not_fed_new_cluster_hypotheses(tmp_path):
+    from romulus.agent.investigate import FAILED_ROUNDS_LIMIT, SESSIONS_FAILED_REASON
+
+    class _Failing(_ByKind):
+        def chat(self, request):
+            if request.response_schema is None and "Dossier index page" not in str(request.messages[1]["content"]):
+                with self.lock:
+                    self.requests.append(request)
+                raise RuntimeError("the endpoint answered with an error")
+            return super().chat(request)
+
+    s = Settings(home=tmp_path, agent_triage="off", agent_max_initial_hypotheses=1)
+    repo = _hunt(tmp_path, s)
+    result = _run(s, repo, _Failing(_finish(), context=1_000_000))
+    investigate = [row for row in repo.agent_sessions("h1") if row["purpose"] == "investigate"]
+    assert all(row["state"] == "failed" for row in investigate)
+    # two failed rounds of one session each, then the scheduling stops; not one session per cluster and retry
+    assert len(investigate) == FAILED_ROUNDS_LIMIT
+    assert SESSIONS_FAILED_REASON in (result.reason or "")
+
+
 def test_the_controller_keeps_opening_clusters_as_hypotheses_are_worked_up_to_the_initial_cap(tmp_path):
     s = Settings(home=tmp_path, agent_triage="off", agent_max_initial_hypotheses=2)
     repo = _hunt(tmp_path, s)
