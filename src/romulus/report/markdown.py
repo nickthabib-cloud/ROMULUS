@@ -34,6 +34,172 @@ def _anchor(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]+", "-", value)
 
 
+RECOMMENDATIONS_TITLE = "Recommendations"
+INDICATORS_TITLE = "Indicators (IOC export)"
+PRIORITY_TITLES = {"immediate": "Immediate", "near_term": "Near-term", "longer_term": "Longer-term"}
+REPORT_TECHNIQUES = 200
+# the findings, entities and techniques a recommendation names in its row (the JSON manifest holds its bounded lists)
+ROW_FINDINGS = 12
+ROW_ENTITIES = 8
+ROW_TECHNIQUES = 8
+
+
+def _more(shown: int, total: int) -> str:
+    return f" and {total - shown} more" if total > shown else ""
+
+
+def recommendation_findings(item: dict, limit: int) -> tuple[list[str], int]:
+    """The finding ids a recommendation lists (at most `limit`) and how many findings it addresses in all."""
+    findings = item.get("findings") or {}
+    return list(findings.get("ids") or [])[:limit], int(findings.get("count") or 0)
+
+
+def recommendation_reasons(view: dict, item: dict) -> str:
+    """Why a triage recommendation has no ATT&CK mitigation, with counts."""
+    names = view.get("triage_reasons") or {}
+    return "; ".join(f"{names.get(key, key)}: {count}" for key, count in (item.get("reasons") or {}).items())
+
+
+def recommendations_intro(view: dict) -> str:
+    counts = view.get("counts") or {}
+    return (f"{counts.get('findings', 0)} reportable finding(s): {counts.get('with_mitigation', 0)} addressed by an "
+            f"ATT&CK mitigation, {counts.get('triage', 0)} on triage only (no actionable mitigation), "
+            f"{counts.get('mentions_not_recommended', 0)} mention(s) with no recommendation. "
+            f"{counts.get('items', 0)} recommendation(s).")
+
+
+def _recommendations_section(m: dict) -> list[str]:
+    """Recommendations by priority, each with its ATT&CK mitigation, techniques, findings and entities."""
+    view = m.get("recommendations")
+    if not view:
+        return []
+    out = [f"## {RECOMMENDATIONS_TITLE}", "", cell(view.get("label") or "") + ".", ""]
+    if view.get("status") != "complete":
+        out += [(f"> **Recommendations unavailable:** {cell(view.get('reason') or view.get('status'))}. The "
+                 "findings and their recommended checks are listed above."), ""]
+    if "counts" in view:
+        out += [cell(recommendations_intro(view)), ""]
+    for level, title in PRIORITY_TITLES.items():
+        chosen = [item for item in view.get("items") or [] if item.get("priority") == level]
+        if not chosen:
+            continue
+        out += [f"### {title}", "", ("| Recommendation | ATT&CK techniques | Findings | Entities | Checks the "
+                                      "rules recommend | Priority because |"), "|---|---|---|---|---|---|"]
+        for item in chosen:
+            if item.get("kind") == "attack_mitigation":
+                mitigation = item["mitigation"]
+                what = (f"**{cell(mitigation['name'])} ({cell(mitigation['id'])})**: {cell(mitigation['summary'])} "
+                        f"<{cell(mitigation['url'])}>" if mitigation.get("url") else
+                        f"**{cell(mitigation['name'])} ({cell(mitigation['id'])})**: {cell(mitigation['summary'])}")
+                techniques = item.get("techniques") or {}
+                listed = (techniques.get("items") or [])[:ROW_TECHNIQUES]
+                technique_text = "; ".join(
+                    f"{cell(row['id'])} {cell(row['name'])} ({row['findings']})"
+                    + ("" if row.get("basis") == "technique" else f", via {cell(row['basis'])}")
+                    for row in listed) + cell(_more(len(listed), techniques.get("count", len(listed))))
+            else:
+                what = f"**Triage**: {cell(item.get('text') or '')} ({cell(recommendation_reasons(view, item))})"
+                technique_text = "none mapped"
+            ids, total = recommendation_findings(item, ROW_FINDINGS)
+            finding_text = ", ".join(f"[`{cell(fid)}`](#f-{fid})" for fid in ids) + cell(_more(len(ids), total))
+            agent = (item.get("findings") or {}).get("agent") or 0
+            if agent:
+                finding_text += f" ({agent} from the AI agent, unconfirmed)"
+            entities = item.get("entities") or {}
+            shown = (entities.get("items") or [])[:ROW_ENTITIES]
+            entity_text = (", ".join(f"{cell(kind)}:{cell(value)}" for kind, value in shown)
+                           + cell(_more(len(shown), entities.get("count", len(shown))))) or "none"
+            checks = item.get("next_checks") or {}
+            check_text = "; ".join(f"{cell(row['check'])} ({row['findings']})" for row in checks.get("items") or [])
+            check_text = (check_text + cell(_more(len(checks.get("items") or []), checks.get("count", 0)))) or "none"
+            out.append(f"| {what} | {technique_text} | {total}: {finding_text} | {entity_text} | {check_text} | "
+                       f"{cell(item.get('priority_reason') or '')} |")
+        out.append("")
+    techniques = view.get("techniques") or []
+    if techniques:
+        out += ["### ATT&CK techniques of the findings", "",
+                "| Technique | Domain | Findings | Actionable mitigations | Mapping basis |", "|---|---|---:|---|---|"]
+        for row in techniques[:REPORT_TECHNIQUES]:
+            out.append(f"| {cell(row['id'])} {cell(row['name'])} | {cell(row['domain'])} | {row['findings']} | "
+                       f"{cell(', '.join(row['mitigations']) or 'none')} | {cell(row['basis'])} |")
+        if len(techniques) > REPORT_TECHNIQUES:
+            out.append(f"| … | | | {len(techniques) - REPORT_TECHNIQUES} more technique(s) in the JSON manifest | |")
+        out.append("")
+    if unknown := view.get("unknown_techniques"):
+        out += ["Technique ids not in the ATT&CK release (their findings are on triage): "
+                + cell(", ".join(f"{key} ({count})" for key, count in unknown.items())) + ".", ""]
+    mentions = view.get("mentions") or {}
+    if mentions.get("count"):
+        out += [f"{cell(mentions.get('note') or '')}: {mentions['count']} finding(s), "
+                + ", ".join(f"`{cell(fid)}`" for fid in mentions.get("finding_ids") or [])
+                + cell(_more(len(mentions.get("finding_ids") or []), mentions["count"])) + ".", ""]
+    if (view.get("attack") or {}).get("attribution"):
+        out += [f"_{cell(view['attack']['attribution'])}_", ""]
+    return out
+
+
+INDICATOR_SCOPES = ("external", "unknown", "internal", "not_applicable")
+
+
+def indicator_files(m: dict) -> dict:
+    """The names of the revision's indicator export files (empty when the manifest has no complete export)."""
+    view = m.get("indicators") or {}
+    files = view.get("files") or {}
+    if view.get("status") != "complete" or not files:
+        return {}
+    stem = m["revision"]["id"]
+    return {"STIX 2.1 bundle": stem + files["stix_suffix"], "CSV": stem + files["csv_suffix"]}
+
+
+def _indicators_section(m: dict) -> list[str]:
+    """The indicator export: what it holds, its files, counts by kind and scope, what was withheld, a preview."""
+    view = m.get("indicators")
+    if not view:
+        return []
+    out = [f"## {INDICATORS_TITLE}", "", cell(view.get("label") or "") + ".", ""]
+    if view.get("status") != "complete":
+        return out + [f"> **No indicator export:** {cell(view.get('reason') or view.get('status'))}.", ""]
+    counts = view["counts"]
+    files = indicator_files(m)
+    out += ["Files: " + ", ".join(f"[{cell(path)}]({path}) ({kind})" for kind, path in files.items()) + ".", "",
+            (f"{counts['indicators']} distinct value(s) in {counts['rows']} row(s) (one per value, finding, role and "
+             f"field) from {counts['findings_with_indicators']} of {counts['findings']} reportable finding(s). "
+             f"Findings whose claim is a mention contribute nothing: {counts['mention_findings_skipped']}. Cited "
+             f"events no longer retained: {counts['events_not_retained']}."), "",
+            "| Kind | Values | Rows | External | Unknown | Internal | Not an address |", "|---|---:|---:|---:|---:|---:|---:|"]
+    for kind, row in (counts.get("by_kind") or {}).items():
+        out.append(f"| {cell(kind)} | {row['indicators']} | {row['rows']} | "
+                   + " | ".join(str(row.get(scope, 0)) for scope in INDICATOR_SCOPES) + " |")
+    networks = view.get("internal_networks") or {}
+    out += ["", f"Internal and external are read from the hunt's recorded site networks ({cell(networks.get('source'))}"
+            + (f", digest `{cell(networks['digest'][:16])}…`" if networks.get("digest") else "")
+            + "); names and paths are not addresses, and a name's address is unknown.", ""]
+    withheld = view.get("withheld") or {}
+    if withheld:
+        out += ["Values withheld from the export (never exported in part), by reason:", "",
+                "| Kind | Reason | Values |", "|---|---|---:|"]
+        for kind, reasons in withheld.items():
+            for reason, count in reasons.items():
+                out.append(f"| {cell(kind)} | {cell(reason)} | {count} |")
+        out.append("")
+    if not view.get("secrets_checked"):
+        out += [("Configured secrets were not checked for this revision (it was built without the server "
+                 "settings); credential masking was applied."), ""]
+    preview = view.get("preview") or []
+    if preview:
+        out += [f"First {len(preview)} value(s), external first, then by finding count:", "",
+                "| Kind | Value | Scope | Findings | First seen (UTC) | Last seen (UTC) | Roles (field) |",
+                "|---|---|---|---:|---|---|---|"]
+        for row in preview:
+            out.append(f"| {cell(row['kind'])} | `{cell(row['value'])}` | {cell(row['scope'])} | {row['findings']} | "
+                       f"{cell(row['first_seen'] or 'not recorded')} | {cell(row['last_seen'] or 'not recorded')} | "
+                       f"{cell('; '.join(row['roles']))} |")
+        if counts["indicators"] > len(preview):
+            out.append(f"| … | {counts['indicators'] - len(preview)} more value(s) in the export files | | | | | |")
+        out.append("")
+    return out
+
+
 RAW_SECTION_TITLE = "Raw records cited by the AI agent (not normalized)"
 # what the Markdown report shows of each cited raw record's text; the JSON manifest keeps the whole stored text
 RAW_EXCERPT_CHARS = 2_000
@@ -975,6 +1141,8 @@ def _render_body(m: dict, banner: str = BANNER) -> str:
                 out.append(f"  - Rejection: {esc(step['rejection'])}")
         out.append("")
 
+    out += _recommendations_section(m)
+    out += _indicators_section(m)
     out += ["## Coverage", "",
             ("What each rule searched. ROMULUS reports what it finds and never claims that nothing is there. "
              "`searched in full` says every partition in scope was evaluated and none matched; it is a statement "

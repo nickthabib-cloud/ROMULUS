@@ -429,10 +429,10 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         u = need(request)
         if not csrf_ok(u, csrf):
             raise HTTPException(403, "bad CSRF token")
-        m = publish_revision(repo, hunt_id, f"web:{u['u']}")
+        m = publish_revision(repo, hunt_id, f"web:{u['u']}", settings=s)
         out = s.reports_dir / hunt_id
         out.mkdir(parents=True, exist_ok=True)
-        write_reports(repo, m, out)
+        write_reports(repo, m, out, settings=s)
         return RedirectResponse(agent_views.href(hunt_id) + "#reports", status_code=303)
 
     @app.get("/reports/{hunt_id}/{rev_id}.{ext}")
@@ -442,13 +442,14 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
                     and all(char in "0123456789abcdef" for char in rev_id[12:]))
         appendix |= (ext == "jsonl" and rev_id.startswith("zeek-visibility-") and len(rev_id) == 80
                      and all(char in "0123456789abcdef" for char in rev_id[16:]))
-        if (not appendix and (ext not in ("md", "json", "docx") or not rev_id.startswith(hunt_id + "-r"))
+        if (not appendix and (ext not in ("md", "json", "docx", "csv") or not rev_id.startswith(hunt_id + "-r"))
                 or "/" in rev_id or ".." in rev_id):
             raise HTTPException(404)
         p = (s.reports_dir / hunt_id / f"{rev_id}.{ext}").resolve()
         if s.reports_dir.resolve() not in p.parents or not p.exists():
             raise HTTPException(404)
         media = {"md": "text/markdown; charset=utf-8", "json": "application/json", "jsonl": "application/x-ndjson",
+                 "csv": "text/csv; charset=utf-8",
                  "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}[ext]
         return FileResponse(p, media_type=media, filename=f"{rev_id}.{ext}")
 

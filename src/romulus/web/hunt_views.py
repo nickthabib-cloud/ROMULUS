@@ -155,9 +155,12 @@ def overview(repo, hunt: dict) -> dict:
 
 
 def reports(repo, hunt_id: str) -> list[dict]:
+    """The hunt's report revisions, newest first; `indicators` is the indicator export's status in the revision's
+    manifest (None for a revision from before the export existed, which has no export files)."""
     with repo.engine.connect() as connection:
         return [dict(row) for row in connection.execute(
-            select(t.report_manifest.c.id, t.report_manifest.c.revision, t.report_manifest.c.created_at)
+            select(t.report_manifest.c.id, t.report_manifest.c.revision, t.report_manifest.c.created_at,
+                   func.json_extract(t.report_manifest.c.manifest, "$.indicators.status").label("indicators"))
             .where(t.report_manifest.c.hunt_id == hunt_id).order_by(t.report_manifest.c.revision.desc())).mappings()]
 
 

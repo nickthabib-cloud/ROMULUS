@@ -18,6 +18,7 @@ from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.evidence.raw_citation import RAW_GATE, RAW_ID_PREFIX, RAW_LABEL_PLURAL, raw_record_view
 from romulus.hunt.publish import subject_event_ids
 from romulus.hunt.rank import PASS_FINAL, rank_summary, rank_unranked
+from romulus.report import iocs, recommendations
 from romulus.report.incidents import build_incident_graph, incident_narrative
 from romulus.report.markdown import (
     ATTACK_STEPS,
@@ -808,7 +809,28 @@ def investigations_for_hunt(repo: Repo, hunt_id: str) -> dict:
     return _investigations(repo, hunt_id, [_discovery_origin(row) for row in repo.candidates(hunt_id)], agent)
 
 
-def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
+def recommendations_view(findings: list[dict], metadata: dict) -> dict:
+    """The recommendations section; a failure to build it is named in the report and never blocks it."""
+    try:
+        return recommendations.build(findings, metadata)
+    except Exception as exc:  # noqa: BLE001 - an optional section never blocks the authoritative report
+        return {"label": recommendations.LABEL, "status": "unavailable", "items": [],
+                "reason": f"{type(exc).__name__}: {exc}"[:300]}
+
+
+def indicators_view(repo: Repo, findings: list[dict], internal_networks: dict | None, settings=None) -> dict:
+    """The indicator export's summary: exact counts, a preview and the digest the exported files must match. A
+    failure is named in the report (and no export is written for it); it never blocks the report."""
+    try:
+        with iocs.collect(repo, findings, internal_networks, settings=settings) as table:
+            return table.summary()
+    except Exception as exc:  # noqa: BLE001 - an optional export never blocks the authoritative report
+        return {"label": iocs.LABEL, "status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"[:300]}
+
+
+def build_manifest(repo: Repo, hunt_id: str, actor: str, *, settings=None) -> dict:
+    """The report manifest of a hunt; `settings`, when given, lets the indicator export withhold any value that
+    holds a configured secret."""
     h = repo.get_hunt(hunt_id)
     if h is None:
         raise KeyError(hunt_id)
@@ -890,6 +912,8 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
         "banners": egress_banners(hm.get("ai_agent"), repo.agent_usage(hunt_id)),
         "investigations": _investigations(repo, hunt_id, cands, agent or {"status": "unknown"}),
         "incident_graph": incident_graph,
+        # suggestions for the partner, from the findings' ATT&CK techniques and the release's mitigations
+        "recommendations": recommendations_view(findings, metadata),
         # an analyst's asserted relations: shown as assertions, never as observed or inferred links
         "analyst_links": [{"id": a["id"], "from_finding": a["from_finding"], "to_finding": a["to_finding"],
                            "relation": a["relation"], "note": a["note"], "actor": a["actor"],
@@ -957,6 +981,8 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
     if fleet_gaps:
         m["integrity"]["incomplete_fleet_host_lists"] = fleet_gaps
         m["integrity"]["finalizable"] = False
+    # values seen in the findings' typed evidence, exported beside the report as STIX 2.1 and CSV
+    m["indicators"] = indicators_view(repo, findings, m["internal_networks"], settings)
     return _jsonable(m)
 
 
@@ -1490,6 +1516,11 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
     # gaps are listed by hunt-scoped target and partition (link ids); order them by content
     canonical["coverage"]["gaps"].sort(key=lambda gap: json.dumps(gap, sort_keys=True, separators=(",", ":")))
     canonical["findings"].sort(key=lambda finding: finding["id"])
+    # the partner sections from the deterministic findings alone, by content keys: the AI's findings sit under `ai`
+    canonical["recommendations"] = recommendations_view(
+        canonical["findings"], hunt_rule_metadata(repo, manifest=repo.get_hunt(hunt_id)["manifest"]))
+    canonical["indicators"] = indicators_view(repo, deterministic_views, manifest["internal_networks"])
+    canonical["indicators"].pop("digest", None)      # it covers hunt-scoped finding ids
     for finding in canonical["findings"]:
         gates = finding.get("gates") or {}
         if gates.get("_context_reaches"):        # stored sorted by hunt-scoped link ids; re-sort by content
@@ -1578,9 +1609,9 @@ def _broken_investigation_citations(repo: Repo, investigations) -> list[str]:
     return sorted(cited - found)
 
 
-def publish_revision(repo: Repo, hunt_id: str, actor: str) -> dict:
+def publish_revision(repo: Repo, hunt_id: str, actor: str, *, settings=None) -> dict:
     """Append a new immutable revision; never edits an earlier one."""
-    m = build_manifest(repo, hunt_id, actor)
+    m = build_manifest(repo, hunt_id, actor, settings=settings)
     body_digest = digest({k: v for k, v in m.items() if k != "generated_by"})
     with write_txn(repo.engine) as conn:
         prev = conn.execute(select(t.report_manifest.c.id, t.report_manifest.c.revision, t.report_manifest.c.digest)
