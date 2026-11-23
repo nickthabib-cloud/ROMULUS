@@ -342,7 +342,8 @@ def test_two_consecutive_provider_outages_are_billed_then_assess_runs(tmp_path):
     assert all(row["options"]["billed_failure"] == "ProviderUnavailable" for row in calls[:2])
     assert repo.agent_usage("h1")["calls"] == 3
     assert [row["state"] for row in repo.agent_sessions("h1")] == ["failed", "failed", "finished"]
-    assert result.state == "partial" and result.reason == "provider_unavailable"
+    # the hypothesis the outage left unworked is named, so a continuation works it
+    assert result.state == "partial" and result.reason == "unworked_hypotheses:1; provider_unavailable"
     engine.dispose()
 
 

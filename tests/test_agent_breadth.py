@@ -158,6 +158,41 @@ def test_a_provider_failing_every_session_is_not_fed_new_cluster_hypotheses(tmp_
     assert SESSIONS_FAILED_REASON in (result.reason or "")
 
 
+class _Outage(_ByKind):
+    """Orient and the assessment answer; every investigate call fails (an endpoint error, not an outage)."""
+
+    def chat(self, request):
+        if request.response_schema is None and "Dossier index page" not in str(request.messages[1]["content"]):
+            with self.lock:
+                self.requests.append(request)
+            raise RuntimeError("transient endpoint error")
+        return super().chat(request)
+
+
+def test_hypotheses_whose_sessions_failed_are_worked_by_the_next_run_and_the_failed_run_says_so(tmp_path):
+    from romulus.agent.investigate import SESSIONS_FAILED_REASON, UNEXPLAINED_CLUSTERS, UNWORKED_HYPOTHESES
+    s = Settings(home=tmp_path, agent_triage="off", agent_max_initial_hypotheses=1)
+    repo = _hunt(tmp_path, s)
+    failed = _run(s, repo, _Outage(_finish(), context=1_000_000))
+    # the failed run is partial and names what it left: its failed hypotheses and the clusters never reached
+    assert failed.state == "partial"
+    assert SESSIONS_FAILED_REASON in failed.reason
+    # one pending hypothesis (the top cluster's, retried once and failed again) and four clusters never reached
+    assert f"{UNWORKED_HYPOTHESES}:1" in failed.reason and f"{UNEXPLAINED_CLUSTERS}:4" in failed.reason
+    stranded = {row["id"] for row in _controller_rows(repo)}
+    assert len(stranded) == 1
+
+    healthy = _run(s, repo, _ByKind(_finish(), context=1_000_000))
+    # the next run works the hypotheses the outage stranded (the top clusters), then the rest
+    finished = {row["hypothesis_id"] for row in repo.agent_sessions("h1")
+                if row["purpose"] == "investigate" and row["state"] == "finished"}
+    assert stranded <= finished
+    controller = _controller_rows(repo)
+    assert [next(iter(_supported(repo, row))) for row in controller] == REPORT_ORDER
+    assert unexplained_clusters(repo, "h1") == []
+    assert UNWORKED_HYPOTHESES not in (healthy.reason or "") and UNEXPLAINED_CLUSTERS not in (healthy.reason or "")
+
+
 def test_the_controller_keeps_opening_clusters_as_hypotheses_are_worked_up_to_the_initial_cap(tmp_path):
     s = Settings(home=tmp_path, agent_triage="off", agent_max_initial_hypotheses=2)
     repo = _hunt(tmp_path, s)
@@ -217,6 +252,17 @@ def test_a_hypothesis_is_worked_again_only_with_questions_left_or_after_an_unfin
                              "ended_at": utcnow()})
     row["sessions_run"] = 2
     assert not _pending(s, row, repo)                                # finished with nothing left to ask
+    for state, pending in (("failed", True), ("capped", True), ("context_full", True), ("interrupted", True),
+                           ("refused", False), ("secret_guard", False)):
+        session_id = f"as-{state}"
+        repo.save_agent_session({"id": session_id, "hunt_id": "h1", "hypothesis_id": "hyp-x",
+                                 "purpose": "investigate", "state": state, "tool_calls": 1, "summary": "",
+                                 "started_at": utcnow(), "ended_at": utcnow()})
+        row["sessions_run"] = 2
+        assert _pending(s, row, repo) is pending, state
+        with repo.engine.begin() as connection:     # this end is not the last one for the next state
+            from romulus.store import schema as t
+            connection.execute(t.agent_session.delete().where(t.agent_session.c.id == session_id))
     assert _pending(s, {**row, "questions": ["what next?"]}, repo)   # a question left keeps it in the rounds
     assert not _pending(s, {**row, "questions": ["q"], "sessions_run": s.agent_max_sessions_per_hypothesis}, repo)
     assert not _pending(s, {**row, "status": "supported", "sessions_run": 0}, repo)

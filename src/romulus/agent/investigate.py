@@ -112,9 +112,15 @@ SECRET_GUARD_REASON = "secret_guard"
 REASONING_REJECTED_REASON = "reasoning_binding_rejected"
 # The scheduling stops after this many rounds in a row whose every session failed, under SESSIONS_FAILED_REASON.
 FAILED_ROUNDS_LIMIT = 2
-# The end states of a session the budget or an analyst cut short: its hypothesis stays pending (a continuation with
-# added budget works it again).
-CUT_SHORT_STATES = frozenset({"budget", "interrupted"})
+# The end states of a session after which its hypothesis, with no open question left, is done. Every other end (a
+# failure or outage, a tool-call or context cap, a budget or analyst's stop) leaves the hypothesis pending up to
+# AGENT_MAX_SESSIONS_PER_HYPOTHESIS, so a later round or a continuation works it again; FAILED_ROUNDS_LIMIT bounds a
+# provider that fails every session within one run.
+DONE_STATES = frozenset({"finished", "refused", "secret_guard"})
+# The limits an agent run names when it ends with work left: hypotheses still pending, and clusters no hypothesis
+# explains (each with its count), so such a run is partial and says why.
+UNWORKED_HYPOTHESES = "unworked_hypotheses"
+UNEXPLAINED_CLUSTERS = "unexplained_clusters"
 SESSIONS_FAILED_REASON = "sessions_failed"
 # The reason an analyst's stop request ended a session or the phase (a stopped session's state is `interrupted`).
 # A run stopped this way is resumable: `hunt resume` continues it from its persisted work.
@@ -479,9 +485,10 @@ def _id(prefix: str) -> str:
 
 def _pending(settings: Settings, hypothesis: dict, repo: Repo | None = None) -> bool:
     """Whether an open hypothesis still waits for investigation, with sessions to spare: never worked, worked with
-    questions left, or (given `repo`) its last session was cut short by the budget or an analyst's stop
-    (CUT_SHORT_STATES). A hypothesis whose last session ended any other way with no open question is done: another
-    session would re-prove what it recorded, or repeat a failure, a refusal or a secret-guard end."""
+    questions left, or (given `repo`) its last session did not end as done (DONE_STATES): a failure, an outage, a
+    tool-call or context cap, a budget or analyst's stop all leave it pending, up to its session limit. A hypothesis
+    whose last session finished with no open question, or ended refused or at the secret guard, is done: another
+    session would re-prove what it recorded, or meet the same refusal."""
     if hypothesis["status"] != "open":
         return False
     sessions = int(hypothesis.get("sessions_run") or 0)
@@ -493,7 +500,7 @@ def _pending(settings: Settings, hypothesis: dict, repo: Repo | None = None) -> 
         return False
     ran = [row for row in repo.agent_sessions(hypothesis["hunt_id"], hypothesis_id=hypothesis["id"],
                                               purpose="investigate") if row["state"] != "running"]
-    return bool(ran) and ran[-1]["state"] in CUT_SHORT_STATES
+    return not ran or ran[-1]["state"] not in DONE_STATES
 
 
 def _pending_cluster_hypotheses(settings: Settings, repo: Repo, hunt_id: str) -> int:
@@ -1629,6 +1636,16 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
             break
         if _investigation_done(settings, repo, hunt_id) and not top_up():
             break
+
+    # what the investigation left undone is named, never a silent `completed`: hypotheses still pending (an outage,
+    # a cap, a stop or the budget ended their work) and clusters no hypothesis explains
+    left = sum(_pending(settings, row, repo) for row in repo.agent_hypotheses(hunt_id))
+    if left:
+        limits_hit.add(f"{UNWORKED_HYPOTHESES}:{left}")
+    view = cluster_view()
+    unexplained = len(unexplained_clusters(repo, hunt_id, view)) if view is not None else 0
+    if unexplained:
+        limits_hit.add(f"{UNEXPLAINED_CLUSTERS}:{unexplained}")
 
     stopped = stopped or gate.stopped() or next(
         (STOPPED_REASON for session in all_sessions if session.get("reason") == STOPPED_REASON), None)
