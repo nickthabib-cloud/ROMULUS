@@ -21,10 +21,12 @@ Families (the first that fits):
 - **journald**: a journal record exported as JSON in `event.original` (`JOURNAL_FIELDS`).
 - **suricata_eve**: a Suricata EVE JSON record in `event.original`, by event type (`EVE_FIELDS`, from Suricata's EVE
   output documentation). An event type the table does not list is scanned by the union of the table's fields and is
-  counted as scanned only in part. A record is EVE by an event type with a flow's keys, by a catalogued event type
-  carrying its own block (a sensor's `stats` record has no flow), or by its shipper naming Suricata; a Suricata
-  record a shipper indexed as fields only (`suricata.eve.event_type`, or a per-type dataset) of a type without free
-  text (counters: `stats`, `flow`, `netflow`) holds no free text. Any other JSON record keeps its own verdict.
+  counted as scanned only in part. A record is EVE by an event type with a flow's keys, by its shipper naming
+  Suricata, or by a catalogued event type carrying its own block (a sensor's `stats` record has no flow); one
+  recognised by that last alone and holding text outside its type's fields (another product's JSON may share a type
+  name) is counted as scanned in part. A Suricata record a shipper indexed as fields only (`suricata.eve.event_type`,
+  or a per-type dataset) is read by its HTTP/2 header values, or, of a type without free text (`EVE_NO_TEXT`:
+  counters, flow records), holds none unless it carries a payload. Any other JSON record keeps its own verdict.
 - **zeek**: a Zeek JSON log record in `event.original`, by log (`ZEEK_FIELDS`, from Zeek's base-script log
   documentation). A log the table does not list is scanned by the union of the table's fields, in part.
 - **ecs_json**: an ECS-shaped JSON document in `event.original` (top-level names ECS or the Beats namespaces): its
@@ -413,18 +415,38 @@ _CREDENTIAL_PARAM = re.compile(
     r"credentials?)=)([^&;#\s]+)", re.IGNORECASE)
 
 
-def _is_eve(obj: dict, source: dict | None = None) -> bool:
-    """Whether a JSON object is a Suricata EVE record: an event type with a flow's keys, or (a sensor record with no
-    flow, such as `stats`) a catalogued event type carrying its own block, or any event type in a record its shipper
-    names as Suricata's."""
+def _eve_recognition(obj: dict, source: dict | None = None) -> str | None:
+    """How a JSON object is a Suricata EVE record: "flow" (an event type with a flow's keys), "label" (its record's
+    shipper names Suricata), "content" (a catalogued event type carrying its own block, as a sensor's `stats` record
+    does, and nothing else to tell); None when it is not one."""
     event_type = obj.get("event_type")
     if not isinstance(event_type, str):
-        return False
+        return None
     if any(key in obj for key in ("src_ip", "flow_id", "in_iface", "dest_ip")):
-        return True
+        return "flow"
+    if source is not None and _suricata_shipped(source):
+        return "label"
     if event_type in EVE_FIELDS and isinstance(obj.get(event_type.replace("-", "_"), obj.get(event_type)), dict):
+        return "content"
+    return None
+
+
+def _is_eve(obj: dict, source: dict | None = None) -> bool:
+    return _eve_recognition(obj, source) is not None
+
+
+def _other_strings(obj, selected: set[str], depth: int = 0) -> bool:
+    """Whether an object holds a string value outside `selected` (its time and event type aside), bounded."""
+    if depth > MAX_DEPTH:
         return True
-    return source is not None and _suricata_shipped(source)
+    if isinstance(obj, str):
+        return bool(obj.strip()) and obj not in selected
+    if isinstance(obj, list):
+        return any(_other_strings(item, selected, depth + 1) for item in obj[:MAX_LIST_ITEMS])
+    if isinstance(obj, dict):
+        return any(_other_strings(value, selected, depth + 1) for key, value in obj.items()
+                   if not (depth == 0 and key in ("timestamp", "event_type")))
+    return False
 
 
 def _suricata_shipped(source: dict) -> bool:
@@ -465,7 +487,12 @@ def _zeek_log(obj: dict, source: dict):
 EVE_PAYLOAD = ("a Suricata EVE record's packet payload or message body is not read (it can hold credentials and is "
                "no log field): its other free-text fields were scanned")
 _EVE_PAYLOADS = ("payload", "payload_printable", "packet", "http.http_request_body", "http.http_request_body_printable",
-                 "http.http_response_body", "http.http_response_body_printable")
+                 "http.http_response_body", "http.http_response_body_printable", "frame.payload",
+                 "frame.payload_printable")
+# EVE event types whose records hold no free text (counters, flow records, industrial and key-exchange metadata)
+EVE_NO_TEXT = frozenset({"stats", "flow", "netflow", "modbus", "dnp3", "ike", "snmp", "bittorrent-dht", "frame", "arp"})
+EVE_CONTENT_ONLY = ("a JSON record taken for Suricata EVE by its event type alone (no flow, no Suricata label) holds "
+                    "text outside that type's fields: it was not scanned")
 
 
 def _unread_payload(obj: dict) -> bool:
@@ -660,13 +687,16 @@ def _json_texts(obj: dict, source: dict, windows: bool, field: str = "event.orig
             _add(texts, f"{prefix}journal:{key}", _strings(obj.get(key)), seen)
         return _bounded(Selection(JOURNALD, texts))
     event_type = obj.get("event_type")
-    if _is_eve(obj, source):
+    if (recognition := _eve_recognition(obj, source)) is not None:
         known = event_type in EVE_FIELDS
         names = EVE_FIELDS.get(event_type, _EVE_ALL)
         if _password_command(_get(obj, "ftp.command")) or _password_command(_get(obj, "ftp_data.command")):
             names = tuple(name for name in names if name not in ("ftp.command_data", "ftp_data.filename"))
         _paths(obj, names, texts, seen, prefix + "eve:")
         _http2_headers(obj, texts, seen, prefix + "eve:")
+        if recognition == "content" and _other_strings(obj, {text for _path, text in texts}):
+            # another product's JSON may share an EVE type name: what it holds beyond the type's fields is unread
+            return _bounded(Selection(EVE, texts, complete=False, reason=EVE_CONTENT_ONLY))
         if _unread_payload(obj):
             return _bounded(Selection(EVE, texts, complete=False, reason=EVE_PAYLOAD))
         if not known:
@@ -781,9 +811,16 @@ def _select(source: dict, windows: bool, only: tuple[str, ...] | None) -> Select
         _windows_data(source, texts, seen)
     if not texts:
         event_type = _shipped_eve_type(source)
-        if event_type in EVE_FIELDS and not EVE_FIELDS[event_type] and not _unread_payload(_get(source, "suricata.eve")
-                                                                                            or {}):
+        eve = _get(source, "suricata.eve")
+        eve = eve if isinstance(eve, dict) else {}
+        if event_type == "http2":
+            # a Suricata HTTP/2 record a shipper indexed as fields: its header values, never a credential header's
+            _http2_headers(eve, texts, seen, "suricata.eve.")
+            return _bounded(Selection(EVE, texts))
+        if event_type in EVE_NO_TEXT:
             # a Suricata sensor record a shipper indexed as fields, of an event type without free text (counters)
+            if _unread_payload(eve):
+                return Selection(EVE, [], complete=False, reason=EVE_PAYLOAD)
             return Selection(EVE, [])
         return Selection(TEXT, [], complete=False, reason=NO_TEXT)
     if not lined:
