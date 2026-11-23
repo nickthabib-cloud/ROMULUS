@@ -1,9 +1,10 @@
 """The hunt's finding clusters, and which of them no hypothesis explains yet, from typed state only.
 
 A cluster is one incident of the deterministic incident graph over the hunt's reportable findings (urgent, high and
-lead): findings joined by observed expansion links, or one finding on its own. A cluster is explained once any
+lead): findings joined by observed expansion links, or one finding on its own. A cluster is explained once a
 hypothesis of the hunt, in any state, cites one of its findings, one of its links, or evidence one of its findings
-cites (through the candidate-event index). Nothing a model wrote decides it: no statement, note or summary is read.
+cites (through the candidate-event index), and the cluster is among the best CLUSTERS_PER_HYPOTHESIS that hypothesis's
+cites reach. Nothing a model wrote decides it: no statement, note or summary is read.
 Agent findings never form or join a cluster, and mentions never define one: a mention is text a record contains, not
 an action.
 
@@ -27,6 +28,10 @@ CLUSTER_FINDING_LIMIT = MATERIALIZE_FINDING_LIMIT
 _PAGE = 1_000
 # The findings an evidence cite can map to (through the candidate-event index), per cited event.
 EVIDENCE_FINDINGS_LIMIT = 50
+# The most clusters one hypothesis explains. A session (tens of tool calls) can examine a few clusters closely, not a
+# hunt's worth; a broad hypothesis citing more explains only its best three in report order, and the rest get
+# hypotheses of their own. Three covers a hypothesis that links an intrusion's steps across a few hosts' clusters.
+CLUSTERS_PER_HYPOTHESIS = 3
 # The findings, clusters and hosts a hypothesis card's leads list by name (the rest are counted), and the characters
 # of a listed rule id, host or claim.
 LEADS_LIMIT = 8
@@ -204,8 +209,37 @@ def _bounded(value, limit: int = LEADS_TEXT_LIMIT):
     return text if len(text) <= limit else f"{text[:limit]}…"
 
 
+def explained_clusters(repo: Repo, hunt_id: str, view: ClusterView) -> set[str]:
+    """The keys of the clusters the hunt's hypotheses explain. Each hypothesis explains the clusters its cites reach
+    (findings, findings citing its evidence, a link's cluster), but at most CLUSTERS_PER_HYPOTHESIS of them, the best
+    in report order: one broad hypothesis citing every cluster must not turn the controller off for all of them."""
+    findings: dict[str, set[str]] = {}
+    events: dict[str, set[str]] = {}
+    for cite in repo.agent_hypothesis_cites(hunt_id=hunt_id):
+        hypothesis, kind, target = str(cite["hypothesis_id"]), cite["target_kind"], str(cite["target_id"])
+        if kind == "finding":
+            findings.setdefault(hypothesis, set()).add(target)
+        elif kind == "evidence":
+            events.setdefault(hypothesis, set()).add(target)
+        elif kind == "link" and target in view.by_link:
+            findings.setdefault(hypothesis, set()).update(view.by_link[target].finding_ids)
+    mapped: dict[str, list[str]] = {}
+    for hypothesis, ids in events.items():
+        for event in sorted(ids):
+            if event not in mapped:
+                mapped[event] = repo.candidate_ids_for_event(hunt_id, event, REPORTABLE_LANES,
+                                                             EVIDENCE_FINDINGS_LIMIT)
+            findings.setdefault(hypothesis, set()).update(mapped[event])
+    out: set[str] = set()
+    for ids in findings.values():
+        reached = {view.by_finding[item].key: view.by_finding[item] for item in ids if item in view.by_finding}
+        best = sorted(reached.values(), key=lambda cluster: (cluster.order, cluster.key))[:CLUSTERS_PER_HYPOTHESIS]
+        out.update(cluster.key for cluster in best)
+    return out
+
+
 def unexplained_clusters(repo: Repo, hunt_id: str, view: ClusterView | None = None) -> list[Cluster]:
-    """The clusters no hypothesis explains yet, in report order of their best finding."""
+    """The clusters no hypothesis explains yet (`explained_clusters`), in report order of their best finding."""
     view = view if view is not None else hunt_clusters(repo, hunt_id)
-    explained = cited_findings(repo, hunt_id, view)
-    return [cluster for cluster in view.clusters if not explained.intersection(cluster.finding_ids)]
+    explained = explained_clusters(repo, hunt_id, view)
+    return [cluster for cluster in view.clusters if cluster.key not in explained]

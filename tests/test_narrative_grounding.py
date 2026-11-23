@@ -301,9 +301,18 @@ def _assessment_body(repo):
                    _p([_s(_f(repo, "f-0001"))], "Persistence")])
 
 
+@pytest.fixture(autouse=True)
+def _one_hypothesis_explains_every_cluster(monkeypatch):
+    """These tests are about triage and grounding, one investigation long: one orient hypothesis explains every
+    cluster here (a hunt otherwise counts at most CLUSTERS_PER_HYPOTHESIS per hypothesis; tests/test_agent_breadth.py
+    covers that)."""
+    from romulus.agent import clusters
+    monkeypatch.setattr(clusters, "CLUSTERS_PER_HYPOTHESIS", 10 ** 6)
+
+
 def _orient_covering(repo) -> list[ToolCall]:
-    """Orient's reply: one hypothesis citing every reportable finding, so every cluster is explained and the controller
-    opens no hypothesis of its own; the phase then investigates exactly that one."""
+    """Orient's reply: one hypothesis citing every reportable finding, so every cluster is explained (with the
+    fixture above) and the controller opens no hypothesis of its own; the phase then investigates exactly that one."""
     book = AliasBook(repo, "h1")
     aliases = [book.alias_for("F", row["id"]) for row in repo.candidates("h1", ["urgent", "high", "lead"])]
     assert len(aliases) <= 40

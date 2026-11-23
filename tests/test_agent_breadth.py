@@ -120,6 +120,26 @@ def test_orient_that_opened_two_never_leaves_the_other_clusters_unexamined(tmp_p
     assert unexplained_clusters(repo, "h1") == []
 
 
+def test_one_broad_hypothesis_explains_at_most_its_best_three_clusters(tmp_path):
+    from romulus.agent.clusters import CLUSTERS_PER_HYPOTHESIS
+    s = Settings(home=tmp_path, agent_triage="off")
+    repo = _hunt(tmp_path, s)
+    book = AliasBook(repo, "h1")
+    # the shape that turned the top-up off: one orient hypothesis citing every cluster
+    every = [book.alias_for("F", finding_id) for finding_id, _lane, _priority in FINDINGS]
+    opens = [ToolCall("o1", "open_hypothesis", {"statement": "Every reported finding is one intrusion",
+                                                "supporting": every, "questions": ["How do they connect?"]}, "{}"),
+             ToolCall("of", "finish_session", {"summary": "One broad hypothesis opened."}, "{}")]
+    _run(s, repo, _ByKind(opens, context=1_000_000))
+
+    assert CLUSTERS_PER_HYPOTHESIS == 3
+    # it explains its best three clusters; the two below them get controller hypotheses of their own, and are worked
+    controller = _controller_rows(repo)
+    assert [next(iter(_supported(repo, row))) for row in controller] == ["c-l2", "c-l1"]
+    assert all(int(row["sessions_run"]) >= 1 for row in controller)
+    assert unexplained_clusters(repo, "h1") == []
+
+
 def test_hypotheses_citing_nothing_never_hold_a_clusters_place(tmp_path):
     s = Settings(home=tmp_path, agent_triage="off", agent_max_initial_hypotheses=3)
     repo = _hunt(tmp_path, s)
