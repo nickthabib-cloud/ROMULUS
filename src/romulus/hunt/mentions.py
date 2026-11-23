@@ -81,6 +81,7 @@ from romulus.evidence.raw_citation import build_raw_record, raw_record_id, recor
 from romulus.evidence.raw_scrub import clean_source
 from romulus.evidence.windows import is_windows_source
 from romulus.hunt.mention_fields import (  # noqa: F401 - the reasons are part of this module's coverage vocabulary
+    CATALOGUED_FAMILIES,
     JSON_ARRAY,
     JSON_RECORD,
     NO_TEXT,
@@ -318,6 +319,9 @@ class MentionScanner:
                 if selection.no_text:
                     # a record of a catalogued family holding none of its free-text fields: nothing to scan
                     self.no_free_text[selection.family] += 1
+                elif selection.family in CATALOGUED_FAMILIES:
+                    # read by its family, with part of it deliberately or past a bound unread (a packet payload)
+                    self.in_part[selection.reason] += 1
                 else:
                     self.not_scanned[selection.reason] += 1
                 continue

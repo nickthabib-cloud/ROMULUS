@@ -46,6 +46,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from xml.etree import ElementTree
 
@@ -61,6 +62,8 @@ MAX_DEPTH = 8
 
 # Families, as counted under the pool's coverage (`by_field` is "<family>:<field>")
 TEXT, AUDITD, JOURNALD, EVE, ZEEK, ECS_JSON = "text", "auditd", "journald", "suricata_eve", "zeek", "ecs_json"
+# families whose records are read by a documented selection (a record of one with part unread is scanned in part)
+CATALOGUED_FAMILIES = frozenset({AUDITD, JOURNALD, EVE, ZEEK, ECS_JSON})
 
 NO_TEXT = "no text field"
 NO_LINE = "a record without a message line: only its catalogued free-text fields were scanned"
@@ -225,13 +228,32 @@ def _get(source: dict, name: str):
     return node
 
 
+# Whether the selection being made left a list's items or a nesting level unread (set per record by select_texts)
+_CUT: ContextVar[list[bool] | None] = ContextVar("mention_selection_cut", default=None)
+
+
+def _note_cut() -> None:
+    flag = _CUT.get()
+    if flag is not None:
+        flag[0] = True
+
+
+def _bounded_items(items: list) -> list:
+    if len(items) > MAX_LIST_ITEMS:
+        _note_cut()
+    return items[:MAX_LIST_ITEMS]
+
+
 def _strings(value, depth: int = 0) -> list[str]:
-    """The non-empty strings of a value: itself, or a list's items (at most MAX_LIST_ITEMS)."""
+    """The non-empty strings of a value: itself, or a list's items (at most MAX_LIST_ITEMS, two levels deep)."""
     if isinstance(value, str):
         return [value] if value.strip() else []
-    if isinstance(value, list) and depth < 2:
+    if isinstance(value, list):
+        if depth >= 2:
+            _note_cut()
+            return []
         out: list[str] = []
-        for item in value[:MAX_LIST_ITEMS]:
+        for item in _bounded_items(value):
             out.extend(_strings(item, depth + 1))
         return out
     return []
@@ -240,12 +262,13 @@ def _strings(value, depth: int = 0) -> list[str]:
 def _walk(node, parts: list[str], depth: int = 0) -> list[str]:
     """The strings at a dotted path through nested objects and arrays of objects (an array is read item by item)."""
     if depth > MAX_DEPTH:
+        _note_cut()
         return []
     if not parts:
         return _strings(node)
     if isinstance(node, list):
         out: list[str] = []
-        for item in node[:MAX_LIST_ITEMS]:
+        for item in _bounded_items(node):
             out.extend(_walk(item, parts, depth + 1))
         return out
     if not isinstance(node, dict):
@@ -297,7 +320,7 @@ def audit_lines(value) -> list[str]:
     if isinstance(value, str):
         parts = value.split("\n") if "\n" in value else [value]
     elif isinstance(value, list):
-        parts = [item for item in value[:MAX_LIST_ITEMS] if isinstance(item, str)]
+        parts = [item for item in _bounded_items(value) if isinstance(item, str)]
     else:
         return []
     parts = [part for part in parts if part.strip()]
@@ -392,6 +415,16 @@ def _zeek_log(obj: dict, source: dict):
     return log
 
 
+EVE_PAYLOAD = ("a Suricata EVE record's packet payload or message body is not read (it can hold credentials and is "
+               "no log field): its other free-text fields were scanned")
+_EVE_PAYLOADS = ("payload", "payload_printable", "packet", "http.http_request_body", "http.http_request_body_printable",
+                 "http.http_response_body", "http.http_response_body_printable")
+
+
+def _unread_payload(obj: dict) -> bool:
+    return any(isinstance(value := _get(obj, name), str) and value.strip() for name in _EVE_PAYLOADS)
+
+
 def _password_command(command) -> bool:
     """A command whose argument is, or may hold, a credential (its argument is never selected)."""
     return isinstance(command, str) and command.strip().upper() in CREDENTIAL_COMMANDS
@@ -408,7 +441,7 @@ def _http2_headers(obj: dict, texts, seen, prefix: str) -> None:
         return
     for block in ("request_headers", "response_headers"):
         headers = http2.get(block)
-        for header in headers[:MAX_LIST_ITEMS] if isinstance(headers, list) else ():
+        for header in _bounded_items(headers) if isinstance(headers, list) else ():
             if isinstance(header, dict) and not _credential_header(header.get("name")):
                 _add(texts, f"{prefix}http2.{block}.{header.get('name')}"[:120], _strings(header.get("value")), seen)
 
@@ -541,6 +574,8 @@ def _json_texts(obj: dict, source: dict, windows: bool, field: str = "event.orig
             names = tuple(name for name in names if name not in ("ftp.command_data", "ftp_data.filename"))
         _paths(obj, names, texts, seen, prefix + "eve:")
         _http2_headers(obj, texts, seen, prefix + "eve:")
+        if _unread_payload(obj):
+            return _bounded(Selection(EVE, texts, complete=False, reason=EVE_PAYLOAD))
         if not known:
             return _bounded(Selection(EVE, texts, complete=False,
                                       reason="a Suricata EVE event type outside the catalogued table: scanned by the "
@@ -596,9 +631,26 @@ def _json_field(text: str, source: dict, windows: bool, field: str) -> Selection
     return selection
 
 
+TRUNCATED = (f"a record with a list longer than {MAX_LIST_ITEMS} items or nested deeper than {MAX_DEPTH} levels: "
+             "the rest was not scanned")
+
+
 def select_texts(source: dict, *, windows: bool = False, only: tuple[str, ...] | None = None) -> Selection:
     """The texts of one record the mention sweep scans (see the module docstring). `only` restricts an audit record to
-    the decoded fields it names (the fields of a record whose other fields a typed event already reads)."""
+    the decoded fields it names (the fields of a record whose other fields a typed event already reads). A list or
+    nesting cut at its bound makes the selection partial."""
+    token = _CUT.set([False])
+    try:
+        selection = _select(source, windows, only)
+        if _CUT.get()[0] and selection.complete:
+            selection.complete = False
+            selection.reason = TRUNCATED
+        return selection
+    finally:
+        _CUT.reset(token)
+
+
+def _select(source: dict, windows: bool, only: tuple[str, ...] | None) -> Selection:
     message = next(((path, value) for path in _MESSAGE_FIELDS
                     if isinstance(value := _get(source, path), str) and value), None)
     original = _get(source, "event.original")

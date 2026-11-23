@@ -214,6 +214,34 @@ def test_a_windows_record_whose_only_text_is_its_exported_xml_is_read_by_its_eve
     scanner.close()
 
 
+def test_an_eve_payload_never_read_makes_the_record_scanned_in_part(tmp_path):
+    from romulus.hunt.mention_fields import EVE_PAYLOAD
+    alert = {"event_type": "alert", "src_ip": "1.2.3.4", "flow_id": 1, "alert": {"signature": "x"},
+             "payload_printable": "cmd.exe /c mimikatz"}
+    selection = select_texts({"event": {"original": json.dumps(alert)}})
+    assert selection.texts == [] and not selection.complete and selection.reason == EVE_PAYLOAD
+    scanner = _scanner(tmp_path)
+    scanner.scan(TARGET, CONTRACT, [(_record(1, {"event": {"original": json.dumps(alert)}}), "x")], None)
+    summary = scanner.summary()
+    assert summary["not_scanned"]["records_in_part"] == {EVE_PAYLOAD: 1}
+    assert summary["records_without_free_text"] == {} and summary["status"] == "partial"
+    scanner.close()
+
+
+@pytest.mark.parametrize("source", [
+    {"event": {"original": json.dumps({"event_type": "dns", "src_ip": "1.2.3.4", "dns": {
+        "queries": [{"rrname": f"h{n % 3}.example"} for n in range(80)]}})}},
+    {"message": "x", "process": {"args": [f"a{n % 3}" for n in range(80)]}},
+    {"message": "x", "process": {"args": [["nested", ["deeper"]]]}},
+])
+def test_a_list_or_nesting_cut_at_its_bound_makes_the_record_scanned_in_part(source):
+    from romulus.hunt.mention_fields import TRUNCATED
+    selection = select_texts(source)
+    assert selection.texts and not selection.complete and selection.reason == TRUNCATED
+    # the bound is per record: the next record is judged on its own
+    assert select_texts({"message": "x", "process": {"args": ["a"]}}).complete
+
+
 def test_an_xml_document_declaring_entities_is_never_parsed():
     from romulus.hunt.mention_fields import XML_UNREAD
     bomb = ('<?xml version="1.0"?><!DOCTYPE lolz [<!ENTITY lol "lol"><!ENTITY lol2 "&lol;&lol;">]>'
