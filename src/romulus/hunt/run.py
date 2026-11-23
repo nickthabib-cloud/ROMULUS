@@ -938,7 +938,9 @@ AGENT_EXCLUSIONS_ACTION = "hunt.agent_baseline_exclusions"
 def exclusions_after_agent(repo: Repo, hunt_id: str) -> dict:
     """Leave out of baseline history every record the AI agent's findings cite, whatever the agent's outcome (a
     failed or stopped agent keeps the findings it stored). A failure leaves the ledger and history as they were,
-    is recorded, and never changes the hunt's result; the next agent finish or resume tries again."""
+    is recorded in the audit, and never changes the hunt's result. It runs again only when this hunt's agent
+    finishes again (a continuation or resume of its agent): a hunt that is not resumed keeps the AI-cited records
+    in history."""
     try:
         summary = refresh_cited_exclusions(repo, hunt_id)
     except Exception as exc:  # history upkeep must never sink the agent's result

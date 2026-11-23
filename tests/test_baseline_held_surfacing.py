@@ -23,6 +23,12 @@ def _writer(repo, hunt_id: str, status: str) -> None:
     writer = ({"status": "held", "written": 0, "held": {"stages": STAGES, "reason": "held"}} if status == "held"
               else {"status": "complete", "written": 2})
     repo.audit("system", "hunt.baseline_summary", hunt_id, {"segment_writer": writer})
+    if status == "held":
+        # a held finish keeps the window material for the resume, charged to the disk budget
+        from romulus.store.db import utcnow
+        repo.retain_baseline_window_material(hunt_id, bytes_=1, retained_at=utcnow(), reason="kept for the resume")
+    else:
+        repo.drop_baseline_window_retention(hunt_id)
 
 
 def test_the_line_names_the_unfinished_stages_and_the_resume():
@@ -101,3 +107,36 @@ def test_a_finish_stopped_after_the_sweep_and_its_resumed_finish_set_and_clear_t
     _later_stage_finding(repo)
     _finish_run(repo)
     assert held_history(repo, "hunt-a") is None
+
+
+def test_held_history_whose_material_the_disk_budget_released_promises_no_resume():
+    from romulus.report.manifest import held_history
+    from tests.test_baseline_held_history import _finish_run, _window
+    from tests.test_baseline_held_history import STOP_AT_BASELINE, NOT_RUN, PACKETS
+    from tests.test_baseline_hunt_writer import _repo
+    repo = _repo()
+    _window(repo)
+    # a budget smaller than this hunt's material: the held finish cannot keep it
+    _finish_run(repo, stopped=STOP_AT_BASELINE, packet=PACKETS, baseline={}, expansion=NOT_RUN, budget=1)
+
+    writer = repo.latest_audit("hunt-a", "hunt.baseline_summary")["detail"]["segment_writer"]
+    assert writer["status"] == "held" and writer["material"]["kept"] is False
+    assert "resuming the hunt will not write" in writer["held"]["reason"]
+    assert "resumed hunt's finish writes" not in writer["held"]["reason"]
+    line = held_history(repo, "hunt-a")
+    assert line == held_history_line(STAGES, resumable=False) and "until it is resumed" not in line
+
+
+def test_held_history_kept_at_the_finish_but_released_later_stops_promising_a_resume():
+    from romulus.report.manifest import held_history
+    from tests.test_baseline_held_history import _stop_after_sweep, _window
+    from tests.test_baseline_hunt_writer import _repo
+    repo = _repo()
+    _window(repo)
+    _stop_after_sweep(repo)
+    assert held_history(repo, "hunt-a") == LINE
+    # another hunt's finish later releases it under the budget
+    for spec_id, target in repo.baseline_window_material_pairs("hunt-a"):
+        repo.release_baseline_window_material("hunt-a", spec_id, target, "released by the disk budget")
+    repo.drop_baseline_window_retention("hunt-a")
+    assert held_history(repo, "hunt-a") == held_history_line(STAGES, resumable=False)

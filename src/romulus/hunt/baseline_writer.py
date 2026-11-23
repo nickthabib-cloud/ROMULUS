@@ -243,10 +243,14 @@ def _direction_failure(repo: Repo, hunt_id: str) -> str | None:
     return contradiction_reason(check) if isinstance(check, dict) else None
 
 
-def held_reason(stages: list[str]) -> str:
-    """Why a run that did not finish every record-citing stage writes no history."""
-    return (f"no segment written: {', '.join(stages)} did not run to its end, so the keys of finding-associated "
-            "activity to leave out of history are not all known; the resumed hunt's finish writes them")
+def held_reason(stages: list[str], *, material_kept: bool = True) -> str:
+    """Why a run that did not finish every record-citing stage writes no history, and whether a resume can."""
+    why = (f"no segment written: {', '.join(stages)} did not run to its end, so the keys of finding-associated "
+           "activity to leave out of history are not all known")
+    if material_kept:
+        return f"{why}; the resumed hunt's finish writes them"
+    return (f"{why}; its window counter material was released under the disk budget, so resuming the hunt will "
+            "not write these hours' history either")
 
 
 def run_hunt_segment_writer(repo: Repo, hunt_id: str, *, hunt_partial: bool, baseline_finished: bool = True,
@@ -294,11 +298,11 @@ def run_hunt_segment_writer(repo: Repo, hunt_id: str, *, hunt_partial: bool, bas
     changed = {"exclusion_changes": changes} if changes["derived"] or changes["rebuilt_from_source"] else {}
     repo.cleanup_baseline_building(before=now - timedelta(hours=1))
     if held:
-        reason = held_reason(held)
         material = _settle_material(
             repo, hunt_id, specs, targets, hunt_partial=True, baseline_finished=baseline_finished,
-            budget=retain_budget_bytes, now=now, held=reason,
+            budget=retain_budget_bytes, now=now, held=held_reason(held),
         )
+        reason = held_reason(held, material_kept=bool(material.get("kept")))
         return {
             "status": "held", "written": 0, "stale": stale, "max_write_seconds": 0.0,
             "held": {"stages": held, "reason": reason},
