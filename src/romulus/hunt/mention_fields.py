@@ -51,6 +51,8 @@ NO_TEXT = "no text field"
 NO_LINE = "a record without a message line: only its catalogued free-text fields were scanned"
 JSON_RECORD = "event.original is a JSON record of no catalogued family"
 JSON_ARRAY = "event.original is a JSON array"
+JSON_MESSAGE = "the message is a JSON record of no catalogued family"
+JSON_MESSAGE_ARRAY = "the message is a JSON array"
 XML_RECORD = "event.original is an XML record"
 UNREADABLE_AUDIT = "an audit record line that does not parse: scanned as plain text"
 PAST_TEXTS = f"a record with more than {MAX_TEXTS} selected free-text fields: the rest were not scanned"
@@ -337,11 +339,12 @@ def _password_command(command) -> bool:
     return isinstance(command, str) and command.strip().upper() in ("PASS", "ACCT")
 
 
-def _json_texts(obj: dict, source: dict, windows: bool) -> Selection:
-    """The selection of a JSON object held in event.original."""
+def _json_texts(obj: dict, source: dict, windows: bool, field: str = "event.original") -> Selection:
+    """The selection of a JSON object held in a record's text field (`event.original`, or a `message` a shipper
+    filled with the producer's JSON line)."""
     texts: list[tuple[str, str]] = []
     seen: set[str] = set()
-    prefix = "event.original#"
+    prefix = f"{field}#"
     if any(marker in obj for marker in _JOURNAL_MARKERS):
         for key in JOURNAL_FIELDS:
             _add(texts, f"{prefix}journal:{key}", _strings(obj.get(key)), seen)
@@ -382,7 +385,30 @@ def _json_texts(obj: dict, source: dict, windows: bool) -> Selection:
                                       reason="an ECS JSON document with fields outside ECS: only its ECS free-text "
                                              "fields were scanned"))
         return _bounded(Selection(ECS_JSON, texts))
-    return Selection("json", [], complete=False, reason=JSON_RECORD)
+    return Selection("json", [], complete=False, reason=JSON_RECORD if field == "event.original" else JSON_MESSAGE)
+
+
+def _json_field(text: str, source: dict, windows: bool, field: str) -> Selection | None:
+    """The selection of a text field that holds one JSON document (None when it holds a line): an object is read by
+    its family, never as a serialized line; an array or an object of no family is not scanned."""
+    if text.lstrip()[:1] not in ("{", "["):
+        return None
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return None
+    if isinstance(parsed, list):
+        return Selection("json", [], complete=False,
+                         reason=JSON_ARRAY if field == "event.original" else JSON_MESSAGE_ARRAY)
+    if not isinstance(parsed, dict):
+        return None
+    selection = _json_texts(parsed, source, windows, field)
+    if selection.family != "json":
+        # the record's own top-level free-text fields are read beside it
+        seen = {text for _path, text in selection.texts}
+        _paths(source, ECS_FIELDS, selection.texts, seen)
+        selection = _bounded(selection)
+    return selection
 
 
 def select_texts(source: dict, *, windows: bool = False, only: tuple[str, ...] | None = None) -> Selection:
@@ -409,26 +435,14 @@ def select_texts(source: dict, *, windows: bool = False, only: tuple[str, ...] |
     texts: list[tuple[str, str]] = []
     seen: set[str] = set()
     if message is not None:
+        if (selection := _json_field(message[1], source, windows, message[0])) is not None:
+            return selection
         _add(texts, message[0], [message[1]], seen)
     elif original is not None:
         head = original.lstrip()[:1]
-        if head in ("{", "["):
-            try:
-                parsed = json.loads(original)
-            except ValueError:
-                parsed = None
-            if isinstance(parsed, dict):
-                selection = _json_texts(parsed, source, windows)
-                if selection.family != "json":
-                    # the record's own top-level free-text fields are read beside its event.original
-                    seen = {text for _path, text in selection.texts}
-                    _paths(source, ECS_FIELDS, selection.texts, seen)
-                    return _bounded(selection)
-                return selection
-            if isinstance(parsed, list):
-                return Selection("json", [], complete=False, reason=JSON_ARRAY)
-            _add(texts, "event.original", [original], seen)
-        elif head == "<" and _is_xml(original):
+        if (selection := _json_field(original, source, windows, "event.original")) is not None:
+            return selection
+        if head == "<" and _is_xml(original):
             return Selection("xml", [], complete=False, reason=XML_RECORD)
         else:
             _add(texts, "event.original", [original], seen)

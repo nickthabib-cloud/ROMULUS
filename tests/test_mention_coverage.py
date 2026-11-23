@@ -236,6 +236,26 @@ def test_a_credential_is_never_selected_and_a_scrubbed_record_is_scanned_as_stor
         "event.original#eve:ftp.command": "RETR", "event.original#eve:ftp.command_data": "/tmp/MIMIKATZ.exe"}
 
 
+def test_json_held_in_the_message_is_read_by_its_family_never_as_a_serialized_line(tmp_path):
+    from romulus.hunt.mention_fields import JSON_MESSAGE
+    alert = {"event_type": "alert", "src_ip": "1.2.3.4", "flow_id": 1, "alert": {"signature": "ET MIMIKATZ"}}
+    selection = select_texts({"message": json.dumps(alert)})
+    # the sensor's rule text is never read, and no key name is scanned
+    assert selection.family == EVE and selection.texts == []
+    zeek = {"_path": "http", "uid": "C1", "id.orig_h": "10.0.0.5", "uri": "/MIMIKATZ.ps1"}
+    assert select_texts({"message": json.dumps(zeek)}).texts == [("message#zeek:uri", "/MIMIKATZ.ps1")]
+    other = select_texts({"message": json.dumps({"cmd": SHELL, "note": "x"})})
+    assert other.texts == [] and other.reason == JSON_MESSAGE and not other.complete
+    scanner = _scanner(tmp_path)
+    scanner.scan(TARGET, CONTRACT, [(_record(1, {"message": json.dumps({"cmd": SHELL})}), "x")], None)
+    summary = scanner.summary()
+    assert summary["lines_matched"] == 0 and summary["not_scanned"]["records"] == {JSON_MESSAGE: 1}
+    assert summary["status"] == "partial"
+    scanner.close()
+    # a message that only starts like JSON is a line like any other
+    assert select_texts({"message": "{not json} " + SHELL}).texts[0][0] == "message"
+
+
 @pytest.mark.parametrize("source", [
     {"event": {"original": json.dumps({"MESSAGE": "x", "_CMDLINE": "MIMIKATZ"})}},
     {"event": {"original": json.dumps({"@timestamp": "t", "process": {"command_line": "MIMIKATZ"}})}},
