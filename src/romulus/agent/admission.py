@@ -349,6 +349,19 @@ class AgentAdmission:
             accepted.append(attack_id)
         return list(dict.fromkeys(accepted))
 
+    def _typed_support(self, kind: str, target: str) -> bool:
+        """Whether a resolved supporting cite is typed evidence a technique may rest on: a typed event (E), an
+        expansion link (L), or a finding (F) that is deterministic or, if the agent proposed it, cites typed events.
+        An agent finding resting on raw records only (a mention claim) is not."""
+        if kind not in TYPED_CITE_ALIASES:
+            return False
+        if kind != "F":
+            return True
+        row = self.repo.candidate(target)
+        if row is None:
+            return False
+        return row.get("provenance", "deterministic") == "deterministic" or bool(row.get("event_ids"))
+
     def _resolve_many(self, aliases: list[str], kinds: set[str], field: str = "$") -> list[tuple[str, str]]:
         """`field` is the argument the aliases came from, which a refusal is recorded by."""
         resolved = []
@@ -447,7 +460,7 @@ class AgentAdmission:
             # an ATT&CK technique on a hypothesis rests on typed evidence: a finding, a typed event or an expansion
             # link. A mention-led hypothesis (no cite, or raw records and agent links only) names none, so text a
             # record contains can never put a technique on the hunt's hypotheses
-            if techniques and not any(kind in TYPED_CITE_ALIASES for kind, _target in supporting):
+            if techniques and not any(self._typed_support(kind, target) for kind, target in supporting):
                 raise Refusal("techniques need at least one typed supporting citation (a finding F, evidence E or "
                               "link L); open the hypothesis without techniques, or cite typed evidence",
                               "techniques", "needs_typed_citation")
