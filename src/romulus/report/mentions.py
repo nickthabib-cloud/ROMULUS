@@ -57,6 +57,11 @@ def snippet(line: str, match_offset: int, chars: int) -> tuple[str, int, bool, b
 
 CITED_BY_NOTE = ("findings that cite the same source record: the mention is shown once, here, beside them; it adds no "
                  "evidence to them and they do not make it a finding")
+# how the link is found, and so what a count of 0 means
+CITED_BY_SCOPE = ("a mention names the findings that cite a typed event the normalizer made from its record when it "
+                  "offered it to the scan (an audit group's process title), and the AI findings that cite its raw "
+                  "record; a typed event made from the record another way is not linked, so 0 is not a statement "
+                  "that no finding rests on the record")
 
 
 def citations(repo, hunt_id: str, rows: list[dict]) -> dict[str, dict]:
@@ -116,6 +121,7 @@ def mentions_view(repo, hunt_id: str, *, limit: int = MANIFEST_MENTIONS) -> dict
         "kind": MENTION_KIND, "lane": MENTION_LANE, "label": MENTION_LABEL, "lane_note": LANE_NOTE,
         "status": status, "status_text": STATUS_TEXT.get(status, status), "coverage": coverage,
         "total": total, "shown": len(rows), "not_shown": total - len(rows),
+        "cited_by_scope": CITED_BY_SCOPE,
         "order": "pattern strength, then whether the record's telemetry class is one the pattern names, then "
                  "rarity (the pattern's distinct hosts, then its matching lines, fewest first), then first time",
         "items": [mention_item(row, cited=cited.get(row["id"])) for row in rows],

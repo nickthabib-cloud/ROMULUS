@@ -27,7 +27,8 @@ def test_a_mention_whose_record_a_finding_cites_is_shown_once_beside_it(tmp_path
     line = f"type=PROCTITLE msg=audit(1731938400.123:77): proctitle={_hex(SHELL)}"
     hits = [_record(1, {"message": line}), _record(2, {"message": "MIMIKATZ elsewhere"}, host="db1")]
     scanner = _scanner(tmp_path)
-    scanner.scan(TARGET, CONTRACT, [(hits[0], "x", False, ("proctitle",)), (hits[1], "x")], None)
+    # the normalizer offers the process title with the typed event it made from the same group
+    scanner.scan(TARGET, CONTRACT, [(hits[0], "x", False, ("proctitle",), ("ev1",)), (hits[1], "x")], None)
     scanner.publish(repo)
     scanner.close()
     shell, other = repo.mentions("h1")
@@ -59,42 +60,41 @@ def test_the_store_reads_ai_findings_cited_raw_records_under_admissions_key():
     assert AGENT_RAW_GATE == RAW_GATE
 
 
-def test_the_link_reads_only_the_shown_records_neighbourhood_at_scale(tmp_path):
-    """100,000 findings on other records: the page's lookup stays bounded by the page (index probes), never by the
-    hunt."""
+def test_the_link_reads_only_the_shown_records_linked_events_at_scale(tmp_path):
+    """100,000 findings over 500,000 typed events, 200,000 of them on the mentions' busy host within a minute of the
+    records: the page's lookup goes through the candidate-event index for its linked events, never a search."""
     import time
+    from datetime import timedelta
 
     from romulus.store import schema as t
     from romulus.store.repo import raw_id
     from tests.test_mention_sweep import _repo
     repo = _repo(tmp_path / "h.sqlite")
-    hits = [_record(n, {"message": f"MIMIKATZ {n}"}, host=f"web{n}") for n in range(50)]
+    hits = [_record(n, {"message": f"MIMIKATZ {n}"}, host="dc1") for n in range(50)]
     scanner = _scanner(tmp_path / "s")
-    scanner.scan(TARGET, CONTRACT, [(hit, "x") for hit in hits], None)
+    scanner.scan(TARGET, CONTRACT, [(hit, "x", False, None, (f"ev{n * 5}",)) for n, hit in enumerate(hits)], None)
     scanner.publish(repo)
     scanner.close()
-    count, per = 100_000, 5
+    count, per, busy = 100_000, 5, 200_000
     with repo.engine.begin() as connection:
         connection.execute(t.typed_event.insert(), [{
-            "id": f"ev{i}", "hunt_id": "h1", "family": "x", "ts": T0, "host": f"other{i % 997}", "event": {}, "normalizer": "n",
+            "id": f"ev{i}", "hunt_id": "h1", "family": "x", "ts": T0 + timedelta(milliseconds=i % 60_000),
+            "host": "dc1" if i < busy else f"other{i % 997}", "event": {}, "normalizer": "n",
             "raw_ids": [raw_id("logs", f"r{i}")]} for i in range(count * per)])
-        # the one event made from one mention's record
-        connection.execute(t.typed_event.insert().values(
-            id="own", hunt_id="h1", family="x", ts=T0, host="web7", event={}, normalizer="n",
-            raw_ids=[raw_id(TARGET, "c7")]))
         connection.execute(t.candidate.insert(), [{
-            "id": f"c{i}", "hunt_id": "h1", "rule_id": "r", "rule_version": "1", "claim": "c", "claim_type": "observed_action",
-            "event_ids": [f"ev{i * per + j}" for j in range(per)], "predicate_fields": [], "entities": [], "ts": T0,
-            "severity": "high", "confidence": "high", "lane": "lead", "priority": 1.0, "priority_reasons": [],
-            "benign_alternatives": [], "next_checks": [], "gate_results": {}, "provenance": "deterministic", "created_at": T0}
-            for i in range(count)])
-    _finding(repo, "linked", "high", events=["own"])
+            "id": f"c{i}", "hunt_id": "h1", "rule_id": "r", "rule_version": "1", "claim": "c",
+            "claim_type": "observed_action", "event_ids": [f"ev{i * per + j}" for j in range(per)],
+            "predicate_fields": [], "entities": [], "ts": T0, "severity": "high", "confidence": "high", "lane": "lead",
+            "priority": 1.0, "priority_reasons": [], "benign_alternatives": [], "next_checks": [], "gate_results": {},
+            "provenance": "deterministic", "created_at": T0} for i in range(count)])
     mentions = repo.mentions("h1", limit=50)
     began = time.perf_counter()
     out = repo.mention_citations("h1", mentions)
     took = time.perf_counter() - began
-    linked = next(row["id"] for row in mentions if row["native_id"] == "c7")
-    assert out == {linked: {"count": 1, "findings": [{"id": "linked", "rule_id": "rule.linked", "lane": "high"}]}}
+    # every mention's linked event is cited by exactly one finding (c<n>, whose first event it is)
+    assert len(out) == 50 and all(found["count"] == 1 for found in out.values())
+    first = next(row for row in mentions if row["native_id"] == "c7")
+    assert out[first["id"]]["findings"] == [{"id": "c7", "rule_id": "r", "lane": "lead"}]
     assert took < 0.25, took
 
 

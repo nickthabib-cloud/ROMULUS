@@ -119,6 +119,8 @@ NAMES_SHOWN = 20
 NOTES_SHOWN = 200
 # hosts whose cut lines are counted by name (the rest are counted together)
 CUT_HOSTS_COUNTED = 1_000
+# typed events the normalizer made from a mention's cited record, kept on the mention (the finding link reads them)
+MAX_LINKED_EVENTS = 8
 # keys of a target's records outside the sweep's selection, not read in full, named in the coverage (all counted)
 RESIDUE_KEYS_NAMED = 50
 # distinct (family, field) names counted for the coverage summary
@@ -366,7 +368,8 @@ class MentionScanner:
                 stats["lines_not_staged"] += 1
                 continue
             try:
-                self._keep(target, contract, hit, texts, found, task_id, telemetry, residue, source)
+                self._keep(target, contract, hit, texts, found, task_id, telemetry, residue, source,
+                           entry[4] if len(entry) > 4 else ())
             except (sqlite3.Error, OSError) as error:
                 # the stage itself failed: this line and every later match are counted, never kept
                 self._fail(f"the mention stage failed ({type(error).__name__}: {error})"[:300])
@@ -418,7 +421,7 @@ class MentionScanner:
                        "seq INTEGER NOT NULL, telemetry TEXT NOT NULL, fit INTEGER NOT NULL, raw TEXT NOT NULL, "
                        "raw_kept INTEGER NOT NULL DEFAULT 1, line TEXT NOT NULL, line_offset INTEGER NOT NULL, "
                        "match_offset INTEGER NOT NULL, line_chars INTEGER NOT NULL, line_cut INTEGER NOT NULL, "
-                       "suspicious INTEGER NOT NULL, others TEXT NOT NULL)")
+                       "suspicious INTEGER NOT NULL, others TEXT NOT NULL, events TEXT NOT NULL DEFAULT '[]')")
             db.execute("CREATE INDEX grp_weak ON grp (strength, pattern, seq)")
             db.execute("CREATE INDEX grp_host ON grp (host, strength, seq)")
             db.execute("CREATE INDEX grp_pattern_host ON grp (pattern, host)")
@@ -605,7 +608,7 @@ class MentionScanner:
 
     def _keep(self, target: str, contract, hit: dict, texts: list[tuple[str, str]],
               found: dict[int, tuple[int, int]], task_id: str | None, telemetry: str, residue: bool = False,
-              kept: dict | None = None) -> None:
+              kept: dict | None = None, linked=()) -> None:
         db = self._open()
         host = record_host(hit["_source"])
         # one group per record, under its strongest pattern (the earliest loaded among equals); the rest are metadata.
@@ -666,12 +669,13 @@ class MentionScanner:
         self._seq += 1
         try:
             db.execute("INSERT INTO grp (key, pattern, host, strength, n, first_ts, last_ts, seq, telemetry, fit, "
-                       "raw, line, line_offset, match_offset, line_chars, line_cut, suspicious, others) "
-                       "VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (
+                       "raw, line, line_offset, match_offset, line_chars, line_cut, suspicious, others, events) "
+                       "VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (
                            key, index, host, strength, ts_text, ts_text, self._seq, telemetry,
                            int(self._fits(index, telemetry)), json.dumps(raw, ensure_ascii=False, default=str),
                            excerpt, line_offset, match_offset, line_chars, int(len(excerpt) < line_chars),
-                           int(bool(injection_flags(excerpt))), others))
+                           int(bool(injection_flags(excerpt))), others,
+                           json.dumps([str(event)[:128] for event in list(linked)[:MAX_LINKED_EVENTS]])))
             db.execute("INSERT INTO host VALUES (?, 1) ON CONFLICT (host) DO UPDATE SET kept = kept + 1", (host,))
             db.execute("INSERT INTO pat VALUES (?, 1) ON CONFLICT (pattern) DO UPDATE SET kept = kept + 1", (index,))
         except sqlite3.OperationalError as error:
@@ -699,7 +703,7 @@ class MentionScanner:
         yield from self.db.execute(
             "SELECT g.key, g.pattern, g.host, g.n, g.first_ts, g.last_ts, g.telemetry, g.raw, g.line, g.line_chars, "
             "g.line_cut, g.suspicious, coalesce(r.hosts, 0), coalesce(r.lines, g.n), g.others, g.fit, g.line_offset, "
-            "g.match_offset, g.raw_kept FROM grp g LEFT JOIN rarity r USING (pattern) "
+            "g.match_offset, g.raw_kept, g.events FROM grp g LEFT JOIN rarity r USING (pattern) "
             "ORDER BY g.strength DESC, g.fit DESC, coalesce(r.hosts, 0), coalesce(r.lines, g.n), "
             "g.first_ts IS NULL, g.first_ts, g.key")
 
@@ -874,7 +878,8 @@ class MentionScanner:
 
         def rows():
             for rank, (key, index, host, count, first_ts, last_ts, telemetry, raw, line, line_chars, line_cut,
-                       suspicious, hosts, lines, others, fit, line_offset, match_offset, raw_kept) in enumerate(
+                       suspicious, hosts, lines, others, fit, line_offset, match_offset, raw_kept,
+                       events) in enumerate(
                            self.ranked() or (), start=1):
                 pattern = patterns[index]
                 record = json.loads(raw)
@@ -894,6 +899,7 @@ class MentionScanner:
                     "pattern_hosts": hosts, "pattern_lines": lines, "line": line, "line_chars": line_chars,
                     "line_offset": line_offset, "match_offset": match_offset,
                     "line_cut": bool(line_cut), "suspicious_content": bool(suspicious), "created_at": now,
+                    "linked_events": json.loads(events),
                 }, {**record, "origin": MENTION_ORIGIN})
 
         def losses():

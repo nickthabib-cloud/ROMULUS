@@ -3928,7 +3928,9 @@ def _offer_audit_text(members: list[tuple[dict, AuditRecord]], made: list[TypedE
         whole = per_hit[hit["_id"]] > 1 or record.reconstructed
         if (record.type == "PROCTITLE" or whole) and hit["_id"] not in offered:
             offered.add(hit["_id"])
-            unread.append((hit, AUDIT_PROCTITLE_UNREAD, False, AUDIT_PROCTITLE_ONLY))
+            # the events made from the group, so a finding on one is shown beside the title's mention
+            unread.append((hit, AUDIT_PROCTITLE_UNREAD, False, AUDIT_PROCTITLE_ONLY,
+                           tuple(event.id for event in made)))
 
 
 def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
@@ -3976,7 +3978,7 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
     a record a normalizer failed on (the record as cleaned of lone surrogates), and a Windows record on a network
     target. Of raw audit record lines it receives the records of a group that made no event, a record that could not
     be parsed, and the process title of a group without an EXECVE record (with a fourth item naming that field, the
-    only one no typed event reads; `_offer_audit_text`). A duplicate copy of a record that was read (a journald copy
+    only one no typed event reads, and a fifth naming the typed events made from the group; `_offer_audit_text`). A duplicate copy of a record that was read (a journald copy
     of an audit record among them) is never listed."""
     events, skips, errors = [], defaultdict(int), []
     windows_events: dict[tuple[tuple[str, ...], str], TypedEvent] = {}
