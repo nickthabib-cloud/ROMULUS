@@ -44,7 +44,8 @@ def test_the_card_names_the_cluster_what_is_reported_and_what_no_hypothesis_cite
     card, messages = _investigate_messages(repo, "h1", _hypothesis(repo, "finding-01"), _prompt_set())
     leads = card["leads"]
     assert [cluster["findings"] for cluster in leads["clusters"]] == [2]
-    assert leads["clusters"][0]["incident"].startswith("I") and leads["clusters"][0]["cited_by_hypotheses"] == 1
+    assert leads["clusters"][0]["incident"].startswith("I")
+    assert leads["clusters"][0]["explained_by_hypotheses"] == leads["clusters"][0]["findings_cited"] == 1
     assert leads["already_reported_findings"] == 2
     # the cluster's other finding, which no hypothesis cites, is the lead to read first
     assert [item["alias"] for item in leads["not_yet_cited"]] == [book.alias_for("F", "finding-00")]
@@ -61,7 +62,24 @@ def test_once_every_finding_of_the_cluster_is_cited_nothing_is_left_to_read_firs
     repo = _hunt()
     _hypothesis(repo, "finding-00")
     card, _ = _investigate_messages(repo, "h1", _hypothesis(repo, "finding-01"), _prompt_set())
-    assert card["leads"]["not_yet_cited"] == [] and card["leads"]["clusters"][0]["cited_by_hypotheses"] == 2
+    assert card["leads"]["not_yet_cited"] == []
+    assert card["leads"]["clusters"][0]["explained_by_hypotheses"] == card["leads"]["clusters"][0]["findings_cited"] == 2
+
+
+def test_leads_count_only_cites_of_hypotheses_that_explain_the_cluster(tmp_path):
+    from romulus.store import schema as t
+    repo = _hunt()
+    book = AliasBook(repo, "h1")
+    other = _hypothesis(repo, "finding-02")
+    # a hypothesis opened for the other cluster later cites finding-00: it does not explain finding-00's cluster
+    with repo.engine.begin() as connection:
+        connection.execute(t.agent_hypothesis_cite.insert().values(
+            hunt_id="h1", hypothesis_id=other["id"], role="support", target_kind="finding", target_id="finding-00"))
+    card, _ = _investigate_messages(repo, "h1", _hypothesis(repo, "finding-01"), _prompt_set())
+    leads = card["leads"]
+    # so, as the controller sees it, finding-00 is still a lead no hypothesis explaining the cluster has cited
+    assert [item["alias"] for item in leads["not_yet_cited"]] == [book.alias_for("F", "finding-00")]
+    assert leads["clusters"][0]["explained_by_hypotheses"] == 1
 
 
 def test_a_hypothesis_citing_no_clustered_finding_has_no_leads(tmp_path):

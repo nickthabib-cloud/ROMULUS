@@ -132,21 +132,10 @@ def hunt_clusters(repo: Repo, hunt_id: str) -> ClusterView:
 
 
 def cited_findings(repo: Repo, hunt_id: str, view: ClusterView) -> set[str]:
-    """The reportable findings any hypothesis of the hunt explains: cited as findings, through the evidence they cite,
-    or as members of a cluster whose link a hypothesis cites."""
-    out: set[str] = set()
-    events: set[str] = set()
-    for cite in repo.agent_hypothesis_cites(hunt_id=hunt_id):
-        kind, target = cite["target_kind"], str(cite["target_id"])
-        if kind == "finding":
-            out.add(target)
-        elif kind == "evidence":
-            events.add(target)
-        elif kind == "link" and target in view.by_link:
-            out.update(view.by_link[target].finding_ids)
-    for event in sorted(events):
-        out.update(repo.candidate_ids_for_event(hunt_id, event, REPORTABLE_LANES, EVIDENCE_FINDINGS_LIMIT))
-    return out
+    """The reportable findings any hypothesis of the hunt cites (as findings, through the evidence they cite, or as
+    members of a cluster whose link a hypothesis cites). A cite is not an explanation: which clusters are explained
+    is `explanations`."""
+    return set().union(*_cites_by_hypothesis(repo, hunt_id, view).values())
 
 
 def _host(row: dict) -> str | None:
@@ -156,32 +145,45 @@ def _host(row: dict) -> str | None:
     return None
 
 
+def _cites_by_hypothesis(repo: Repo, hunt_id: str, view: ClusterView) -> dict[str, set[str]]:
+    """Every reportable finding each hypothesis of the hunt cites: as a finding, through the evidence it cites, or as
+    a member of the cluster of a link it cites."""
+    out: dict[str, set[str]] = {}
+    mapped: dict[str, list[str]] = {}
+    for cite in repo.agent_hypothesis_cites(hunt_id=hunt_id):
+        hypothesis, kind, target = str(cite["hypothesis_id"]), cite["target_kind"], str(cite["target_id"])
+        found = out.setdefault(hypothesis, set())
+        if kind == "finding":
+            found.add(target)
+        elif kind == "evidence":
+            if target not in mapped:
+                mapped[target] = repo.candidate_ids_for_event(hunt_id, target, REPORTABLE_LANES,
+                                                              EVIDENCE_FINDINGS_LIMIT)
+            found.update(mapped[target])
+        elif kind == "link" and target in view.by_link:
+            found.update(view.by_link[target].finding_ids)
+    return out
+
+
 def hypothesis_leads(repo: Repo, hunt_id: str, hypothesis_id: str, aliases, view: ClusterView) -> dict | None:
-    """What an investigate session's card says about where to look, from typed state only: the clusters the
-    hypothesis's cited findings (or the findings citing its cited evidence) belong to, how many of their findings
-    are already reported, the ones no hypothesis cites yet (best first, at most LEADS_LIMIT, the rest counted), the
-    clusters' open expansion ends, and how many findings the agent has already proposed. None when the hypothesis
-    cites no clustered finding. Every finding listed is a deterministic, already reported finding: it is an anchor to
-    widen from, not something to prove again."""
-    own: set[str] = set()
-    events: set[str] = set()
-    for cite in repo.agent_hypothesis_cites(hypothesis_id=hypothesis_id):
-        if cite["target_kind"] == "finding":
-            own.add(str(cite["target_id"]))
-        elif cite["target_kind"] == "evidence":
-            events.add(str(cite["target_id"]))
-        elif cite["target_kind"] == "link" and str(cite["target_id"]) in view.by_link:
-            own.update(view.by_link[str(cite["target_id"])].finding_ids)
-    for event in sorted(events):
-        own.update(repo.candidate_ids_for_event(hunt_id, event, REPORTABLE_LANES, EVIDENCE_FINDINGS_LIMIT))
-    mine = list(dict.fromkeys(view.by_finding[item] for item in sorted(own) if item in view.by_finding))
+    """What an investigate session's card says about where to look, from typed state only and as the controller sees
+    it (`explanations`): the clusters this hypothesis explains, how many hypotheses explain each, how many of their
+    findings are already reported, the ones no hypothesis explaining that cluster cites yet (best first, at most
+    LEADS_LIMIT, the rest counted), the clusters' open expansion ends, and how many findings the agent has already
+    proposed. None when the hypothesis explains no cluster. Every finding listed is a deterministic, already reported
+    finding: it is an anchor to widen from, not something to prove again."""
+    explained = explanations(repo, hunt_id, view)
+    by_key = {cluster.key: cluster for cluster in view.clusters}
+    mine = [by_key[key] for key in explained.get(hypothesis_id) or [] if key in by_key]
     if not mine:
         return None
-    mine.sort(key=lambda cluster: (cluster.order, cluster.key))
-    explained = cited_findings(repo, hunt_id, view)
+    cites = _cites_by_hypothesis(repo, hunt_id, view)
+    explainers = {cluster.key: [h for h, keys in explained.items() if cluster.key in keys] for cluster in mine}
+    cited = {key: set().union(*(cites.get(h, set()) for h in hypotheses)) if hypotheses else set()
+             for key, hypotheses in explainers.items()}
     members = [item for cluster in mine for item in cluster.finding_ids]
     rows = {row["id"]: row for cluster in mine for row in [cluster.top]}
-    uncited = [item for item in members if item not in explained]
+    uncited = [item for cluster in mine for item in cluster.finding_ids if item not in cited[cluster.key]]
     shown = uncited[:LEADS_LIMIT]
     if shown:
         rows.update({row["id"]: row for row in repo.candidates_by_ids(shown, hunt_id=hunt_id)})
@@ -191,8 +193,9 @@ def hypothesis_leads(repo: Repo, hunt_id: str, hypothesis_id: str, aliases, view
     agent_findings = len(repo.candidates(hunt_id, list(REPORTABLE_LANES), provenance="agent"))
     return {
         "clusters": [{"incident": aliases.alias_for("I", cluster.key), "findings": len(cluster.finding_ids),
-                      "cited_by_hypotheses": sum(item in explained for item in cluster.finding_ids),
-                      "open_ends": dict(cluster.open_ends)} for cluster in mine[:LEADS_LIMIT]],
+                      "explained_by_hypotheses": len(explainers[cluster.key]),
+                      "findings_cited": sum(item in cited[cluster.key] for item in cluster.finding_ids),
+                      "open_ends": dict(cluster.open_ends)} for cluster in mine],
         "already_reported_findings": len(members),
         "not_yet_cited": [{"alias": aliases.alias_for("F", item), "lane": rows[item]["lane"],
                            "rule_id": _bounded(rows[item]["rule_id"]), "host": _bounded(_host(rows[item])),
