@@ -172,6 +172,8 @@ ZEEK_FIELDS: dict[str, tuple[str, ...]] = {
     "smb_mapping": ("path",),
     "dce_rpc": ("named_pipe",),
     "kerberos": ("client", "service"),
+    "ldap": ("object", "argument", "diagnostic_message"),
+    "ldap_search": ("base_object", "filter", "attributes"),
     "ntlm": ("username", "hostname", "domainname"),
     "rdp": ("cookie", "client_name"),
     "notice": ("msg", "sub"),

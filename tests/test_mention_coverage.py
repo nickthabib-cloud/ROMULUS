@@ -214,6 +214,12 @@ def test_a_windows_record_whose_only_text_is_its_exported_xml_is_read_by_its_eve
     scanner.close()
 
 
+def test_zeek_ldap_logs_are_read_by_their_documented_fields():
+    search = {"_path": "ldap_search", "uid": "C1", "id.orig_h": "10.0.0.5", "base_object": "CN=MIMIKATZ,DC=x"}
+    selection = select_texts({"event": {"original": json.dumps(search)}})
+    assert selection.complete and selection.texts == [("event.original#zeek:base_object", "CN=MIMIKATZ,DC=x")]
+
+
 def test_an_eve_payload_never_read_makes_the_record_scanned_in_part(tmp_path):
     from romulus.hunt.mention_fields import EVE_PAYLOAD
     alert = {"event_type": "alert", "src_ip": "1.2.3.4", "flow_id": 1, "alert": {"signature": "x"},
