@@ -707,6 +707,8 @@ def _coverage(body: _Body, m: dict, technical_name: str) -> None:
     if m.get("execution_state") != "completed_within_scope":
         body.p(f"The hunt is {m.get('execution_state')}: some sources, windows or tasks were not fully searched.",
                style="Callout")
+    if held := (coverage.get("baseline") or {}).get("history_held"):
+        body.p(held, style="Callout")
     integrity = m.get("integrity") or {}
     if not integrity.get("finalizable", True):
         body.p("Report integrity: " + ", ".join(f"{key.replace('_', ' ')} {value}" for key, value in integrity.items()

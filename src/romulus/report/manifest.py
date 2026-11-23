@@ -508,6 +508,21 @@ def coverage_for_hunt(repo: Repo, hunt_id: str) -> dict:
     return coverage
 
 
+def held_history_line(stages: list[str]) -> str:
+    """One line for an analyst: a run that held its baseline history back adds none until the hunt is resumed."""
+    return (f"This hunt's hours add no baseline history until it is resumed: {', '.join(stages)} did not run to "
+            "its end, so the records its findings would cite are not all known.")
+
+
+def held_history(repo: Repo, hunt_id: str) -> str | None:
+    """The held-history line when the hunt's last finish held its segments back, else None."""
+    audit = repo.latest_audit(hunt_id, "hunt.baseline_summary")
+    writer = (((audit or {}).get("detail") or {}).get("segment_writer")) or {}
+    if writer.get("status") != "held":
+        return None
+    return held_history_line(list((writer.get("held") or {}).get("stages") or ["a stage"]))
+
+
 def _baseline_coverage(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dict:
     """Bounded report projection of the immutable baseline snapshot and per-spec verdict health."""
     config = hunt_manifest.get("baseline") or {}
@@ -544,6 +559,7 @@ def _baseline_coverage(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dict:
         "snapshot_status": (snapshot or {}).get("status") or "not_frozen",
         "stage_status": summary.get("status", "not_run"),
         "specs": specs,
+        **({"history_held": held} if (held := held_history(repo, hunt_id)) else {}),
     }
 
 
