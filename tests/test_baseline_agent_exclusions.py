@@ -12,6 +12,7 @@ from datetime import timedelta
 import pytest
 
 from romulus.baseline.lookback import LookbackBudget, LookbackWriter
+from romulus.evidence.raw_citation import RAW_GATE
 from romulus.hunt import run as hunt_run
 from romulus.hunt.baseline_writer import apply_exclusion_changes, refresh_cited_exclusions
 from romulus.store.repo import Repo
@@ -129,7 +130,7 @@ def test_a_refresh_that_fails_leaves_the_ledger_and_history_as_they_were(monkeyp
     def unavailable(*_args, **_kwargs):
         raise OSError("store unavailable")
 
-    monkeypatch.setattr(Repo, "replace_baseline_hunt_exclusions", unavailable)
+    monkeypatch.setattr(Repo, "add_baseline_hunt_exclusions", unavailable)
     result = _agent_done(repo)
     monkeypatch.undo()
 
@@ -240,7 +241,8 @@ def test_a_lookback_segment_over_the_cited_hours_is_derived_too_and_stays_unhunt
     assert summary["derived"] == 2 and len(active) == 2
     assert {(row["origin"], row["source_hunt_id"], row["hunted"]) for row in active} == {("lookback", None, 0)}
     counted = {item["key"]["executable"] for row in active for item in repo.baseline_counts(row["id"])}
-    assert not counted & {"/tmp/.x/implant-a", "/tmp/.x/implant-b"} and "/usr/bin/id" in counted
+    # only the AI-cited key leaves; the sweep's own citation joins the ledger at the hunt's finish, not here
+    assert "/tmp/.x/implant-b" not in counted and {"/tmp/.x/implant-a", "/usr/bin/id"} <= counted
 
 
 def test_twenty_thousand_keys_with_hundreds_cited_by_the_agent_equal_the_run_that_cited_them_from_the_start():
@@ -262,3 +264,58 @@ def test_twenty_thousand_keys_with_hundreds_cited_by_the_agent_equal_the_run_tha
     assert _history(repo) == reference
     counted = {name for row in reference for name, _count in row[-1]}
     assert len(counted) == 20_000 + len(ROUTINE) - len(cited)
+
+
+def _ledger(repo: Repo) -> list[str]:
+    return repo.baseline_exclusion_keys(site="site-a", target="host-index", spec_id=SPEC.id, spec_version=SPEC.version,
+                                        key_version=SPEC.key_version, start=START, end=START + 2 * H)
+
+
+def test_a_hunt_without_ai_findings_reads_and_writes_nothing_after_the_agent():
+    repo = _finished_with_agent_pending()
+    ledger, segments = _ledger(repo), repo.baseline_segments()
+
+    result = _agent_done(repo, status="disabled")
+
+    assert result["baseline_exclusions"] == {"status": "no_agent_findings"}
+    assert _ledger(repo) == ledger and repo.baseline_segments() == segments
+    assert repo.latest_audit("hunt-a", hunt_run.AGENT_EXCLUSIONS_ACTION) is None
+
+
+def test_the_refresh_only_adds_to_the_ledger_and_never_rereads_deterministic_citations(monkeypatch):
+    """The finish's own citations stay as the finish recorded them, even when they could no longer be read."""
+    repo = _finished_with_agent_pending()
+    finish_ledger = _ledger(repo)
+    _agent_finding(repo, [LATER_IMPLANT])
+    real = Repo.citation_events
+
+    def only_agent_citations(self, hunt_id, event_ids):
+        assert set(event_ids) == {LATER_IMPLANT.id}, event_ids
+        return real(self, hunt_id, event_ids)
+
+    monkeypatch.setattr(Repo, "citation_events", only_agent_citations)
+    summary = refresh_cited_exclusions(repo, "hunt-a")
+
+    assert summary["blocked"] == {} and summary["blocked_retired"] == 0
+    assert set(finish_ledger) < set(_ledger(repo))
+
+
+def test_an_ai_finding_citing_only_raw_records_names_no_key_and_is_counted():
+    repo = _finished_with_agent_pending()
+    history = _history(repo)
+    repo.save_candidate({
+        "id": "agent-raw", "hunt_id": "hunt-a", "rule_id": "agent.finding", "rule_version": "1",
+        "claim": "AI-proposed finding from raw records", "claim_type": "observed_action", "event_ids": [],
+        "context_event_ids": [], "predicate_fields": [], "entities": [], "ts": START, "severity": "medium",
+        "confidence": "low", "lane": "lead", "priority": 0.25, "priority_reasons": [],
+        "gate_results": {RAW_GATE: ["raw-1"]}, "benign_alternatives": [], "next_checks": [], "group_key": "raw",
+        "source_case_id": None, "source_anchor_id": None, "source_link_id": None, "provenance": "agent",
+        "agent_hypothesis_id": None,
+    })
+
+    summary = refresh_cited_exclusions(repo, "hunt-a")
+
+    # known limit: a raw-only citation has no typed event, so no baseline key can be derived from it
+    assert summary["raw_only_findings"] == 1 and summary["keys"] == 0
+    assert summary["derived"] == summary["stale"] == 0 and summary["blocked"] == {}
+    assert _history(repo) == history

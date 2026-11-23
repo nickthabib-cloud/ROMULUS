@@ -31,6 +31,7 @@ from romulus.baseline.carry import CarryInStore, PendingResolver
 from romulus.baseline.lookback import exclusion_digest, segment_content_id
 from romulus.baseline.spec import SPEC_BY_ID, KeyContext, Pending
 from romulus.detect import netdef
+from romulus.evidence.raw_citation import RAW_GATE
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.site_networks import contradiction_reason
 from romulus.store.db import utcnow
@@ -174,15 +175,18 @@ def writable_runs(cells: list[dict], spans: dict[str, tuple[datetime, datetime]]
 
 
 def _cited_exclusions(repo: Repo, hunt_id: str, targets: set[str], spec_ids: set[str],
+                      candidates: list[dict] | None = None,
                       ) -> tuple[dict[tuple[str, str], set[str]], dict[tuple[str, str], str]]:
     """The keys of every record urgent, high and lead findings cite, per (target, spec), and the (target, spec)
     pairs whose cited keys cannot all be known.
 
     A finding's context records count: they are often the attack chain itself. A cited record that is not
     retained, or an exec-pair child whose parent cannot be resolved, could hold any key, so its pairs are
-    blocked rather than written with the key possibly still inside.
+    blocked rather than written with the key possibly still inside. `candidates` narrows the findings read (by
+    default every urgent, high and lead finding of the hunt).
     """
-    candidates = repo.candidates(hunt_id, ["urgent", "high", "lead"])
+    if candidates is None:
+        candidates = repo.candidates(hunt_id, ["urgent", "high", "lead"])
     event_ids = sorted({event_id for row in candidates
                         for event_id in [*(row.get("event_ids") or []), *(row.get("context_event_ids") or [])]})
     found: dict[tuple[str, str], set[str]] = {}
@@ -414,26 +418,33 @@ def _derive_segment(repo: Repo, change: dict, *, built_by: str, now: datetime) -
 
 
 def refresh_cited_exclusions(repo: Repo, hunt_id: str, *, now: datetime | None = None) -> dict:
-    """Bring history up to every finding the hunt now holds, after work that publishes past its finish (the AI
-    agent): replace the hunt's exclusion ledger and derive (or retire) the overlapping segments it changes.
+    """Leave out of history every record the hunt's AI findings cite: they are published after the finish wrote the
+    hunt's segments. Their keys are added to the hunt's exclusion ledger (never replacing a key it holds) and the
+    overlapping segments the union changes are derived (or retired, named).
 
-    Records an AI finding cites only ever leave history: a key out of history can only make a later hunt judge it
-    new, never quieter. A (target, spec) whose cited keys cannot all be known retires this hunt's own segments of it,
-    as the writer would not have written them. Idempotent: a second run changes nothing."""
+    Only AI findings are read, so the refresh can only add exclusions: a key out of history can only make a later
+    hunt judge it new, never quieter. A (target, spec) whose AI-cited keys cannot all be known retires this hunt's own
+    segments of it, as the writer would not have written them. A finding that cites only raw records (no typed event)
+    names no key and is counted. Idempotent: a second run changes nothing. Without an AI finding, nothing is read or
+    written."""
     hunt = repo.get_hunt(hunt_id)
     if hunt is None:
         raise KeyError(hunt_id)
-    now = now or utcnow()
     manifest = hunt["manifest"]
     config = manifest.get("baseline") or {}
     specs = sorted(str(item["id"]) for item in config.get("specs") or [])
     if not specs or not config.get("site"):
         return {"status": "disabled"}
+    findings = [row for row in repo.candidates(hunt_id, ["urgent", "high", "lead"])
+                if row.get("provenance") == "agent"]
+    if not findings:
+        return {"status": "no_agent_findings"}
+    now = now or utcnow()
     start, end = _window(manifest)
     targets = sorted(set(manifest.get("targets") or []))
     site = str(config.get("site") or "")
-    exclusions, blocked = _cited_exclusions(repo, hunt_id, set(targets), set(specs))
-    repo.replace_baseline_hunt_exclusions(
+    exclusions, blocked = _cited_exclusions(repo, hunt_id, set(targets), set(specs), candidates=findings)
+    repo.add_baseline_hunt_exclusions(
         hunt_id, site=site, start=start, end=end, exclusions=exclusions,
         spec_versions={spec_id: (SPEC_BY_ID[spec_id].version, SPEC_BY_ID[spec_id].key_version)
                        for spec_id in specs},
@@ -444,7 +455,11 @@ def refresh_cited_exclusions(repo: Repo, hunt_id: str, *, now: datetime | None =
         for row in repo.baseline_segments(site=site, target=target, spec_id=spec_id, statuses=["active"]):
             if row["source_hunt_id"] == hunt_id and row["start"] < end and row["end"] > start:
                 blocked_retired += int(repo.stale_baseline_segment(row["id"], row["exclusion_digest"]))
-    return {"status": "complete", "keys": sum(len(keys) for keys in exclusions.values()), **changes,
+    raw_only = sum(1 for row in findings
+                   if not (row.get("event_ids") or row.get("context_event_ids"))
+                   and (row.get("gate_results") or {}).get(RAW_GATE))
+    return {"status": "complete", "findings": len(findings), "raw_only_findings": raw_only,
+            "keys": sum(len(keys) for keys in exclusions.values()), **changes,
             "blocked": {f"{target}|{spec_id}": reason for (target, spec_id), reason in sorted(blocked.items())},
             "blocked_retired": blocked_retired}
 

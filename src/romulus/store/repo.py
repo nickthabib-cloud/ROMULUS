@@ -5601,6 +5601,27 @@ class Repo:
             for chunk in _chunks(rows, BASELINE_CHUNK):
                 connection.execute(t.baseline_hunt_exclusion.insert(), chunk)
 
+    def add_baseline_hunt_exclusions(self, hunt_id: str, *, site: str, start: datetime, end: datetime,
+                                     exclusions: dict[tuple[str, str], set[str]],
+                                     spec_versions: dict[str, tuple[str, str]]) -> None:
+        """Add keys to one hunt's cited-key ledger, keeping every key it already holds (one transaction)."""
+        start, end = _utc(start, "exclusion start"), _utc(end, "exclusion end")
+        if start >= end:
+            raise ValueError("baseline exclusion start before end is required")
+        rows = (
+            {
+                "hunt_id": hunt_id, "site": site, "target": target, "spec_id": spec_id,
+                "spec_version": spec_versions[spec_id][0], "key_version": spec_versions[spec_id][1],
+                "key_digest": key_digest, "start": start, "end": end,
+            }
+            for (target, spec_id), keys in sorted(exclusions.items())
+            for key_digest in sorted(keys)
+        )
+        statement = _insert_ignore(t.baseline_hunt_exclusion, ("hunt_id", "target", "spec_id", "key_digest"))
+        with write_txn(self.engine) as connection:
+            for chunk in _chunks(rows, BASELINE_CHUNK):
+                connection.execute(statement, chunk)
+
     def baseline_exclusion_keys(self, *, site: str, target: str, spec_id: str,
                                 spec_version: str, key_version: str,
                                 start: datetime, end: datetime) -> list[str]:

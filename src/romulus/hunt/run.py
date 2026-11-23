@@ -944,7 +944,7 @@ def exclusions_after_agent(repo: Repo, hunt_id: str) -> dict:
     except Exception as exc:  # history upkeep must never sink the agent's result
         log.exception("baseline exclusions after the AI agent failed")
         summary = {"status": "failed", "reason": f"baseline exclusions after the AI agent failed: {exc}"[:300]}
-    if summary.get("status") != "disabled":
+    if summary.get("status") not in {"disabled", "no_agent_findings"}:
         try:
             repo.audit("system", AGENT_EXCLUSIONS_ACTION, hunt_id, summary)
         except Exception:
