@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 from datetime import timedelta
+from itertools import pairwise
 
 from romulus.baseline.lookback import LookbackBudget, LookbackWriter
 from romulus.hunt.baseline_writer import _derive_segment, apply_exclusion_changes, refresh_cited_exclusions
@@ -44,7 +45,7 @@ def _cite(repo: Repo, hunt_id: str, event) -> None:
 def _one_generation_excluding(repo: Repo, *events) -> list[dict]:
     """Active cover over the window: never two segments over one hour, each excluding every given key."""
     active = sorted(repo.baseline_segments(statuses=["active"]), key=lambda row: row["start"])
-    for first, second in zip(active, active[1:], strict=False):
+    for first, second in pairwise(active):
         assert first["end"] <= second["start"], (first["id"], second["id"])
     wanted = {digest for event in events for digest in _digests(event)}
     for row in active:

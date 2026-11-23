@@ -84,6 +84,25 @@ def _gap_classes(gaps) -> str:
     return named
 
 
+def _incomplete_hunts(coverage: list[dict]) -> tuple[list[str], int]:
+    """The unfinished hunts whose marked hours a spec's frozen history holds (named, bounded) and their count."""
+    named: set[str] = set()
+    count = 0
+    for item in coverage:
+        mark = item.get("incomplete") or {}
+        named.update(mark.get("hunts") or [])
+        count = max(count, int(mark.get("hunt_count") or 0))
+    count = max(count, len(named))
+    return (sorted(named), count) if count else ()
+
+
+def _incomplete_reason(incomplete: tuple[list[str], int]) -> str:
+    named, count = incomplete
+    more = f" and {count - len(named)} more" if count > len(named) else ""
+    return (f"seen in history only in hours whose finding-associated exclusions are incomplete: hunt(s) "
+            f"{', '.join(named)}{more} did not finish the stages whose findings cite records")
+
+
 def _coverage_failure(coverage: list[dict], minimum: int) -> str | None:
     coverage = [item for item in coverage if item.get("status") != "not_applicable"]
     if not coverage:
@@ -337,16 +356,27 @@ class SnapshotView:
                  if playbook.spec.measure == "prevalence" and reason is None else None)
         shown: list[dict] = []
         totals = {"rows": 0, "unresolved": 0, "common": 0, "first_seen": 0}
+        incomplete = _incomplete_hunts(coverage)
         for chunk in _chunks(itertools.chain((first,), rows), _JUDGE_CHUNK):
             key_ids = [row["key_id"] for row in chunk]
             history = ({} if reason else self.repo.baseline_key_history_counts(
                 key_ids, scope_kind, scope, self.hunt_id, playbook.id, self.span))
+            # A key seen only in hours whose finding-associated exclusions were incomplete may be the activity some
+            # unfinished hunt's findings cite: its history proves nothing normal. Never quieter: an absent key
+            # stays first seen, and a key also seen in complete hours stays common.
+            complete = ({} if reason or not incomplete else self.repo.baseline_key_history_counts(
+                [key for key in key_ids if history.get(key)], scope_kind, scope, self.hunt_id, playbook.id,
+                self.span, complete_only=True))
             prevalence = (self.repo.baseline_key_prevalences(
                 key_ids, scope_kind, self.hunt_id, playbook.id, self.span) if peers is not None else {})
             updated = []
             for source in chunk:
                 history_count = None if reason else history[source["key_id"]]
                 verdict = "unresolved" if reason else "common" if history_count else "first_seen"
+                key_reason = reason
+                if verdict == "common" and incomplete and not complete.get(source["key_id"]):
+                    verdict = "unresolved"
+                    key_reason = _incomplete_reason(incomplete)
                 item = {
                     **source,
                     "history_count": history_count,
@@ -359,7 +389,7 @@ class SnapshotView:
                     "sigma": None,
                     "n_hours": live_hours,
                     "verdict": verdict,
-                    "reason": reason or (
+                    "reason": key_reason or (
                         f"absent from baseline {self.snapshot['digest']}" if verdict == "first_seen"
                         else f"present in baseline {self.snapshot['digest']}"
                     ),

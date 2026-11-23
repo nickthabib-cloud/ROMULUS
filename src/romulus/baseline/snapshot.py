@@ -12,6 +12,8 @@ from romulus.baseline.spec import BaselineSpec
 from romulus.store.repo import Repo
 
 _HOUR = timedelta(hours=1)
+# How many unfinished hunts a snapshot's coverage names per (target, spec); the count is exact.
+_INCOMPLETE_HUNTS_NAMED = 10
 
 
 def _utc_hour(value: datetime, name: str) -> datetime:
@@ -96,6 +98,30 @@ class SnapshotPlanner:
                     return found
             hour = stop
         return None
+
+    def _incomplete(self, hunt_id: str, site: str, target: str, spec: BaselineSpec, chosen: list[dict],
+                    history_start: datetime, window_start: datetime) -> dict:
+        """The chosen segments over hours some other hunt marked as having incomplete finding-associated
+        exclusions (it has not finished the stages whose findings cite records), as `{"incomplete": ...}`, or {}.
+
+        Whole segments are flagged: a day-bucketed count row cannot be split by hour, and a flag only ever turns a
+        key's `common` into `unresolved`. Stated only when non-empty, so a snapshot with none reads as before."""
+        marks = [row for row in self.repo.baseline_exclusions_incomplete(
+            site=site, target=target, spec_id=spec.id, spec_version=spec.version, key_version=spec.key_version,
+            start=history_start, end=window_start) if row["hunt_id"] != hunt_id]
+        if not marks:
+            return {}
+        flagged: list[str] = []
+        hunts: set[str] = set()
+        for row in chosen:
+            over = {mark["hunt_id"] for mark in marks if mark["start"] < row["end"] and mark["end"] > row["start"]}
+            if over:
+                flagged.append(row["id"])
+                hunts |= over
+        if not flagged:
+            return {}
+        return {"incomplete": {"segment_ids": sorted(flagged), "hunts": sorted(hunts)[:_INCOMPLETE_HUNTS_NAMED],
+                               "hunt_count": len(hunts)}}
 
     def freeze(self, *, hunt_id: str, window_start: datetime, lookback: timedelta,
                min_live_hours: int, site: str, targets: list[str],
@@ -205,6 +231,7 @@ class SnapshotPlanner:
                     "gaps": _gaps(set(claimed), history_start, window_start, causes),
                     "absent_before": absent_before,
                     "status": status, "segment_ids": sorted(row["id"] for row in chosen),
+                    **self._incomplete(hunt_id, site, target, spec, chosen, history_start, window_start),
                 }
         # Absent history resolves nothing, so it is unresolved at the snapshot level. A gap outranks absence.
         status = ("unresolved" if {"unresolved", "absent"} & set(statuses) else

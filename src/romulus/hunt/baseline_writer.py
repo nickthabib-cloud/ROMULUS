@@ -243,6 +243,29 @@ def _direction_failure(repo: Repo, hunt_id: str) -> str | None:
     return contradiction_reason(check) if isinstance(check, dict) else None
 
 
+UNFINISHED_REASON = "the hunt has not finished the stages whose findings cite records"
+
+
+def mark_history_incomplete(repo: Repo, hunt_id: str, reason: str = UNFINISHED_REASON) -> int:
+    """Mark every (target, spec) of a hunt's window as having incomplete finding-associated exclusions, from the
+    moment it starts running: whatever ends the run before a finish that clears them (a stop, a crash, a failure)
+    leaves its hours marked, so no later hunt's history over them reads as normal. Returns the pairs marked."""
+    hunt = repo.get_hunt(hunt_id)
+    manifest = (hunt or {}).get("manifest") or {}
+    config = manifest.get("baseline") or {}
+    specs = sorted(str(item["id"]) for item in config.get("specs") or [] if str(item["id"]) in SPEC_BY_ID)
+    if not specs or not config.get("site") or not manifest.get("window"):
+        return 0
+    start, end = _window(manifest)
+    targets = sorted(set(manifest.get("targets") or []))
+    pairs = {(target, spec_id): reason for target in targets for spec_id in specs}
+    repo.mark_baseline_exclusions_incomplete(
+        hunt_id, site=str(config["site"]), start=start, end=end, pairs=pairs,
+        spec_versions={spec_id: (SPEC_BY_ID[spec_id].version, SPEC_BY_ID[spec_id].key_version)
+                       for spec_id in specs})
+    return len(pairs)
+
+
 def held_reason(stages: list[str], *, material_kept: bool = True) -> str:
     """Why a run that did not finish every record-citing stage writes no history, and whether a resume can."""
     why = (f"no segment written: {', '.join(stages)} did not run to its end, so the keys of finding-associated "
@@ -287,11 +310,20 @@ def run_hunt_segment_writer(repo: Repo, hunt_id: str, *, hunt_partial: bool, bas
     targets = sorted(set(manifest.get("targets") or []))
     site = str(config.get("site") or "")
     current_exclusions, blocked = _cited_exclusions(repo, hunt_id, set(targets), set(specs))
+    versions = {spec_id: (SPEC_BY_ID[spec_id].version, SPEC_BY_ID[spec_id].key_version) for spec_id in specs}
     repo.replace_baseline_hunt_exclusions(
-        hunt_id, site=site, start=start, end=end, exclusions=current_exclusions,
-        spec_versions={spec_id: (SPEC_BY_ID[spec_id].version, SPEC_BY_ID[spec_id].key_version)
-                       for spec_id in specs},
+        hunt_id, site=site, start=start, end=end, exclusions=current_exclusions, spec_versions=versions,
     )
+    # The incomplete-exclusion marks follow the ledger just written: a held run keeps every (target, spec) marked;
+    # a finished one clears them, except the pairs whose cited keys cannot all be known.
+    if held:
+        repo.mark_baseline_exclusions_incomplete(
+            hunt_id, site=site, start=start, end=end, spec_versions=versions,
+            pairs={(target, spec_id): held_reason(held) for target in targets for spec_id in specs})
+    else:
+        repo.clear_baseline_exclusions_incomplete(hunt_id, keep=set(blocked))
+        repo.mark_baseline_exclusions_incomplete(hunt_id, site=site, start=start, end=end, spec_versions=versions,
+                                                 pairs=dict(blocked))
     changes = apply_exclusion_changes(repo, site=site, start=start, end=end, built_by=hunt_id)
     stale = changes["stale"]
     # stated only when the union changed some segment, so an unchanged store reads as before
@@ -488,6 +520,11 @@ def refresh_cited_exclusions(repo: Repo, hunt_id: str) -> dict:
         spec_versions={spec_id: (SPEC_BY_ID[spec_id].version, SPEC_BY_ID[spec_id].key_version)
                        for spec_id in specs},
     )
+    # a pair whose AI-cited keys cannot all be known stays marked: a lookback over its hours proves nothing normal
+    repo.mark_baseline_exclusions_incomplete(
+        hunt_id, site=site, start=start, end=end, pairs=dict(blocked),
+        spec_versions={spec_id: (SPEC_BY_ID[spec_id].version, SPEC_BY_ID[spec_id].key_version)
+                       for spec_id in specs})
     changes = apply_exclusion_changes(repo, site=site, start=start, end=end, built_by=hunt_id)
     blocked_retired = 0
     for (target, spec_id) in sorted(blocked):

@@ -1062,6 +1062,9 @@ class Repo:
             # hunts' snapshots name them), and the hunt id on them remains as provenance. Its cited-key exclusion
             # ledger stays too, so the segments' exclusion digests stay current. Only a segment it was still
             # building is unfinished work of this hunt alone, and is revoked.
+            # a deleted hunt no longer holds history back: its marks go with it
+            rm("baseline_exclusions_incomplete", t.baseline_exclusions_incomplete.delete().where(
+                t.baseline_exclusions_incomplete.c.hunt_id == hunt_id))
             rm("baseline_segments_revoked", t.baseline_segment.update().where(
                 t.baseline_segment.c.built_by_hunt_id == hunt_id, t.baseline_segment.c.status == "building",
             ).values(status="revoked"))
@@ -3995,17 +3998,20 @@ class Repo:
         return {key_id: found.get(key_id, 0) for key_id in key_ids}
 
     def baseline_key_history_counts(self, key_ids: list[str], scope_kind: str, scope: str, hunt_id: str,
-                                    spec_id: str, span: tuple[datetime, datetime] | None = None) -> dict[str, int]:
+                                    spec_id: str, span: tuple[datetime, datetime] | None = None, *,
+                                    complete_only: bool = False) -> dict[str, int]:
         """The summed history count of each key of a bounded batch in one scope, in one query; absent keys are 0.
 
-        Equal, key by key, to summing `baseline_key_history` rows."""
+        Equal, key by key, to summing `baseline_key_history` rows. With `complete_only`, only the member segments
+        the snapshot did not flag as covering hours whose finding-associated exclusions were incomplete."""
         if not key_ids:
             return {}
         c = t.baseline_count.c
+        complete = ((t.baseline_snapshot_segment.c.exclusions_incomplete.is_(False),) if complete_only else ())
         query = (select(c.key_id, func.sum(c.count))
                  .join(t.baseline_snapshot_segment, _snapshot_member(c.segment_id, hunt_id, spec_id))
                  .where(c.key_id.in_(sorted(set(key_ids))), c.scope_kind == scope_kind, c.scope == scope,
-                        *_count_in_span(c, span))
+                        *_count_in_span(c, span), *complete)
                  .group_by(c.key_id))
         with self.engine.connect() as connection:
             found = {str(key_id): int(total) for key_id, total in connection.execute(query)}
@@ -4102,6 +4108,15 @@ class Repo:
                 inserted = c.execute(member, chunk).rowcount
                 if inserted != len(chunk):
                     raise ValueError("snapshot names an unknown baseline segment")
+            # members over hours whose finding-associated exclusions were incomplete, as the coverage names them
+            m = t.baseline_snapshot_segment.c
+            flag = (t.baseline_snapshot_segment.update()
+                    .where(m.hunt_id == row["hunt_id"], m.segment_id == bindparam("sid"))
+                    .values(exclusions_incomplete=True))
+            flagged = sorted({segment_id for item in (row.get("coverage") or {}).values()
+                              for segment_id in (item.get("incomplete") or {}).get("segment_ids") or []})
+            for chunk in _chunks(({"sid": segment_id} for segment_id in flagged), BASELINE_CHUNK):
+                c.execute(flag, chunk)
             return True
 
     def baseline_snapshot(self, hunt_id: str) -> dict | None:
@@ -5661,6 +5676,65 @@ class Repo:
             ))
             for chunk in _chunks(rows, BASELINE_CHUNK):
                 connection.execute(t.baseline_hunt_exclusion.insert(), chunk)
+
+    def mark_baseline_exclusions_incomplete(self, hunt_id: str, *, site: str, start: datetime, end: datetime,
+                                            pairs: dict[tuple[str, str], str],
+                                            spec_versions: dict[str, tuple[str, str]]) -> None:
+        """Record that one hunt's finding-associated exclusions over its window are not all known, per (target,
+        spec), with why; a later mark of the same pair replaces its reason and versions. One transaction."""
+        start, end = _utc(start, "incomplete start"), _utc(end, "incomplete end")
+        if start >= end:
+            raise ValueError("baseline incomplete-exclusion start before end is required")
+        now = utcnow()
+        rows = [{"hunt_id": hunt_id, "site": site, "target": target, "spec_id": spec_id,
+                 "spec_version": spec_versions[spec_id][0], "key_version": spec_versions[spec_id][1],
+                 "start": start, "end": end, "reason": str(reason)[:500], "marked_at": now}
+                for (target, spec_id), reason in sorted(pairs.items())]
+        if not rows:
+            return
+        statement = insert(t.baseline_exclusions_incomplete)
+        statement = statement.on_conflict_do_update(
+            index_elements=["hunt_id", "target", "spec_id"],
+            set_={name: statement.excluded[name] for name in
+                  ("site", "spec_version", "key_version", "start", "end", "reason", "marked_at")},
+        )
+        with write_txn(self.engine) as connection:
+            for chunk in _chunks(iter(rows), BASELINE_CHUNK):
+                connection.execute(statement, chunk)
+
+    def clear_baseline_exclusions_incomplete(self, hunt_id: str, *, keep: set[tuple[str, str]] | None = None) -> int:
+        """Drop one hunt's incomplete-exclusion marks, except the (target, spec) pairs in `keep`."""
+        table = t.baseline_exclusions_incomplete.c
+        with write_txn(self.engine) as connection:
+            removed = 0
+            for row in connection.execute(select(table.target, table.spec_id).where(
+                    table.hunt_id == hunt_id)).all():
+                if keep and (row[0], row[1]) in keep:
+                    continue
+                removed += connection.execute(t.baseline_exclusions_incomplete.delete().where(
+                    table.hunt_id == hunt_id, table.target == row[0], table.spec_id == row[1])).rowcount
+            return removed
+
+    def baseline_exclusions_incomplete(self, *, site: str | None = None, target: str | None = None,
+                                       spec_id: str | None = None, spec_version: str | None = None,
+                                       key_version: str | None = None, start: datetime | None = None,
+                                       end: datetime | None = None, hunt_id: str | None = None) -> list[dict]:
+        """Incomplete-exclusion marks, narrowed by any of site, target, spec and versions, an overlapping span, or
+        one hunt; in (hunt, target, spec) order."""
+        table = t.baseline_exclusions_incomplete.c
+        query = select(t.baseline_exclusions_incomplete)
+        for column, value in ((table.site, site), (table.target, target), (table.spec_id, spec_id),
+                              (table.spec_version, spec_version), (table.key_version, key_version),
+                              (table.hunt_id, hunt_id)):
+            if value is not None:
+                query = query.where(column == value)
+        if start is not None:
+            query = query.where(table.end > _utc(start, "incomplete query start"))
+        if end is not None:
+            query = query.where(table.start < _utc(end, "incomplete query end"))
+        query = query.order_by(table.hunt_id, table.target, table.spec_id)
+        with self.engine.connect() as connection:
+            return [_with_utc(row, ("start", "end", "marked_at")) for row in connection.execute(query).mappings()]
 
     def add_baseline_hunt_exclusions(self, hunt_id: str, *, site: str, start: datetime, end: datetime,
                                      exclusions: dict[tuple[str, str], set[str]],

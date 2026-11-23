@@ -185,9 +185,11 @@ def test_a_lookback_over_a_stopped_hunts_hours_is_unhunted_history_without_what_
     assert {(row["origin"], row["source_hunt_id"], row["hunted"]) for row in segments} == {("lookback", None, 0)}
     counted = {item["key"]["executable"] for row in segments for item in repo.baseline_counts(row["id"])}
     assert "/tmp/.x/implant-a" not in counted
-    # Known residual: what the stopped hunt's unrun stages would have cited is not in its ledger, so a lookback over
-    # its hours counts it like any history nobody hunted. Holding the hunt's own segments does not change that.
+    # What the stopped hunt's unrun stages would have cited is not in its ledger, so the lookback counts it; the
+    # hunt's incomplete-exclusion marks make a later judgement of it unresolved, never common
+    # (tests/test_baseline_incomplete_history.py).
     assert "/tmp/.x/implant-b" in counted
+    assert repo.baseline_exclusions_incomplete(hunt_id="hunt-a")
 
 
 # ---- through the real stop and the stages after the sweep ---------------------------------------------------

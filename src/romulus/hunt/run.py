@@ -26,6 +26,7 @@ from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.hunt.baseline_stage import run_baseline_stage
 from romulus.hunt.baseline_writer import (
     DEFAULT_RETAIN_BYTES,
+    mark_history_incomplete,
     refresh_cited_exclusions,
     run_hunt_segment_writer,
 )
@@ -779,6 +780,9 @@ def run_hunt(s: Settings, hunt_id: str, on_candidate=None, expand: bool | None =
         repo.heartbeat_hunt(hunt_id, _lease_seconds(s), owner_token=claimed_owner)
         claimed = hunt
     owner_token = claimed["lease_owner"]
+    # until a finish whose record-citing stages all ran to their end clears it, this hunt's hours hold findings
+    # whose cited keys are not all known: no later hunt's history over them reads as normal
+    mark_history_incomplete(repo, hunt_id)
     h = repo.get_hunt(hunt_id)
     m = h["manifest"]
     window = Window(start=datetime.fromisoformat(m["window"]["start"]), end=datetime.fromisoformat(m["window"]["end"]))
@@ -1114,6 +1118,8 @@ def resume_hunt(s: Settings, hunt_id: str, *, force_model: bool = False, continu
     if forced is not None:
         # recorded only now, under the lease: a refused resume switched nothing
         repo.audit("system", AGENT_MODEL_FORCED, hunt_id, forced, owner_token=owner_token)
+    if not agent_only:
+        mark_history_incomplete(repo, hunt_id)          # a run recorded before the marks existed has none
     hunt = repo.get_hunt(hunt_id)
     manifest = hunt["manifest"]
     if agent_only:

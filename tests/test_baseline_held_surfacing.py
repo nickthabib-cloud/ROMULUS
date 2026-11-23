@@ -111,8 +111,7 @@ def test_a_finish_stopped_after_the_sweep_and_its_resumed_finish_set_and_clear_t
 
 def test_held_history_whose_material_the_disk_budget_released_promises_no_resume():
     from romulus.report.manifest import held_history
-    from tests.test_baseline_held_history import _finish_run, _window
-    from tests.test_baseline_held_history import STOP_AT_BASELINE, NOT_RUN, PACKETS
+    from tests.test_baseline_held_history import NOT_RUN, PACKETS, STOP_AT_BASELINE, _finish_run, _window
     from tests.test_baseline_hunt_writer import _repo
     repo = _repo()
     _window(repo)
