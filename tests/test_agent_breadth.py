@@ -263,6 +263,19 @@ def test_hypotheses_whose_sessions_failed_are_worked_by_the_next_run_and_the_fai
     assert UNWORKED_HYPOTHESES not in (healthy.reason or "") and UNEXPLAINED_CLUSTERS not in (healthy.reason or "")
 
 
+def test_a_hypothesis_whose_every_session_failed_is_named_by_every_later_run(tmp_path):
+    from romulus.agent.investigate import EXHAUSTED_HYPOTHESES, UNWORKED_HYPOTHESES
+    s = Settings(home=tmp_path, agent_triage="off", agent_max_initial_hypotheses=1,
+                 agent_max_sessions_per_hypothesis=2)
+    repo = _hunt(tmp_path, s)
+    failed = _run(s, repo, _Outage(_finish(), context=1_000_000))
+    # the top cluster's hypothesis used both its sessions, both failed: no longer pending, but named
+    assert f"{EXHAUSTED_HYPOTHESES}:1" in failed.reason and UNWORKED_HYPOTHESES not in failed.reason
+    healthy = _run(s, repo, _ByKind(_finish(), context=1_000_000))
+    # the next run works the other clusters, and still cannot read completed: that hypothesis was never worked through
+    assert healthy.state == "partial" and f"{EXHAUSTED_HYPOTHESES}:1" in healthy.reason
+
+
 def test_the_controller_keeps_opening_clusters_as_hypotheses_are_worked_up_to_the_initial_cap(tmp_path):
     s = Settings(home=tmp_path, agent_triage="off", agent_max_initial_hypotheses=2)
     repo = _hunt(tmp_path, s)

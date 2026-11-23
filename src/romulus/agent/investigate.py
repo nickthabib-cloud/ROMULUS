@@ -130,6 +130,8 @@ DONE_STATES = frozenset({"finished", "refused", "secret_guard"})
 # explains (each with its count), so such a run is partial and says why.
 UNWORKED_HYPOTHESES = "unworked_hypotheses"
 UNEXPLAINED_CLUSTERS = "unexplained_clusters"
+# ... and open hypotheses that used their whole session limit with no session ending as done.
+EXHAUSTED_HYPOTHESES = "exhausted_hypotheses"
 SESSIONS_FAILED_REASON = "sessions_failed"
 # The reason an analyst's stop request ended a session or the phase (a stopped session's state is `interrupted`).
 # A run stopped this way is resumable: `hunt resume` continues it from its persisted work.
@@ -510,6 +512,17 @@ def _pending(settings: Settings, hypothesis: dict, repo: Repo | None = None) -> 
     ran = [row for row in repo.agent_sessions(hypothesis["hunt_id"], hypothesis_id=hypothesis["id"],
                                               purpose="investigate") if row["state"] != "running"]
     return not ran or ran[-1]["state"] not in DONE_STATES
+
+
+def _exhausted(settings: Settings, hypothesis: dict, repo: Repo) -> bool:
+    """Whether an open hypothesis used its whole session limit and none of its sessions ended as done (DONE_STATES):
+    every session failed, hit a cap or was stopped, so it was never worked through."""
+    if hypothesis["status"] != "open":
+        return False
+    if int(hypothesis.get("sessions_run") or 0) < settings.agent_max_sessions_per_hypothesis:
+        return False
+    ran = repo.agent_sessions(hypothesis["hunt_id"], hypothesis_id=hypothesis["id"], purpose="investigate")
+    return not any(row["state"] in DONE_STATES for row in ran)
 
 
 def _pending_cluster_hypotheses(settings: Settings, repo: Repo, hunt_id: str) -> int:
@@ -1706,6 +1719,11 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
     left = sum(_pending(settings, row, repo) for row in repo.agent_hypotheses(hunt_id))
     if left:
         limits_hit.add(f"{UNWORKED_HYPOTHESES}:{left}")
+    # and hypotheses that used their whole session limit without a session ending as done (every one failed, hit
+    # a cap or was stopped): no longer pending, never worked through, so never read as completed either
+    spent = sum(_exhausted(settings, row, repo) for row in repo.agent_hypotheses(hunt_id))
+    if spent:
+        limits_hit.add(f"{EXHAUSTED_HYPOTHESES}:{spent}")
     view = cluster_view()
     unexplained = len(unexplained_clusters(repo, hunt_id, view)) if view is not None else 0
     if unexplained:
