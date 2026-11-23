@@ -704,6 +704,42 @@ def _cache_basis(result, request: ChatRequest, prompt_est: int, started_at: floa
             "completion": served.completion, "prompt_est": prompt_est, "cached": cached, "since": started_at}
 
 
+def _without_state(message: dict) -> dict:
+    """A message without its provider state: the replayable copy of the turn (its text and tool inputs again, its
+    signed reasoning), which an estimate over the whole message would count a second time."""
+    return {key: value for key, value in message.items() if key != PROVIDER_STATE} if PROVIDER_STATE in message \
+        else message
+
+
+def _reported_size(result, request: ChatRequest) -> dict | None:
+    """The prompt and output tokens the provider reported for a completed call, with the request they belong to;
+    None when the usage was estimated or the call did not complete."""
+    if result.status not in ("ok", "invalid_json", "invalid_tool_call", "truncated_output"):
+        return None
+    charge = charge_of(result)
+    if charge.estimated:
+        return None
+    served = charge.parts[-1] if charge.parts else charge
+    return {"messages": len(request.messages), "digest": digest(request.messages), "prompt": served.prompt,
+            "completion": served.completion}
+
+
+def _prompt_size(messages: list[dict], tools: list, reported: dict | None) -> int:
+    """The prompt the next call will send, in tokens, for the compaction ceiling. When the conversation extends the
+    previous call's unchanged, it is that call's reported prompt and output (the reply goes back as the next turn)
+    plus an estimate of the tool results and messages added since. Otherwise it is estimated, with each turn's
+    provider state left out: the state repeats the turn's text and tool inputs, and counting it again would make a
+    session compact long before its prompt is near the ceiling."""
+    if (reported is not None and len(messages) >= reported["messages"]
+            and digest(messages[:reported["messages"]]) == reported["digest"]):
+        added = [_without_state(message) for message in messages[reported["messages"]:]
+                 if message.get("role") != "assistant"]
+        return reported["prompt"] + reported["completion"] + (
+            estimate_tokens(json.dumps(added, sort_keys=True, default=str)) if added else 0)
+    return estimate_tokens(ChatRequest(messages=[_without_state(message) for message in messages], tools=tools,
+                                       tool_choice="auto").prompt_text())
+
+
 def _cache_positions(messages: list[dict]) -> int:
     """The content positions `messages` add to a request, as the cache lookback counts them: every block, a run of
     tool calls or of tool results counting once. Counted generously (each message's text is one position)."""
@@ -814,6 +850,8 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
     finish_refusals = 0
     # what the previous call left in the prompt cache, and the request it was made with (see `_BudgetGate`)
     cache_basis: dict | None = None
+    # the previous call's prompt and output as the provider reported them, for sizing the next prompt (_prompt_size)
+    reported: dict | None = None
     cache_trusted = True
     overruns = 0
     counted = True
@@ -967,8 +1005,8 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
             # older results the model has seen are stubbed in one batch, before the prompt is sized and its cached
             # prefix checked: a compacted conversation no longer extends the previous request, so its prefix is not
             # counted as cached, and between compactions the conversation only grows at its end
-            compacted = results.compact(messages, provider.without_reasoning, prompt_tokens=estimate_tokens(
-                ChatRequest(messages=messages, tools=tools, tool_choice="auto").prompt_text()))
+            compacted = results.compact(messages, provider.without_reasoning,
+                                        prompt_tokens=_prompt_size(messages, tools, reported))
             if compacted:
                 log.info("agent session %s compacted %d earlier tool results", session_id, compacted)
             request = ChatRequest(messages=messages, tools=tools, tool_choice="auto")
@@ -1078,6 +1116,7 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                         f"{reserved} reserved, and {spent} of {limits.max_tokens} budget tokens are spent. "
                         + _deterministic_tool_summary(tool_history, hypothesis_changes)), "budget:tokens")
             cache_basis = _cache_basis(result, request, prompt_est, started_at) if cache_trusted else None
+            reported = _reported_size(result, request)
             if result.status in {"too_large", "truncated_input"}:
                 return finish("context_full", result.error or "Provider reported an oversized or truncated input.",
                               "context_full")

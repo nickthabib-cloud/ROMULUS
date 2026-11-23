@@ -234,6 +234,30 @@ def test_a_prompt_at_the_ceiling_is_compacted_below_the_threshold(tmp_path, monk
     results.close()
 
 
+def test_the_ceiling_sizes_the_prompt_from_reported_usage_and_never_counts_provider_state_twice():
+    from romulus.agent.investigate import _prompt_size
+    from romulus.agent.provider.base import PROVIDER_STATE
+    from romulus.store.db import digest
+    text = "the model's reply text " * 50
+    state = {"content": [{"type": "thinking", "thinking": "", "signature": "s" * 8_000},
+                         {"type": "text", "text": text}], "tool_inputs": {"c1": "{}"}}
+    messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"},
+                {"role": "assistant", "content": text, "tool_calls": [], PROVIDER_STATE: state}]
+    whole = estimate_tokens(ChatRequest(messages=messages, tools=[], tool_choice="auto").prompt_text())
+    stripped = [{key: value for key, value in m.items() if key != PROVIDER_STATE} for m in messages]
+    # estimated: the provider state (the turn's text again, its signature) is left out
+    assert _prompt_size(messages, [], None) == estimate_tokens(
+        ChatRequest(messages=stripped, tools=[], tool_choice="auto").prompt_text()) < whole - 1_000
+    # extending the previous call's unchanged conversation: its reported prompt and output, plus what was added
+    reported = {"messages": 2, "digest": digest(messages[:2]), "prompt": 30_000, "completion": 700}
+    added = {"role": "tool", "tool_call_id": "c1", "content": "x" * 4_000}
+    size = _prompt_size([*messages, added], [], reported)
+    assert size == 30_700 + estimate_tokens(json.dumps([added], sort_keys=True, default=str))
+    # an edited conversation (a compaction) is estimated again
+    edited = [messages[0], {"role": "user", "content": "changed"}, *messages[2:], added]
+    assert _prompt_size(edited, [], reported) < 30_000
+
+
 def test_a_ceiling_below_what_cannot_be_compacted_never_compacts_on_every_call(tmp_path, monkeypatch):
     # every prompt is past the ceiling (as when the model's own turns alone fill it): a compaction still needs the
     # minimum to reclaim, so it runs in batches, never once per newly stale result
