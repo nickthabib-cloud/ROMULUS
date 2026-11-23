@@ -267,11 +267,13 @@ class MentionScanner:
                               "reason": reason})
 
     def note_residue(self, target: str, *, records: int | None, read: int, counted: bool, reason: str = "",
-                     short_keys=()) -> None:
+                     short_keys=(), drift: str = "") -> None:
         """A target's records outside the sweep's selection (`hunt.mention_residue`): how many (None: not counted
-        exactly), how many were read into the scan, and the keys not read in full."""
+        exactly), how many were read into the scan, the keys not read in full, and how the source changed between
+        the count and the read (`drift`, which makes the pool partial however many were read)."""
         short = list(short_keys)
         self.residue[target] = {"records": records, "read": read, "counted": counted, "reason": reason,
+                                "drift": drift,
                                 "keys_not_read_in_full": len(short),
                                 "keys": [{**item, "not_read": item["records"] - item["read"]}
                                          for item in sorted(short, key=lambda item: item["read"] - item["records"])
@@ -779,6 +781,8 @@ class MentionScanner:
                                f"the sweep's selection were not scanned ({row['reason']})"
                                + (f"; keys not read in full: {named}" if named else "")
                                + (f" and {more} more" if more > 0 else ""))
+            if row["counted"] and row.get("drift"):
+                reasons.append(f"{target}: {row['drift']}")
         for why, count in sorted(self.not_scanned.items()):
             reasons.append(f"{count} record(s) not scanned: {why}")
         for why, count in sorted(self.in_part.items()):

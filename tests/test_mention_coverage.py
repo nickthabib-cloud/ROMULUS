@@ -470,7 +470,8 @@ def test_a_windows_record_outside_a_network_targets_selection_is_read_and_scanne
     assert "outside the sweep's selection" in json.loads(rows[0][7])["query"]
     summary = scanner.summary()
     assert summary["outside_selection"]["targets"]["net-x"] == {
-        "records": 1, "read": 1, "counted": True, "reason": "", "keys_not_read_in_full": 0, "keys": []}
+        "records": 1, "read": 1, "counted": True, "reason": "", "drift": "", "keys_not_read_in_full": 0,
+        "keys": []}
     assert summary["status"] == SCANNED_ALL
     # every residue request negates the sweep's selection exactly
     assert all(body["query"]["bool"]["must_not"] for body in transport.searches)
@@ -547,7 +548,8 @@ def test_a_record_of_a_shape_the_target_cannot_select_is_read_and_scanned(tmp_pa
     repo, _sweep_run, _transport = _sweep(tmp_path, hits, NARROW)
     stored = repo.mention_scan("h1")
     assert stored["outside_selection"]["targets"][TARGET] == {
-        "records": 1, "read": 1, "counted": True, "reason": "", "keys_not_read_in_full": 0, "keys": []}
+        "records": 1, "read": 1, "counted": True, "reason": "", "drift": "", "keys_not_read_in_full": 0,
+        "keys": []}
     rows = repo.mentions("h1")
     assert [(row["pattern_id"], row["host"]) for row in rows] == [("mention.test_dev_tcp_redirect", "db1")]
     assert stored["status"] == SCANNED_ALL, stored["reasons"]
@@ -664,6 +666,60 @@ def test_the_records_outside_the_selection_are_streamed_within_the_budget(tmp_pa
     assert any("10,000 of 60,000 record(s) outside the sweep's selection were not scanned" in reason
                for reason in summary["reasons"])
     assert grown < 96 * 2**20, grown
+    scanner.close()
+
+
+class _LateES(QueryES):
+    """A record with an early timestamp is indexed after the count (ingest lag)."""
+
+    def __init__(self, hits, late):
+        super().__init__(hits)
+        self.late = late
+
+    def __call__(self, request):
+        response = super().__call__(request)
+        body = json.loads(request.content) if request.content else {}
+        if "h" in body.get("aggs", {}) and self.late not in self.hits:
+            self.hits.insert(0, self.late)
+        return response
+
+
+def _late_pass(tmp_path, budget):
+    import httpx
+
+    from romulus.config import Settings
+    from romulus.hunt.mention_residue import ResiduePass
+    from romulus.sources.es import ElasticClient
+    from romulus.sources.models import Predicate
+    hits = [_record(n, {"event": {"dataset": "app"}, "message": f"line {n}"}) for n in range(10, 20)]
+    late = _record(1, {"event": {"dataset": "app"}, "message": "MIMIKATZ late arrival"}, host="late")
+    client = ElasticClient(Settings(es_url="http://es.invalid", mention_dir=FIXTURES, mention_residue_records=budget),
+                           transport=httpx.MockTransport(_LateES(hits, late)))
+    from types import SimpleNamespace
+    scanner = _scanner(tmp_path)
+    owner = SimpleNamespace(contracts={TARGET: CONTRACT}, mentions=scanner, client=client, window=WINDOW,
+                            heartbeat=lambda: None, stop_check=None)
+    ResiduePass(owner, TARGET, [Predicate(field="event.dataset", op="in", value=["linux.audit"])], []).run()
+    return scanner
+
+
+def test_a_record_indexed_after_the_count_is_read_and_the_change_makes_the_pool_partial(tmp_path):
+    scanner = _late_pass(tmp_path, 1_000)
+    summary = scanner.summary()
+    row = summary["outside_selection"]["targets"][TARGET]
+    # the read went on to the end of its point in time: the late record was read and scanned
+    assert (row["records"], row["read"]) == (11, 11) and {r[2] for r in scanner.ranked()} == {"late"}
+    assert "11 when read, 10 when counted" in row["drift"] and summary["status"] == "partial"
+    assert any(reason.startswith(f"{TARGET}: the source's records outside the selection changed")
+               for reason in summary["reasons"])
+    scanner.close()
+
+
+def test_a_read_that_stops_at_the_budget_before_its_point_in_time_ends_is_partial(tmp_path):
+    scanner = _late_pass(tmp_path, 10)
+    row = scanner.summary()["outside_selection"]["targets"][TARGET]
+    assert (row["records"], row["read"]) == (11, 10) and row["keys"][0]["not_read"] == 1
+    assert scanner.summary()["status"] == "partial"
     scanner.close()
 
 

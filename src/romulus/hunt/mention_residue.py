@@ -117,27 +117,38 @@ class ResiduePass:
                                  reason="no budget for records outside the sweep's selection "
                                         "(ROMULUS_MENTION_RESIDUE_RECORDS is 0)")
             return
-        plan = [(None, None, total, min(total, self.budget))]
+        # within the budget the read goes on to the end of its point in time, so a record indexed after the count
+        # is read too; the point in time's own total is compared with the count
+        plan = [(None, None, total, self.budget)]
         how = ""
         if total > self.budget:
             plan, how = self._plan(total)
-        read = 0
+        read = held_total = 0
         short: list[dict] = []
         problems: list[str] = []
+        drift: list[str] = []
         for field, value, records, quota in plan:
-            got, problem = self._read(field, value, quota) if quota else (0, "")
+            got, problem, seen = self._read(field, value, quota) if quota else (0, "", None)
+            key = NO_KEY if field is not None and value is None else "(all)" if field is None else str(value)[:200]
+            held = max(records, seen) if seen is not None else records
+            held_total += held
             read += got
             if problem:
                 problems.append(problem)
-            if got < records:
-                short.append({"key": NO_KEY if field is not None and value is None else
-                              "(all)" if field is None else str(value)[:200],
-                              "key_field": field, "records": records, "read": got})
+            if seen is not None and seen != records:
+                drift.append(f"{key}: {seen:,} when read, {records:,} when counted")
+            if got < held:
+                short.append({"key": key, "key_field": field, "records": held, "read": got})
         reason = ""
-        if read < total:
+        if read < held_total:
             reason = "; ".join([*([how] if how else []), *problems[:3]]) or "not read in full"
-        scanner.note_residue(target, records=total, read=read, counted=True, reason=reason[:600],
-                             short_keys=short)
+        note = ""
+        if drift:
+            note = ("the source's records outside the selection changed between the count and the read (records "
+                    "indexed or removed meanwhile): " + "; ".join(drift[:5])
+                    + (f" and {len(drift) - 5} more" if len(drift) > 5 else ""))
+        scanner.note_residue(target, records=held_total, read=read, counted=True, reason=reason[:600],
+                             short_keys=short, drift=note[:600])
 
     def _plan(self, total: int) -> tuple[list[tuple], str]:
         """(key field, key value, records, records to read) per key, and how the budget was shared."""
@@ -161,16 +172,18 @@ class ResiduePass:
                f"read from its earliest record")
         return [(field, key, count, share) for (key, count), share in zip(keys, shares, strict=True)], how
 
-    def _read(self, field: str | None, value, quota: int) -> tuple[int, str]:
-        """Stream up to `quota` records of one key into the scan; (records read, a problem or "")."""
+    def _read(self, field: str | None, value, quota: int) -> tuple[int, str, int | None]:
+        """Stream up to `quota` records of one key into the scan, to the end of the point in time; (records read, a
+        problem or "", the point in time's exact total or None when it gave none)."""
         sweep, scanner = self.sweep, self.scanner
         filters = [_key_predicate(field, value)] if field is not None else []
         try:
             query = compile_es(self._intent("raw", filters, max_records=quota), self.contract,
                                sweep.client.settings.es_flavor)
         except CompileError as error:
-            return 0, f"the read could not be compiled: {error}"
+            return 0, f"the read could not be compiled: {error}", None
         read = 0
+        seen: int | None = None
         pages = sweep.client.iterate(query, quota)
         try:
             for hits, meta in pages:
@@ -178,6 +191,8 @@ class ResiduePass:
                 if stop is not None and (stopped := stop()):
                     raise HuntStopped(stopped)
                 sweep.heartbeat()
+                if meta.get("total_relation") == "eq" and meta.get("total") is not None:
+                    seen = int(meta["total"])
                 entries = []
                 for hit in hits[:quota - read]:
                     # the scan reads the record as it may be stored (lone surrogates replaced, credentials masked)
@@ -191,11 +206,11 @@ class ResiduePass:
                 except Exception as exc:  # noqa: BLE001 - the mention pool never ends the sweep
                     scanner.note_scan_failure(self.target, f"residue:{field or 'all'}={value}", exc)
                 if meta.get("problems"):
-                    return read, "; ".join(meta["problems"])[:300]
+                    return read, "; ".join(meta["problems"])[:300], seen
                 if read >= quota:
                     break
         except SourceError as error:
-            return read, f"the read failed: {error}"[:300]
+            return read, f"the read failed: {error}"[:300], seen
         finally:
             pages.close()
-        return read, ""
+        return read, "", seen
