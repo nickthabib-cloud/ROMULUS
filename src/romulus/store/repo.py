@@ -3719,8 +3719,7 @@ class Repo:
         tally.check()
         return longest
 
-    def finalize_baseline_segment(self, segment_id: str) -> str:
-        """Digest a completed build without a write lock, then expose it in one metadata update."""
+    def _segment_rows_digest(self, segment_id: str) -> str:
         digest = _RowsDigest()
         for kind, columns, rows in (
                 ("count", _COUNT_COLUMNS, self.baseline_counts(segment_id)),
@@ -3728,7 +3727,33 @@ class Repo:
                 ("event", _EVENT_HOUR_COLUMNS, self.baseline_segment_event_hours(segment_id))):
             for chunk in _chunks(rows, BASELINE_PAGE):
                 digest.add(kind, columns, chunk)
-        value = digest.hexdigest()
+        return digest.hexdigest()
+
+    def publish_derived_baseline_segment(self, segment_id: str, *, replaces: str, replaces_digest: str) -> bool:
+        """Expose a completed derived build and retire the segment it replaces in one transaction, so the two are
+        never both active and never both out of cover. The replaced segment is retired only while it is still
+        active with the exclusions it was judged on; returns whether it was. Raises when the build is not building."""
+        value = self._segment_rows_digest(segment_id)
+        s = t.baseline_segment.c
+        with write_txn(self.engine) as c:
+            if not c.execute(t.baseline_segment.update().where(s.id == segment_id, s.status == "building")
+                             .values(rows_digest=value, status="active")).rowcount:
+                raise ValueError(f"baseline segment {segment_id} is not building")
+            return bool(c.execute(t.baseline_segment.update().where(
+                s.id == replaces, s.status == "active", s.exclusion_digest == replaces_digest,
+            ).values(status="stale")).rowcount)
+
+    def stale_baseline_segment(self, segment_id: str, exclusion_digest: str) -> bool:
+        """Retire one active segment judged on `exclusion_digest`; False when it is no longer that."""
+        s = t.baseline_segment.c
+        with write_txn(self.engine) as c:
+            return bool(c.execute(t.baseline_segment.update().where(
+                s.id == segment_id, s.status == "active", s.exclusion_digest == exclusion_digest,
+            ).values(status="stale")).rowcount)
+
+    def finalize_baseline_segment(self, segment_id: str) -> str:
+        """Digest a completed build without a write lock, then expose it in one metadata update."""
+        value = self._segment_rows_digest(segment_id)
         with write_txn(self.engine) as c:
             result = c.execute(t.baseline_segment.update().where(
                 t.baseline_segment.c.id == segment_id,
@@ -5602,25 +5627,40 @@ class Repo:
                                                chunk: int = 500) -> int:
         """Mark active overlapping segments stale when the durable cited-key union changed.
 
-        Segments and exclusions are read without the write lock. The exclusion rows of one (target, spec,
-        versions) are read once and each segment's union is computed from them; the changed segments are then
-        flipped in short transactions of `chunk` ids. A flip only applies to a segment still active with the
-        exclusion digest it was judged on, so a concurrent rewrite is never staled on stale information.
+        The changed segments are flipped in short transactions of `chunk` ids. A flip only applies to a segment
+        still active with the exclusion digest it was judged on, so a concurrent rewrite is never staled on stale
+        information.
         """
+        changed = [(row["id"], row["exclusion_digest"])
+                   for row in self.baseline_exclusion_changes(site=site, start=start, end=end)]
+        stale = 0
+        segment = t.baseline_segment.c
+        for index in range(0, len(changed), chunk):
+            with write_txn(self.engine) as connection:
+                for segment_id, digest in changed[index:index + chunk]:
+                    stale += connection.execute(t.baseline_segment.update().where(
+                        segment.id == segment_id, segment.status == "active",
+                        segment.exclusion_digest == digest,
+                    ).values(status="stale")).rowcount
+        return stale
+
+    def baseline_exclusion_changes(self, *, site: str, start: datetime, end: datetime) -> list[dict]:
+        """Active segments overlapping [start, end) whose stored exclusions differ from the durable cited-key
+        union over their span: each segment row (child rows aside) with `keys`, that union in sorted order.
+
+        Segments and exclusions are read without the write lock. The exclusion rows of one (target, spec,
+        versions) are read once and each segment's union is computed from them."""
         start, end = _utc(start, "staleness start"), _utc(end, "staleness end")
         segment, exclusion = t.baseline_segment.c, t.baseline_hunt_exclusion.c
         with self.engine.connect() as connection:
-            segments = list(connection.execute(select(
-                segment.id, segment.target, segment.spec_id, segment.spec_version, segment.key_version,
-                segment.start, segment.end, segment.excluded_keys, segment.exclusion_digest,
-            ).where(
+            segments = list(connection.execute(select(t.baseline_segment).where(
                 segment.site == site, segment.status == "active", segment.start < end, segment.end > start,
             ).order_by(segment.target, segment.spec_id, segment.spec_version, segment.key_version,
                        segment.id)).mappings())
-        changed: list[tuple[str, str]] = []
+        changed: list[dict] = []
         group = lambda row: (row["target"], row["spec_id"], row["spec_version"], row["key_version"])
         for (target, spec_id, spec_version, key_version), rows in groupby(segments, key=group):
-            rows = [_with_utc(row, ("start", "end")) for row in rows]
+            rows = [_with_utc(row, _SEGMENT_TIMES) for row in rows]
             low, high = min(row["start"] for row in rows), max(row["end"] for row in rows)
             with self.engine.connect() as connection:
                 cited = [(key, _stored_utc(first), _stored_utc(last)) for key, first, last in connection.execute(
@@ -5633,16 +5673,8 @@ class Repo:
                 keys = sorted({key for key, first, last in cited if first < row["end"] and last > row["start"]})
                 if (keys != sorted(row["excluded_keys"] or [])
                         or self._baseline_exclusion_digest(keys) != row["exclusion_digest"]):
-                    changed.append((row["id"], row["exclusion_digest"]))
-        stale = 0
-        for index in range(0, len(changed), chunk):
-            with write_txn(self.engine) as connection:
-                for segment_id, digest in changed[index:index + chunk]:
-                    stale += connection.execute(t.baseline_segment.update().where(
-                        segment.id == segment_id, segment.status == "active",
-                        segment.exclusion_digest == digest,
-                    ).values(status="stale")).rowcount
-        return stale
+                    changed.append({**row, "keys": keys})
+        return changed
 
     def baseline_observations(self, hunt_id: str, *, page_size: int = BASELINE_PAGE) -> Iterator[dict]:
         """A hunt's observations in key order (spec, version, scope, key digest), paged."""

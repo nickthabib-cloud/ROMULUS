@@ -12,6 +12,10 @@ later hunt until a resume replaced them, and for good if none ever did. Its excl
 lookback over its hours leaves out what it did find, and older segments those keys contradict go stale), and its
 window counter material is kept, so the resumed run's finish writes the segments from complete exclusions.
 
+When the cited-key union over a segment's hours grows (a later hunt, a resume, or the AI agent after the finish
+cites more), the segment is replaced by one derived from its own rows less the new keys, published in the same
+transaction that retires it, so history never loses an hour to the change.
+
 The hunt's window counter material is released once the writer has run for a finished hunt. A partial (resumable)
 hunt keeps it only until its resumed run finishes, charged to one store-wide disk budget that releases the oldest
 retained material first, so it is never unbounded.
@@ -280,7 +284,8 @@ def run_hunt_segment_writer(repo: Repo, hunt_id: str, *, hunt_partial: bool, bas
         spec_versions={spec_id: (SPEC_BY_ID[spec_id].version, SPEC_BY_ID[spec_id].key_version)
                        for spec_id in specs},
     )
-    stale = repo.stale_baseline_segments_for_exclusions(site=site, start=start, end=end)
+    changes = apply_exclusion_changes(repo, site=site, start=start, end=end, built_by=hunt_id, now=now)
+    stale = changes["stale"]
     repo.cleanup_baseline_building(before=now - timedelta(hours=1))
     if held:
         reason = held_reason(held)
@@ -292,6 +297,7 @@ def run_hunt_segment_writer(repo: Repo, hunt_id: str, *, hunt_partial: bool, bas
             "status": "held", "written": 0, "stale": stale, "max_write_seconds": 0.0,
             "held": {"stages": held, "reason": reason},
             "specs": {spec_id: {"written": 0, "reason": reason} for spec_id in specs}, "material": material,
+            "exclusion_changes": changes,
         }
     normalizer = str(manifest.get("normalizer") or "unknown")
     network = manifest.get("internal_networks") or {}
@@ -331,8 +337,116 @@ def run_hunt_segment_writer(repo: Repo, hunt_id: str, *, hunt_partial: bool, bas
         )
     return {
         "status": "complete", "written": written, "stale": stale,
-        "max_write_seconds": longest, "specs": summaries, "material": material,
+        "max_write_seconds": longest, "specs": summaries, "material": material, "exclusion_changes": changes,
     }
+
+
+# How many fallback reasons a summary names; the count is always exact.
+_FALLBACKS_NAMED = 10
+
+
+def apply_exclusion_changes(repo: Repo, *, site: str, start: datetime, end: datetime, built_by: str,
+                            now: datetime) -> dict:
+    """Bring every active segment overlapping [start, end) up to the durable cited-key union.
+
+    A segment whose new exclusions hold every key it already excluded is replaced by one derived from its own rows:
+    the same span, scope hours and event hours (so the same rate series and liveness), its count rows less the newly
+    excluded keys, a new content-derived id and the new exclusion digest. That is exactly what its writer would have
+    written had the keys been known, and history loses no hour. Otherwise (the union no longer holds a key the
+    segment excluded, its spec version is no longer current, or the derivation failed) it is retired, and a later
+    lookback rebuilds its hours from source; each such fallback is named.
+
+    `stale` counts every segment retired, derived or not."""
+    derived = retired = 0
+    fallbacks: list[str] = []
+    for change in repo.baseline_exclusion_changes(site=site, start=start, end=end):
+        try:
+            outcome = _derive_segment(repo, change, built_by=built_by, now=now)
+        except Exception as error:  # noqa: BLE001 - a failed derivation falls back to retiring the segment
+            outcome = f"derivation failed: {error}"[:300]
+        if isinstance(outcome, bool):
+            derived += 1
+            retired += int(outcome)
+            continue
+        if repo.stale_baseline_segment(change["id"], change["exclusion_digest"]):
+            retired += 1
+        fallbacks.append(f"{change['id']}: {outcome}")
+    return {"derived": derived, "stale": retired, "rebuilt_from_source": len(fallbacks),
+            "fallbacks": fallbacks[:_FALLBACKS_NAMED]}
+
+
+def _derive_segment(repo: Repo, change: dict, *, built_by: str, now: datetime) -> bool | str:
+    """Replace one segment by its derivation under the new exclusions: whether the old segment was retired by this
+    derivation, or why it cannot be derived."""
+    spec = SPEC_BY_ID.get(change["spec_id"])
+    if spec is None or (spec.version, spec.key_version) != (change["spec_version"], change["key_version"]):
+        return "its spec version is no longer current, so it cannot be re-identified"
+    if change["origin"] not in ("hunt", "lookback"):
+        return f"origin {change['origin']} cannot be derived"
+    keys = set(change["keys"])
+    if not set(change["excluded_keys"] or []) <= keys:
+        return "the cited-key union no longer holds every key it excluded"
+    digest = exclusion_digest(sorted(keys))
+    segment_id = repo.usable_baseline_segment_id(segment_content_id(
+        site=change["site"], target=change["target"], spec=spec, start=change["start"], end=change["end"],
+        normalizer=change["normalizer"], exclusion_digest=digest, excluded_keys=sorted(keys),
+        origin=change["origin"], network_digest=change["network_digest"],
+    ))
+    row = {name: change[name] for name in (
+        "site", "target", "spec_id", "spec_version", "key_version", "normalizer", "start", "end", "bucket",
+        "origin", "source_hunt_id", "hunted", "network_digest", "events_total", "events_basis", "first_event_hour")}
+    row.update(id=segment_id, built_by_hunt_id=built_by, exclusion_digest=digest, excluded_keys=sorted(keys),
+               status="building", created_at=now)
+    state = repo.begin_baseline_segment(row, reclaim_owner=True)
+    if state == "active":
+        # an identical derivation is already published: only the old segment remains to retire
+        return repo.stale_baseline_segment(change["id"], change["exclusion_digest"])
+    if state != "begun":
+        return f"its replacement {segment_id} is {state}"
+    old = change["id"]
+    repo.append_baseline_segment_rows(
+        segment_id,
+        ({**item, "segment_id": segment_id} for item in repo.baseline_counts(old) if item["key_digest"] not in keys),
+        ({**item, "segment_id": segment_id} for item in repo.baseline_scope_hours(old)),
+        ({**item, "segment_id": segment_id} for item in repo.baseline_segment_event_hours(old)),
+    )
+    return repo.publish_derived_baseline_segment(segment_id, replaces=old, replaces_digest=change["exclusion_digest"])
+
+
+def refresh_cited_exclusions(repo: Repo, hunt_id: str, *, now: datetime | None = None) -> dict:
+    """Bring history up to every finding the hunt now holds, after work that publishes past its finish (the AI
+    agent): replace the hunt's exclusion ledger and derive (or retire) the overlapping segments it changes.
+
+    Records an AI finding cites only ever leave history: a key out of history can only make a later hunt judge it
+    new, never quieter. A (target, spec) whose cited keys cannot all be known retires this hunt's own segments of it,
+    as the writer would not have written them. Idempotent: a second run changes nothing."""
+    hunt = repo.get_hunt(hunt_id)
+    if hunt is None:
+        raise KeyError(hunt_id)
+    now = now or utcnow()
+    manifest = hunt["manifest"]
+    config = manifest.get("baseline") or {}
+    specs = sorted(str(item["id"]) for item in config.get("specs") or [])
+    if not specs or not config.get("site"):
+        return {"status": "disabled"}
+    start, end = _window(manifest)
+    targets = sorted(set(manifest.get("targets") or []))
+    site = str(config.get("site") or "")
+    exclusions, blocked = _cited_exclusions(repo, hunt_id, set(targets), set(specs))
+    repo.replace_baseline_hunt_exclusions(
+        hunt_id, site=site, start=start, end=end, exclusions=exclusions,
+        spec_versions={spec_id: (SPEC_BY_ID[spec_id].version, SPEC_BY_ID[spec_id].key_version)
+                       for spec_id in specs},
+    )
+    changes = apply_exclusion_changes(repo, site=site, start=start, end=end, built_by=hunt_id, now=now)
+    blocked_retired = 0
+    for (target, spec_id) in sorted(blocked):
+        for row in repo.baseline_segments(site=site, target=target, spec_id=spec_id, statuses=["active"]):
+            if row["source_hunt_id"] == hunt_id and row["start"] < end and row["end"] > start:
+                blocked_retired += int(repo.stale_baseline_segment(row["id"], row["exclusion_digest"]))
+    return {"status": "complete", "keys": sum(len(keys) for keys in exclusions.values()), **changes,
+            "blocked": {f"{target}|{spec_id}": reason for (target, spec_id), reason in sorted(blocked.items())},
+            "blocked_retired": blocked_retired}
 
 
 def _write_target(repo: Repo, hunt_id: str, spec, target: str, *, site: str,

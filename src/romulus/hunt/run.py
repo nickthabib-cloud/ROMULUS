@@ -24,7 +24,11 @@ from romulus.config import Settings
 from romulus.detect import netdef
 from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.hunt.baseline_stage import run_baseline_stage
-from romulus.hunt.baseline_writer import DEFAULT_RETAIN_BYTES, run_hunt_segment_writer
+from romulus.hunt.baseline_writer import (
+    DEFAULT_RETAIN_BYTES,
+    refresh_cited_exclusions,
+    run_hunt_segment_writer,
+)
 from romulus.hunt.controls import HuntStopped, StopWatch
 from romulus.hunt.expansion import PER_ANCHOR_SOURCE_QUERIES, ExpansionEngine
 from romulus.hunt.links import LinkFetcher, is_agent_reach
@@ -916,7 +920,8 @@ def _with_agent_result(result: dict, repo: Repo, summary: dict, *, settings: Set
     triage = (_triage_after_agent(settings, repo, result["hunt_id"], manifest or {}, summary)
               if settings is not None else None)
     combined = {**result, "ai_agent": summary,
-                "agent": {"status": summary.get("status", "unknown"), "stop_reason": summary.get("reason")}}
+                "agent": {"status": summary.get("status", "unknown"), "stop_reason": summary.get("reason")},
+                "baseline_exclusions": exclusions_after_agent(repo, result["hunt_id"])}
     if triage is not None:
         combined["ai_triage"] = triage
     try:
@@ -925,6 +930,26 @@ def _with_agent_result(result: dict, repo: Repo, summary: dict, *, settings: Set
     except Exception:
         log.exception("could not read the refreshed agent result")
     return combined
+
+
+AGENT_EXCLUSIONS_ACTION = "hunt.agent_baseline_exclusions"
+
+
+def exclusions_after_agent(repo: Repo, hunt_id: str) -> dict:
+    """Leave out of baseline history every record the AI agent's findings cite, whatever the agent's outcome (a
+    failed or stopped agent keeps the findings it stored). A failure leaves the ledger and history as they were,
+    is recorded, and never changes the hunt's result; the next agent finish or resume tries again."""
+    try:
+        summary = refresh_cited_exclusions(repo, hunt_id)
+    except Exception as exc:  # history upkeep must never sink the agent's result
+        log.exception("baseline exclusions after the AI agent failed")
+        summary = {"status": "failed", "reason": f"baseline exclusions after the AI agent failed: {exc}"[:300]}
+    if summary.get("status") != "disabled":
+        try:
+            repo.audit("system", AGENT_EXCLUSIONS_ACTION, hunt_id, summary)
+        except Exception:
+            log.exception("could not record the baseline exclusions after the AI agent")
+    return summary
 
 
 class AgentModelMismatch(ValueError):
@@ -1116,7 +1141,9 @@ def resume_hunt(s: Settings, hunt_id: str, *, force_model: bool = False, continu
                                             owner_token=owner_token, summary=summary)
                 except Exception:
                     log.exception("could not record local agent recovery failure")
-            return {**base_result, "agent": summary, "ai_agent": summary}
+            # what the agent stored before it failed still leaves history
+            return {**base_result, "agent": summary, "ai_agent": summary,
+                    "baseline_exclusions": exclusions_after_agent(repo, hunt_id)}
     # A pending template handoff is local work. Keep existing partial investigation recovery on its
     # original path, and resolve readiness once so a changing configuration cannot open a source path.
     if agent_only and agent_run.get("state") == "pending":
