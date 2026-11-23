@@ -290,6 +290,8 @@ def run_hunt_segment_writer(repo: Repo, hunt_id: str, *, hunt_partial: bool, bas
     )
     changes = apply_exclusion_changes(repo, site=site, start=start, end=end, built_by=hunt_id, now=now)
     stale = changes["stale"]
+    # stated only when the union changed some segment, so an unchanged store reads as before
+    changed = {"exclusion_changes": changes} if changes["derived"] or changes["rebuilt_from_source"] else {}
     repo.cleanup_baseline_building(before=now - timedelta(hours=1))
     if held:
         reason = held_reason(held)
@@ -301,7 +303,7 @@ def run_hunt_segment_writer(repo: Repo, hunt_id: str, *, hunt_partial: bool, bas
             "status": "held", "written": 0, "stale": stale, "max_write_seconds": 0.0,
             "held": {"stages": held, "reason": reason},
             "specs": {spec_id: {"written": 0, "reason": reason} for spec_id in specs}, "material": material,
-            "exclusion_changes": changes,
+            **changed,
         }
     normalizer = str(manifest.get("normalizer") or "unknown")
     network = manifest.get("internal_networks") or {}
@@ -341,7 +343,7 @@ def run_hunt_segment_writer(repo: Repo, hunt_id: str, *, hunt_partial: bool, bas
         )
     return {
         "status": "complete", "written": written, "stale": stale,
-        "max_write_seconds": longest, "specs": summaries, "material": material, "exclusion_changes": changes,
+        "max_write_seconds": longest, "specs": summaries, "material": material, **changed,
     }
 
 
