@@ -22,12 +22,16 @@ sweep's left-out datasets, shapes and channels as not offered: they are what thi
 """
 from __future__ import annotations
 
+from pydantic import ValidationError
+
 from romulus.evidence.windows import is_windows_source
 from romulus.hunt.controls import HuntStopped
 from romulus.sources.compile import CompileError, compile_es
 from romulus.sources.es import SourceError
 from romulus.sources.execute import execute
 from romulus.sources.models import Completeness, Predicate, SearchIntent, Selection
+
+INTENT_MAX_RECORDS = SearchIntent.model_fields["max_records"].metadata[-1].le
 
 RESIDUE_REASON = "outside the sweep's selection: no rule reads it"
 # the keys a target's outside records are counted by when they exceed the budget
@@ -98,7 +102,7 @@ class ResiduePass:
         try:
             counted = execute(self.sweep.client, self._intent("histogram", interval_seconds=HISTOGRAM_SECONDS),
                               self.contract)
-        except (SourceError, CompileError) as error:
+        except (SourceError, CompileError, ValidationError) as error:
             scanner.note_residue(target, records=None, read=0, counted=False,
                                  reason=f"the records outside the sweep's selection could not be counted: {error}")
             return
@@ -161,7 +165,7 @@ class ResiduePass:
         try:
             out = execute(self.sweep.client, self._intent("aggregate", group_by=[field], max_records=MAX_KEYS),
                           self.contract)
-        except (SourceError, CompileError):
+        except (SourceError, CompileError, ValidationError):
             return earliest, why_first
         keys = [((bucket.get("key") or {}).get(field), int(bucket.get("count") or 0)) for bucket in out.buckets]
         if (out.completeness != Completeness.complete or sum(count for _key, count in keys) != total
@@ -178,10 +182,11 @@ class ResiduePass:
         sweep, scanner = self.sweep, self.scanner
         filters = [_key_predicate(field, value)] if field is not None else []
         try:
-            query = compile_es(self._intent("raw", filters, max_records=quota), self.contract,
+            # the intent's own record bound is the source layer's largest; the read itself streams to `quota`
+            query = compile_es(self._intent("raw", filters, max_records=min(quota, INTENT_MAX_RECORDS)), self.contract,
                                sweep.client.settings.es_flavor)
-        except CompileError as error:
-            return 0, f"the read could not be compiled: {error}", None
+        except (CompileError, ValidationError) as error:
+            return 0, f"the read could not be compiled: {error}"[:300], None
         read = 0
         seen: int | None = None
         pages = sweep.client.iterate(query, quota)

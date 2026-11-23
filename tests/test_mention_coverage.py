@@ -748,6 +748,22 @@ def test_the_records_outside_the_selection_are_streamed_within_the_budget(tmp_pa
     scanner.close()
 
 
+def test_a_budget_past_the_source_layers_record_bound_still_reads(tmp_path):
+    from types import SimpleNamespace
+
+    from romulus.hunt.mention_residue import INTENT_MAX_RECORDS, ResiduePass
+    from romulus.sources.models import Predicate
+    client = _PagedClient(5_000)
+    client.settings.mention_residue_records = INTENT_MAX_RECORDS + 1_000_000
+    scanner = _scanner(tmp_path)
+    owner = SimpleNamespace(contracts={TARGET: CONTRACT}, mentions=scanner, client=client, window=WINDOW,
+                            heartbeat=lambda: None, stop_check=None)
+    ResiduePass(owner, TARGET, [Predicate(field="event.dataset", op="in", value=["linux.audit"])], []).run()
+    row = scanner.summary()["outside_selection"]["targets"][TARGET]
+    assert (row["records"], row["read"], row["reason"]) == (5_000, 5_000, "") and client.read == 5_000
+    scanner.close()
+
+
 class _LateES(QueryES):
     """A record with an early timestamp is indexed after the count (ingest lag)."""
 
