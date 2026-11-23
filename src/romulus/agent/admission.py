@@ -225,7 +225,7 @@ _PIVOT_PATHS = ("result.evidence.*", "result.candidates.*", "result.entities.*.a
 _TOOL_ALIAS_PATHS = {
     "list_findings": tuple("findings.*." + p for p in _FINDING_PATHS),
     "get_finding": tuple("finding." + p for p in _FINDING_PATHS),
-    "get_evidence": ("evidence.*.alias",),
+    "get_evidence": ("evidence.*.alias", "evidence.*.cited_by_findings.*"),
     "list_incidents": ("incidents.*.alias",),
     "get_incident": tuple("incident." + p for p in _INCIDENT_PATHS),
     "entity_profile": ("entity.alias", "entity.events.*.alias"),
@@ -270,7 +270,10 @@ def typed_alias_arguments(tool_name: str, arguments: object) -> set[str]:
 def collect_issued_aliases(value: object, *, source: str = "tool", tool_name: str | None = None) -> set[str]:
     """Collect explicitly typed aliases in a prompt or tool payload shown to a session."""
     if source == "hypothesis":
-        return _path_aliases(value, ("alias", "entities.*", "cites.*.alias"))
+        # the card's leads (romulus.agent.clusters.hypothesis_leads) name its clusters and their findings no
+        # hypothesis cites yet: controller-built from stored state, never telemetry or model text
+        return _path_aliases(value, ("alias", "entities.*", "cites.*.alias", "leads.clusters.*.incident",
+                                     "leads.not_yet_cited.*.alias"))
     if source == "dossier":
         paths = ("findings.*.alias", "entities.*.alias", "expansion.unfinished_anchors.*.anchor",
                  "expansion.link_tiers_not_reached.*.anchor", "expansion.partial_links.*.alias",

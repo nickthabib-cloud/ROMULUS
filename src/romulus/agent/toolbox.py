@@ -105,6 +105,8 @@ class ListCoverageArgs(_Args):
     cursor: str | None = Field(default=None, pattern=r"^C[0-9a-f]{20}$", description=_CURSOR)
 
 
+# The reportable findings get_evidence names as already citing a typed record (more are flagged, not listed).
+EVIDENCE_CITED_BY_LIMIT = 5
 LIST_MENTIONS_PAGE_SIZE = 25
 LIST_MENTIONS_DESCRIPTION = (
     "Page the hunt's mention pool: lines of records no normalizer read where a curated pattern's text occurs, in pool "
@@ -1156,8 +1158,15 @@ class Toolbox:
             raw_by_id = {raw["id"]: raw for raw in self.repo.raw_records(selected_raw_ids)}
             raw_records = [raw_by_id[raw_id] for raw_id in selected_raw_ids if raw_id in raw_by_id]
             raw_more = raw_start + len(raw_records) < len(raw_ids)
+            # the deterministic findings that already cite this record (through the candidate-event index): what is
+            # already reported, so the session widens from it rather than proving it again. None citing it says only
+            # that no finding cites it, never that it is benign
+            citing = self.repo.candidate_ids_for_event(self.hunt_id, event_id, ("urgent", "high", "lead"),
+                                                       EVIDENCE_CITED_BY_LIMIT + 1)
             data.append({
                 "alias": alias, "family": row["family"], "time": str(row["ts"]), "host": row["host"],
+                "cited_by_findings": [self.aliases.alias_for("F", item) for item in citing[:EVIDENCE_CITED_BY_LIMIT]],
+                "cited_by_more_findings": len(citing) > EVIDENCE_CITED_BY_LIMIT,
                 "event": budget.project(row["event"], f"get_evidence evidence={alias}"),
                 "raw_records": [{
                     "target": raw["target"], "native_id": raw["native_id"],

@@ -21,7 +21,7 @@ from romulus.agent.admission import (
     typed_alias_arguments,
 )
 from romulus.agent.assessment import SECRET_GUARD_SUMMARY, assess_output, run_assessment, template_assessment
-from romulus.agent.clusters import ClusterView, hunt_clusters, unexplained_clusters
+from romulus.agent.clusters import ClusterView, hunt_clusters, hypothesis_leads, unexplained_clusters
 from romulus.agent.context import SessionResults, issued_in, session_tag, strip_reasoning
 from romulus.agent.dossier import build_dossier, mention_hint, mention_seed
 from romulus.agent.grounding import triage_context
@@ -42,6 +42,7 @@ from romulus.agent.provider import (
 from romulus.agent.provider.base import PROVIDER_STATE, ToolCall, estimate_tokens, redact_value
 from romulus.agent.provider.budget import AgentStopped
 from romulus.agent.refusals import bounded, reason, tool_result_reasons
+from romulus.agent.safety import injection_flags
 from romulus.agent.toolbox import Toolbox
 from romulus.agent.triage import latest_summary
 from romulus.config import Settings, redact_text
@@ -525,7 +526,7 @@ def _controller_open_hypotheses(settings, repo, hunt_id: str, session_id: str, a
 
 
 def _hypothesis_context(repo: Repo, hunt_id: str, hypothesis: dict, summaries: list[dict],
-                        *, owner_token=None) -> dict:
+                        *, owner_token=None, view: ClusterView | None = None) -> dict:
     from romulus.agent.aliases import AliasBook
     aliases = AliasBook(repo, hunt_id, owner_token=owner_token)
     cites = repo.agent_hypothesis_cites(hypothesis_id=hypothesis["id"])
@@ -538,6 +539,14 @@ def _hypothesis_context(repo: Repo, hunt_id: str, hypothesis: dict, summaries: l
             "techniques": hypothesis["techniques"], "entities": entities, "status": hypothesis["status"],
             "confidence": hypothesis["confidence"], "questions": hypothesis["questions"], "cites": mapped_cites,
             "previous_sessions": summaries}
+    # where to look: the hypothesis's clusters, what of them is already reported, and their findings no hypothesis
+    # cites yet, so a session widens from known findings instead of proving them again
+    leads = hypothesis_leads(repo, hunt_id, hypothesis["id"], aliases,
+                             view if view is not None else hunt_clusters(repo, hunt_id))
+    if leads is not None:
+        if flags := injection_flags(leads, "$.leads"):
+            leads["safety_flags"] = flags
+        body["leads"] = leads
     return body
 
 
@@ -725,11 +734,11 @@ def _deterministic_tool_summary(calls: list[tuple[str, str]], changes: list[dict
 
 
 def _investigate_messages(repo: Repo, hunt_id: str, hypothesis: dict, prompts: dict[str, str], *,
-                          owner_token=None) -> tuple[dict, list[dict]]:
+                          owner_token=None, view: ClusterView | None = None) -> tuple[dict, list[dict]]:
     """An investigate session's first messages: the system and investigate prompts, the dossier header, and the
     hypothesis card with its cites and the summaries of its earlier sessions."""
     context = _hypothesis_context(repo, hunt_id, hypothesis, _summaries(repo, hunt_id, hypothesis["id"]),
-                                  owner_token=owner_token)
+                                  owner_token=owner_token, view=view)
     dossier = build_dossier(repo, hunt_id, token_budget=1000, owner_token=owner_token)
     opening = {"dossier_header": {"header": dossier.payload.get("header"), "scope": dossier.payload.get("scope")},
                "hypothesis": context}
@@ -754,9 +763,10 @@ def _cited_hosts(repo: Repo, hunt_id: str, hypothesis_id: str) -> list[str]:
 
 
 def first_investigate_prompt(repo: Repo, hunt_id: str, hypothesis: dict, prompts: dict[str, str], tools: list, *,
-                             owner_token=None) -> tuple[int, ChatRequest]:
+                             owner_token=None, view: ClusterView | None = None) -> tuple[int, ChatRequest]:
     """The estimated tokens of a hypothesis's next session's first prompt, built as the session builds it."""
-    _context, messages = _investigate_messages(repo, hunt_id, hypothesis, prompts, owner_token=owner_token)
+    _context, messages = _investigate_messages(repo, hunt_id, hypothesis, prompts, owner_token=owner_token,
+                                               view=view)
     request = ChatRequest(messages=messages, tools=tools, tool_choice="auto")
     return estimate_tokens(request.prompt_text()), request
 
@@ -764,7 +774,7 @@ def first_investigate_prompt(repo: Repo, hunt_id: str, hypothesis: dict, prompts
 def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_gate: _BudgetGate,
                  toolbox_factory: Callable[[str], Toolbox], prompts: dict[str, str],
                  *, purpose: str, hypothesis: dict | None = None, owner_token=None,
-                 heartbeat: Callable[[], None] | None = None) -> dict:
+                 heartbeat: Callable[[], None] | None = None, view: ClusterView | None = None) -> dict:
     session_id = _id("as")
     now = utcnow()
     hypothesis_id = hypothesis["id"] if hypothesis else None
@@ -921,7 +931,8 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
             call_limit = _tool_call_allowance(settings, reads=len(dossier.pages) - 1)
         else:
             call_limit = _tool_call_allowance(settings, reads=_cited_findings(repo, hypothesis_id))
-            context, messages = _investigate_messages(repo, hunt_id, hypothesis, prompts, owner_token=owner_token)
+            context, messages = _investigate_messages(repo, hunt_id, hypothesis, prompts, owner_token=owner_token,
+                                                      view=view)
             admission.issue_aliases(context, source="hypothesis")
         while True:
             # older results the model has seen are stubbed in one batch, before the prompt is sized and its cached
@@ -1507,6 +1518,16 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
 
     clusters: list[ClusterView] = []
 
+    def cluster_view() -> ClusterView | None:
+        """The hunt's clusters, built once per run (the deterministic findings do not change during it)."""
+        if not reportable_count:
+            return None
+        if not clusters:
+            clusters.append(hunt_clusters(repo, hunt_id))
+            if clusters[0].partial:
+                limits_hit.add(clusters[0].partial["reason"])
+        return clusters[0]
+
     def top_up() -> int:
         """Open hypotheses for unexplained clusters (the controller's, under the latest orient session), when the
         hunt has reportable findings and orient has run; the cluster graph is built once per run."""
@@ -1516,15 +1537,11 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
         pending = _pending_cluster_hypotheses(settings, repo, hunt_id)
         if pending >= min(settings.agent_max_initial_hypotheses, settings.agent_max_hypotheses):
             return 0
-        if not clusters:
-            clusters.append(hunt_clusters(repo, hunt_id))
         admission = AgentAdmission(settings, repo, hunt_id, orient_rows[-1]["id"], owner_token=owner_token,
                                    purpose="orient")
         opened = _controller_open_hypotheses(settings, repo, hunt_id, orient_rows[-1]["id"], admission,
-                                             view=clusters[0])
+                                             view=cluster_view())
         limits_hit.update(admission.limits_hit)
-        if clusters and clusters[0].partial:
-            limits_hit.add(clusters[0].partial["reason"])
         if opened:
             log.info("agent controller opened %d hypotheses for unexplained clusters of hunt %s", opened, hunt_id)
         return opened
@@ -1547,7 +1564,7 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
         room, firsts, no_room = [], [], None
         for hypothesis in batch[:settings.agent_concurrency]:
             prompt, request = first_investigate_prompt(repo, hunt_id, hypothesis, prompts, probe_tools,
-                                                       owner_token=owner_token)
+                                                       owner_token=owner_token, view=cluster_view())
             output = provider.output_limit(request)
             refused = gate.room_for(prompt, output, "investigate", also=firsts)
             if refused is not None:
@@ -1565,7 +1582,7 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
         with ThreadPoolExecutor(max_workers=len(room), thread_name_prefix="romulus-agent") as pool:
             futures = {pool.submit(_run_session, settings, repo, hunt_id, provider, gate, toolbox_factory, prompts,
                                    purpose="investigate", hypothesis=hypothesis, owner_token=owner_token,
-                                   heartbeat=heartbeat): hypothesis
+                                   heartbeat=heartbeat, view=cluster_view()): hypothesis
                        for hypothesis in room}
             for future in as_completed(futures):
                 try:
