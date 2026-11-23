@@ -35,6 +35,8 @@ _SUPPORT = ("Aliases of supporting findings (F...), evidence (E...), raw records
             "an action), expansion links (L...) or agent links (A...).")
 # what a cited alias kind is stored as in a hypothesis's cites
 _CITE_KINDS = {"F": "finding", "E": "evidence", "L": "link", "A": "agent_link", "Q": "raw_record"}
+# The alias kinds a hypothesis's ATT&CK techniques may rest on: typed evidence, never a raw record or an agent link.
+TYPED_CITE_ALIASES = frozenset({"F", "E", "L"})
 RAW_ONLY_NOTE = ("rests only on raw records, not normalized: no typed fields were extracted and no detection rule ran "
                  "on them; they show that records with this text exist, not that an action happened")
 RAW_ALSO_NOTE = ("also cites raw records, not normalized: they show that records with this text exist, not that an "
@@ -442,6 +444,13 @@ class AgentAdmission:
             techniques = self._check_techniques(args.techniques)
             entities = self._resolve_many(args.entities, {"N"}, "entities[]")
             supporting = self._resolve_many(args.supporting, {"F", "E", "L", "A", "Q"}, "supporting[]")
+            # an ATT&CK technique on a hypothesis rests on typed evidence: a finding, a typed event or an expansion
+            # link. A mention-led hypothesis (no cite, or raw records and agent links only) names none, so text a
+            # record contains can never put a technique on the hunt's hypotheses
+            if techniques and not any(kind in TYPED_CITE_ALIASES for kind, _target in supporting):
+                raise Refusal("techniques need at least one typed supporting citation (a finding F, evidence E or "
+                              "link L); open the hypothesis without techniques, or cite typed evidence",
+                              "techniques", "needs_typed_citation")
             statement = args.statement.strip()
             support_key = {(kind, target) for kind, target in supporting}
             for existing in self.repo.agent_hypotheses(self.hunt_id):
