@@ -338,6 +338,22 @@ _CREDENTIAL_CASES = {
         "_path": "custom_auth", "uid": "C1", "id.orig_h": "10.0.0.5", "argument": _SECRET, "username": "bob"})}},
     "zeek unknown log filter column": {"event": {"original": json.dumps({
         "_path": "custom_dir", "uid": "C1", "id.orig_h": "10.0.0.5", "filter": f"(userPassword={_SECRET})"})}},
+    "ecs request body": {"message": "POST /login", "http": {"request": {"body": {
+        "content": f"user=bob&password={_SECRET}"}}}},
+    "ecs request body flat": {"message": "POST /login", "http.request.body.content": f"pw={_SECRET}"},
+    "ecs url query parameter": {"message": "GET", "url": {"original": f"/a?password={_SECRET}&x=1",
+                                                          "query": f"token={_SECRET}&x=1"}},
+    "ecs json body and url in original": {"event": {"original": json.dumps({
+        "@timestamp": "t", "http": {"request": {"body": {"content": f"password={_SECRET}"}}},
+        "url": {"full": f"http://bob:{_SECRET}@h/x?key={_SECRET}"}})}},
+    "message userinfo": {"message": f"curl http://bob:{_SECRET}@10.0.0.9/x | sh"},
+    "message credential parameter": {"message": f"GET /api?api_key={_SECRET} 200"},
+    "eve body short name": {"event": {"original": json.dumps({
+        "event_type": "http", "src_ip": "1.2.3.4", "flow_id": 1,
+        "http": {"url": "/x", "http_request_body_printable": f"username=bob&pw={_SECRET}"}})}},
+    "eve payload PASS line": {"event": {"original": json.dumps({
+        "event_type": "alert", "src_ip": "1.2.3.4", "flow_id": 1, "alert": {"signature": "x"},
+        "payload_printable": f"USER bob\\r\\nPASS {_SECRET}"})}},
     "zeek uri userinfo": {"event": {"original": json.dumps({"_path": "http", "uid": "C1", "id.orig_h": "10.0.0.5",
                                                             "uri": f"http://bob:{_SECRET}@x/y"})}},
     "zeek in message": {"message": json.dumps({"_path": "irc", "uid": "C1", "id.orig_h": "10.0.0.5",

@@ -31,8 +31,10 @@ Credentials. Before selection, a Zeek or EVE object held in `message` or `event.
 scrubber whatever recognised it (`scrub_source`), and the record the mention keeps is that scrubbed one. Never
 selected: the argument of a credential command (the producers' own sets: FTP PASS/ACCT/ADAT, IRC PASS/OPER/
 AUTHENTICATE/JOIN keys, Redis AUTH and the like), the argument columns of a Zeek log no table describes, the value of
-an HTTP/2 header whose name is a credential's (Authorization, Cookie, tokens, keys), a message body; and every
-selected text loses a URI's userinfo and a SIP URI's password.
+an HTTP/2 header whose name is a credential's (Authorization, Cookie, tokens, keys), a message body (ECS or EVE);
+every selected text, and the kept message, raw line and ECS URL, lose a URI's userinfo, a SIP URI's password and the
+value of a parameter named as a credential (password=, token=, key=...); a kept body or payload carrying a credential
+cue is masked.
 
 A JSON record of no family above, a JSON array and any other XML document are not scanned (counted, with the reason). A family
 record that holds none of its family's fields has no free text to scan: it is counted, and it is not a coverage gap.
@@ -83,7 +85,7 @@ ECS_FIELDS = (
     "process.command_line", "process.args", "process.title", "process.executable", "process.name",
     "process.parent.command_line", "process.parent.executable", "process.parent.args",
     "url.original", "url.full", "url.path", "url.query",
-    "user_agent.original", "http.request.referrer", "http.request.body.content",
+    "user_agent.original", "http.request.referrer",
     "dns.question.name", "file.path", "file.target_path", "registry.data.strings",
     "tls.client.server_name", "email.subject", "email.attachments.file.name",
     "powershell.file.script_block_text", "powershell.command.value", "powershell.command.invocation_details.value",
@@ -370,7 +372,7 @@ def _decoded(value: str) -> list[str]:
     except UnicodeDecodeError:
         return [value, raw.decode("utf-8", errors="replace")]
     if all(char.isprintable() or char in "\x00\t\n" for char in text):
-        return [text]
+        return [text] if len(value) > 16 else [text, value]     # a short value may be hex-looking text as written
     return [value, text]
 
 
@@ -398,7 +400,14 @@ _ZEEK_ARGUMENTS = ("arg", "value", "addl", "argument", "filter")
 _CREDENTIAL_HEADER_WORDS = ("auth", "cookie", "token", "secret", "pass", "key", "session", "credential", "signature")
 
 
-_BODY_CUE = re.compile(r"pass|pwd|token|secret|auth|key=|session", re.IGNORECASE)
+# A body or payload that may carry a credential (a form field, an FTP/POP/IMAP PASS line, a token): masked when kept
+_BODY_CUE = re.compile(r"pass|pwd|\bpw\b|token|secret|auth|key=|session|cred|login", re.IGNORECASE)
+# A query parameter or key=value pair whose name is a credential's: its value is masked wherever text is selected or
+# kept (a URL's query, a logged command line)
+_CREDENTIAL_PARAM = re.compile(
+    r"(?:(?<=[?&;\s])|^)((?:password|passwd|pwd|pass|pw|passphrase|token|access_token|refresh_token|id_token|"
+    r"api_?key|apikey|key|secret|client_secret|auth|authorization|session|sessionid|sid|sig|signature|"
+    r"credentials?)=)([^&;#\s]+)", re.IGNORECASE)
 
 
 def _is_eve(obj: dict) -> bool:
@@ -449,7 +458,10 @@ def _http2_headers(obj: dict, texts, seen, prefix: str) -> None:
 
 
 def mask_credentials(text: str) -> str:
-    """A selected text without the credentials free text can carry: a URI's userinfo, a SIP URI's password."""
+    """A text without the credentials free text can carry: the value of a parameter named as a credential
+    (password=, token=, key=, session=...), a URI's userinfo, a SIP URI's password."""
+    if "=" in text:
+        text = _CREDENTIAL_PARAM.sub(lambda m: m.group(1) + REDACTED, text)
     if "@" not in text:
         return text
     text, _removed, _password = strip_uri_userinfo(text)
@@ -477,8 +489,9 @@ def _scrubbed_json(obj: dict, source: dict) -> dict | None:
                     header["value"] = REDACTED
                     changed = True
         for block, key in (("http", "http_request_body_printable"), ("http", "http_request_body"),
-                           ("http", "http_response_body_printable"), ("http", "http_response_body")):
-            body = out.get(block) if isinstance(out.get(block), dict) else {}
+                           ("http", "http_response_body_printable"), ("http", "http_response_body"),
+                           (None, "payload_printable")):
+            body = out if block is None else out.get(block) if isinstance(out.get(block), dict) else {}
             value = body.get(key)
             if isinstance(value, str) and _BODY_CUE.search(value):
                 body[key] = REDACTED
@@ -534,7 +547,13 @@ def scrub_source(source: dict) -> dict:
             obj = json.loads(value)
         except ValueError:
             continue
-        if not isinstance(obj, dict) or (scrubbed := _scrubbed_json(obj, source)) is None:
+        if not isinstance(obj, dict):
+            continue
+        scrubbed = _scrubbed_json(obj, source)
+        if scrubbed is None and _ecs_credentials(obj):
+            _ecs_credentials(obj, mask=True)
+            scrubbed = obj
+        if scrubbed is None:
             continue
         text = json.dumps(scrubbed, ensure_ascii=False)
         if out is source:
@@ -543,19 +562,55 @@ def scrub_source(source: dict) -> dict:
             out[name] = text
         else:
             out["event"]["original"] = text
-    # an ECS URL's userinfo and password
-    url = out.get("url") if isinstance(out.get("url"), dict) else None
-    if url is not None:
-        masked = {key: strip_uri_userinfo(url[key])[0] for key in ("full", "original")
-                  if isinstance(url.get(key), str) and "@" in url[key]}
-        masked = {key: value for key, value in masked.items() if value != url[key]}
-        if url.get("password") not in (None, "", REDACTED):
-            masked["password"] = REDACTED
-        if masked:
+    # a plain message line and raw line, an ECS URL and query, and an ECS request body: their credentials
+    for name in ("message", "event.original"):
+        flat = name in out
+        value = out.get(name) if flat else _get(out, name)
+        if isinstance(value, str) and value.lstrip()[:1] != "{" and (masked := mask_credentials(value)) != value:
             if out is source:
                 out = copy.deepcopy(source)
-            out["url"].update(masked)
+            if flat or "." not in name:
+                out[name] = masked
+            else:
+                out["event"]["original"] = masked
+    if _ecs_credentials(out):
+        out = copy.deepcopy(source) if out is source else out
+        _ecs_credentials(out, mask=True)
     return out
+
+
+def _ecs_credentials(doc: dict, *, mask: bool = False) -> bool:
+    """Whether an ECS document's URL (userinfo, credential parameters, password) or request body (a credential cue)
+    holds a credential, its fields nested or flat; with `mask`, mask them in place."""
+    found = False
+    for name in ("url.full", "url.original", "url.query", "url.path", "url.password", "http.request.body.content"):
+        value = _get(doc, name)
+        if not isinstance(value, str) or not value or value == REDACTED:
+            continue
+        if name == "url.password" or (name == "http.request.body.content" and _BODY_CUE.search(value)):
+            masked = REDACTED
+        elif name.startswith("url."):
+            masked = mask_credentials(value)
+        else:
+            continue
+        if masked == value:
+            continue
+        found = True
+        if mask:
+            _set(doc, name, masked)
+    return found
+
+
+def _set(doc: dict, name: str, value) -> None:
+    """Set a dotted field where `_get` found it: flat, or nested."""
+    if name in doc:
+        doc[name] = value
+        return
+    node = doc
+    parts = name.split(".")
+    for part in parts[:-1]:
+        node = node[part]
+    node[parts[-1]] = value
 
 
 def _json_texts(obj: dict, source: dict, windows: bool, field: str = "event.original") -> Selection:
