@@ -326,14 +326,20 @@ def audit_texts(lines: list[str], only: tuple[str, ...] | None = None) -> Select
                               reason=reason))
 
 
-def _decoded(value: str) -> str:
-    """A shipper's audit value, decoded when it is still auditd's hex encoding."""
-    if len(value) % 2 == 0 and value and all(char in "0123456789ABCDEFabcdef" for char in value):
-        try:
-            return bytes.fromhex(value).decode("utf-8", errors="replace")
-        except ValueError:
-            return value
-    return value
+def _decoded(value: str) -> list[str]:
+    """A shipper's audit value as it may be meant: decoded when it is still auditd's hex encoding and decodes to text;
+    both the value and its decoding when an even run of hex digits does not decode to text (an already decoded value
+    such as "cafe" stays readable)."""
+    if not (len(value) % 2 == 0 and value and all(char in "0123456789ABCDEFabcdef" for char in value)):
+        return [value]
+    raw = bytes.fromhex(value)
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return [value, raw.decode("utf-8", errors="replace")]
+    if all(char.isprintable() or char in "\x00\t\n" for char in text):
+        return [text]
+    return [value, text]
 
 
 def _shipper_audit(source: dict, only: tuple[str, ...]) -> list[tuple[str, str]]:
@@ -344,7 +350,8 @@ def _shipper_audit(source: dict, only: tuple[str, ...]) -> list[tuple[str, str]]
     for key in only:
         names = [f"auditd.log.{key}", f"auditd.data.{key}", *(("process.title",) if key == "proctitle" else ())]
         for name in names:
-            values = [_decoded(value).replace("\x00", " ").strip() for value in _strings(_get(source, name))]
+            values = [form.replace("\x00", " ").strip() for value in _strings(_get(source, name))
+                      for form in _decoded(value)]
             _add(texts, name, [value for value in values if value], seen)
     return texts
 

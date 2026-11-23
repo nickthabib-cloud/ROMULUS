@@ -383,6 +383,15 @@ def test_a_socket_groups_process_title_is_offered_in_every_shipper_shape(shape):
     assert len(titles) == 1 and titles[0].replace("^@", " ") == "curl http://203.0.113.5/"
 
 
+def test_a_shipper_value_that_only_looks_like_hex_is_kept_as_written():
+    texts = [text for _path, text in select_texts({"auditd": {"data": {"name": "cafe"}}, "message": "x"}).texts]
+    assert "cafe" in texts
+    titles = select_texts({"auditd": {"log": {"proctitle": "deadbeef"}}}, only=("proctitle",)).texts
+    assert ("auditd.log.proctitle", "deadbeef") in titles
+    encoded = select_texts({"auditd": {"log": {"proctitle": _hex("curl\x00http://x/MIMIKATZ")}}}, only=("proctitle",))
+    assert encoded.texts == [("auditd.log.proctitle", "curl http://x/MIMIKATZ")]
+
+
 def test_an_audit_record_that_does_not_parse_is_offered_as_plain_text():
     from romulus.evidence.normalize import normalize_hits
     broken = _audit_hit("b1", 'type=SYSCALL msg=audit(1731938400.0:5): comm="x" exe="/tmp/MIMIKATZ', 1731938400.0)
