@@ -8,14 +8,15 @@ citation can only resolve from what the rule kept.
 """
 from __future__ import annotations
 
+import base64
 import json
-import zlib
+import os
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from romulus.detect import service_catalog as sc
-from romulus.detect.bounded import StateBudget, StateExhausted
+from romulus.detect.bounded import StateBudget
 from romulus.detect.netdef import SiteNetworks, current, install
 from romulus.evidence.typed import RawRef, TypedEvent, fv
 from romulus.hunt import sweep as sw
@@ -226,23 +227,78 @@ def test_a_copy_over_its_bound_is_not_kept_and_the_finding_says_its_body_is_fetc
     assert "service_raw_copies" in rule.__dict__.get("_cov_notes", {}) and not rule.limits
 
 
-def test_a_raw_copy_never_costs_a_source_its_membership_row(rule, monkeypatch):
-    """A write refused for its bytes is retried without the copy before the source is refused."""
-    calls = {"n": 0}
-    original = sc.ServiceCatalog._write_witness
+def incompressible(n, size=2048):
+    """A raw record whose kept copy is about its own size on disk (random bytes do not compress)."""
+    return {"n": n, "pad": base64.b64encode(os.urandom(size)).decode()}
 
-    def refuse_copies(spill, key, rank, witness):
-        calls["n"] += 1
-        if witness[1] is not None:
-            raise StateExhausted("synthetic: no room for a citation copy")
-        return original(spill, key, rank, witness)
 
-    monkeypatch.setattr(sc.ServiceCatalog, "_write_witness", staticmethod(refuse_copies))
-    matches = drive(rule, [[event(n, f"10.0.0.{n}") for n in range(1, 6)]])
+def drive_budgeted(directory, sources, disk_total, *, copies=True, rounds=2):
+    """Drive the rule over `rounds` records per internal source with a real spill and a small hunt byte total."""
+    rule = sc.ServiceCatalog()
+    rule.spill_dir = directory
+    rule.budget = StateBudget(directory, disk_total=disk_total, reserve=0)
+    if not copies:
+        rule._raw_copy = lambda event: None
+    n = 0
+    try:
+        for _round in range(rounds):
+            for index in range(sources):
+                n += 1
+                batch = [event(n, f"10.{index // 62500}.{index // 250 % 250}.{index % 250 + 1}")]
+                rule.bind_raw({ref.key: incompressible(n) for ref in batch[0].raw}, "idx")
+                for _ in rule.consume(batch):
+                    pass
+        rule.bind_raw({})
+        matches = []
+        for match in rule.finalize():
+            match.fleet_hosts = tuple(match.fleet_hosts) if match.group_key.endswith("|fleet") else ()
+            matches.append(match)
+        rows = rule._spill.db.execute(f"SELECT count(*) FROM {sc.WitnessCopies.TABLE}").fetchone()[0]
+        return rule, matches, rows
+    finally:
+        rule.close_spill()
+
+
+@pytest.mark.parametrize("sources,disk_total", [(2_000, 2 * 2**20), (3_000, 1_200_000)])
+def test_raw_copies_never_cost_membership_on_a_real_spill(tmp_path, networks, sources, disk_total):
+    """Incompressible copies on a small hunt byte total: membership, counts and limits are exactly those of a run
+    that keeps no copy at all. Copies give way to detection state; their witnesses keep their native references."""
+    install(SiteNetworks.from_lists(["10.0.0.0/8"]))
+    without, plain, _ = drive_budgeted(tmp_path / "without", sources, disk_total, copies=False)
+    kept, matches, _rows = drive_budgeted(tmp_path / "with", sources, disk_total)
     fleet = next(m for m in matches if m.group_key == "ngrok|fleet")
-    assert fleet.fleet_host_count == 5 and fleet.fleet_hosts_complete
-    assert rule.evaluated == 5 and not rule.capped and "service_state" not in rule.limits
-    assert "service_raw_copies" in rule.__dict__.get("_cov_notes", {}) and calls["n"] == 10
+    baseline = next(m for m in plain if m.group_key == "ngrok|fleet")
+    assert (fleet.fleet_host_count, fleet.fleet_hosts_complete, len(fleet.fleet_hosts)) == (
+        baseline.fleet_host_count, baseline.fleet_hosts_complete, len(baseline.fleet_hosts))
+    assert (kept.evaluated, kept.capped, sorted(kept.limits)) == (without.evaluated, without.capped,
+                                                                   sorted(without.limits))
+    notes = kept.__dict__.get("_cov_notes", {})
+    assert "service_raw_copies" in notes and not kept.budget.broken
+    # every witness keeps its native reference and the compact mark, so one without a copy is fetched by id
+    for match in matches:
+        assert all(e.raw and COMPACT_CITATION_NOTE in e.caveats for e in match.events)
+        assert set(match.raw_copies) <= {ref.key for e in match.events for ref in e.raw}
+
+
+def test_every_source_fits_while_copies_give_way(tmp_path, networks):
+    """Room for every membership row but not for every copy: all sources counted, the copies that fit kept."""
+    install(SiteNetworks.from_lists(["10.0.0.0/8"]))
+    kept, matches, rows = drive_budgeted(tmp_path, 2_000, 2 * 2**20)
+    fleet = next(m for m in matches if m.group_key == "ngrok|fleet")
+    assert fleet.fleet_host_count == 2_000 and fleet.fleet_hosts_complete and not kept.limits
+    assert rows > 0 and (kept.copies.evicted > 0 or kept._raw_unkept > 0)
+
+
+def test_replaced_witnesses_release_their_copies(rule, tmp_path):
+    rule.spill_dir = tmp_path
+    batches = [[event(n, "10.0.0.1")] for n in range(1, 41)] + [[event(n, "10.0.0.2")] for n in range(41, 61)]
+    for batch in batches:
+        rule.bind_raw(raw_for(batch), "idx")
+        list(rule.consume(batch))
+    kept = sorted(row[0] for row in rule._spill.db.execute(f"SELECT id FROM {sc.WitnessCopies.TABLE}"))
+    referenced = sorted({ident for row in rule._spill.db.execute(
+        "SELECT first_raw, last_raw FROM service_groups") for ident in row})
+    assert kept == referenced and len(kept) == 4         # a first and a last per source, nothing superseded
 
 
 def test_live_findings_keep_the_partition_copy_even_when_the_row_cannot_be_written(rule, tmp_path):
@@ -275,8 +331,7 @@ def test_kept_copies_live_on_disk_not_in_memory_at_20k_sources(tmp_path, network
             for index in range(rows):
                 batch = [event(index, str(ip_address(0x0A000000 + index + 1)))]
                 # incompressible padding: the kept copy is about its raw size on disk
-                rule.bind_raw({ref.key: {"n": ref.native_id, "pad": zlib.crc32(str(index).encode()).to_bytes(4, "big").hex() * 256}
-                               for ref in batch[0].raw}, "idx")
+                rule.bind_raw({ref.key: incompressible(ref.native_id, 1536) for ref in batch[0].raw}, "idx")
                 for _ in rule.consume(batch):
                     pass
             kept = 0
