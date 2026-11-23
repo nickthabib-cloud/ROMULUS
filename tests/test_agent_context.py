@@ -159,6 +159,7 @@ def _is_prefix(before: list[dict], after: list[dict]) -> bool:
 def test_prompts_stay_bounded_across_a_forty_call_session_with_large_query_results(tmp_path, monkeypatch):
     # before: no compaction (the threshold never reached), as the session ran until now
     monkeypatch.setattr(context, "COMPACT_AFTER_TOKENS", 10 ** 12)
+    monkeypatch.setattr(context, "PROMPT_COMPACT_TOKENS", 10 ** 12)
     _repo, _provider, before_outcome, before, *_ = _run(tmp_path / "before")
     monkeypatch.undo()
     _repo, provider, outcome, after, *_ = _run(tmp_path / "after")
@@ -173,7 +174,87 @@ def test_prompts_stay_bounded_across_a_forty_call_session_with_large_query_resul
     assert outcome["context"]["compactions"] >= 3
     last = prompt_composition(provider.requests[-1].messages, provider.requests[-1].tools)
     assert last["stubs"] > 0 and last["tool_results"].get("query_source", 0) <= (
-        context.COMPACT_AFTER_TOKENS + context.KEEP_FULL_RESULTS * 5_000)
+        context.COMPACT_AFTER_TOKENS + (context.KEEP_FULL_RESULTS + 2) * 5_000)
+
+
+def _weighted_prompt_tokens(requests) -> float:
+    """What a session's prompts cost at the prompt-cache weights the token budget uses (read 0.1, written 1.25): each
+    request's messages shared with the previous request are read from the cache, the rest is written to it. The tool
+    definitions and system prompt are the cached prefix every call reads."""
+    total = 0.0
+    previous: list = []
+    for request in requests:
+        messages = request.messages
+        shared = 0
+        while shared < min(len(previous), len(messages)) and previous[shared] == messages[shared]:
+            shared += 1
+        whole = estimate_tokens(request.prompt_text())
+        fresh = estimate_tokens(json.dumps(messages[shared:], sort_keys=True, default=str)) if previous else (
+            estimate_tokens(json.dumps(messages, sort_keys=True, default=str)))
+        total += 0.1 * (whole - fresh) + 1.25 * fresh
+        previous = messages
+    return total
+
+
+def test_keeping_fewer_results_whole_costs_less_at_the_cache_weights_and_keeps_prompts_lower(tmp_path, monkeypatch):
+    # before: the four newest results kept whole at every compaction, and no prompt ceiling
+    monkeypatch.setattr(context, "KEEP_FULL_RESULTS", 4)
+    monkeypatch.setattr(context, "PROMPT_COMPACT_TOKENS", 10 ** 12)
+    _repo, before, before_outcome, before_sizes, *_ = _run(tmp_path / "before")
+    monkeypatch.undo()
+    _repo, after, outcome, after_sizes, *_ = _run(tmp_path / "after")
+    assert before_outcome["state"] == outcome["state"] == "finished"
+    old, new = _weighted_prompt_tokens(before.requests), _weighted_prompt_tokens(after.requests)
+    # the same work (the same calls and results) for fewer budget tokens: each compaction rewrites less
+    assert len(before.requests) == len(after.requests)
+    assert new < 0.95 * old
+    assert max(after_sizes) < max(before_sizes)
+    assert max(after_sizes) < context.PROMPT_COMPACT_TOKENS
+
+
+def test_a_prompt_at_the_ceiling_is_compacted_below_the_threshold(tmp_path, monkeypatch):
+    monkeypatch.setattr(context, "COMPACT_AFTER_TOKENS", 10 ** 12)
+    monkeypatch.setattr(context, "PROMPT_COMPACT_TOKENS", 30_000)
+    _repo, provider, outcome, sizes, *_ = _run(tmp_path)
+    assert outcome["state"] == "finished"
+    assert outcome["context"]["compactions"] >= 2
+    # every prompt after the first compaction stays near the ceiling: it never grows a result per call past it
+    assert max(sizes) < 30_000 + (context.KEEP_FULL_RESULTS + 2) * 5_000
+    results = SessionResults(_settings(tmp_path / "unit"))
+    messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"},
+                {"role": "assistant", "content": None, "tool_calls": []}]
+    for n in range(1, 5):
+        handle, content = results.enter(n, "query_source", {}, _query_result(n, "E1"), {"E1"})
+        messages.append({"role": "tool", "tool_call_id": f"c{n}", "content": content})
+        results.track(len(messages) - 1, handle)
+    messages.append({"role": "assistant", "content": None, "tool_calls": []})
+    # below both lines nothing changes; at the prompt ceiling the stale results are stubbed in one batch
+    assert results.compact(messages, prompt_tokens=29_999) == 0
+    assert results.compact(messages, prompt_tokens=30_000) == 4 - context.KEEP_FULL_RESULTS
+    results.close()
+
+
+def test_a_ceiling_below_what_cannot_be_compacted_never_compacts_on_every_call(tmp_path, monkeypatch):
+    # every prompt is past the ceiling (as when the model's own turns alone fill it): a compaction still needs the
+    # minimum to reclaim, so it runs in batches, never once per newly stale result
+    monkeypatch.setattr(context, "COMPACT_AFTER_TOKENS", 10 ** 12)
+    monkeypatch.setattr(context, "PROMPT_COMPACT_TOKENS", 1)
+    _repo, _provider, outcome, _sizes, *_ = _run(tmp_path)
+    compacted = outcome["context"]
+    assert outcome["state"] == "finished"
+    assert 1 <= compacted["compactions"] <= CALLS // 2
+    assert compacted["results_compacted"] >= 2 * compacted["compactions"]
+    results = SessionResults(_settings(tmp_path / "unit"))
+    messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"},
+                {"role": "assistant", "content": None, "tool_calls": []}]
+    for n in range(1, 4):
+        handle, content = results.enter(n, "query_source", {}, _query_result(n, "E1"), {"E1"})
+        messages.append({"role": "tool", "tool_call_id": f"c{n}", "content": content})
+        results.track(len(messages) - 1, handle)
+    messages.append({"role": "assistant", "content": None, "tool_calls": []})
+    # one stale result (under the minimum) past the ceiling: left as it is
+    assert results.compact(messages, prompt_tokens=10 ** 9) == 0
+    results.close()
 
 
 def test_the_profile_script_reads_each_calls_prompt_and_cache_use_from_the_store(tmp_path):
@@ -536,12 +617,12 @@ def test_the_compaction_threshold_is_at_most_a_quarter_of_a_small_context(tmp_pa
     results = SessionResults(_settings(tmp_path), context_tokens=32_000)
     messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"},
                 {"role": "assistant", "content": None, "tool_calls": []}]
-    for n in range(1, 11):     # ten paged results of about 2,000 tokens: 12,000 stale tokens past the kept four
+    for n in range(1, 11):     # ten paged results of about 2,000 tokens: 16,000 stale tokens past the kept two
         handle, content = results.enter(n, "query_source", {}, _query_result(n, "E1"), {"E1"})
         messages.append({"role": "tool", "tool_call_id": f"c{n}", "content": content})
         results.track(len(messages) - 1, handle)
     messages.append({"role": "assistant", "content": None, "tool_calls": []})
-    assert results.compact(messages) == 6
+    assert results.compact(messages) == 8
     results.close()
 
 

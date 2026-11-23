@@ -895,7 +895,8 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
             # older results the model has seen are stubbed in one batch, before the prompt is sized and its cached
             # prefix checked: a compacted conversation no longer extends the previous request, so its prefix is not
             # counted as cached, and between compactions the conversation only grows at its end
-            compacted = results.compact(messages, provider.without_reasoning)
+            compacted = results.compact(messages, provider.without_reasoning, prompt_tokens=estimate_tokens(
+                ChatRequest(messages=messages, tools=tools, tool_choice="auto").prompt_text()))
             if compacted:
                 log.info("agent session %s compacted %d earlier tool results", session_id, compacted)
             request = ChatRequest(messages=messages, tools=tools, tool_choice="auto")
