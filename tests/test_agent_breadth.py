@@ -140,6 +140,56 @@ def test_one_broad_hypothesis_explains_at_most_its_best_three_clusters(tmp_path)
     assert unexplained_clusters(repo, "h1") == []
 
 
+def test_a_hypothesis_keeps_explaining_the_cluster_it_opened_for_whatever_it_cites_later(tmp_path):
+    from romulus.agent.admission import AgentAdmission
+    from romulus.agent.investigate import _controller_open_hypotheses
+    from romulus.store import schema as t
+    s = Settings(home=tmp_path)
+    repo = _hunt(tmp_path, s)
+    repo.save_agent_session({"id": "as-o", "hunt_id": "h1", "hypothesis_id": None, "purpose": "orient",
+                             "state": "finished", "tool_calls": 1, "summary": "", "started_at": utcnow(),
+                             "ended_at": utcnow()})
+    admission = AgentAdmission(s, repo, "h1", "as-o", purpose="orient")
+    view = hunt_clusters(repo, "h1")
+    # the top four clusters have a hypothesis each, so only c-l1 is unexplained
+    for finding_id in ("c-h3", "c-h2", "c-h1", "c-l2"):
+        admission.create_controller_hypothesis(f"Hypothesis on {finding_id}", finding_id=finding_id,
+                                               alias=admission.aliases.alias_for("F", finding_id))
+    assert [cluster.top["id"] for cluster in unexplained_clusters(repo, "h1", view)] == ["c-l1"]
+    opened = []
+    for _round in range(3):
+        opened.append(_controller_open_hypotheses(s, repo, "h1", "as-o", admission, view=view))
+        newest = [row for row in repo.agent_hypotheses("h1") if "c-l1" in _supported(repo, row)][-1]
+        # its session cites three better clusters: the hypothesis still explains the cluster it was opened for
+        with repo.engine.begin() as connection:
+            for finding_id in ("c-h3", "c-h2", "c-h1"):
+                connection.execute(t.agent_hypothesis_cite.insert().prefix_with("OR IGNORE").values(
+                    hunt_id="h1", hypothesis_id=newest["id"], role="support", target_kind="finding",
+                    target_id=finding_id))
+        assert unexplained_clusters(repo, "h1", view) == []
+    # one controller hypothesis for c-l1, never a second identical one
+    assert opened == [1, 0, 0]
+    assert sum("c-l1" in _supported(repo, row) for row in repo.agent_hypotheses("h1")) == 1
+
+
+def test_an_orient_hypothesis_explains_what_it_opened_citing(tmp_path):
+    from romulus.agent.clusters import explanations
+    s = Settings(home=tmp_path, agent_triage="off")
+    repo = _hunt(tmp_path, s)
+    book = AliasBook(repo, "h1")
+    opens = [ToolCall("o1", "open_hypothesis", {"statement": "The lowest lead is the entry point",
+                                                "supporting": [book.alias_for("F", "c-l1")],
+                                                "questions": ["What came next?"]}, "{}"),
+             ToolCall("of", "finish_session", {"summary": "One hypothesis opened."}, "{}")]
+    _run(s, repo, _ByKind(opens, context=1_000_000))
+    orient_row = next(row for row in repo.agent_hypotheses("h1") if row["statement"].startswith("The lowest"))
+    view = hunt_clusters(repo, "h1")
+    assert explanations(repo, "h1", view)[orient_row["id"]] == [view.by_finding["c-l1"].key]
+    # the controller covered the other four, and none twice
+    assert sorted(next(iter(_supported(repo, row))) for row in _controller_rows(repo)) == [
+        "c-h1", "c-h2", "c-h3", "c-l2"]
+
+
 def test_hypotheses_citing_nothing_never_hold_a_clusters_place(tmp_path):
     s = Settings(home=tmp_path, agent_triage="off", agent_max_initial_hypotheses=3)
     repo = _hunt(tmp_path, s)

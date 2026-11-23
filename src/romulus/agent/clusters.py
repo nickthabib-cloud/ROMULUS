@@ -2,9 +2,9 @@
 
 A cluster is one incident of the deterministic incident graph over the hunt's reportable findings (urgent, high and
 lead): findings joined by observed expansion links, or one finding on its own. A cluster is explained once a
-hypothesis of the hunt, in any state, cites one of its findings, one of its links, or evidence one of its findings
-cites (through the candidate-event index), and the cluster is among the best CLUSTERS_PER_HYPOTHESIS that hypothesis's
-cites reach. Nothing a model wrote decides it: no statement, note or summary is read.
+hypothesis of the hunt, in any state, was opened citing one of its findings, one of its links, or evidence one of
+its findings cites (through the candidate-event index), and the cluster is among the best CLUSTERS_PER_HYPOTHESIS
+those opening cites reach; later cites never change it, so explanation is monotone. Nothing a model wrote decides it: no statement, note or summary is read.
 Agent findings never form or join a cluster, and mentions never define one: a mention is text a record contains, not
 an action.
 
@@ -211,32 +211,73 @@ def _bounded(value, limit: int = LEADS_TEXT_LIMIT):
     return text if len(text) <= limit else f"{text[:limit]}…"
 
 
-def explained_clusters(repo: Repo, hunt_id: str, view: ClusterView) -> set[str]:
-    """The keys of the clusters the hunt's hypotheses explain. Each hypothesis explains the clusters its cites reach
-    (findings, findings citing its evidence, a link's cluster), but at most CLUSTERS_PER_HYPOTHESIS of them, the best
-    in report order: one broad hypothesis citing every cluster must not turn the controller off for all of them."""
-    findings: dict[str, set[str]] = {}
-    events: dict[str, set[str]] = {}
+def _opening_cites(repo: Repo, hypothesis: dict) -> list[tuple[str, str]] | None:
+    """The cites a hypothesis was opened with, as (target kind, target id), from its opened event: the controller's
+    finding, or the supporting cites open_hypothesis took. None for a hypothesis whose event does not record them
+    (one opened before it did)."""
+    for event in repo.agent_hypothesis_events(hypothesis["id"]):
+        if event["kind"] != "opened":
+            continue
+        payload = event.get("payload") or {}
+        if payload.get("by") == "controller" and payload.get("finding_id"):
+            return [("finding", str(payload["finding_id"]))]
+        if isinstance(payload.get("supporting"), list):
+            return [(str(item.get("kind")), str(item.get("id"))) for item in payload["supporting"]
+                    if isinstance(item, dict)]
+        return None
+    return None
+
+
+def explanations(repo: Repo, hunt_id: str, view: ClusterView) -> dict[str, list[str]]:
+    """For each hypothesis of the hunt, the keys of the clusters it explains, best first: the clusters the cites it
+    was opened with reach (findings, findings citing its evidence, a link's cluster), at most CLUSTERS_PER_HYPOTHESIS
+    of them, the best in report order. They are fixed when it opens, so explanation is monotone: what a session cites
+    later never moves a hypothesis off the cluster it was opened for, and a cluster once explained stays explained
+    (the controller never opens a second hypothesis for it). A hypothesis whose opened event does not record its cites
+    is read from all its cites, with the same limit."""
+    cites: dict[str, list[tuple[str, str]]] = {}
     for cite in repo.agent_hypothesis_cites(hunt_id=hunt_id):
-        hypothesis, kind, target = str(cite["hypothesis_id"]), cite["target_kind"], str(cite["target_id"])
-        if kind == "finding":
-            findings.setdefault(hypothesis, set()).add(target)
-        elif kind == "evidence":
-            events.setdefault(hypothesis, set()).add(target)
-        elif kind == "link" and target in view.by_link:
-            findings.setdefault(hypothesis, set()).update(view.by_link[target].finding_ids)
+        cites.setdefault(str(cite["hypothesis_id"]), []).append((cite["target_kind"], str(cite["target_id"])))
     mapped: dict[str, list[str]] = {}
-    for hypothesis, ids in events.items():
-        for event in sorted(ids):
-            if event not in mapped:
-                mapped[event] = repo.candidate_ids_for_event(hunt_id, event, REPORTABLE_LANES,
-                                                             EVIDENCE_FINDINGS_LIMIT)
-            findings.setdefault(hypothesis, set()).update(mapped[event])
-    out: set[str] = set()
-    for ids in findings.values():
+
+    def reach(pairs: list[tuple[str, str]]) -> list[str]:
+        ids: set[str] = set()
+        for kind, target in pairs:
+            if kind == "finding":
+                ids.add(target)
+            elif kind == "evidence":
+                if target not in mapped:
+                    mapped[target] = repo.candidate_ids_for_event(hunt_id, target, REPORTABLE_LANES,
+                                                                  EVIDENCE_FINDINGS_LIMIT)
+                ids.update(mapped[target])
+            elif kind == "link" and target in view.by_link:
+                ids.update(view.by_link[target].finding_ids)
         reached = {view.by_finding[item].key: view.by_finding[item] for item in ids if item in view.by_finding}
-        best = sorted(reached.values(), key=lambda cluster: (cluster.order, cluster.key))[:CLUSTERS_PER_HYPOTHESIS]
-        out.update(cluster.key for cluster in best)
+        best = sorted(reached.values(), key=lambda cluster: (cluster.order, cluster.key))
+        return [cluster.key for cluster in best[:CLUSTERS_PER_HYPOTHESIS]]
+
+    out: dict[str, list[str]] = {}
+    for hypothesis in repo.agent_hypotheses(hunt_id):
+        opening = _opening_cites(repo, hypothesis)
+        out[hypothesis["id"]] = reach(opening if opening is not None else cites.get(hypothesis["id"], []))
+    return out
+
+
+def explained_clusters(repo: Repo, hunt_id: str, view: ClusterView) -> set[str]:
+    """The keys of the clusters any hypothesis of the hunt explains (`explanations`)."""
+    return {key for keys in explanations(repo, hunt_id, view).values() for key in keys}
+
+
+def controller_clusters(repo: Repo, hunt_id: str, view: ClusterView) -> set[str]:
+    """The keys of the clusters the controller has already opened a hypothesis for (by its opened event)."""
+    out: set[str] = set()
+    for hypothesis in repo.agent_hypotheses(hunt_id):
+        for event in repo.agent_hypothesis_events(hypothesis["id"]):
+            payload = event.get("payload") or {}
+            if event["kind"] == "opened" and payload.get("by") == "controller":
+                finding = str(payload.get("finding_id") or "")
+                if finding in view.by_finding:
+                    out.add(view.by_finding[finding].key)
     return out
 
 

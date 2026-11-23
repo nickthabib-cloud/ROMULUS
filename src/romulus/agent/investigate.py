@@ -21,7 +21,13 @@ from romulus.agent.admission import (
     typed_alias_arguments,
 )
 from romulus.agent.assessment import SECRET_GUARD_SUMMARY, assess_output, run_assessment, template_assessment
-from romulus.agent.clusters import ClusterView, hunt_clusters, hypothesis_leads, unexplained_clusters
+from romulus.agent.clusters import (
+    ClusterView,
+    controller_clusters,
+    hunt_clusters,
+    hypothesis_leads,
+    unexplained_clusters,
+)
 from romulus.agent.context import SessionResults, issued_in, session_tag, strip_reasoning
 from romulus.agent.dossier import build_dossier, mention_hint, mention_seed
 from romulus.agent.grounding import triage_context
@@ -528,7 +534,11 @@ def _controller_open_hypotheses(settings, repo, hunt_id: str, session_id: str, a
         return 0
     view = view if view is not None else hunt_clusters(repo, hunt_id)
     opened = 0
-    for cluster in unexplained_clusters(repo, hunt_id, view)[:room]:
+    # a cluster the controller already opened a hypothesis for never gets a second one (its hypothesis explains it
+    # for good: explanation is fixed by the cites a hypothesis opens with)
+    covered = controller_clusters(repo, hunt_id, view)
+    candidates = [cluster for cluster in unexplained_clusters(repo, hunt_id, view) if cluster.key not in covered]
+    for cluster in candidates[:room]:
         top = cluster.top
         incident_alias = admission.aliases.alias_for("I", cluster.key)
         statement = f"Investigate incident {incident_alias}: {top['claim']}"

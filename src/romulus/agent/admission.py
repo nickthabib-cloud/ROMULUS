@@ -473,8 +473,12 @@ class AgentAdmission:
             }
             event = {"id": _id("he"), "hunt_id": self.hunt_id, "hypothesis_id": hypothesis_id,
                      "session_id": self.session_id, "kind": "opened",
+                     # the cites it was opened with: the clusters it explains are fixed by them
+                     # (romulus.agent.clusters.explanations), whatever it cites later
                      "payload": {"by": "agent", "statement": row["statement"], "techniques": techniques,
-                                 "entity_ids": row["entity_ids"], "questions": row["questions"]},
+                                 "entity_ids": row["entity_ids"], "questions": row["questions"],
+                                 "supporting": [{"kind": _CITE_KINDS[kind], "id": value}
+                                                for kind, value in supporting]},
                      "created_at": now}
             cites = [{"hunt_id": self.hunt_id, "hypothesis_id": hypothesis_id, "role": "support",
                       "target_kind": _CITE_KINDS[kind], "target_id": value} for kind, value in supporting]
