@@ -83,6 +83,7 @@ from romulus.evidence.windows_catalog import (
 from romulus.evidence.windows_reassembly import SCRIPT_FINALIZE_BATCH_SIZE, ScriptBlockAssembler
 from romulus.evidence.zeek import ZEEK_INTERIM_SUPERSEDED, ZEEK_NORMALIZER
 from romulus.evidence.zeek_catalog import MALCOLM, SHAPES, ZEEK_LOGS, lookup_log
+from romulus.hunt.citations import AUTH_WITNESS_NOTE_PREFIX, COMPACT_CITATION_NOTE
 from romulus.hunt.controls import HuntStopped
 from romulus.hunt.mentions import MentionScanner
 from romulus.hunt.net_join_pass import rows_path
@@ -554,6 +555,23 @@ class Sweep:
             # Aggregates retain examples: stash raw copies of their retained events now.
             self._retain_aggregate_raw(pb, raw_sources)
 
+    @staticmethod
+    def _mark_uncopied(m: Match, raw_sources: dict[str, dict]) -> None:
+        """Mark compact a cited record whose raw copy is in none of the partition read, the rule's own copies and the
+        event stage (a witness an aggregate chose from an earlier partition), so publication finds the copy the hunt
+        retained or fetches its body by native id, and says so on the finding when it cannot. Unmarked, the record
+        would be cited with no raw copy at all. Events are replaced, never changed in place: a rule may hold them.
+        An authentication witness kept by reference is left to the Windows citation pass, which checks the fetched
+        body field by field; its reference records no digest, so the by-id fetch would accept any body."""
+        marked = {}
+        for event in m.events:
+            if any(note.startswith(AUTH_WITNESS_NOTE_PREFIX) for note in event.caveats):
+                continue
+            if COMPACT_CITATION_NOTE not in event.caveats and any(ref.key not in raw_sources for ref in event.raw):
+                marked[event.id] = event.model_copy(update={"caveats": [*event.caveats, COMPACT_CITATION_NOTE]})
+        if marked:
+            m.events = [marked.get(event.id, event) for event in m.events]
+
     def _charge_stage(self, stage: EventStage) -> None:
         """Charge the stage file's growth beyond the most it has held to the event stage's account."""
         stage.charge_growth()
@@ -562,6 +580,7 @@ class Sweep:
         playbook = next(playbook for playbook in self.pack if playbook.id == m.playbook_id)
         if m.raw_copies:
             raw_sources = {**m.raw_copies, **raw_sources}      # records the rule kept for citation itself
+        self._mark_uncopied(m, raw_sources)
         if any(event.get("observer.product") == "zeek" for event in m.events):
             from romulus.hunt.zeek_gaps import enrich
             enrich(self, m, raw_sources)
@@ -3182,7 +3201,6 @@ class Sweep:
         loaded = {event.id: event for event in stage.load([event.id for event in match.events])}
         match.events = [loaded.get(event.id, event) for event in match.events]
         sources = stage.raw_sources(match.events)
-        from romulus.hunt.citations import COMPACT_CITATION_NOTE
         for event in match.events:
             if any(ref.key not in sources for ref in event.raw) and COMPACT_CITATION_NOTE not in event.caveats:
                 event.caveats.append(COMPACT_CITATION_NOTE)

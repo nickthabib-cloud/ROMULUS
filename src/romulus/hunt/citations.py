@@ -7,6 +7,9 @@ import zlib
 from romulus.evidence.typed import TypedEvent
 
 COMPACT_CITATION_NOTE = "Citation body not retained in the event stage; compact recorded fields and native references retained."
+# The caveat of an authentication witness kept by reference only (romulus.detect.windows_burst_rows): its body is
+# fetched and checked field by field by the Windows citation pass, never by the digest-checked by-id fetch.
+AUTH_WITNESS_NOTE_PREFIX = "Authentication witness body not retrieved"
 
 
 def compact_event(event: TypedEvent) -> bytes:

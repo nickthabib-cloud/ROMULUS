@@ -13,7 +13,7 @@ from romulus.detect.observed import pointer_body
 from romulus.errors import SourceError
 from romulus.evidence.normalize import normalize_hits, observed_record, raw_digest
 from romulus.evidence.typed import TypedEvent, fv
-from romulus.hunt.citations import COMPACT_CITATION_NOTE
+from romulus.hunt.citations import AUTH_WITNESS_NOTE_PREFIX, COMPACT_CITATION_NOTE
 from romulus.store.repo import Repo, raw_id
 
 LINEAGE_CITATION_BATCH = 500
@@ -108,7 +108,7 @@ class WindowsCitationFetcher:
     def hydrate(self, match: Match, raw_sources=None) -> None:
         SourceCitationFetcher(self.client).hydrate(match, raw_sources)
         compact = [event for event in match.events if any(
-            note.startswith("Authentication witness body not retrieved") for note in event.caveats)]
+            note.startswith(AUTH_WITNESS_NOTE_PREFIX) for note in event.caveats)]
         if not compact:
             return
         wanted = {}
@@ -156,6 +156,19 @@ class WindowsCitationFetcher:
                     "compact recorded fields, native index/document ids and timestamps are retained.")
             match.notes.append(note)
             match.claim += " " + note
+
+
+def _verified_sources(match: Match, raw_sources: dict[str, dict]) -> dict[str, dict]:
+    """The raw copies stored with a finding: the rule's own copies and the sources given, less any copy of a compact
+    witness that does not verify against the digest its reference recorded. Hydration keeps such a witness compact
+    and says its body was not retrieved; its unverified copy is never stored as the retained record."""
+    sources = {**match.raw_copies, **raw_sources}
+    unverified = {ref.key for event in match.events if COMPACT_CITATION_NOTE in event.caveats for ref in event.raw
+                  if ref.digest and ref.key in sources and raw_digest(sources[ref.key]) != ref.digest}
+    if not unverified:
+        return sources
+    match.raw_copies = {key: body for key, body in match.raw_copies.items() if key not in unverified}
+    return {key: body for key, body in sources.items() if key not in unverified}
 
 
 def _exec_record(hits: list[dict], boot: list | tuple | None = None) -> TypedEvent | None:
@@ -466,7 +479,7 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
                              repo.citation_events(hunt_id,missing[start:start+LINEAGE_CITATION_BATCH]))
         attach(match,witnesses,limited=True)
     compact = [event for event in match.events if COMPACT_CITATION_NOTE in event.caveats or any(
-        note.startswith("Authentication witness body not retrieved") for note in event.caveats)]
+        note.startswith(AUTH_WITNESS_NOTE_PREFIX) for note in event.caveats)]
     if compact:
         refs = {raw_id(ref.target, ref.native_id): ref for event in compact for ref in event.raw
                 if ref.key not in raw_sources}
@@ -483,9 +496,11 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
         fetcher.hydrate(match, raw_sources)
     else:
         SourceCitationFetcher(None).hydrate(match, raw_sources)
+    if COMPACT_CITATION_NOTE in match.notes and not any(COMPACT_CITATION_NOTE in event.caveats for event in match.events):
+        # every compact witness's body was found or fetched: the finding no longer says it was not retained
+        match.notes = [note for note in match.notes if note != COMPACT_CITATION_NOTE]
     decision = decide(match, hunt_id)
-    if match.raw_copies:
-        raw_sources = {**match.raw_copies, **raw_sources}
+    raw_sources = _verified_sources(match, raw_sources)
     repo.save_evidence(hunt_id, match.events, raw_sources, task_id, owner_token=owner_token)
     event_ids = [event.id for event in match.events]
     context_event_ids = sorted({event.id for event in match.events} & match.context_ids)

@@ -406,6 +406,10 @@ from tests import throughput_fixture as tf
 # The network-to-host join (pack@63) publishes nothing in this scenario (the three administration sessions network
 # findings cite stay unresolved: no host logged a logon from their clients): it adds its rule cells, its manifest
 # card and the audit of its pass after the packet and baseline stages, and nothing else.
+# network.service_catalog 3->4 (each witness keeps its raw records so a witness chosen at finalize cites a retained
+# record) and pack@64 move only its rule version in rule_cells: the rule reports nothing in this scenario. Marking
+# compact a cited record whose raw copy is not in hand at publication moves no digest here: every finding of this
+# scenario already cites records whose copies are in hand.
 # The mention scan reads each record's free-text fields by family and the audit process titles no typed field
 # reads (the socket and file groups' PROCTITLE records here), and counts the records outside the sweep's
 # selection: only the mention coverage in the sweep's stats, its summary audit record and the manifest moved
@@ -436,7 +440,7 @@ GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe55
  'links': '5fa22b4162492394955b6b1873f566f427a58dfd7529c0df73e87a6da8daa76f',
  'manifest': 'e620af8e0e1bf456a08c1ce9f182000cda69875e7c08864315a67e1e7dde6cd7',
  'raw': 'd924f62eebd5ee88c8142c690333924450c3344b18210ddfe87b8e486127dd35',
- 'rule_cells': '88bb9bcbd0a6f2f26f13da91e5f07d79681f73e2fdf75b34481dc973af6eda5e',
+ 'rule_cells': '901fd3bf864345e6f4868a7aea7b5c1cdb828a4c44f329e9d3f47cd980e13240',
  'stats': 'd9b4e9300012bd2993dcc874e105eb1dfcdf40626ea74849433f3d100309051e',
  'tasks': '1e1eeb69d05da151bec8f6dff43c1863a4eb43a288f84c1ba35168311b303360'}
 # The rule-estimate stack's digests (expansion seeded by the urgent and high lanes, as before evidence ranking;
@@ -461,7 +465,7 @@ GOLDEN_STACK_BY_RULE_ESTIMATE = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e
  'links': '5fa22b4162492394955b6b1873f566f427a58dfd7529c0df73e87a6da8daa76f',
  'manifest': '4bdcb7cbec68bce866ae6fb5c70bad499bfee3314cfe2a3916d3371d3d0d1161',
  'raw': 'd924f62eebd5ee88c8142c690333924450c3344b18210ddfe87b8e486127dd35',
- 'rule_cells': '88bb9bcbd0a6f2f26f13da91e5f07d79681f73e2fdf75b34481dc973af6eda5e',
+ 'rule_cells': '901fd3bf864345e6f4868a7aea7b5c1cdb828a4c44f329e9d3f47cd980e13240',
  'stats': 'd9b4e9300012bd2993dcc874e105eb1dfcdf40626ea74849433f3d100309051e',
  'tasks': '1e1eeb69d05da151bec8f6dff43c1863a4eb43a288f84c1ba35168311b303360'}
 GOLDEN_CANDIDATES_BY_RULE_ESTIMATE = GOLDEN_STACK_BY_RULE_ESTIMATE['candidates']
@@ -486,14 +490,14 @@ GOLDEN_NON_BASELINE_SEMANTICS_BY_RULE_ESTIMATE = {'candidates': {'all_fields': '
                 'severity': 'd8fb260b8a62f9175181cdba1356bfbd3dab9167f0965c5e7586e2202c62bcc3',
                 'source_presence': '31f6a55e225e04f5da96ef7f565969408d500a329be1bf37e463188763a5af16',
                 'ts': 'bfc0e0328d7a2b9fb224bc2791da7a13f533d4b8f03819ad9f65e7609fac08e0'},
- 'rule_cells': {'all_fields': 'a7ec58488dbf6c42c1278acae5695ddfc944d6b6c167b0d045ab91296effdc8a',
+ 'rule_cells': {'all_fields': '28198df1d8b84880edc018aafd32ee19da3398d60fb22440e10e3c0f54cbe5d6',
                 'count': 19172,
                 'detail': '5c4482f9fb5d3fc1eb4a44d4e575c13b6a83c5f828706cac8e76781204d3f863',
                 'evaluated': '32006f8501f75aa9ef6d3586cd0e17941669dfe7734426d7365060bb23113d75',
                 'matched': '4476d2d3d8676e061eb656a446e219ca5512c32bbfeb72fb08c130ff72bfa92c',
                 'partition': '47a13113b00f59e566911d943c7683cc4d52c6641c1aa423d140f3d570064c19',
                 'rule_id': 'ed30e2467f947a20b1b3ac6d06b1dbace07babe2494b022c7af7e3998771eb2e',
-                'rule_version': '598fff56950b4d2bfbe6e34a6004c4e14e70023e1f061fcf49f14893c3167612',
+                'rule_version': '08b97591f8f4329abcd306720ba6f8b8f2ececbbdb9ba8d378dce73dee7b0571',
                 'state': 'af38bf406a420c0ac2e60d7985282e225b944d59a8f87b72636ecbc1ea49f400',
                 'target': '27a3213b34651623de2b8a8fe7c85453904a4eea4e5107ec1f2fc10ba3a901ee'}}
 # Captured directly from the S7 fixture through _non_baseline_semantic_digests. Typed-event-derived hashes and
@@ -520,14 +524,14 @@ GOLDEN_NON_BASELINE_SEMANTICS = {'candidates': {'all_fields': '01298210f34ad208d
                 'severity': 'd8fb260b8a62f9175181cdba1356bfbd3dab9167f0965c5e7586e2202c62bcc3',
                 'source_presence': '31f6a55e225e04f5da96ef7f565969408d500a329be1bf37e463188763a5af16',
                 'ts': 'bfc0e0328d7a2b9fb224bc2791da7a13f533d4b8f03819ad9f65e7609fac08e0'},
- 'rule_cells': {'all_fields': 'a7ec58488dbf6c42c1278acae5695ddfc944d6b6c167b0d045ab91296effdc8a',
+ 'rule_cells': {'all_fields': '28198df1d8b84880edc018aafd32ee19da3398d60fb22440e10e3c0f54cbe5d6',
                 'count': 19172,
                 'detail': '5c4482f9fb5d3fc1eb4a44d4e575c13b6a83c5f828706cac8e76781204d3f863',
                 'evaluated': '32006f8501f75aa9ef6d3586cd0e17941669dfe7734426d7365060bb23113d75',
                 'matched': '4476d2d3d8676e061eb656a446e219ca5512c32bbfeb72fb08c130ff72bfa92c',
                 'partition': '47a13113b00f59e566911d943c7683cc4d52c6641c1aa423d140f3d570064c19',
                 'rule_id': 'ed30e2467f947a20b1b3ac6d06b1dbace07babe2494b022c7af7e3998771eb2e',
-                'rule_version': '598fff56950b4d2bfbe6e34a6004c4e14e70023e1f061fcf49f14893c3167612',
+                'rule_version': '08b97591f8f4329abcd306720ba6f8b8f2ececbbdb9ba8d378dce73dee7b0571',
                 'state': 'af38bf406a420c0ac2e60d7985282e225b944d59a8f87b72636ecbc1ea49f400',
                 'target': '27a3213b34651623de2b8a8fe7c85453904a4eea4e5107ec1f2fc10ba3a901ee'}}
 GOLDEN_NORMALIZED = {'arkime_sessions3-x': 'b4464dbf8fe8d697a71ef62d8c965b6ad2034f24e0fb055db657a71564d0061c',
