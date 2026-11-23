@@ -98,6 +98,49 @@ def test_an_empty_pool_adds_nothing_to_either_prompt(tmp_path):
     assert mention_seed(repo, "h1") is None and mention_hint(repo, "h1", ["ws-c-h3"]) is None
 
 
+def _orient_page(tmp_path, *, pool: bool):
+    """Orient's first request on a hunt of 150 findings, its prompt room held to the tool definitions and system
+    prompt plus about 6,000 tokens, so the dossier page cannot hold them all."""
+    from romulus.agent.investigate import ORIENT_TOKEN_SHARE, _BudgetGate, _run_session
+    from romulus.agent.provider import AgentBudget, BudgetLimits
+    from romulus.agent.toolbox import Toolbox
+    from tests.test_agent_breadth import _candidate
+    s = Settings(home=tmp_path, agent_triage="off")
+    repo = _hunt(tmp_path, s, findings=())
+    for index in range(150):
+        _candidate(repo, f"c-{index:03d}", "high", float(1000 - index))
+    if pool:
+        _pool(repo, ["strong"] * 15, host="ws-c-000")
+    limits = BudgetLimits.from_settings(s)
+    gate = _BudgetGate(AgentBudget(limits, clock=lambda: 0.0), s)
+    provider = _ByKind(_finish_only(), context=1_000_000)
+    from romulus.agent.provider.base import ChatRequest, estimate_tokens
+    shell = ChatRequest(messages=[{"role": "system", "content": _prompt_set()["system.md"] + "\n\n"
+                                   + _prompt_set()["orient.md"]}, {"role": "user", "content": ""}],
+                        tools=Toolbox(repo, "h1").provider_tools(), tool_choice="auto")
+    room = estimate_tokens(shell.prompt_text()) + 6_000 + provider.output
+    gate.orient_tokens = int(limits.max_tokens * ORIENT_TOKEN_SHARE - room * limits.attempts_reserved)
+    _run_session(s, repo, "h1", provider, gate, lambda _s: Toolbox(repo, "h1"), _prompt_set(), purpose="orient")
+    assert provider.requests, "orient made its call"
+    return _opening(provider.requests[0])
+
+
+def _finish_only():
+    return [ToolCall("of", "finish_session", {"summary": "Nothing to open."}, "{}")]
+
+
+def test_the_seed_gives_way_before_the_dossier_page_shrinks(tmp_path):
+    without = _orient_page(tmp_path / "without", pool=False)
+    seeded = _orient_page(tmp_path / "with", pool=True)
+    # the page holds as many findings as it would with no pool at all; the seed was halved to fit and says so
+    assert len(seeded["page"]["findings"]) == len(without["page"]["findings"]) < 150
+    if "mention_pool" in seeded:
+        shown = seeded["mention_pool"]["strong_and_medium"]
+        assert len(shown) < 15 and seeded["mention_pool"]["groups_not_shown"] == 15 - len(shown)
+    # dropped whole when even its header would cost the page findings; the page's own header still counts the pool
+    assert seeded["page"]["mentions"]["total"] == 15
+
+
 def test_the_seed_is_bounded_and_stops_at_the_first_weak_group(tmp_path):
     s = Settings(home=tmp_path)
     repo = _hunt(tmp_path, s)

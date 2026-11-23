@@ -110,6 +110,9 @@ MIN_ORIENT_PAGE_TOKENS = 2_000
 SECRET_GUARD_REASON = "secret_guard"
 # The end reason of a session whose replayed reasoning the provider refused again after it was removed.
 REASONING_REJECTED_REASON = "reasoning_binding_rejected"
+# How many times orient's mention seed may be halved to fit its first request before the dossier page shrinks
+# (enough to empty a seed of MENTION_SEED_LIMIT groups, then drop its header).
+SEED_TRIMS = 6
 # The scheduling stops after this many rounds in a row whose every session failed, under SESSIONS_FAILED_REASON.
 FAILED_ROUNDS_LIMIT = 2
 # The end states of a session after which its hypothesis, with no open question left, is done. Every other end (a
@@ -913,8 +916,10 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
             room = min(room, share_room)
             # the strong and medium mention groups ride beside the first page, whatever that page holds
             seed = mention_seed(repo, hunt_id)
-            # Pagination estimates canonical data; measure the actual request envelope too.
-            for _ in range(4):
+            # Pagination estimates canonical data; measure the actual request envelope too. When the request is too
+            # large, the seed gives way first (half its groups at a time, counted as not shown, its header kept), and
+            # only then does the page shrink: findings are what orient is for.
+            for _ in range(4 + SEED_TRIMS):
                 dossier = build_dossier(repo, hunt_id, token_budget=room, owner_token=owner_token,
                                         followable=followable)
                 page = dossier.page(1)
@@ -933,6 +938,16 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 share_excess = prompt_tokens - budget_gate.orient_prompt_room(provider.output_limit(request))
                 if excess <= 0 and share_excess <= 0:
                     break
+                groups = (seed or {}).get("strong_and_medium") or []
+                if groups:
+                    kept = groups[:len(groups) // 2]
+                    seed = {**seed, "strong_and_medium": kept,
+                            "groups_not_shown": int(seed.get("groups_not_shown") or 0) + len(groups) - len(kept)}
+                    continue
+                if seed is not None:
+                    # an emptied seed's header goes too: the page's own mention header still gives the pool's size
+                    seed = None
+                    continue
                 room = max(1, room - max(excess, share_excess) - 128)
             if excess > 0:
                 return finish("context_full", "Orient input exceeds the available context budget.", "context_full")
