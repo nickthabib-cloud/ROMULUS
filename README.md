@@ -58,7 +58,7 @@ Nothing that might be attacker activity is dropped: noise is handled by grouping
 - Currently A Linux host for ROMULUS (it is developed on Ubuntu)
 - Python 3.12+
 - Elasticsearch or OpenSearch holding the telemetry, and an account with read access to the indices only
-- Arkime (sessions and PCAP), TShark, PCAP files in an allow-listed directory
+- Arkime (sessions, and the PCAP its viewer serves) and TShark, which decodes the packets ROMULUS fetches from Arkime
 - Optional: a model server for the AI agent (see [AI investigating agent](#ai-investigating-agent-in-progress)); hunts run without one
 
 ## Quick start

@@ -11,8 +11,7 @@ This guide takes you from a fresh Linux host to a finished hunt, a published rep
 | TShark | On `PATH`, or set `TSHARK_BIN`. `doctor` fails without it. |
 | Disk | The stage directory (`ROMULUS_STAGE_DIR`, default `$ROMULUS_HOME/stage`) holds staged events and detector state during a hunt. Put it on a volume no other service writes to, never the volume holding Elasticsearch, Arkime or docker data. `doctor` warns under 10 GB free in the home. |
 | Elasticsearch 8+ or OpenSearch 2.4+ | Network reach from this host, and an account with **read access to the telemetry indices only**. Never the `elastic` superuser or an OpenSearch `all_access` account; `doctor` fails on those. |
-| Arkime viewer | Network reach to its API (directly, or behind a proxy under a path prefix). Its session indices are read through Elasticsearch/OpenSearch. |
-| PCAP directories | Only if TShark should read capture files from disk: list them in `PCAP_ALLOWED_DIRS`. |
+| Arkime viewer | Network reach to its API (directly, or behind a proxy under a path prefix). Its session indices are read through Elasticsearch/OpenSearch, and the packets of selected sessions are fetched from the viewer and decoded with TShark. |
 | Model endpoint (optional) | The AI investigating agent needs one (see [Model providers](../README.md#model-providers)). Without one, hunts run deterministically and the agent is reported as not configured. |
 
 ## 2. Install
@@ -57,8 +56,9 @@ Then edit it. `doctor` fails if the file is readable by anyone but its owner.
 | `ES_CA_CERT`, `ES_VERIFY_TLS` | for TLS | The CA that signed the cluster's certificate. Keep verification on. |
 | `ES_INDEX_PATTERNS` | yes | Comma-separated index or data-stream patterns, including the Arkime session indices. Without them there is nothing to hunt. |
 | `ES_READ_ONLY_ROLES` | OpenSearch | The names of your read-only roles, so `doctor` can show the account is read-only. |
-| `ARKIME_URL`, `ARKIME_USERNAME`, `ARKIME_PASSWORD` | yes | Plus `ARKIME_BASE_PATH` and `ARKIME_AUTH` (`digest` or `basic`) behind a proxy. Use an `https` URL with `basic`. |
-| `PCAP_ALLOWED_DIRS`, `TSHARK_BIN` | as needed | Directories TShark may read; the TShark binary. |
+| `ARKIME_URL`, `ARKIME_USERNAME`, `ARKIME_PASSWORD` | for packets | Plus `ARKIME_BASE_PATH` and `ARKIME_AUTH` (`digest` or `basic`) behind a proxy. Use an `https` URL with `basic`. |
+| `TSHARK_BIN` | as needed | The TShark binary, when it is not `tshark` on `PATH`. |
+| `PCAP_ALLOWED_DIRS` | no | `doctor` checks that each listed directory exists. Hunts fetch packets from Arkime, not from these directories. |
 | `ROMULUS_INTERNAL_NETWORKS`, `ROMULUS_EXTERNAL_NETWORKS` | strongly advised | The site's address space and carve-outs (CIDRs). Unset, the RFC 1918 ranges are assumed, rules that depend on direction report partial coverage and `doctor` warns. They can be set on the web UI's Site setup page instead, not in both places. |
 | `MISSION_TIMEZONE` | no | Times given without an offset are read in this zone (default `UTC`). |
 | `ROMULUS_STAGE_DIR` | advised | See Disk above. |
@@ -182,8 +182,8 @@ Recommendations are a section of the Markdown and DOCX reports, not a separate f
 ### Reading a result
 
 - **Headline result:** `reportable_findings`, `leads_only`, or `no_qualifying_observation_in_assessed_scope`. The last means that nothing qualified in what was searched. It never means the network is clean.
-- **Execution state:** `completed_within_scope` or `partial`. A partial hunt (a source failed, a cap or time limit was reached, the stage disk hit its reserve, or someone stopped it) says what did not run. It is never shown as complete, and `hunt resume` can finish it.
-- **Coverage:** each rule reports `searched in full`, `searched in part` or `not assessable by design` (rules that can find something but cannot show it is absent). Coverage gaps lists every partition a rule did not fully search, and why. Data not assessed lists data in scope that no rule read. A baseline whose history could not be completed is `unresolved`. Caps, timeouts, missing fields and partial responses always appear this way, never as "no match".
+- **Execution state:** `planned` (created, not yet started), `running`, `completed_within_scope`, `partial` or `failed`. A partial hunt (part of a source could not be read, a cap or time limit was reached, the stage disk hit its reserve, or someone stopped it) says what did not run and is never shown as complete. `hunt resume` reruns a sweep that was stopped part-way and the stages after the sweep that did not finish. It does not search again partitions that a finished sweep left partial: start a new hunt over that window for those. A `failed` hunt (a source preflight or sweep error) whose sweep did not finish cannot be resumed; fix the cause and start a new hunt. A `planned` hunt cannot be resumed either: delete it and start again.
+- **Coverage:** each rule reports `searched in full`, `searched in part` or `not assessable by design` (rules that can find something but cannot show it is absent). Coverage gaps lists every partition a rule did not fully search, and why. Data not assessed lists data in scope that no rule read. A baseline that could not be judged is `unresolved`, as is a link or a time range that could not be resolved. Caps, timeouts, missing fields and partial responses always appear in one of these forms, never as "no match". (`unresolved` is also a disposition an analyst can set on a finding.)
 
 ## 6. Web UI
 
@@ -202,7 +202,7 @@ Open `https://<romulus-host>:8443/login` (or the proxy's address) and log in wit
 
 ## 7. Troubleshooting
 
-**A source is unreachable.** `doctor` shows `es.reachable` or `arkime.reachable` as FAIL with the error text. Check, in order: network reach from this host to the URL; the URL's scheme and port; `ES_CA_CERT` or `ES_VERIFY_TLS` for a certificate error; the credentials; for Arkime behind a proxy, `ARKIME_BASE_PATH` and `ARKIME_AUTH`. A source that fails during a hunt is named in the result as a coverage gap or a partial reason. Fix the source, then run `hunt resume <hunt-id>` if the hunt is `partial`, or start a new hunt. `doctor` always probes `ARKIME_URL` (it has a default), so a host with no Arkime viewer shows `arkime.reachable` FAIL. Hunts still run: with no Arkime session index in `ES_INDEX_PATTERNS`, the packet stage is skipped and says so.
+**A source is unreachable.** `doctor` shows `es.reachable` or `arkime.reachable` as FAIL with the error text. Check, in order: network reach from this host to the URL; the URL's scheme and port; `ES_CA_CERT` or `ES_VERIFY_TLS` for a certificate error; the credentials; for Arkime behind a proxy, `ARKIME_BASE_PATH` and `ARKIME_AUTH`. A source that fails during a hunt is named in the result as a coverage gap or a partial reason. Fix the source, then start a new hunt over the affected window: `hunt resume` does not read again what a finished sweep could not. `doctor` always probes `ARKIME_URL` (it has a default), so a host with no Arkime viewer shows `arkime.reachable` FAIL. Hunts still run: with no Arkime session index in `ES_INDEX_PATTERNS`, the packet stage is skipped and says so.
 
 **The web UI will not start.** `web-restart.sh` prints "web failed to start" and the end of `logs/web.log`.
 
@@ -219,7 +219,7 @@ Open `https://<romulus-host>:8443/login` (or the proxy's address) and log in wit
 - "integrity check did not finish": a large store; give it longer with `--check-timeout`.
 - `db.space` says space is reclaimable: run `romulus db compact` while no hunt is running.
 
-**The stage disk is short.** `state.budget` FAIL means the stage volume's free space is already below its reserve, so rules that keep state would evaluate nothing. Free space, or point `ROMULUS_STAGE_DIR` at a larger volume that no other service uses. The reserve is the larger of `ROMULUS_STATE_DISK_RESERVE_GB` and 15% of the volume. A hunt's detector state may use `ROMULUS_STATE_DISK_GB`, or by default the smaller of half the free space and 10% of the volume. `state.budget` WARN means that total is under 1 GiB. A hunt that reaches the reserve becomes `partial` and names what it did not evaluate; it does not crash. After freeing space, resume it.
+**The stage disk is short.** `state.budget` FAIL means the stage volume's free space is already below its reserve, so rules that keep state would evaluate nothing. Free space, or point `ROMULUS_STAGE_DIR` at a larger volume that no other service uses. The reserve is the larger of `ROMULUS_STATE_DISK_RESERVE_GB` and 15% of the volume. A hunt's detector state may use `ROMULUS_STATE_DISK_GB`, or by default the smaller of half the free space and 10% of the volume. `state.budget` WARN means that total is under 1 GiB. A hunt that reaches the reserve becomes `partial` and names what it did not evaluate; it does not crash. After freeing space, start a new hunt over the window its coverage gaps name.
 
 **The agent endpoint fails.** Run `romulus doctor` and read the `agent.*` lines.
 
@@ -229,4 +229,4 @@ Open `https://<romulus-host>:8443/login` (or the proxy's address) and log in wit
 - `agent.reachable` or `agent.model` FAIL: check the URL, the key and the model id. `romulus doctor --agent-model <id>` tests another model id without changing `.env`.
 - `agent.timeout` WARN: raise `AGENT_TIMEOUT_SECONDS` as the warning says.
 
-A hunt whose agent was blocked or failed keeps all its deterministic results. Its agent cannot be added later. After a fix, `hunt resume <hunt-id> --agent-only` continues an agent run that ended partial (the provider became unavailable, or it was interrupted, stopped, or given more budget). For a hunt with no agent run to continue, start a new hunt over the same window.
+A hunt whose agent was blocked or failed keeps all its deterministic results. After a fix, `hunt resume <hunt-id> --agent-only` continues an agent run that ended partial (the provider became unavailable, or it was interrupted, stopped, or given more budget). For a hunt with no agent run to continue, start a new hunt over the same window.
