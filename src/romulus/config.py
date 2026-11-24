@@ -194,6 +194,12 @@ class Settings(BaseModel):
     # raw records (returned rows no normalizer read) the agent's source queries keep as citable text, per hunt; each
     # keeps at most 16 KB of text. At the cap further rows are not kept, and the query result and the report say so.
     agent_max_raw_records: int = Field(default=1_000, ge=0, le=10_000)
+    # The Arkime sessions whose packets the agent may fetch and read (read_session) per hunt, and the packet bytes
+    # those fetches may take together. Each fetch is also capped as the packet stage caps its own (32 MiB for an HTTP
+    # session, 4 MiB for any other connection). The byte default is the stage's per-target stream budget. A read the
+    # caps refuse is reported as such; it is never a negative.
+    agent_max_session_reads: int = Field(default=50, ge=0, le=1_000)
+    agent_max_session_read_bytes: int = Field(default=256 * 1024 * 1024, ge=1024 * 1024, le=8 * 1024 ** 3)
     # AI triage order: a separately labelled, promote-only presentation order over a hunt's surfaced findings, run
     # after the agent phase when the agent is enabled, or on demand with `romulus triage`. It never changes lanes,
     # ranks, the Reported set, citations or the deterministic report order. The model sees deterministic group cards
@@ -407,6 +413,8 @@ ENV_MAP = {
     "AGENT_MAX_FINDINGS": "agent_max_findings", "AGENT_MAX_LINKS": "agent_max_links",
     "AGENT_MAX_NOTES": "agent_max_notes",
     "AGENT_MAX_RAW_RECORDS": "agent_max_raw_records",
+    "AGENT_MAX_SESSION_READS": "agent_max_session_reads",
+    "AGENT_MAX_SESSION_READ_BYTES": "agent_max_session_read_bytes",
     "AGENT_TRIAGE": "agent_triage",
     "AGENT_TRIAGE_MODEL": "agent_triage_model",
     "AGENT_TRIAGE_PROMOTE_PER_LANE": "agent_triage_promote_per_lane",

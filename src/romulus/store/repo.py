@@ -1721,6 +1721,94 @@ class Repo:
             ))
             return used + 1
 
+    def agent_session_reads(self, hunt_id: str) -> tuple[int, int]:
+        """(session reads reserved, packet bytes they fetched) by the AI agent's read_session in this hunt, across every
+        session and resume."""
+        with self.engine.connect() as c:
+            return self._agent_session_reads(c, hunt_id)
+
+    @staticmethod
+    def _agent_session_reads(c, hunt_id: str) -> tuple[int, int]:
+        reads = int(c.execute(select(func.count()).select_from(t.audit_event).where(
+            t.audit_event.c.hunt_id == hunt_id, t.audit_event.c.action == "agent.session_read",
+        )).scalar_one())
+        fetched = int(c.execute(select(func.coalesce(func.sum(func.json_extract(t.audit_event.c.detail, "$.bytes")),
+                                                     0)).where(
+            t.audit_event.c.hunt_id == hunt_id, t.audit_event.c.action == "agent.session_read_bytes",
+        )).scalar_one())
+        return reads, fetched
+
+    def reserve_agent_session_read(self, hunt_id: str, max_reads: int, max_bytes: int, task_id: str | None, *,
+                                   owner_token: str | None = None, session_id: str | None = None
+                                   ) -> tuple[int | None, int, str | None]:
+        """Atomically reserve one packet read under the hunt's session-read caps, before anything is fetched: (its
+        ordinal, the packet bytes left to fetch, None), or (None, bytes left, the cap that refuses it)."""
+        with write_txn(self.engine) as c:
+            self._fence_agent_lease(c, hunt_id, owner_token)
+            reads, fetched = self._agent_session_reads(c, hunt_id)
+            left = max(0, max_bytes - fetched)
+            if reads >= max_reads:
+                return None, left, f"agent_session_reads:{max_reads}"
+            if left <= 0:
+                return None, 0, f"agent_session_read_bytes:{max_bytes}"
+            c.execute(t.audit_event.insert().values(
+                at=utcnow(), actor="system", action="agent.session_read", hunt_id=hunt_id,
+                detail={"task_id": task_id, "ordinal": reads + 1, "limit": max_reads, "session_id": session_id}))
+            return reads + 1, left, None
+
+    def record_agent_session_read_bytes(self, hunt_id: str, task_id: str | None, fetched: int, *,
+                                        owner_token: str | None = None) -> None:
+        """The packet bytes one reserved read fetched (counted against the hunt's byte cap)."""
+        with write_txn(self.engine) as c:
+            self._fence_agent_lease(c, hunt_id, owner_token)
+            c.execute(t.audit_event.insert().values(
+                at=utcnow(), actor="system", action="agent.session_read_bytes", hunt_id=hunt_id,
+                detail={"task_id": task_id, "bytes": int(fetched)}))
+
+    def packet_session_evidence(self, hunt_id: str, session_ids: Iterable[str], start: datetime, end: datetime, *,
+                                scan_limit: int = 2_000) -> tuple[list[str], list[str], bool]:
+        """The packet-content events (http_body, tcp_stream) this hunt holds for these Arkime session ids, whose time
+        lies in [start, end], with the hunt's findings that cite them: (event ids, candidate ids, complete). An event
+        another hunt stored first counts when this hunt observed it. Each owning hunt's rows are read through its
+        (hunt, family, time) index, at most `scan_limit` per hunt and family; complete is False when one was cut."""
+        wanted = set(session_ids)
+        start, end = (moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment.astimezone(UTC)
+                      for moment in (start, end))
+        found: list[str] = []
+        complete = True
+        families = ("http_body", "tcp_stream")
+        with self.engine.connect() as c:
+            owners = list(c.execute(select(t.hunt.c.id)).scalars())
+            for owner in owners:
+                for family in families:
+                    rows = c.execute(select(t.typed_event.c.id, t.typed_event.c.event).where(
+                        t.typed_event.c.hunt_id == owner, t.typed_event.c.family == family,
+                        t.typed_event.c.ts >= start, t.typed_event.c.ts <= end,
+                    ).order_by(t.typed_event.c.ts, t.typed_event.c.id).limit(scan_limit + 1)).all()
+                    if len(rows) > scan_limit:
+                        complete = False
+                        rows = rows[:scan_limit]
+                    for event_id, event in rows:
+                        fields = (event or {}).get("fields") or {}
+                        named = {(fields.get("arkime.session_id") or {}).get("value")}
+                        many = (fields.get("arkime.session_ids") or {}).get("value")
+                        if isinstance(many, list):
+                            named |= {item for item in many if isinstance(item, str)}
+                        if not named & wanted:
+                            continue
+                        if owner != hunt_id and c.execute(select(t.event_observation.c.event_id).where(
+                                t.event_observation.c.hunt_id == hunt_id,
+                                t.event_observation.c.event_id == event_id)).first() is None:
+                            continue
+                        found.append(event_id)
+            found = sorted(set(found))
+            candidates: set[str] = set()
+            for begin in range(0, len(found), 500):
+                candidates.update(c.execute(select(t.candidate_event.c.candidate_id).where(
+                    t.candidate_event.c.hunt_id == hunt_id,
+                    t.candidate_event.c.event_id.in_(found[begin:begin + 500]))).scalars())
+        return found, sorted(candidates), complete
+
     def expansion_source_queries(self, hunt_id: str) -> int:
         """Durable physical-query spend for expansion, including an interrupted link."""
         with self.engine.connect() as c:
