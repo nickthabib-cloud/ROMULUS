@@ -43,6 +43,10 @@ STALE_SECONDS = 6 * 3600
 WINDOWS_STABLE_ID_MAX_CHARS = 64
 REFERENCE_FLAGS_BASE = 1 << 7        # all plan tags occupy the same two payload bytes, even at FULL
 MAX_REFERENCE_SEQUENCE = (1 << 63)-1
+# Ids remembered as already carrying the protected bit under the current reference plan, or as having no stored row
+# yet, so a state touched again does not resend an UPDATE that would change nothing (about 100 bytes each: 26 MB at
+# most per memo). A row's admission forgets its id as absent.
+PROTECTED_ROWS_KNOWN = 1 << 18
 
 
 def _citation_epoch(body):
@@ -173,6 +177,9 @@ class EventStage:
         self._reference_pending = OrderedDict()
         self._reference_hints = OrderedDict()
         self._reference_uncertain_owners = set()
+        self._protected_known = OrderedDict()
+        self._absent_known = OrderedDict()
+        self._protected_connection = None
         if budget is not None:
             budget.protect_references = self._protect_state
         self._cache_connection = self.db
@@ -344,6 +351,7 @@ class EventStage:
         started = time.perf_counter()
         self._reference_plan_builds += 1
         self._reference_hints.clear()
+        self._forget_protected()        # the plan rewrites every row's flags
         work = 0
         pending = 0
         def write(sql, params):
@@ -498,11 +506,38 @@ class EventStage:
         if changed:
             self._reference_plan[1:3] = [0, None]
 
+    def _protected_rows(self) -> OrderedDict:
+        """Ids whose stored row is known to carry the protected bit under the current plan (bounded, oldest first
+        out). Valid for one connection: a replaced connection starts with none known."""
+        if self._protected_connection is not self.db:
+            self._protected_known.clear()
+            self._absent_known.clear()
+            self._protected_connection = self.db
+        return self._protected_known
+
+    def _admitting(self, ids) -> None:
+        """Rows are about to be stored for these ids: none of them is known to be absent any more."""
+        if self._absent_known:
+            for identity in ids:
+                self._absent_known.pop(identity, None)
+
+    def _forget_protected(self, ids=None) -> None:
+        """A plan reset or a dropped row: the protected bit is no longer known for these ids (all when None)."""
+        if ids is None:
+            self._protected_known.clear()
+        else:
+            for identity in ids:
+                self._protected_known.pop(identity, None)
+
     def _protect_ids(self, ids):
         if self._reference_plan is None:
             return
         # Updating only classified, unprotected rows keeps repeated reads cheap and the plan conservative.
         # This happens before the writer's transaction, so FULL rollback cannot undo the protection.
+        # A row already known to carry the protected bit under this plan is not sent again: its UPDATE would
+        # change nothing. Every id still counts as touch work.
+        known = self._protected_rows()
+        absent = self._absent_known
         def parameters():
             seen = set()
             for identity in ids:
@@ -515,11 +550,29 @@ class EventStage:
                 if len(seen) == 128:
                     seen.clear()
                 seen.add(identity)
+                if identity in known or identity in absent:
+                    continue
                 yield identity
+        sent = []
         with self.db:
             for chunk in _reference_chunks(parameters()):
                 marks = ",".join("?" for _ in chunk)
                 self.db.execute(f"UPDATE event SET reclaim=reclaim|2 WHERE id IN ({marks}) AND (reclaim&2)=0", chunk)
+                sent.append(chunk)
+        # Committed: every stored row sent now carries the bit; an id without a stored row is remembered as absent
+        # until a row is admitted for it.
+        for chunk in sent:
+            marks = ",".join("?" for _ in chunk)
+            protected = {identity for (identity,) in self.db.execute(
+                f"SELECT id FROM event WHERE id IN ({marks}) AND (reclaim&2)!=0", chunk)}
+            for identity in chunk:
+                if identity in protected:
+                    known[identity] = None
+                else:
+                    absent[identity] = None
+        for memo in (known, absent):
+            while len(memo) > PROTECTED_ROWS_KNOWN:
+                memo.popitem(last=False)
 
     def _evict_references(self, needed):
         """After FULL, advance retained admission-order cursors without rescanning exhausted state."""
@@ -571,6 +624,7 @@ class EventStage:
         # remove both witnesses of a shared group, even when their times fall in different cursor pages.
         ids = [identity for _stamp, identity in rows]
         try:
+            self._forget_protected(ids)
             with self.db:
                 for table in ("event_raw", "hold", "citation_owner", "event"):
                     self.db.executemany(f"DELETE FROM {table} WHERE id=?", [(identity,) for identity in ids])
@@ -1109,6 +1163,7 @@ class EventStage:
                 if cap is not None:
                     cap["uses"] += 1
             charged = False
+            self._admitting(row[0] for row in packed)
             try:
                 with self.db:
                     added = self.db.executemany("INSERT OR IGNORE INTO event(id,body,kept,seq) VALUES(?,?,?,?)", packed).rowcount
@@ -1184,6 +1239,7 @@ class EventStage:
         bodies, raws = prepared or self._prepare(events, raw_sources)
         if not self._sequence_available(len(bodies)):
             return
+        self._admitting(bodies)
         added = self.db.executemany("INSERT OR IGNORE INTO event(id,body,kept,seq) VALUES (?, ?, 1, ?)",
                                     [(identity, body, self._next_reference_sequence())
                                      for identity, body in bodies.items()]).rowcount
@@ -1247,6 +1303,7 @@ class EventStage:
             marks = ",".join("?" * len(chunk))
             present.update(row[0] for row in self.db.execute(f"SELECT id FROM event WHERE id IN ({marks})", chunk))
         # an event already on the stage (kept, or held before) is not serialized again
+        self._admitting(bodies)
         self.db.executemany("INSERT INTO event(id,body,kept,seq) VALUES (?, ?, 0, ?)",
                             [(eid, body, self._next_reference_sequence()) for eid, body in bodies.items() if eid not in present])
         self.db.executemany(HOLD_ADD, [(e.id, owner) for owner, e in held])
@@ -1299,6 +1356,7 @@ class EventStage:
                             raw_changed_owners.update(row[0] for row in self.db.execute(
                                 "SELECT DISTINCT c.owner FROM event_raw r JOIN citation_owner c ON c.id=r.id "
                                 f"WHERE r.key IN ({marks})", chunk))
+                    self._forget_protected((event_id,))
                     self.db.execute(EVENT_DROP, (event_id,))
                     self.db.execute(EVENT_RAW_DROP, (event_id,))
                     if self._raw_table:
