@@ -206,10 +206,11 @@ Python 3.12 modular monolith (`src/romulus/`), SQLite (WAL) as the single state 
 ## Development
 
 ```bash
-venv/bin/pip install pytest respx ruff
-venv/bin/python -m pytest -q -p no:warnings
-venv/bin/ruff check src tests
-python scripts/archmap.py --check     # architecture dependency rules
+cd "$ROMULUS_HOME/app"
+"$ROMULUS_HOME/venv/bin/pip" install pytest respx ruff
+"$ROMULUS_HOME/venv/bin/python" -m pytest -q -p no:warnings
+"$ROMULUS_HOME/venv/bin/ruff" check src tests
+"$ROMULUS_HOME/venv/bin/python" scripts/archmap.py --check     # architecture dependency rules
 ```
 
 Repository layout:
@@ -224,8 +225,8 @@ Repository layout:
 
 ## Roadmap
 
-- **Detection breadth:** Windows and Active Directory (process, logon, persistence, registry, WMI, Kerberos and directory rules on Windows event logs and Sysmon), cloud and identity logs, and ICS protocols.
-- **Assurance:** testing on unseen datasets, and hardening.
+- **Now:** detection breadth. Windows and Active Directory first (process, logon, persistence, registry, WMI, Kerberos and directory rules on Windows event logs and Sysmon).
+- **Then:** testing on unseen datasets and hardening.
 
 ROMULUS is built to find what is there. It reports what each rule searched and where it was blind, and never claims that nothing is there.
 
