@@ -20,7 +20,7 @@ ROMULUS works **with or without an AI model**. Initial finding comes from determ
 4. **Expands** from the strongest findings along typed links (the same process tree, the same login session, the same network flow) and judges the linked activity in that context: discovery commands, privilege probing, credential access, data staging and lateral movement that would be too weak on their own.
 5. **Assembles incidents**: findings joined by observed links, with a cited, time-ordered narrative. Inferred links are shown, but always labelled as hypotheses.
 6. **Ai Agent Investigation**: Ai agent reviews initial round of sweeps and develops hypothesis. It then follows leads, creats custom queries, and develops its own attack path narrative based on further findings.
-7. **Reports**: an immutable report revision (JSON and Markdown) and a browser UI with findings, incidents and an attack-path timeline.
+7. **Reports**: an immutable report revision (JSON manifest, technical Markdown, executive DOCX and an indicator export as CSV and STIX 2.1) and a browser UI with findings, incidents and an attack-path timeline.
 
 
 
@@ -59,9 +59,11 @@ Nothing that might be attacker activity is dropped: noise is handled by grouping
 - Python 3.12+
 - Elasticsearch or OpenSearch holding the telemetry, and an account with read access to the indices only
 - Arkime (sessions and PCAP), TShark, PCAP files in an allow-listed directory
-- A model server (see [AI investigating agent](#ai-investigating-agent-in-progress))
+- Optional: a model server for the AI agent (see [AI investigating agent](#ai-investigating-agent-in-progress)); hunts run without one
 
 ## Quick start
+
+For a step-by-step setup (install, `.env`, web exposure, doctor, accounts, a first hunt and troubleshooting), see the [operator quick-start](docs/OPERATOR_GUIDE.md).
 
 ```bash
 git clone https://github.com/nickthabib-cloud/ROMULUS.git && cd ROMULUS
@@ -70,7 +72,7 @@ venv/bin/pip install -e .
 
 export ROMULUS_HOME=~/romulus && mkdir -p "$ROMULUS_HOME" && chmod 700 "$ROMULUS_HOME"
 cp .env.example "$ROMULUS_HOME/.env" && chmod 600 "$ROMULUS_HOME/.env"
-# edit .env: ES_URL, ES_USERNAME/ES_PASSWORD (read-only), ES_INDEX_PATTERNS, ROMULUS_SECRET_KEY, optional Arkime and PCAP settings
+# edit .env: ROMULUS_HOME (the same path), ES_URL, ES_USERNAME/ES_PASSWORD (read-only), ES_INDEX_PATTERNS, ROMULUS_SECRET_KEY, optional Arkime and PCAP settings
 
 venv/bin/romulus --env-file "$ROMULUS_HOME/.env" doctor
 venv/bin/romulus --env-file "$ROMULUS_HOME/.env" hunt start --start 2026-01-01T10:00:00Z --end 2026-01-01T17:30:00Z
@@ -100,20 +102,20 @@ Behind a TLS reverse proxy instead, keep the loopback bind, list the proxy's IP 
 | Command | What it does |
 |---|---|
 | `doctor` | Checks sources, privileges, tools, model endpoint (if any) and storage |
-| `hunt start --start <ISO> --end <ISO>` | Runs a hunt: sweep, packet stage, expansion and incidents. Deterministic by default |
+| `hunt start --start <ISO> --end <ISO> [--agent \| --no-agent]` | Runs a hunt: sweep, packet stage, expansion and incidents, then the AI agent when it is configured and requested (`AGENT_DEFAULT`, default `on`; `--agent`/`--no-agent` choose per hunt) |
 | `hunt start ... --style directed --hypothesis "<text>"` | A hunt focused on one hypothesis |
 | `hunt start ... --agent --effort quick\|standard\|deep [--agent-max-calls N ...]` | Choose the AI agent's budget for this hunt: a profile and optional per-limit values, pinned to the hunt |
 | `hunt resume <id>` / `hunt status [id]` | Continue an interrupted or stopped hunt / show progress |
 | `hunt stop <id> [--agent-only]` / `hunt stop <id> --force` | Ask a running hunt (or only its AI agent) to stop at its next safe point / end its worker process when it has not stopped within the grace period |
 | `hunt extend <id> --calls N --tokens N --minutes N --source-queries N` (or `--effort deep`) | Give a hunt's AI agent more budget; a stopped or budget-limited agent continues from where it was, without sweeping again |
 | `findings <id> [--lane urgent --lane high]` | List ranked findings |
-| `report <id>` | Publish a new immutable report revision (JSON and Markdown) |
+| `report <id>` | Publish a new immutable report revision (JSON, Markdown, executive DOCX, indicator CSV and STIX) |
 | `user add <name> --role lead\|analyst` | Create a web UI account (interactive) |
 | `user disable\|enable\|passwd\|logout <name>` / `user role <name> --role lead\|analyst` | Disable or re-enable an account, change its password or role, or end its web sessions. Each change ends the account's open sessions |
 | `web` | Serve the browser UI |
 | `db compact` | Return the space freed by deleted hunts to the disk |
 
-Add `--json` for machine-readable output.
+Add `--json` before the command (`romulus --json findings <id>`) for machine-readable output; `--env-file` goes there too.
 
 ## Configuration
 
