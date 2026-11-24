@@ -42,6 +42,8 @@ UNKNOWN_REASON = "text line in no recognized format: custom.unknown"
 # The mention scan reads each record's free-text fields by family and counts the records outside the sweep's
 # selection: only the mention coverage in stats, the sweep summary audit and the manifest moved.
 # The mentions view then states how its finding link is found (cited_by_scope): only the manifest digest moved.
+# pack@65 (three new rules' cells and cards, tool UA v5, scan_burst v3) moves only rule_cells and the manifest;
+# candidates, events and links are unchanged.
 GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a6dadaa59988bdf81e',
  # Fleet member hosts staged as memberships add two ranking statements: only the audit's rank query count moved.
  # The ranking version rank@1 -> rank@2 (fleet member hosts keep the rule's evidence, timed by their own record) moves
@@ -64,10 +66,10 @@ GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a
  'events': 'f0d612c20f67d030a43e835b8ef639a78c824b51fff59c169d3d5219700de383',
  'expansion': 'dae7cbd7929a4cb94bb232a7343d4d70f62885a979b52714b87bd3641a92169b',
  'links': 'd9f0da030bf1447f35601910ec18eb012f4a55a0a8feef7262ab6e745319890e',
- 'manifest': '66d445663ff89e6c876aebe44a171f0ccb099873a4d8c9b4452b1adb178a852d',
+ 'manifest': 'e60a748678a6f94d9152b606b02e2da93af8210d2a98e22326b4fd3329800a65',
  'raw': '64be31e697a32f93b1a71657560af514b2d430469cb3be19f44b8827985a7775',
  # host.account_or_group_change 7->8 moves only the rule cells (its version); every other digest is unchanged.
- 'rule_cells': 'b760e8ae1ebbb7884616ee13c688282d85693054fd3126e44496331437fc2bfa',
+ 'rule_cells': '094f3986c5b0f48114a2b7fd7812b1c8dc1fd2cb4347c1743e1c927d22ede220',
  'stats': '64faa1b65d116f9fcc177c6defc3028cdf13a8db34724ccdc2db10f58214eabc',
  'tasks': '31db5bad23dca3ba0a6c4114135053177ece1b46af44576b3198b8967c6762bb'}
 
