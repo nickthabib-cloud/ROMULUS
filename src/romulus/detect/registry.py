@@ -29,6 +29,7 @@ from romulus.detect.smb_impact import SmbImpact
 from romulus.detect.tamper import TAMPER_PLAYBOOKS
 from romulus.detect.tls import TLS_PLAYBOOKS
 from romulus.detect.vpn import VPN_PLAYBOOKS
+from romulus.detect.web_access_shell import RULES as WEB_ACCESS_SHELL_RULES
 from romulus.detect.web_attacks import WEB_ATTACK_PLAYBOOKS
 from romulus.detect.windows_account_events import WINDOWS_ACCOUNT_PLAYBOOKS
 from romulus.detect.windows_auth_events import WINDOWS_AUTH_EVENT_PLAYBOOKS
@@ -103,7 +104,8 @@ ALL_PLAYBOOKS = (HOST_PLAYBOOKS + HIJACK_PLAYBOOKS + KERNEL_FILE_PLAYBOOKS + LIN
                  + list(ICS_PLAYBOOKS)
                  + LINUX_DIRECT_RULES + LINUX_SEQUENCE_RULES + PRIVILEGE_BROKER_RULES
                  + SERVICE_AUTH_PLAYBOOKS + MAIL_PLAYBOOKS + VPN_PLAYBOOKS + BASELINE_PLAYBOOKS
-                 + [SmbImpact, ServiceCatalog] + list(WEB_ATTACK_PLAYBOOKS) + list(NET_HOST_JOIN_RULES))
+                 + [SmbImpact, ServiceCatalog] + list(WEB_ATTACK_PLAYBOOKS) + list(WEB_ACCESS_SHELL_RULES)
+                 + list(NET_HOST_JOIN_RULES))
 _ANCHOR_CLASSES = {playbook.id: playbook.anchor_class for playbook in ALL_PLAYBOOKS}
 
 
