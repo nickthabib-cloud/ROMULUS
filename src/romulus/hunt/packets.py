@@ -401,6 +401,8 @@ class _Target:
         self.source_case_id: str | None = None
         # Optional: called with each batch of body events and their raw copies before the rules see them.
         self.observe: Callable[[list[TypedEvent], dict[str, dict]], None] | None = None
+        # Optional: called with each match the indicator rule publishes while bodies are consumed, and its new row.
+        self.on_published: Callable[[object, object, dict | None], None] | None = None
 
     def run(self, sessions: list[dict]) -> None:
         self.index(sessions)
@@ -555,9 +557,11 @@ class _Target:
             pb.bind_raw(raws)
             try:
                 for match in pb.consume_partition(events):
-                    publish_match(self.repo, self.hunt_id, pb, match, self.task_id, raws,
-                                  source_case_id=self.source_case_id, owner_token=self.owner_token)
+                    row = publish_match(self.repo, self.hunt_id, pb, match, self.task_id, raws,
+                                        source_case_id=self.source_case_id, owner_token=self.owner_token)
                     self.published[pb.id] = self.published.get(pb.id, 0)+1
+                    if self.on_published is not None:
+                        self.on_published(pb, match, row)
                 # Only matching witnesses reach the hunt database. Group samples
                 # and moving span bounds hold IDs; finalization reloads them in
                 # bounded groups instead of keeping a body/raw lifetime map.

@@ -171,6 +171,25 @@ class QuerySourceRequest(_Strict):
     arguments: QuerySourceArgs
 
 
+class ReadSessionArgs(_WindowArgs):
+    """One Arkime session to read the packets of, named only by a record ROMULUS issued an alias for: a typed event
+    (evidence_id) or a raw record (raw_record_id). The hunt layer finds the session from that record's own reference;
+    the model never names a session id, a filter, a port or a path. start and end are the hunt window."""
+    evidence_id: str | None = Field(default=None, min_length=1, max_length=128)
+    raw_record_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def _one_record(self):
+        if (self.evidence_id is None) == (self.raw_record_id is None):
+            raise ValueError("a session read names exactly one record: an evidence id or a raw record id")
+        return self
+
+
+class ReadSessionRequest(_Strict):
+    tool: Literal["read_session"]
+    arguments: ReadSessionArgs
+
+
 class EntityTimelineRequest(_Strict):
     tool: Literal["entity_timeline"]
     arguments: EntityTimelineArgs
