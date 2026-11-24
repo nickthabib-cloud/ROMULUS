@@ -170,6 +170,7 @@ tools:
   kind: offensive
   rules:
   - host.web_service_spawns_interpreter
+  - web.access_log_web_shell
 lotl:
 - name: 7z
   platform: Linux
@@ -699,7 +700,8 @@ lotl:
   rules: []
 - name: sudo
   platform: Linux
-  rules: []
+  rules:
+  - host.privilege_broker_credential_args
 - name: sudo -l
   platform: Linux
   rules: []
@@ -838,6 +840,7 @@ themes:
   rules:
   - context.credential_access
   - host.credential_store_read
+  - host.privilege_broker_credential_args
 - name: Abuse Elevation Control Mechanism
   description: Abuse Elevation Control Mechanism.
   rules:
@@ -909,10 +912,12 @@ themes:
   description: Credentials from Web Browsers.
   rules:
   - context.credential_access
+  - host.privilege_broker_credential_args
 - name: Credentials In Files
   description: Credentials In Files.
   rules:
   - context.credential_access
+  - host.privilege_broker_credential_args
 - name: Cron
   description: Cron.
   rules:
@@ -951,6 +956,7 @@ themes:
   description: Exploit Public-Facing Application.
   rules:
   - host.web_service_spawns_interpreter
+  - web.access_log_web_shell
 - name: Exploitation for Credential Access
   description: Exploitation for Credential Access.
   rules:
@@ -1045,6 +1051,7 @@ themes:
   description: Malicious File.
   rules:
   - host.exec_from_temp_dir
+  - win.deceptive_file_name
 - name: Match Legitimate Resource Name or Location
   description: Match Legitimate Resource Name or Location.
   rules:
@@ -1079,6 +1086,7 @@ themes:
   description: Password Managers.
   rules:
   - context.credential_access
+  - host.privilege_broker_credential_args
 - name: Password Policy Discovery
   description: Password Policy Discovery.
   rules:
@@ -1098,6 +1106,7 @@ themes:
   description: Private Keys.
   rules:
   - context.credential_access
+  - host.privilege_broker_credential_args
 - name: Process Discovery
   description: Process Discovery.
   rules:
@@ -1179,6 +1188,7 @@ themes:
   description: Sudo and Sudo Caching.
   rules:
   - context.privilege_probing
+  - host.privilege_broker_credential_args
 - name: System Information Discovery
   description: System Information Discovery.
   rules:
@@ -1239,6 +1249,7 @@ themes:
   description: Web Shell.
   rules:
   - host.web_service_spawns_interpreter
+  - web.access_log_web_shell
 - name: Windows Remote Management
   description: Windows Remote Management.
   rules:
