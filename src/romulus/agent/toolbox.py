@@ -533,6 +533,10 @@ class InvestigationExecutor(Protocol):
     # refuses it there.
     def query_refusal(self, request) -> dict | None: ...
 
+    # optional: why a read_session request names no session the hunt can read (a record that is no Arkime session,
+    # one from another source, one outside the window), decided without any source query; None when it can be read.
+    def session_refusal(self, request) -> dict | None: ...
+
     # optional: what the hunt's sources can be searched on, without any source query (list_search_fields): the typed
     # vocabulary {"fields": [{"field", "roles": {role: {"targets", "ops": {op: targets}}}}], "targets": {role: n},
     # "packet_sources": n, "uncontracted": n}; the sources [{"source", "kind", "role", "time_field", "fields"}]; and
