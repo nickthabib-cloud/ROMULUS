@@ -8,11 +8,12 @@ from math import ceil
 from romulus.agent.models import EntityRef, PivotCoverage, PivotResult
 from romulus.agent.refusals import reason as refusal_reason
 from romulus.agent.toolbox import FOLLOW_LINK_KINDS, Toolbox
-from romulus.agent.tools import QuerySourceRequest, SearchEventsRequest
+from romulus.agent.tools import QuerySourceRequest, ReadSessionRequest, SearchEventsRequest
 from romulus.config import Settings
 from romulus.detect.registry import bind_windows_site, fresh_direct_pack
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.agent_query import SourceQueryRunner, query_refusal
+from romulus.hunt.agent_session import MAX_LISTED_CANDIDATES, MAX_SAVED_EVENTS, SessionReader
 from romulus.hunt.expansion import ExpansionEngine, expansion_windows
 from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkResult
 from romulus.hunt.manifest import inventory_usable
@@ -46,6 +47,7 @@ _PIVOT_LINK_TYPES = {
     "ids_alerts": "agent_ids_alerts",
     "search_events": "agent_search_events",
     "query_source": "agent_query_source",
+    "read_session": "agent_read_session",
 }
 _AGENT_HYPOTHESIS = "agent_hypothesis"
 _EVENT_DIGEST_LIMIT = 50
@@ -136,7 +138,7 @@ class HuntToolExecutor:
                  hunt_start: datetime, hunt_end: datetime, *, owner_token: str | None = None,
                  packet_sources: tuple[str, ...] = (), uncontracted_targets: tuple[str, ...] = (),
                  packet_spans: dict[str, tuple[datetime, datetime]] | None = None,
-                 settings: Settings | None = None, arkime_search=None):
+                 settings: Settings | None = None, arkime_search=None, packets_factory=None):
         self.repo = repo
         self.hunt_id = hunt_id
         self.pivot = pivot
@@ -156,6 +158,8 @@ class HuntToolExecutor:
         # the agent's own source queries (query_source): secrets are redacted from what they keep, with these settings
         self.settings = settings
         self.queries = SourceQueryRunner(pivot, settings, arkime_search)
+        # the agent's packet reads (read_session): the source queries they make are spent like query_source's
+        self.sessions = SessionReader(pivot, settings, self.queries._spend, self.window, packets_factory)
 
     def _events(self, ids: list[str]) -> list[TypedEvent]:
         rows = self.repo.citation_events(self.hunt_id, ids)
@@ -352,9 +356,17 @@ class HuntToolExecutor:
         found = self.source_table().get(request.arguments.source)
         return query_refusal(request, found[0] if found else None)
 
+    def session_refusal(self, request: ReadSessionRequest) -> dict | None:
+        """Why a session read names no session this hunt can read (hunt.agent_session), decided without any source
+        query; None when it can be read."""
+        return self.sessions.refusal(request)
+
     def search_item_bound(self, request) -> int:
         """The most page items one search's or query's result can hold (PivotExecutor.search_item_bound), plus a
         search's named unsearched sources."""
+        if isinstance(request, ReadSessionRequest):
+            # its kept events, the findings it lists, its listed entities, one coverage cell and its reasons
+            return MAX_SAVED_EVENTS + MAX_LISTED_CANDIDATES + MAX_SEARCH_ENTITIES + 64
         if isinstance(request, QuerySourceRequest):
             # its returned rows, the findings they can raise, its listed entities, one coverage cell and its reasons
             return 2 * MAX_QUERY_HITS + MAX_SEARCH_ENTITIES + 64
@@ -389,6 +401,9 @@ class HuntToolExecutor:
                 result = PivotResult(status="unsupported", reasons=["the source is not one of this hunt's sources"])
             else:
                 result = self.queries.run(session_id, request, kind=kind, target=target)
+        elif isinstance(request, ReadSessionRequest):
+            link_key["record"] = request.arguments.model_dump(mode="json", include={"evidence_id", "raw_record_id"})
+            result = self.sessions.run(session_id, request)
         else:
             result = self.pivot.run(session_id, request, anchor_ts=anchor_ts)
         if isinstance(request, SearchEventsRequest):

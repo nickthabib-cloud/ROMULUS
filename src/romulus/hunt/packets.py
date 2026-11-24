@@ -396,8 +396,23 @@ class _Target:
         self.requested: set[tuple] = set()
         self.docs: dict[tuple, list[dict]] = {}
         self.unexamined: dict[str, list[str]] = {}
+        # Who this run publishes for: the stage leaves both None; an agent's session read names its task and session.
+        self.task_id: str | None = None
+        self.source_case_id: str | None = None
+        # Optional: called with each batch of body events and their raw copies before the rules see them.
+        self.observe: Callable[[list[TypedEvent], dict[str, dict]], None] | None = None
+        # Optional: called with each match the indicator rule publishes while bodies are consumed, and its new row.
+        self.on_published: Callable[[object, object, dict | None], None] | None = None
 
     def run(self, sessions: list[dict]) -> None:
+        self.index(sessions)
+        for n, (merged, docs) in enumerate(_units(sessions)):
+            self.heartbeat()
+            self._batch(n, docs, merged)
+        self.account()
+
+    def index(self, sessions: list[dict]) -> None:
+        """Group the session documents into logical sessions (their time spans and segments) before any batch."""
         for sess in sessions:                           # a logical session spans all of its segments
             first = _epoch(sess["_source"].get("firstPacket"))
             last = _epoch(sess["_source"].get("lastPacket"))
@@ -407,9 +422,9 @@ class _Target:
             self.docs.setdefault(_logical(sess), []).append(sess)
         self.c["logical_sessions"] = len(self.spans)
         self.c["multi_segment_sessions"] = sum(1 for segs in self.docs.values() if len(segs) > 1)
-        for n, (merged, docs) in enumerate(_units(sessions)):
-            self.heartbeat()
-            self._batch(n, docs, merged)
+
+    def account(self) -> None:
+        """After every batch: what was answered, asked or silent, and the partial reasons that follow."""
         silent = self.fetched - self.responded
         asked = silent & self.requested
         unanswered = {k for k in asked if _unanswered_per_arkime(self.docs.get(k, []))}
@@ -460,8 +475,14 @@ class _Target:
             self.c["failed_batches"] += 1
             self.partial.append(f"{self.name}: batch {n} ({what}) not examined: {error}")
             return
+        try:
+            self.read_capture(n, batch, what, path, capped)
+        finally:
+            path.unlink(missing_ok=True)
+
+    def read_capture(self, n: int, batch: list[dict], what: str, path: Path, capped: bool) -> None:
+        """Rebuild the HTTP messages of one fetched capture (batch n, `what` it holds) and judge each response."""
         result = run_tshark(self.s, path, "http_messages", [self.work], http_ports=_ports(batch))
-        path.unlink(missing_ok=True)
         if result.error:
             self.c["failed_batches"] += 1
             self.partial.append(f"{self.name}: batch {n} ({what}) not examined: {result.error}")
@@ -526,6 +547,8 @@ class _Target:
     def _consume_bodies(self, events, raws):
         if not events:
             return
+        if self.observe is not None:
+            self.observe(events, raws)
         self.c['responses'] += len(events)
         for pb in self.pack:
             if pb is not self.indicator:
@@ -534,8 +557,11 @@ class _Target:
             pb.bind_raw(raws)
             try:
                 for match in pb.consume_partition(events):
-                    publish_match(self.repo, self.hunt_id, pb, match, None, raws, owner_token=self.owner_token)
+                    row = publish_match(self.repo, self.hunt_id, pb, match, self.task_id, raws,
+                                        source_case_id=self.source_case_id, owner_token=self.owner_token)
                     self.published[pb.id] = self.published.get(pb.id, 0)+1
+                    if self.on_published is not None:
+                        self.on_published(pb, match, row)
                 # Only matching witnesses reach the hunt database. Group samples
                 # and moving span bounds hold IDs; finalization reloads them in
                 # bounded groups instead of keeping a body/raw lifetime map.
@@ -548,6 +574,11 @@ class _Target:
         self.raw_sources.update(raws)
         keep = {e.raw[0].key for pb in self.pack for e in pb.retained_events()}
         self.raw_sources = {k: v for k, v in self.raw_sources.items() if k in keep}
+
+    def finalized(self, pb):
+        """A rule's matches once every batch was consumed. The shipped-only IndicatorMatch API also supports small
+        direct callers with a list result; packet input must stream every group."""
+        return pb._stream_finalized() if pb is self.indicator and pb._overlay is None else pb.finalize()
 
     def close(self):
         for pb in self.pack:
@@ -779,6 +810,9 @@ class _StreamTarget:
         self.raw_sources: dict[str, dict] = {}
         self.budget = STREAM_BUDGET_BYTES
         self.single: list[str] = []                # in-window session ids with indicators below the rule's bar
+        # Optional: called with each judged connection's event and raw copy (None when its indicators all fall
+        # outside the window), its rebuilt streams and their analysis, before the rules see the event.
+        self.observe: Callable[[TypedEvent | None, dict | None, TcpStreams, ShellAnalysis], None] | None = None
 
     def _lose(self, label: str, segs: list[dict]) -> None:
         self.c[label] += 1
@@ -809,13 +843,17 @@ class _StreamTarget:
                 continue
             self.heartbeat()
             self._judge(n, segs)
+        self.partial += self.loss_reasons()
+
+    def loss_reasons(self) -> list[str]:
+        """Why connections were not judged or were judged on incomplete content, from the counters."""
         self.c["missing_required"] = sum(pb.missing_required for pb in self.pack)
-        for label, what in STREAM_LOSSES.items():
-            if self.c[label]:
-                self.partial.append(f"{self.name}: streams: {self.c[label]} {what}")
+        out = [f"{self.name}: streams: {self.c[label]} {what}" for label, what in STREAM_LOSSES.items()
+               if self.c[label]]
         if self.c["missing_required"]:
-            self.partial.append(f"{self.name}: streams: {self.c['missing_required']} connection(s) lacked a field "
-                                "the rule needs")
+            out.append(f"{self.name}: streams: {self.c['missing_required']} connection(s) lacked a field the rule "
+                       "needs")
+        return out
 
     def unexamined(self) -> dict[str, list[str]]:
         return {label: sorted(ids)[:MAX_LISTED_IDS] for label, ids in sorted(self.lost.items()) if ids}
@@ -845,9 +883,14 @@ class _StreamTarget:
             self._lose("failed", segs)
             return
         try:
-            result = run_tshark(self.s, path, "tcp_payload", [self.work], stream=key)
+            self.judge_capture(segs, key, path, capped)
         finally:
             path.unlink(missing_ok=True)
+
+    def judge_capture(self, segs: list[dict], key: StreamKey, path: Path, capped: bool) -> None:
+        """Rebuild one connection from its fetched capture, analyse it, and give its event to the rules."""
+        src = segs[0]["_source"]
+        result = run_tshark(self.s, path, "tcp_payload", [self.work], stream=key)
         if result.error:
             self._lose("failed", segs)
             return
@@ -878,6 +921,8 @@ class _StreamTarget:
                              f"exchanging data inside it (first in-window byte at {ts.isoformat()})")
             else:
                 self.c["outside_window"] += 1
+                if self.observe is not None:
+                    self.observe(None, None, streams, analysis)
                 return
             if publishable(analysis.kinds, analysis.turns) is None:   # below the rule's bar: named, not published
                 self.c["single_indicator"] += 1
@@ -886,6 +931,8 @@ class _StreamTarget:
             first = streams.chunks[0].time if streams.chunks else _epoch(src.get("firstPacket")) or 0.0
             ts = datetime.fromtimestamp(first, UTC)
         event, raw = _stream_event(key, streams, analysis, segs, self.name, ts, capped or result.truncated, notes)
+        if self.observe is not None:
+            self.observe(event, raw, streams, analysis)
         for pb in self.pack:
             pb.consume([event])
         keep = {e.raw[0].key for pb in self.pack for e in pb.retained_events()}
@@ -987,9 +1034,7 @@ def run_packet_stage(s: Settings, repo, client, hunt_id: str, window: Window, co
             shared_reasons = tuple(run.partial)
             for pb in run.pack:
                 matched = run.published.get(pb.id, 0)
-                # The shipped-only IndicatorMatch API also supports small direct
-                # callers with a list result. Packet input must stream every group.
-                matches = (pb._stream_finalized() if pb is run.indicator and pb._overlay is None else pb.finalize())
+                matches = run.finalized(pb)
                 for m in matches:
                     publish_match(repo, hunt_id, pb, m, None, run.raw_sources, owner_token=owner_token)
                     matched += 1

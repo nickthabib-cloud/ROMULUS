@@ -375,7 +375,8 @@ class SessionResults:
                     out[key] = search[key]
             if search.get("gaps_and_caveats"):
                 out["gaps_and_caveats"] = len(search["gaps_and_caveats"])
-            chunk = search.get("rows_and_aggregations")
+            # a query's rows and aggregations, or a session read's content, in chunks
+            chunk = search.get("rows_and_aggregations") or search.get("content")
             if isinstance(chunk, dict) and chunk.get("fetch"):
                 out["next_chunk"] = chunk["fetch"]
         if "evidence" in inner or "raw_evidence" in inner:

@@ -1721,6 +1721,150 @@ class Repo:
             ))
             return used + 1
 
+    def agent_session_reads(self, hunt_id: str) -> tuple[int, int]:
+        """(session reads held, packet bytes they fetched) by the AI agent's read_session in this hunt, across every
+        session and resume. A refunded read (its fetch got no bytes) is not held."""
+        with self.engine.connect() as c:
+            return self._agent_session_reads(c, hunt_id)
+
+    @staticmethod
+    def _audit_count(c, hunt_id: str, action: str, task_id: str | None = None) -> int:
+        where = [t.audit_event.c.hunt_id == hunt_id, t.audit_event.c.action == action]
+        if task_id is not None:
+            where.append(func.json_extract(t.audit_event.c.detail, "$.task_id") == task_id)
+        return int(c.execute(select(func.count()).select_from(t.audit_event).where(*where)).scalar_one())
+
+    @classmethod
+    def _agent_session_reads(cls, c, hunt_id: str) -> tuple[int, int]:
+        reads = (cls._audit_count(c, hunt_id, "agent.session_read")
+                 - cls._audit_count(c, hunt_id, "agent.session_read_refund"))
+        fetched = int(c.execute(select(func.coalesce(func.sum(func.json_extract(t.audit_event.c.detail, "$.bytes")),
+                                                     0)).where(
+            t.audit_event.c.hunt_id == hunt_id, t.audit_event.c.action == "agent.session_read_bytes",
+        )).scalar_one())
+        return max(0, reads), fetched
+
+    def reserve_agent_session_read(self, hunt_id: str, max_reads: int, max_bytes: int, task_id: str, *,
+                                   owner_token: str | None = None, session_id: str | None = None
+                                   ) -> tuple[int | None, int, str | None]:
+        """Atomically reserve one packet read under the hunt's session-read caps, before anything is fetched: (the reads
+        held with it, the packet bytes left to fetch, None), or (None, bytes left, the cap that refuses it). A task that
+        already holds a read (a retry of the same request) keeps it and reserves no second one."""
+        with write_txn(self.engine) as c:
+            self._fence_agent_lease(c, hunt_id, owner_token)
+            reads, fetched = self._agent_session_reads(c, hunt_id)
+            left = max(0, max_bytes - fetched)
+            held = (self._audit_count(c, hunt_id, "agent.session_read", task_id)
+                    > self._audit_count(c, hunt_id, "agent.session_read_refund", task_id))
+            if held:
+                return (reads, left, None) if left > 0 else (None, 0, f"agent_session_read_bytes:{max_bytes}")
+            if reads >= max_reads:
+                return None, left, f"agent_session_reads:{max_reads}"
+            if left <= 0:
+                return None, 0, f"agent_session_read_bytes:{max_bytes}"
+            c.execute(t.audit_event.insert().values(
+                at=utcnow(), actor="system", action="agent.session_read", hunt_id=hunt_id,
+                detail={"task_id": task_id, "ordinal": reads + 1, "limit": max_reads, "session_id": session_id}))
+            return reads + 1, left, None
+
+    def refund_agent_session_read(self, hunt_id: str, task_id: str, *, owner_token: str | None = None) -> None:
+        """Give back a reserved read whose fetch got no bytes: nothing was read, so it holds no read."""
+        with write_txn(self.engine) as c:
+            self._fence_agent_lease(c, hunt_id, owner_token)
+            if (self._audit_count(c, hunt_id, "agent.session_read", task_id)
+                    > self._audit_count(c, hunt_id, "agent.session_read_refund", task_id)):
+                c.execute(t.audit_event.insert().values(
+                    at=utcnow(), actor="system", action="agent.session_read_refund", hunt_id=hunt_id,
+                    detail={"task_id": task_id}))
+
+    def record_agent_session_read_bytes(self, hunt_id: str, task_id: str | None, fetched: int, *,
+                                        owner_token: str | None = None) -> None:
+        """The packet bytes one reserved read fetched (counted against the hunt's byte cap)."""
+        with write_txn(self.engine) as c:
+            self._fence_agent_lease(c, hunt_id, owner_token)
+            c.execute(t.audit_event.insert().values(
+                at=utcnow(), actor="system", action="agent.session_read_bytes", hunt_id=hunt_id,
+                detail={"task_id": task_id, "bytes": int(fetched)}))
+
+    def record_agent_session_read_done(self, hunt_id: str, task_id: str, session_ids: list[str], *,
+                                       owner_token: str | None = None) -> None:
+        """A read that fetched and extracted a session completely: its task outcome holds what it found, and a later
+        read of the same session in this hunt may answer from it."""
+        with write_txn(self.engine) as c:
+            self._fence_agent_lease(c, hunt_id, owner_token)
+            c.execute(t.audit_event.insert().values(
+                at=utcnow(), actor="system", action="agent.session_read_done", hunt_id=hunt_id,
+                detail={"task_id": task_id, "session_ids": list(session_ids)}))
+
+    def agent_session_read_done(self, hunt_id: str, session_ids: Iterable[str]) -> str | None:
+        """The task of the latest complete read of any of these Arkime session ids in this hunt, or None. Bounded: one
+        row per complete read, and reads are capped per hunt."""
+        wanted = set(session_ids)
+        with self.engine.connect() as c:
+            rows = c.execute(select(t.audit_event.c.detail).where(
+                t.audit_event.c.hunt_id == hunt_id, t.audit_event.c.action == "agent.session_read_done",
+            ).order_by(t.audit_event.c.id.desc())).scalars()
+            for detail in rows:
+                if isinstance(detail, dict) and wanted & set(detail.get("session_ids") or []):
+                    return detail.get("task_id")
+        return None
+
+    def packet_session_evidence(self, hunt_id: str, session_ids: Iterable[str], start: datetime, end: datetime, *,
+                                include_ids: Iterable[str] = (), scan_limit: int = 2_000
+                                ) -> tuple[list[str], list[str], bool]:
+        """The packet-content events (http_body, tcp_stream) this hunt holds for these Arkime session ids, with the
+        hunt's findings that cite them: (event ids, candidate ids, complete). Only this hunt's events count: the ones
+        it stored first (read through its (hunt, family, time) index) and the ones another hunt stored that it
+        observed; only those timed in [start, end] are scanned, at most `scan_limit` per family and kind, and complete
+        is False when a scan was cut. `include_ids` (an aliased packet event) are always looked up by id."""
+        wanted = set(session_ids)
+        start, end = (moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment.astimezone(UTC)
+                      for moment in (start, end))
+        found: set[str] = set()
+        complete = True
+        families = ("http_body", "tcp_stream")
+        ev = t.typed_event
+
+        def names(event: dict) -> set:
+            fields = (event or {}).get("fields") or {}
+            named = {(fields.get("arkime.session_id") or {}).get("value")}
+            many = (fields.get("arkime.session_ids") or {}).get("value")
+            if isinstance(many, list):
+                named |= {item for item in many if isinstance(item, str)}
+            return named
+
+        def visible(c, event_id: str, owner: str) -> bool:
+            return owner == hunt_id or c.execute(select(t.event_observation.c.event_id).where(
+                t.event_observation.c.hunt_id == hunt_id, t.event_observation.c.event_id == event_id)).first() is not None
+
+        with self.engine.connect() as c:
+            included = list(dict.fromkeys(include_ids))
+            for event_id, owner, family in c.execute(select(ev.c.id, ev.c.hunt_id, ev.c.family).where(
+                    ev.c.id.in_(included))) if included else ():
+                if family in families and visible(c, event_id, owner):
+                    found.add(event_id)
+            for family in families:
+                owned = select(ev.c.id, ev.c.event).where(
+                    ev.c.hunt_id == hunt_id, ev.c.family == family, ev.c.ts >= start, ev.c.ts <= end,
+                ).order_by(ev.c.ts, ev.c.id).limit(scan_limit + 1)
+                observed = select(ev.c.id, ev.c.event).select_from(t.event_observation.join(
+                    ev, ev.c.id == t.event_observation.c.event_id)).where(
+                    t.event_observation.c.hunt_id == hunt_id, ev.c.family == family, ev.c.ts >= start,
+                    ev.c.ts <= end).order_by(ev.c.ts, ev.c.id).limit(scan_limit + 1)
+                for query in (owned, observed):
+                    rows = c.execute(query).all()
+                    if len(rows) > scan_limit:
+                        complete = False
+                        rows = rows[:scan_limit]
+                    found.update(event_id for event_id, event in rows if names(event) & wanted)
+            ids = sorted(found)
+            candidates: set[str] = set()
+            for begin in range(0, len(ids), 500):
+                candidates.update(c.execute(select(t.candidate_event.c.candidate_id).where(
+                    t.candidate_event.c.hunt_id == hunt_id,
+                    t.candidate_event.c.event_id.in_(ids[begin:begin + 500]))).scalars())
+        return ids, sorted(candidates), complete
+
     def expansion_source_queries(self, hunt_id: str) -> int:
         """Durable physical-query spend for expansion, including an interrupted link."""
         with self.engine.connect() as c:
