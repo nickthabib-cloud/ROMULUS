@@ -56,6 +56,12 @@ class Settings(BaseModel):
     web_bind: str = "127.0.0.1:8443"
     web_tls_cert: str = ""
     web_tls_key: str = ""
+    # Plain HTTP on an address other than loopback is refused unless this is set (an isolated lab only).
+    web_allow_plaintext: bool = False
+    # Addresses of reverse proxies whose X-Forwarded-For/-Proto headers are trusted (comma-separated); empty: none.
+    web_trusted_proxies: str = ""
+    # Mark the session cookie Secure even without built-in TLS (a TLS-terminating proxy in front).
+    web_cookie_secure: bool = False
     secret_key: SecretStr = SecretStr("")
 
     # The model is optional: with no endpoint configured, model features are off.
@@ -358,6 +364,8 @@ ENV_MAP = {
     "ROMULUS_MENTION_DIR": "mention_dir", "ROMULUS_MENTION_RESIDUE_RECORDS": "mention_residue_records",
     "ROMULUS_WEB_BIND": "web_bind", "ROMULUS_SECRET_KEY": "secret_key",
     "ROMULUS_WEB_TLS_CERT": "web_tls_cert", "ROMULUS_WEB_TLS_KEY": "web_tls_key",
+    "ROMULUS_WEB_ALLOW_PLAINTEXT": "web_allow_plaintext", "ROMULUS_WEB_TRUSTED_PROXIES": "web_trusted_proxies",
+    "ROMULUS_COOKIE_SECURE": "web_cookie_secure",
     "OLLAMA_URL": "ollama_url", "OLLAMA_MODEL_TRIAGE": "ollama_model_triage",
     "OLLAMA_MODEL_SYNTHESIS": "ollama_model_synthesis", "OLLAMA_NUM_CTX": "ollama_num_ctx",
     "OLLAMA_TIMEOUT_SECONDS": "ollama_timeout_seconds", "OLLAMA_KEEP_ALIVE": "ollama_keep_alive",

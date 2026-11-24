@@ -786,6 +786,8 @@ user = Table(
     Column("role", String, nullable=False),             # lead | analyst
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("disabled", Integer, nullable=False, default=0),
+    # raised on logout, disable, role or password change: a session cookie carrying an older value is refused
+    Column("session_generation", Integer, nullable=False, default=0, server_default="0"),
 )
 
 audit_event = Table(

@@ -68,7 +68,7 @@ git clone https://github.com/nickthabib-cloud/ROMULUS.git && cd ROMULUS
 python3.12 -m venv venv
 venv/bin/pip install -e .
 
-export ROMULUS_HOME=~/romulus && mkdir -p "$ROMULUS_HOME"
+export ROMULUS_HOME=~/romulus && mkdir -p "$ROMULUS_HOME" && chmod 700 "$ROMULUS_HOME"
 cp .env.example "$ROMULUS_HOME/.env" && chmod 600 "$ROMULUS_HOME/.env"
 # edit .env: ES_URL, ES_USERNAME/ES_PASSWORD (read-only), ES_INDEX_PATTERNS, ROMULUS_SECRET_KEY, optional Arkime and PCAP settings
 
@@ -77,7 +77,7 @@ venv/bin/romulus --env-file "$ROMULUS_HOME/.env" hunt start --start 2026-01-01T1
 venv/bin/romulus --env-file "$ROMULUS_HOME/.env" report <hunt-id>
 ```
 
-`doctor` checks connectivity, that the account is read-only, the configured indices, TShark, the PCAP paths and storage, and tells you what to fix. Each check has its own deadline (60 to 400 s; `--check-timeout SECONDS` sets one for all). A check that overruns is reported as timed out, a failure for a source, TShark or a model endpoint and a warning otherwise, and the other checks still run. The storage checks open the database read-only: `doctor` never migrates it or writes its data (SQLite may create the empty `-wal`/`-shm` side files a read-only reader needs).
+`doctor` checks connectivity, that the account is read-only, the configured indices, TShark, the PCAP paths and storage, the web UI's TLS setup and that the ROMULUS home is private to its owner, and tells you what to fix. Each check has its own deadline (60 to 400 s; `--check-timeout SECONDS` sets one for all). A check that overruns is reported as timed out, a failure for a source, TShark or a model endpoint and a warning otherwise, and the other checks still run. The storage checks open the database read-only: `doctor` never migrates it or writes its data (SQLite may create the empty `-wal`/`-shm` side files a read-only reader needs).
 
 To use the browser UI:
 
@@ -85,6 +85,15 @@ To use the browser UI:
 venv/bin/romulus --env-file "$ROMULUS_HOME/.env" user add alice --role lead
 venv/bin/romulus --env-file "$ROMULUS_HOME/.env" web      # serves on ROMULUS_WEB_BIND (default 127.0.0.1:8443)
 ```
+
+On the default loopback bind the UI is plain HTTP and reachable only from the same machine. To serve it to other machines, give it a certificate and key; `romulus web` refuses plain HTTP on any other address. A self-signed pair for a small team:
+
+```bash
+openssl req -x509 -newkey rsa:3072 -nodes -days 365 -subj "/CN=romulus" -keyout "$ROMULUS_HOME/key.pem" -out "$ROMULUS_HOME/cert.pem" && chmod 600 "$ROMULUS_HOME/key.pem"
+# .env: ROMULUS_WEB_BIND=0.0.0.0:8443  ROMULUS_WEB_TLS_CERT=$ROMULUS_HOME/cert.pem  ROMULUS_WEB_TLS_KEY=$ROMULUS_HOME/key.pem
+```
+
+Behind a TLS reverse proxy instead, keep the loopback bind (or list the proxy in `ROMULUS_WEB_TRUSTED_PROXIES` so the client address it forwards is used for the login throttle and the audit log) and set `ROMULUS_COOKIE_SECURE=1`. `ROMULUS_WEB_ALLOW_PLAINTEXT=1` accepts plain HTTP on the network for an isolated lab; `doctor` warns about it.
 
 ## Commands
 
@@ -100,6 +109,7 @@ venv/bin/romulus --env-file "$ROMULUS_HOME/.env" web      # serves on ROMULUS_WE
 | `findings <id> [--lane urgent --lane high]` | List ranked findings |
 | `report <id>` | Publish a new immutable report revision (JSON and Markdown) |
 | `user add <name> --role lead\|analyst` | Create a web UI account (interactive) |
+| `user disable\|enable\|passwd\|logout <name>` / `user role <name> --role lead\|analyst` | Disable or re-enable an account, change its password or role, or end its web sessions. Each change ends the account's open sessions |
 | `web` | Serve the browser UI |
 | `db compact` | Return the space freed by deleted hunts to the disk |
 
@@ -110,6 +120,7 @@ Add `--json` for machine-readable output.
 All settings live in `$ROMULUS_HOME/.env` (template: [`.env.example`](.env.example)). Keep it `chmod 600` and never commit it. The main groups:
 
 - **ROMULUS:** `ROMULUS_HOME`, `ROMULUS_WEB_BIND`, `ROMULUS_SECRET_KEY`, `MISSION_TIMEZONE`
+- **Web UI exposure:** `ROMULUS_WEB_TLS_CERT` and `ROMULUS_WEB_TLS_KEY` (built-in TLS), `ROMULUS_WEB_TRUSTED_PROXIES`, `ROMULUS_COOKIE_SECURE`, `ROMULUS_WEB_ALLOW_PLAINTEXT` (see the browser UI notes above)
 - **Elasticsearch/OpenSearch:** `ES_URL`, `ES_FLAVOR`, credentials or `ES_API_KEY`, TLS options, `ES_INDEX_PATTERNS`, `ES_READ_ONLY_ROLES` (OpenSearch)
 - **Arkime and packets:** `ARKIME_URL`, `ARKIME_BASE_PATH`, `ARKIME_AUTH`, credentials, `PCAP_ALLOWED_DIRS`, `TSHARK_BIN`
 - **Model (optional):** see below
@@ -180,7 +191,8 @@ Python 3.12 modular monolith (`src/romulus/`), SQLite (WAL) as the single state 
 ## Security and intended use
 
 - ROMULUS is for **authorized, defensive** threat hunting on networks you are permitted to analyze.
-- It is not hardened for exposure: the web UI has no built-in TLS yet. Bind it to localhost or put it behind a TLS reverse proxy on a trusted network.
+- The web UI serves plain HTTP only on loopback unless you opt out: give it a TLS certificate and key, or put it behind a TLS reverse proxy. Keep it on a trusted network; it is not built for exposure to the internet.
+- Sessions are checked against the account on every request: logging out, disabling an account or changing its role or password ends its sessions at once. Failed logins are throttled per account and slowed per client address.
 
 
 ## Development

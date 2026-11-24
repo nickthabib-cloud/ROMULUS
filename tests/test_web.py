@@ -55,13 +55,21 @@ def test_requires_login(client):
     assert r.status_code == 303 and r.headers["location"] == "/login"
 
 
-def test_bad_password_rejected_and_rate_limited(client):
+def test_bad_password_rejected_and_rate_limited(client, tmp_path):
     c, pw, _ = client
+    from romulus.hunt import run as hr
+    repo = hr.open_repo(Settings(home=tmp_path))
+    other_pw = secrets.token_urlsafe(18)
+    create_user(repo.engine, "analyst2", other_pw, "analyst")
+    repo.engine.dispose()
     for _ in range(6):
         r = c.post("/login", data={"username": "analyst1", "password": "wrong-password-x"}, follow_redirects=False)
         assert "error" in r.headers["location"]
-    # even the right password is refused while rate limited
+    # the locked username refuses even its right password while the failures are recent
     assert "error" in _login(c, pw).headers["location"]
+    # another account from the same address is not locked out
+    r = c.post("/login", data={"username": "analyst2", "password": other_pw}, follow_redirects=False)
+    assert r.headers["location"] == "/"
 
 
 def test_login_headers_and_escaping(client):
@@ -234,6 +242,7 @@ def test_running_stream_releases_sqlite_readers_before_yield_and_sleep(tmp_path,
     app = create_app(settings)
     endpoint = next(route.endpoint for route in app.routes
                     if getattr(route, "path", None) == "/hunts/{hunt_id}/stream")
+    create_user(repo.engine, "test", secrets.token_urlsafe(18), "analyst")
     cookie = Sessions(settings.secret_key.get_secret_value()).issue({"username": "test", "role": "analyst"})
 
     async def receive():
