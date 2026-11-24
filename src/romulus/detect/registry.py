@@ -37,6 +37,7 @@ from romulus.detect.windows_catalog_state import RULES as WINDOWS_CATALOG_STATE_
 from romulus.detect.windows_common import WindowsProcessRule, share_windows_lineage
 from romulus.detect.windows_correlations import WINDOWS_CORRELATION_PLAYBOOKS
 from romulus.detect.windows_credentials import WINDOWS_CREDENTIAL_PLAYBOOKS
+from romulus.detect.windows_deceptive_names import RULES as WINDOWS_DECEPTIVE_NAME_RULES
 from romulus.detect.windows_defense import WINDOWS_DEFENSE_PLAYBOOKS
 from romulus.detect.windows_directory_events import WINDOWS_DIRECTORY_PLAYBOOKS
 from romulus.detect.windows_driver_hashes import RULES as WINDOWS_DRIVER_HASH_RULES
@@ -85,7 +86,7 @@ _WINDOWS_ADDITIONS = (tuple(WINDOWS_PROCESS_W4_RULES) + tuple(ELEVATION_EVENT_RU
                       + tuple(WINDOWS_INJECTION_RULES) + tuple(WINDOWS_LOLBIN_RULES)
                       + tuple(WINDOWS_TUNNEL_RULES) + tuple(WINDOWS_RPC_RULES)
                       + WINDOWS_DRIVER_HASH_RULES + WINDOWS_HOUSEKEEPING_RULES
-                      + WINDOWS_IMAGE_FILE_RULES + WINDOWS_SEQUENCE_RULES)
+                      + WINDOWS_IMAGE_FILE_RULES + WINDOWS_SEQUENCE_RULES + WINDOWS_DECEPTIVE_NAME_RULES)
 WINDOWS_PROCESS_PLAYBOOKS += [rule for rule in _WINDOWS_ADDITIONS if issubclass(rule, WindowsProcessRule)]
 WINDOWS_HOST_PLAYBOOKS += [rule for rule in _WINDOWS_ADDITIONS
                          if issubclass(rule, WindowsEventRule) and not issubclass(rule, WindowsProcessRule)]
