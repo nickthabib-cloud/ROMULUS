@@ -278,7 +278,7 @@ def test_attack_route_reuses_active_sigma_without_history_iteration(persistent_r
     settings = Settings(home=tmp_path, secret_key=secrets.token_urlsafe(32))
     client = TestClient(web.create_app(settings))
     client.cookies.set('romulus_session', Sessions(settings.secret_key.get_secret_value()).issue(
-        {'username': 'reader', 'role': 'analyst'}))
+        {'username': 'reader', 'role': 'analyst', 'generation': 0}))
     response = client.get('/catalog/attack')
     assert response.status_code == 200
     browser = CatalogBrowser(repo)
@@ -303,7 +303,7 @@ def test_stored_windows_profile_cannot_claim_linux_scope_in_detail_or_filter(per
     settings = Settings(home=tmp_path, secret_key=secrets.token_urlsafe(32))
     client = TestClient(web.create_app(settings))
     client.cookies.set('romulus_session', Sessions(settings.secret_key.get_secret_value()).issue(
-        {'username': 'reader', 'role': 'analyst'}))
+        {'username': 'reader', 'role': 'analyst', 'generation': 0}))
     detail = client.get('/catalog/rules/host.exec_from_temp_dir')
     assert detail.status_code == 200
     # the catalog page does not show applicability; the browser keeps it for exports and filters

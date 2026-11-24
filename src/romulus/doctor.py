@@ -15,6 +15,7 @@ from pathlib import Path
 import httpx
 from sqlalchemy import exc as sa_exc
 
+from romulus import web_exposure
 from romulus.agent.provider import EGRESS_SWITCH_VALUE, AgentNotReady, agent_readiness, build_provider
 from romulus.agent.provider.egress import Resolver, system_resolver
 from romulus.agent.provider.openai_responses import LONG_REASONING_EFFORTS, LONG_REASONING_TIMEOUT
@@ -460,11 +461,93 @@ def check_paths(s: Settings, env_file: Path | None) -> list[Check]:
         mode = stat.S_IMODE(env_file.stat().st_mode)
         out.append(Check("paths.env_mode", "ok" if mode & 0o077 == 0 else "fail", oct(mode)))
     s.home.mkdir(parents=True, exist_ok=True)
+    out.append(check_home_modes(s))
     free_gb = shutil.disk_usage(s.home).free / 1e9
     out.append(Check("disk.free", "ok" if free_gb > 10 else "warn", f"{free_gb:.1f} GB free at {s.home}"))
     out.append(check_state_budget(s))
     out.append(check_stage_volume(s))
     return out
+
+
+def open_mode(mode: int) -> str | None:
+    """What a POSIX permission mode opens beyond its owner ("group" and/or "others"), or None."""
+    who = [name for name, bits in (("group", 0o070), ("others", 0o007)) if mode & bits]
+    return " and ".join(who) or None
+
+
+def check_home_modes(s: Settings, posix: bool | None = None,
+                     mode_of: Callable[[Path], int] = lambda path: stat.S_IMODE(path.stat().st_mode)) -> Check:
+    """Warn when the ROMULUS home, the database, report or log directory lets anyone but its owner in: they hold
+    findings, evidence that may carry credentials, and the audit log; the stage directory (staged telemetry) is judged
+    too. A directory inside a home that is private to its owner cannot be reached by others whatever its own mode, so
+    it is judged only when the home itself is open or the directory lives elsewhere (as ROMULUS_STAGE_DIR may)."""
+    if not (os.name == "posix" if posix is None else posix):
+        return Check("paths.home_mode", "ok", "permission modes are not checked on this platform")
+    opened = []
+    home_private = False
+    for path in (s.home, s.db_path.parent, s.reports_dir, s.logs_dir, s.stage_path):
+        if home_private and s.home in path.parents:
+            continue
+        try:
+            who = open_mode(mode_of(path))
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            opened.append(f"{path} (unreadable: {exc.strerror or exc})")
+            continue
+        if who:
+            opened.append(f"{path} (open to {who})")
+        elif path == s.home:
+            home_private = True
+    if opened:
+        return Check("paths.home_mode", "warn", f"{'; '.join(opened)}: run chmod 700 on the ROMULUS home and the "
+                                                "stage directory, so only the service account can read them")
+    return Check("paths.home_mode", "ok", "the home, database, report, log and stage directories are private to their "
+                                          "owner")
+
+
+def key_file_problem(mode: int) -> str | None:
+    """Why a TLS private key with this POSIX mode must not be used, or None."""
+    return "is readable by every local user" if mode & 0o004 else None
+
+
+def check_web_tls(s: Settings, posix: bool | None = None) -> Check:
+    """The web UI's exposure: built-in TLS (its files present, readable and the key private), plain HTTP on loopback
+    only, or plain HTTP on the network, which `romulus web` refuses without ROMULUS_WEB_ALLOW_PLAINTEXT=1."""
+    posix = os.name == "posix" if posix is None else posix
+    if web_exposure.tls_half_configured(s):
+        return Check("web.tls", "fail", "only one of ROMULUS_WEB_TLS_CERT and ROMULUS_WEB_TLS_KEY is set: set both "
+                                        "for built-in TLS, or neither")
+    try:
+        web_exposure.trusted_proxies(s)
+        state = web_exposure.plaintext_state(s)
+    except ValueError as exc:
+        return Check("web.tls", "fail", str(exc))
+    if state == "tls":
+        problems = []
+        for name, value in (("ROMULUS_WEB_TLS_CERT", s.web_tls_cert), ("ROMULUS_WEB_TLS_KEY", s.web_tls_key)):
+            path = Path(value)
+            try:
+                with path.open("rb") as handle:
+                    handle.read(1)
+                mode = stat.S_IMODE(path.stat().st_mode)
+            except OSError as exc:
+                problems.append(f"{name} {path} cannot be read: {exc.strerror or exc}")
+                continue
+            why = key_file_problem(mode) if posix and name == "ROMULUS_WEB_TLS_KEY" else None
+            if why:
+                problems.append(f"{name} {path} {why} ({oct(mode)}): chmod 600 it")
+        if problems:
+            return Check("web.tls", "fail", "; ".join(problems))
+        return Check("web.tls", "ok", f"built-in TLS on {s.web_bind}")
+    if state == "loopback":
+        return Check("web.tls", "ok", f"plain HTTP on loopback only ({s.web_bind}); put a TLS reverse proxy in front "
+                                      "to reach it from other machines")
+    if state == "allowed":
+        return Check("web.tls", "warn", f"plain HTTP on {s.web_bind} under {web_exposure.PLAINTEXT_SWITCH} (lab "
+                                        "exception): passwords and session cookies cross the network unencrypted. "
+                                        "Set ROMULUS_WEB_TLS_CERT and ROMULUS_WEB_TLS_KEY for TLS.")
+    return Check("web.tls", "fail", web_exposure.refusal(s) or f"plain HTTP on {s.web_bind}")
 
 
 # Data directories of services that may share a host with ROMULUS: a stage on their volume can fill it (Elasticsearch
@@ -761,6 +844,7 @@ def doctor_steps(s: Settings, env_file: Path | None = None, check_seconds: float
         Step("secrets.strength", lambda: check_secret_strength(s), bound(CHECK_SECONDS), False),
         Step("tshark", lambda: check_tshark(s), bound(LOCAL_SECONDS), True),
         Step("paths", lambda: check_paths(s, env_file), bound(LOCAL_SECONDS), False),
+        Step("web.tls", lambda: check_web_tls(s), bound(LOCAL_SECONDS), False),
         Step("site.collection", lambda: check_site(s), bound(LOCAL_SECONDS), False),
         Step("mentions.patterns", lambda: check_mention_patterns(s), bound(LOCAL_SECONDS), False),
         Step("db.integrity", lambda: check_db(s, integrity), integrity + DB_GRACE_SECONDS, False),

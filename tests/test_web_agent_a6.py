@@ -248,7 +248,7 @@ def test_stream_resends_mutations_and_never_materializes_candidates(setup, monke
             "name": "get_finding", "arguments": {"secret": "never streamed"}, "status": "ok",
             "result_digest": "d", "created_at": now})
     async def collect():
-        return [unpack(value) async for value in live_events(repo, Connected(), "h1", sleep)]
+        return [unpack(value) async for value in live_events(repo, Connected(), "h1", sleep, authorised=lambda: True)]
     events = asyncio.run(collect())
     assert sleeps == [2]
     assert any(name == "finding" and value["claim"] == "changed claim" and value["revised"] for name, value in events)
@@ -281,7 +281,7 @@ def test_stream_drains_over_200_changes_before_terminal_close(setup, monkeypatch
     async def no_sleep(_):
         pytest.fail("full pages and terminal backlog must not sleep")
     async def collect():
-        return [unpack(value) async for value in live_events(repo, Connected(), "h1", no_sleep)]
+        return [unpack(value) async for value in live_events(repo, Connected(), "h1", no_sleep, authorised=lambda: True)]
     events = asyncio.run(collect())
     findings = [value["id"] for name, value in events if name == "finding"]
     assert len(findings) == len(set(findings)) == 252
@@ -295,7 +295,7 @@ def test_deleted_hunt_ends_live_stream_cleanly(setup):
     async def no_sleep(_):
         pytest.fail("deleted stream must close")
     async def collect():
-        stream = live_events(repo, Connected(), "h1", no_sleep)
+        stream = live_events(repo, Connected(), "h1", no_sleep, authorised=lambda: True)
         first = await anext(stream)
         assert "event: finding" in first
         repo.delete_hunt("h1", actor="test")
@@ -315,7 +315,7 @@ def test_stream_does_not_repeat_unchanged_run_for_heartbeat(setup):
         else:
             run_row(repo, "completed")
     async def collect():
-        return [unpack(value) async for value in live_events(repo, Connected(), "h1", sleep)]
+        return [unpack(value) async for value in live_events(repo, Connected(), "h1", sleep, authorised=lambda: True)]
     states = [value["state"] for name, value in asyncio.run(collect()) if name == "agent_run"]
     assert states == ["pending", "completed"]
 
@@ -410,7 +410,7 @@ def test_stream_keeps_running_when_reassessment_starts_during_terminal_backlog(s
         repo.save_candidate({**original, "id": "late-agent", "provenance": "agent"})
         run_row(repo, "completed")
     async def collect():
-        return [unpack(value) async for value in live_events(repo, Connected(), "h1", sleep)]
+        return [unpack(value) async for value in live_events(repo, Connected(), "h1", sleep, authorised=lambda: True)]
     events = asyncio.run(collect())
     assert sleeps == [1]
     assert any(name == "finding" and row["id"] == "late-agent" for name, row in events)
