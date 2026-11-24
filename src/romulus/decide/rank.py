@@ -428,9 +428,9 @@ def repeat_discount(*, lane: str, ordinal: int | None, inherited: float, rule_id
     if lane != REPEAT_LANE or ordinal is None or ordinal <= REPEAT_FULL_PLACES or entity is None or inherited <= 0:
         return 0.0, None
     discount = inherited * (1 - REPEAT_SHARE)
-    return discount, (f"lead {ordinal} of {rule_id} listed under {entity_kind}:{entity}: a repeat inherits "
-                      f"{REPEAT_SHARE:.0%} of the entity score; the first {REPEAT_FULL_PLACES} inherit it in full "
-                      f"(-{discount:g})")
+    return discount, (f"lead {ordinal} of {rule_id} listed under {entity_kind}:{entity}: past the first "
+                      f"{REPEAT_FULL_PLACES} of its rule there, it inherits {REPEAT_SHARE:.0%} of the inherited entity "
+                      f"score {inherited:g} (-{discount:g})")
 
 
 def repeat_order_key(*, provenance: str, lane: str, prior: float, ts, candidate_id: str) -> tuple:

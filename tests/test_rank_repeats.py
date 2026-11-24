@@ -181,13 +181,25 @@ def test_the_pass_before_expansion_keeps_full_inheritance():
     assert not any("inherits" in str(row["reasons"]) for row in findings.values())
 
 
+def _pivot(row, case="session-1"):
+    """A rule match an investigator pivot found: a catalog rule, deterministic, with its source case."""
+    row["source_case_id"] = case
+    return row
+
+
+def _agent(cid, host, ts, lane="lead"):
+    """An AI agent proposal in its stored shape: every proposal carries rule id `agent.finding`."""
+    return _row(cid, "agent.finding", lane=lane, host=host, ts=ts, provenance="agent",
+                priority=1.0 if lane == "high" else 0.25)
+
+
 def test_ordinals_put_deterministic_findings_first_and_stronger_lanes_before_leads():
-    """An agent lead with an earlier time and a stronger prior never takes a deterministic lead's full share; a high of
-    the rule takes an ordinal (its evidence is already shown at full strength) and is never discounted."""
+    """A pivot's rule match with an earlier time and a stronger prior never takes a deterministic lead's full share;
+    a high of the rule takes an ordinal (its evidence is already shown at full strength) and is never discounted."""
     minute = timedelta(minutes=1)
     rows = [_row("s-exec", "r.exec", lane="high", host="s", attack=["T1059"], ts=START),
             _row("s-dump", "r.dump", lane="high", host="s", attack=["T1003"], ts=START + minute),
-            _row("a-early", "r.admin", host="s", ts=START - timedelta(hours=1), priority=90, provenance="agent"),
+            _pivot(_row("c-early", "r.admin", host="s", ts=START - timedelta(hours=1), priority=90)),
             _row("d-high", "r.admin", lane="high", host="s", ts=START + 9 * minute, priority=20),
             *[_row(f"d{index}", "r.admin", host="s", ts=START + (2 + index) * minute) for index in range(3)]]
     _repo, findings, entities = _ranked(rows)
@@ -196,19 +208,50 @@ def test_ordinals_put_deterministic_findings_first_and_stronger_lanes_before_lea
     assert findings["d0"]["score"] == srv + 30                         # ordinal 2: full
     assert findings["d1"]["score"] == pytest.approx(srv * model.REPEAT_SHARE + 30)  # ordinal 3
     assert findings["d2"]["score"] == pytest.approx(srv * model.REPEAT_SHARE + 30)  # ordinal 4
-    assert findings["a-early"]["score"] == pytest.approx(srv * model.REPEAT_SHARE + 90)  # ordinal 5
-    assert "lead 5 of r.admin" in str(findings["a-early"]["reasons"])
+    assert findings["c-early"]["score"] == pytest.approx(srv * model.REPEAT_SHARE + 90)  # ordinal 5
+    assert any(line.startswith("lead 5 of r.admin listed under host:s") and f"inherited entity score {srv:g}" in line
+               for line in findings["c-early"]["reasons"])
+
+
+def test_distinct_agent_proposals_are_never_repeats_and_never_move_deterministic_ordinals():
+    """Every AI agent proposal carries rule id `agent.finding`, so three distinct proposals on one host are not three
+    instances of one rule: none is discounted, in the pass or placed after it, and the host's deterministic repeats
+    discount exactly as they do without them."""
+    minute = timedelta(minutes=1)
+    rows = _busy_rows()
+    agents = [_agent(f"a{index}", "srv", START - timedelta(hours=1) + index * minute) for index in range(3)]
+    _repo_plain, plain, _ = _ranked(rows)
+    _repo_with, with_agents, entities = _ranked([*rows, *agents])
+    srv = entities[("host", "srv")]["score"]
+    for cid in agents:
+        cid = cid["id"]
+        assert with_agents[cid]["score"] == pytest.approx(srv + 0.25)
+        assert not any("inherits" in line for line in with_agents[cid]["reasons"])
+    for cid in plain:
+        assert with_agents[cid]["score"] == plain[cid]["score"], cid
+        assert with_agents[cid]["reasons"] == plain[cid]["reasons"], cid
+    assert [with_agents[f"b-admin{index}"]["score"] for index in range(8)] == pytest.approx(
+        [srv + 50] * 2 + [srv * model.REPEAT_SHARE + 50] * 6)
+    # placed after the pass: three more proposals are undiscounted and every stored rank stays
+    repo, before, _ = _ranked([*rows, *agents])
+    late = [_agent(f"z{index}", "srv", START - timedelta(hours=2) + index * minute) for index in range(3)]
+    _insert(repo, late)
+    preview = rank_unranked(repo, "h1", late)
+    place_late_findings(repo, "h1")
+    after, _ = _ranks(repo)
+    assert {cid: after[cid]["score"] for cid in before} == {cid: row["score"] for cid, row in before.items()}
+    for row in late:
+        assert after[row["id"]]["score"] == pytest.approx(srv + 0.25) == pytest.approx(preview[row["id"]]["score"])
+        assert "inherits" not in str(after[row["id"]]["reasons"])
 
 
 # -- findings stored after the pass --------------------------------------------------------------------------------
-def test_a_late_agent_lead_takes_its_ordinal_after_the_stored_rows_and_moves_no_stored_rank():
+def test_a_late_pivot_lead_takes_its_ordinal_after_the_stored_rows_and_moves_no_stored_rank():
     rows = _busy_rows()
     repo, before, entities = _ranked(rows)
     srv = entities[("host", "srv")]["score"]
-    late = [_row("z-agent", "host.account_change", host="srv", ts=START - timedelta(hours=1), priority=70,
-                 provenance="agent"),
-            _row("z-agent-high", "host.account_change", lane="high", host="srv", ts=START, priority=70,
-                 provenance="agent")]
+    late = [_pivot(_row("z-pivot", "host.account_change", host="srv", ts=START - timedelta(hours=1), priority=70)),
+            _pivot(_row("z-pivot-high", "host.account_change", lane="high", host="srv", ts=START, priority=70))]
     _insert(repo, late)
     preview = rank_unranked(repo, "h1", late)
     place_late_findings(repo, "h1")
@@ -218,14 +261,14 @@ def test_a_late_agent_lead_takes_its_ordinal_after_the_stored_rows_and_moves_no_
     assert {cid: tuple(after[cid][key] for key in fields) for cid in before} == {
         cid: tuple(row[key] for key in fields) for cid, row in before.items()}
     # the late high takes ordinal 9 at full share; the late lead ordinal 10
-    assert after["z-agent-high"]["score"] == srv + 70
-    assert after["z-agent"]["score"] == pytest.approx(srv * model.REPEAT_SHARE + 70)
-    reasons = after["z-agent"]["reasons"]
+    assert after["z-pivot-high"]["score"] == srv + 70
+    assert after["z-pivot"]["score"] == pytest.approx(srv * model.REPEAT_SHARE + 70)
+    reasons = after["z-pivot"]["reasons"]
     reasons = json.loads(reasons) if isinstance(reasons, str) else reasons
     assert any(line.startswith("lead 10 of host.account_change listed under host:srv") for line in reasons)
     assert reasons[-1] == "ranked from the stored entity scores after the last ranking pass"
-    assert preview["z-agent"]["score"] == pytest.approx(after["z-agent"]["score"])
-    assert preview["z-agent"]["reasons"] == reasons
+    assert preview["z-pivot"]["score"] == pytest.approx(after["z-pivot"]["score"])
+    assert preview["z-pivot"]["reasons"] == reasons
 
 
 def test_repeat_discount_model():
@@ -241,6 +284,7 @@ def test_repeat_discount_model():
                                                  entity_kind="host", entity="a")
         assert discount == 100.0 * (1 - model.REPEAT_SHARE) and reason.endswith(f"(-{discount:g})")
         assert f"lead {ordinal} of r listed under host:a" in reason
+        assert f"{model.REPEAT_SHARE:.0%} of the inherited entity score 100 " in reason
 
 
 # -- mission scale --------------------------------------------------------------------------------------------------

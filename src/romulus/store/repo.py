@@ -3008,7 +3008,7 @@ class Repo:
 
     def rank_group_sizes(self, hunt_id: str, pass_no: int, keys) -> dict[tuple[str, str, str], int]:
         """How many of a pass's finding ranks each given (entity kind, entity, rule) group holds: findings of that
-        rule listed under that entity."""
+        rule listed under that entity. The AI agent's proposals are not counted: they take no ordinal."""
         out: dict[tuple[str, str, str], int] = {}
         ordered = sorted(set(keys))
         rank, c = t.finding_rank, t.candidate
@@ -3018,7 +3018,8 @@ class Repo:
                 query = (select(rank.c.entity_kind, rank.c.entity, c.c.rule_id, func.count())
                          .select_from(c.join(rank, and_(rank.c.hunt_id == c.c.hunt_id, rank.c["pass"] == pass_no,
                                                         rank.c.candidate_id == c.c.id)))
-                         .where(c.c.hunt_id == hunt_id, c.c.rule_id.in_(sorted({key[2] for key in chunk})),
+                         .where(c.c.hunt_id == hunt_id, c.c.provenance != "agent",
+                                c.c.rule_id.in_(sorted({key[2] for key in chunk})),
                                 tuple_(rank.c.entity_kind, rank.c.entity, c.c.rule_id).in_(chunk))
                          .group_by(rank.c.entity_kind, rank.c.entity, c.c.rule_id))
                 for kind, entity, rule_id, count in connection.execute(query).all():

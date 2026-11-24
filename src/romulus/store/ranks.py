@@ -402,18 +402,20 @@ class RankWorkspace:
                    "entity = :entity, reasons = :reasons, inherited = :inherited WHERE candidate_id = :candidate_id",
                    rows)
 
-    def number_repeats(self, lane_tiers: dict[str, int], deterministic: str) -> None:
+    def number_repeats(self, lane_tiers: dict[str, int], deterministic: str, agent: str) -> None:
         """Each listed finding's ordinal among the findings of its rule listed under its entity, in one SQL window
         statement: deterministic findings first, then by lane tier, stronger prior, earlier time and id (the order
-        `romulus.decide.rank.repeat_order_key` states)."""
-        tier = "CASE lane " + " ".join(f"WHEN '{lane}' THEN {value}" for lane, value in lane_tiers.items()) +             f" ELSE {len(lane_tiers)} END"
+        `romulus.decide.rank.repeat_order_key` states). The AI agent's proposals take no ordinal: they all carry one
+        rule id, so distinct proposals are not repeats of one rule, and they never move a deterministic ordinal."""
+        tier = ("CASE lane " + " ".join(f"WHEN '{lane}' THEN {value}" for lane, value in lane_tiers.items())
+                + f" ELSE {len(lane_tiers)} END")
         self._run(f"""
             UPDATE rk_finding SET ordinal = o.n FROM (
                 SELECT candidate_id, ROW_NUMBER() OVER (
                     PARTITION BY entity_kind, entity, rule_id
                     ORDER BY provenance != :deterministic, {tier}, prior DESC, ts IS NULL, ts, candidate_id) AS n
-                FROM rk_finding WHERE entity IS NOT NULL) AS o
-            WHERE rk_finding.candidate_id = o.candidate_id""", {"deterministic": deterministic})
+                FROM rk_finding WHERE entity IS NOT NULL AND provenance != :agent) AS o
+            WHERE rk_finding.candidate_id = o.candidate_id""", {"deterministic": deterministic, "agent": agent})
 
     def repeat_page(self, after: str, limit: int, lane: str, past: int) -> list[dict]:
         """The next page (keyset on id) of findings in `lane` whose ordinal is past `past`."""

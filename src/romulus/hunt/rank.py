@@ -264,8 +264,9 @@ def _rank_findings(ws, batch_size: int, heartbeat) -> None:
 
 def _discount_repeats(ws, batch_size: int, heartbeat) -> None:
     """Number each finding within its (listed entity, rule) group in one SQL statement, then lower the inherited
-    share of the leads past the first REPEAT_FULL_PLACES of their group, one keyset page at a time."""
-    ws.number_repeats(model.LANE_TIER, model.DETERMINISTIC_PROVENANCE)
+    share of the leads past the first REPEAT_FULL_PLACES of their group, one keyset page at a time. The AI agent's
+    proposals are never numbered or discounted (they all share one rule id)."""
+    ws.number_repeats(model.LANE_TIER, model.DETERMINISTIC_PROVENANCE, model.AGENT_PROVENANCE)
     ws.commit()
     after = ""
     while True:
@@ -410,11 +411,14 @@ def rank_unranked(repo: Repo, hunt_id: str, candidates: list[dict], *, pass_no: 
 def _discount_late_repeats(repo: Repo, hunt_id: str, pass_no: int, candidates: list[dict], out: dict[str, dict],
                            provenance_of: dict[str, str], inherited: dict[str, float]) -> None:
     """Give each late finding its ordinal in its (listed entity, rule) group, after the group's stored rows and then
-    in the group's own order among the late ones, and discount the repeated leads (`model.repeat_discount`)."""
+    in the group's own order among the late ones, and discount the repeated leads (`model.repeat_discount`). The AI
+    agent's proposals take no ordinal and are never discounted: they all carry one rule id, so distinct proposals are
+    not repeats of one rule."""
     def key(row):
         return out[row["id"]]["entity_kind"], out[row["id"]]["entity"], row["rule_id"]
 
-    grouped = [row for row in candidates if out[row["id"]]["entity"] is not None]
+    grouped = [row for row in candidates if out[row["id"]]["entity"] is not None
+               and provenance_of[row["id"]] != model.AGENT_PROVENANCE]
     if not any(row["lane"] == model.REPEAT_LANE for row in grouped):
         return
     taken = repo.rank_group_sizes(hunt_id, pass_no, {key(row) for row in grouped})
