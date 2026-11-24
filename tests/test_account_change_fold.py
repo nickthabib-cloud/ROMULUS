@@ -714,7 +714,7 @@ def test_a_fleet_member_is_timed_by_its_own_record():
     from romulus.decide.rank import RANK_VERSION
     from romulus.hunt.rank import PASS_FINAL, compute_rank_pass
     from tests.test_evidence_rank import START, _event, _insert, _ranks, _repo, _row
-    assert RANK_VERSION == "rank@2"
+    assert RANK_VERSION == "rank@3"
     repo = _repo()
     _insert(repo, [_row("acct-fleet", "host.account_or_group_change", lane="high", host="node00",
                         attack=["T1136.001"], ts=START),
