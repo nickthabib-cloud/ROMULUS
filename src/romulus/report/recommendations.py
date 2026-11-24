@@ -10,8 +10,8 @@ techniques, findings and entities it addresses; its priority comes from the stro
 - near-term:   any other high finding, or a lead of critical or high severity;
 - longer-term: any other lead.
 
-A finding the AI agent proposed is unconfirmed, so it raises a recommendation to near-term at most; a finding an
-analyst marked benign or expected raises it no higher than longer-term. A finding with no technique, or whose
+A finding the AI agent proposed is unconfirmed, so it raises a recommendation to near-term at most until an analyst
+confirms it malicious; a finding an analyst marked benign or expected raises it no higher than longer-term. A finding with no technique, or whose
 techniques have no actionable mitigation in the release, gets a triage recommendation at its own priority: no
 reportable finding is left out. A finding whose claim is a mention (text a record contains) drives no
 recommendation: it is counted and listed apart. Lists are bounded and every count is exact; distinct entities are
@@ -55,8 +55,10 @@ def finding_priority(finding: dict) -> tuple[str, str]:
     lane, severity = finding.get("lane"), finding.get("severity")
     status = finding.get("analyst_status")
     strong = severity in ("critical", "high")
-    if status == "confirmed_malicious" and finding.get("provenance") != "agent":
-        return "immediate", "an analyst confirmed a finding malicious"
+    if status == "confirmed_malicious":
+        # an analyst's confirmation outranks the AI agent's cap: the finding is no longer unconfirmed
+        return "immediate", ("an analyst confirmed an AI agent finding malicious" if finding.get("provenance") == "agent"
+                             else "an analyst confirmed a finding malicious")
     if status in CLEARED:
         return "longer_term", f"an analyst marked the finding {status.replace('_', ' ')}"
     if lane == "urgent" or (lane == "high" and strong):

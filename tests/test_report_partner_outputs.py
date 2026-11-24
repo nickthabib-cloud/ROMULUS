@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import re
+import time
 import tracemalloc
 import uuid
 import zipfile
@@ -142,7 +143,8 @@ def test_findings_without_an_actionable_mitigation_get_triage_and_none_is_droppe
     ("urgent", "critical", "benign", "deterministic", "longer_term"),
     ("high", "high", "expected_activity", "deterministic", "longer_term"),
     ("urgent", "critical", "new", "agent", "near_term"),
-    ("high", "high", "confirmed_malicious", "agent", "near_term"),
+    # an analyst's confirmation outranks the AI agent's cap, and the reason no longer calls it unconfirmed
+    ("lead", "low", "confirmed_malicious", "agent", "immediate"),
     ("lead", "medium", "new", "agent", "longer_term"),
 ])
 def test_priority_rules(lane, severity, status, provenance, expected):
@@ -151,6 +153,7 @@ def test_priority_rules(lane, severity, status, provenance, expected):
     assert level == expected and reason
     if provenance == "agent":
         assert "AI agent" in reason
+    assert ("unconfirmed" in reason) == (provenance == "agent" and status != "confirmed_malicious")
 
 
 def test_a_recommendation_takes_the_priority_of_its_strongest_finding_and_counts_agent_findings():
@@ -310,7 +313,7 @@ def test_context_records_and_fleet_members_are_read_by_their_role():
     with iocs.collect(repo, findings, _networks(), hunt_id="h1") as table:
         summary = table.summary()
         rows = list(table.rows())
-    values = {(row[0], row[1], row[2]) for row in rows}
+    values = {(row[0], row[1], row[3]) for row in rows}         # kind, value, (port,) role
     assert ("process_executable", "/tmp/implant", "executable") in values
     assert not any(row[1] in ("/usr/sbin/sshd", "root") for row in rows)
     assert {("ipv4", "203.0.113.80", "fleet member address"), ("ipv4", "203.0.113.81", "fleet member address")} <= values
@@ -341,9 +344,64 @@ def test_credentials_and_secrets_are_withheld_never_exported_in_part(tmp_path):
     for secret in ("hunter2", "user:pw", "Wh1spered-Pa55word", "token=abcdef"):
         assert secret not in everything
     withheld = summary["withheld"]
-    assert withheld["url"] == {"holds a credential": 1, "not an absolute URL": 1}
-    assert withheld["file_path"] == {"holds a configured secret": 1, "holds a credential": 1}
+    # one reason for a credential and a configured secret alike: the export never says which value holds a secret
+    assert withheld["url"] == {iocs.CREDENTIAL_REASON: 1, "not an absolute URL": 1}
+    assert withheld["file_path"] == {iocs.CREDENTIAL_REASON: 2}
+    assert "configured" not in json.dumps(withheld)
     assert summary["secrets_checked"] is True
+
+
+def test_a_weak_secret_withholds_only_a_whole_value_or_credential_token(tmp_path):
+    """A weak configured password (`admin`) never withholds a name or path it is part of, and is never named."""
+    settings = Settings(home=tmp_path, arkime_password="admin")
+    from romulus.config import weak_secret_names
+    assert "ARKIME_PASSWORD" in weak_secret_names(settings)
+    events = [_event("e1", "auth", {"user.name": "admin", "auth.target_user": "admin2",
+                                    "file.path": "/home/admin/.ssh/authorized_keys",
+                                    "url.full": "http://203.0.113.5/login?user=x&pass=admin",
+                                    "destination.ip": "203.0.113.5"}, host="admin-ws01")]
+    findings = [_finding("F1", entities=[["host", "admin-ws01", "host"]], citations=[{"event_id": "e1"}])]
+    summary, text, _stix = _export(findings=findings, events=events, settings=settings)
+    values = {row["value"] for row in csv.DictReader(io.StringIO(text))}
+    assert {"admin-ws01", "/home/admin/.ssh/authorized_keys", "admin2", "203.0.113.5"} <= values
+    assert "admin" not in values
+    assert summary["withheld"] == {"url": {iocs.CREDENTIAL_REASON: 1}, "user_account": {iocs.CREDENTIAL_REASON: 1}}
+
+
+def test_a_strong_secret_is_withheld_wherever_it_appears():
+    secrets = iocs._Secrets(None)
+    assert not secrets and not secrets.held("anything")
+    check = iocs._Checker(None, secrets)
+    assert check("file_path", "/srv/x") == ("file_path", "/srv/x", "")
+
+
+@pytest.mark.parametrize("url", [
+    "http://x.example/a?access_key=SECRETSECRET1",
+    "https://x.example/cb?code=abc123def",
+    "https://hooks.slack.com/services/T0000/B0000/XXXXXXXXXXXXXXXXXXXXXXXX",
+    "https://discord.com/api/webhooks/123456789/abcDEF_ghi-JKL",
+    "https://contoso.webhook.office.com/webhookb2/abc@def/IncomingWebhook/0123abc/xyz",
+    "https://api.telegram.org/bot123456:ABCdefGhIJKlmnoPQRstuVWXyz/sendMessage",
+    "http://x.example/a?X-Amz-Signature=abc&X-Amz-Credential=AK",
+])
+def test_credential_urls_are_withheld(url):
+    exported, reason, _port = iocs._Checker(None, iocs._Secrets(None))("url", url)
+    assert exported is None and reason in (iocs.CREDENTIAL_REASON, "invalid or credential-bearing URL")
+
+
+def test_a_port_is_kept_apart_from_the_name_it_was_written_with():
+    check = iocs._Checker(None, iocs._Secrets(None))
+    assert check("domain", "Evil.Example.com:8080") == ("domain", "evil.example.com", "8080")
+    assert check("domain", "192.0.2.5:443") == ("ipv4", "192.0.2.5", "443")
+    assert check("domain", "[2001:db8::1]:443") == ("ipv6", "2001:db8::1", "443")
+    assert check("domain", "2001:db8::1") == ("ipv6", "2001:db8::1", "")
+    events = [_event("e1", "http_tx", {"http.host": "evil.example.com:8080"})]
+    _summary, text, stix = _export(findings=[_finding("F1", entities=[], citations=[{"event_id": "e1"}])],
+                                   events=events)
+    rows = [row for row in csv.DictReader(io.StringIO(text)) if row["kind"] == "domain"]
+    assert [(row["value"], row["port"]) for row in rows] == [("evil.example.com", "8080")]
+    observed = next(item for item in json.loads(stix)["objects"] if item.get("x_romulus_kind") == "domain")
+    assert observed["x_romulus_ports"] == ["8080"]
 
 
 def test_csv_cells_cannot_start_a_formula():
@@ -615,7 +673,7 @@ def test_the_web_report_list_links_the_exports_and_serves_them(client):  # noqa:
     assert 'href="/reports/h1/h1-r1-iocs.csv"' in page.text and 'href="/reports/h1/h1-r1-iocs-stix.json"' in page.text
     served = web.get("/reports/h1/h1-r1-iocs.csv")
     assert served.status_code == 200 and served.headers["content-type"].startswith("text/csv")
-    assert served.text.startswith("kind,value,role,field")
+    assert served.text.startswith("kind,value,port,role,field")
     stix = web.get("/reports/h1/h1-r1-iocs-stix.json")
     assert stix.status_code == 200
     validate_stix(stix.json())
@@ -633,3 +691,71 @@ def test_the_report_list_links_no_export_that_is_not_on_disk(client, monkeypatch
     assert web.post("/hunts/h1/report", data={"csrf": _csrf(page.text)}, follow_redirects=False).status_code == 303
     page = web.get("/hunts/h1")
     assert 'href="/reports/h1/h1-r1.md"' in page.text and "h1-r1-iocs" not in page.text
+
+
+def test_a_dropped_file_written_and_run_gets_one_observed_data_per_kind():
+    """The same path as a written file and a run program, and one name as a file name and a bare path, share their
+    observables but each kind keeps its own observation."""
+    events = [_event("e1", "file_change", {"file.path": "/tmp/x/implant"}),
+              _event("e2", "process_exec", {"process.executable": "/tmp/x/implant"}),
+              _event("e3", "process_exec", {"process.name": "implant2", "file.path": "implant2"})]
+    findings = [_finding(f"F{i}", entities=[], citations=[{"event_id": f"e{i}"}]) for i in (1, 2, 3)]
+    summary, _text, stix = _export(findings=findings, events=events)
+    objects = validate_stix(json.loads(stix))
+    observed = [item for item in objects.values() if item["type"] == "observed-data"]
+    assert len(observed) == summary["counts"]["indicators"]
+    implant = [item for item in observed if item["x_romulus_kind"] in ("file_path", "process_executable")
+               and objects[item["object_refs"][-1]].get("name") == "implant"]
+    assert {item["x_romulus_kind"] for item in implant} == {"file_path", "process_executable"}
+    assert implant[0]["object_refs"] == implant[1]["object_refs"]
+
+
+def test_analyst_status_and_agent_only_values_reach_the_export():
+    findings = _export_findings()
+    findings[0]["analyst_status"] = "benign"
+    findings.append(_finding("F4", provenance="agent", entities=[["ip", "198.18.0.77", "dst"]]))
+    summary, text, stix = _export(findings=findings)
+    statuses = {(row["finding_id"], row["finding_analyst_status"]) for row in csv.DictReader(io.StringIO(text))}
+    assert ("F1", "benign") in statuses and ("F2", "new") in statuses
+    observed = next(item for item in json.loads(stix)["objects"] if item["type"] == "observed-data"
+                    and item["x_romulus_finding_ids"] == ["F1", "F3"])
+    assert observed["x_romulus_analyst_status"] == {"benign": 1, "new": 1}
+    preview = {row["value"]: row["agent_only"] for row in summary["preview"]}
+    assert preview["198.18.0.77"] is True and preview["203.0.113.7"] is False
+    text = render({**_minimal_manifest(), "indicators": summary})
+    assert "198.18.0.77 (AI agent findings only, unconfirmed)" in text
+
+
+def _minimal_manifest():
+    repo, _ = _repo_with_finding()
+    m = build_manifest(repo, "h1", "test")
+    m["revision"] = {"number": 1, "id": "h1-r1", "supersedes": None}
+    return m
+
+
+def test_build_time_scratch_stays_under_the_reports_directory_and_stale_ones_are_removed(tmp_path, monkeypatch):
+    import os
+    import tempfile as tempfile_module
+
+    from romulus.report import spill
+    settings = Settings(home=tmp_path)
+    settings.reports_dir.mkdir(parents=True, exist_ok=True)
+    stale = settings.reports_dir / (spill.PREFIX + "left-behind")
+    stale.mkdir()
+    old = time.time() - spill.STALE_SECONDS - 60
+    os.utime(stale, (old, old))
+    recent = settings.reports_dir / (spill.PREFIX + "running-now")
+    recent.mkdir()
+    used = []
+    real = tempfile_module.TemporaryDirectory
+
+    def recording(*args, **kwargs):
+        used.append(kwargs.get("dir"))
+        return real(*args, **kwargs)
+    monkeypatch.setattr(spill.tempfile, "TemporaryDirectory", recording)
+    repo, _ = _repo_with_finding()
+    m = build_manifest(repo, "h1", "test", settings=settings)
+    assert m["indicators"]["status"] == "complete" and m["recommendations"]["status"] == "complete"
+    assert used and all(Path(directory) == settings.reports_dir for directory in used)
+    assert not stale.exists() and recent.exists()
+    assert sorted(path.name for path in settings.reports_dir.iterdir()) == [recent.name]

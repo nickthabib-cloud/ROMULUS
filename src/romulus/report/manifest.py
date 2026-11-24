@@ -809,10 +809,19 @@ def investigations_for_hunt(repo: Repo, hunt_id: str) -> dict:
     return _investigations(repo, hunt_id, [_discovery_origin(row) for row in repo.candidates(hunt_id)], agent)
 
 
-def recommendations_view(findings: list[dict], metadata: dict) -> dict:
+def scratch_dir(settings) -> object:
+    """Where the report's scratch files go while a manifest is built: under the configured reports directory, else
+    (no settings, as in tests) the system's temporary directory."""
+    if settings is None:
+        return None
+    settings.reports_dir.mkdir(parents=True, exist_ok=True)
+    return settings.reports_dir
+
+
+def recommendations_view(findings: list[dict], metadata: dict, settings=None) -> dict:
     """The recommendations section; a failure to build it is named in the report and never blocks it."""
     try:
-        return recommendations.build(findings, metadata)
+        return recommendations.build(findings, metadata, scratch=scratch_dir(settings))
     except Exception as exc:  # noqa: BLE001 - an optional section never blocks the authoritative report
         return {"label": recommendations.LABEL, "status": "unavailable", "items": [],
                 "reason": f"{type(exc).__name__}: {exc}"[:300]}
@@ -823,7 +832,8 @@ def indicators_view(repo: Repo, hunt_id: str, findings: list[dict], internal_net
     """The indicator export's summary: exact counts, a preview and the digest the exported files must match. A
     failure is named in the report (and no export is written for it); it never blocks the report."""
     try:
-        with iocs.collect(repo, findings, internal_networks, hunt_id=hunt_id, settings=settings) as table:
+        with iocs.collect(repo, findings, internal_networks, hunt_id=hunt_id, settings=settings,
+                          scratch=scratch_dir(settings)) as table:
             return table.summary()
     except Exception as exc:  # noqa: BLE001 - an optional export never blocks the authoritative report
         return {"label": iocs.LABEL, "status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"[:300]}
@@ -914,7 +924,7 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str, *, settings=None) -> di
         "investigations": _investigations(repo, hunt_id, cands, agent or {"status": "unknown"}),
         "incident_graph": incident_graph,
         # suggestions for the partner, from the findings' ATT&CK techniques and the release's mitigations
-        "recommendations": recommendations_view(findings, metadata),
+        "recommendations": recommendations_view(findings, metadata, settings),
         # an analyst's asserted relations: shown as assertions, never as observed or inferred links
         "analyst_links": [{"id": a["id"], "from_finding": a["from_finding"], "to_finding": a["to_finding"],
                            "relation": a["relation"], "note": a["note"], "actor": a["actor"],

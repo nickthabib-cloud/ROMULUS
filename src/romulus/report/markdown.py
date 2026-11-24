@@ -195,7 +195,8 @@ def _indicators_section(m: dict) -> list[str]:
                 "| Kind | Value | Scope | Findings | First seen (UTC) | Last seen (UTC) | Roles (field) |",
                 "|---|---|---|---:|---|---|---|"]
         for row in preview:
-            out.append(f"| {cell(row['kind'])} | `{cell(row['value'])}` | {cell(row['scope'])} | {row['findings']} | "
+            agent = " (AI agent findings only, unconfirmed)" if row.get("agent_only") else ""
+            out.append(f"| {cell(row['kind'])} | {cell(row['value'])}{agent} | {cell(row['scope'])} | {row['findings']} | "
                        f"{cell(row['first_seen'] or 'not recorded')} | {cell(row['last_seen'] or 'not recorded')} | "
                        f"{cell('; '.join(row['roles']))} |")
         if counts["indicators"] > len(preview):

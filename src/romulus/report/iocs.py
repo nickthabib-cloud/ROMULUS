@@ -32,6 +32,7 @@ from itertools import groupby
 from romulus.content.indicator_values import (
     _SECRET_ASSIGNMENT,
     _SECRET_LITERAL,
+    _SECRET_URL_PATH,
     _URI_USERINFO,
     normalize_value,
 )
@@ -96,6 +97,8 @@ ENTITY_ROLES = {("ip", "src"): "source address", ("ip", "dst"): "destination add
                 ("host", "host"): "reporting host", ("account", "actor"): "acting account",
                 ("account", "subject"): "target account", ("sni", "subject"): "TLS server name (SNI)"}
 _JA4 = re.compile(r"[a-z0-9_]{1,128}")
+# a host name or address with a port: `name:8080`, `192.0.2.5:443`, `[2001:db8::1]:443`
+_HOST_PORT = re.compile(r"\[?(?P<host>[^\[\]\s]+?)\]?:(?P<port>\d{1,5})")
 _HEX = re.compile(r"[0-9a-f]+")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f  ]")
 # a CSV cell a spreadsheet would run as a formula once leading space is skipped
@@ -130,34 +133,70 @@ def _utc(value) -> str | None:
     return moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.microsecond // 1000:03d}Z"
 
 
-def _secrets(settings) -> list[str]:
-    if settings is None:
-        return []
-    from romulus.config import _secret_forms, secret_settings
+# the reason a value holding a credential or a configured secret is withheld: one reason for both, so the export never
+# says which values a configured secret is part of
+CREDENTIAL_REASON = "holds a credential or secret"
+# what may stand on either side of a weak secret for it to count as the credential in a value: the whole value, or a
+# token set off as a credential is written (`user:secret@`, `pass=secret`, quoted); never a part of a name or path
+_TOKEN_EDGE = r"[\s=:@'\"&?;,]"
 
-    return sorted({form for _name, secret in secret_settings(settings) if len(secret) >= 4
-                   for form in _secret_forms(secret)}, key=len, reverse=True)
+
+class _Secrets:
+    """The configured secrets an exported value must not hold. A strong secret is found anywhere in a value, as the
+    other redaction paths find it; a weak one (`romulus.config.weak_secret_names`: short, low-entropy or a word the
+    product's own text holds) only as the whole value or a credential token, so a weak password such as `admin`
+    never withholds `admin-ws01` or `/home/admin/.ssh/authorized_keys`."""
+
+    def __init__(self, settings):
+        self.strong: list[str] = []
+        self.weak: list[re.Pattern] = []
+        if settings is None:
+            return
+        from romulus.config import _secret_forms, secret_settings, weak_secret_names
+
+        weak_names = weak_secret_names(settings)
+        for name, secret in secret_settings(settings):
+            if len(secret) < 4:          # below this, no redaction path matches a secret at all
+                continue
+            for form in _secret_forms(secret):
+                if name in weak_names:
+                    self.weak.append(re.compile(f"(?:^|(?<={_TOKEN_EDGE})){re.escape(form)}(?:$|(?={_TOKEN_EDGE}))"))
+                else:
+                    self.strong.append(form)
+
+    def __bool__(self) -> bool:
+        return bool(self.strong or self.weak)
+
+    def held(self, text: str) -> bool:
+        return any(form in text for form in self.strong) or any(pattern.search(text) for pattern in self.weak)
 
 
 class _Checker:
     """Validation and credential masking of one value; returns (kind, canonical value) or (None, reason)."""
 
-    def __init__(self, networks: SiteNetworks | None, secrets: list[str]):
+    def __init__(self, networks: SiteNetworks | None, secrets: _Secrets):
         self.networks, self.secrets = networks, secrets
 
-    def __call__(self, kind: str, value) -> tuple[str | None, str]:
+    def __call__(self, kind: str, value) -> tuple[str | None, str, str]:
+        """(kind, canonical value, port) for an exported value, or (None, reason, "") for a withheld one. A port
+        written with a host name (`host:8080`) is kept apart from the name."""
         if not isinstance(value, (str, int)) or isinstance(value, bool):
-            return None, "not a text value"
+            return None, "not a text value", ""
         text = str(value).strip()
         if not text or text in ("-", "(empty)") or REDACTED in text:
-            return None, "empty or already redacted"
+            return None, "empty or already redacted", ""
         if len(text) > MAX_TEXT or _CONTROL.search(text) or any(0xD800 <= ord(c) <= 0xDFFF for c in text):
-            return None, "too long or holds control characters"
-        if any(secret in text for secret in self.secrets):
-            return None, "holds a configured secret"
-        if (mask_credentials(text) != text or _SECRET_ASSIGNMENT.search(text) or _SECRET_LITERAL.search(text)
-                or _URI_USERINFO.search(text)):
-            return None, "holds a credential"
+            return None, "too long or holds control characters", ""
+        if (self.secrets.held(text) or mask_credentials(text) != text or _SECRET_ASSIGNMENT.search(text)
+                or _SECRET_LITERAL.search(text) or _URI_USERINFO.search(text) or _SECRET_URL_PATH.search(text)):
+            return None, CREDENTIAL_REASON, ""
+        port = ""
+        if kind == "domain" and not _is_address(text) and (split := _HOST_PORT.fullmatch(text)):
+            text, port = split.group("host"), split.group("port")
+        exported, detail = self._value(kind, text)
+        return exported, detail, port if exported is not None else ""
+
+    def _value(self, kind: str, text: str) -> tuple[str | None, str]:
         if kind == "ip":
             try:
                 address = ipaddress.ip_address(text)
@@ -166,7 +205,7 @@ class _Checker:
             return ("ipv4" if address.version == 4 else "ipv6"), str(address)
         if kind == "domain":
             if _is_address(text):
-                return self("ip", text)
+                return self._value("ip", text)
             try:
                 return "domain", normalize_value("domain", text)
             except ValueError:
@@ -308,10 +347,10 @@ class IndicatorTable:
     def rows(self) -> Iterator[tuple]:
         """Every row with its finding and its indicator's aggregates, in export order."""
         yield from self.db.execute(
-            "SELECT r.kind, r.value, r.role, r.field, i.scope, f.id, f.lane, f.severity, f.confidence, f.provenance, "
-            "f.rule_id, f.observed_at, i.first_seen, i.last_seen, i.findings FROM row r "
+            "SELECT r.kind, r.value, r.port, r.role, r.field, i.scope, f.id, f.lane, f.severity, f.confidence, "
+            "f.provenance, f.analyst_status, f.rule_id, f.observed_at, i.first_seen, i.last_seen, i.findings FROM row r "
             "JOIN finding f ON f.seq = r.seq JOIN ind i ON i.kind = r.kind AND i.value = r.value "
-            "ORDER BY r.kind, r.value, r.seq, r.role, r.field")
+            "ORDER BY r.kind, r.value, r.seq, r.role, r.field, r.port")
 
     def digest(self) -> str:
         """A content digest over every row (finding ids included), the same for every write of one manifest."""
@@ -331,14 +370,16 @@ class IndicatorTable:
                              **{scope: count for scope, count in zip(SCOPES, scopes, strict=True) if count}}
         order = " ".join(f"WHEN '{scope}' THEN {position}" for position, scope in enumerate(SCOPES))
         preview = []
-        for kind, value, scope, first, last, findings in self.db.execute(
-                f"SELECT kind, value, scope, first_seen, last_seen, findings FROM ind ORDER BY CASE scope {order} END, "
-                "findings DESC, kind, value LIMIT ?", (PREVIEW,)):
+        for kind, value, scope, first, last, findings, agent_only in self.db.execute(
+                f"SELECT kind, value, scope, first_seen, last_seen, findings, agent_only FROM ind ORDER BY CASE scope "
+                f"{order} END, findings DESC, kind, value LIMIT ?", (PREVIEW,)):
             roles = [f"{role} ({field})" for role, field in self.db.execute(
                 "SELECT DISTINCT role, field FROM row WHERE kind = ? AND value = ? ORDER BY role, field LIMIT 5",
                 (kind, value))]
             preview.append({"kind": kind, "value": value, "scope": scope, "findings": findings,
-                            "first_seen": first, "last_seen": last, "roles": roles})
+                            "first_seen": first, "last_seen": last, "roles": roles,
+                            # seen only in findings the AI agent proposed: unconfirmed
+                            "agent_only": bool(agent_only)})
         indicators = sum(item["indicators"] for item in by_kind.values())
         return {
             "label": LABEL, "status": "complete", "files": {"csv_suffix": CSV_SUFFIX, "stix_suffix": STIX_SUFFIX},
@@ -368,12 +409,12 @@ def collect(repo, findings: Iterable[dict], internal_networks: dict | None, *, h
     """Gather the indicator rows of `findings` (reportable findings, report order) into an `IndicatorTable`. With
     `hunt_id`, a fleet finding's members are read from its host appendix as well."""
     networks, networks_view = _site_networks(internal_networks)
-    check = _Checker(networks, _secrets(settings))
+    check = _Checker(networks, _Secrets(settings))
     with scratch_db(scratch) as db:
         db.execute("CREATE TABLE finding (seq INTEGER PRIMARY KEY, id TEXT, lane TEXT, severity TEXT, "
-                   "confidence TEXT, provenance TEXT, rule_id TEXT, observed_at TEXT)")
-        db.execute("CREATE TABLE row (kind TEXT, value TEXT, role TEXT, field TEXT, seq INTEGER, "
-                   "PRIMARY KEY (kind, value, role, field, seq)) WITHOUT ROWID")
+                   "confidence TEXT, provenance TEXT, analyst_status TEXT, rule_id TEXT, observed_at TEXT)")
+        db.execute("CREATE TABLE row (kind TEXT, value TEXT, role TEXT, field TEXT, port TEXT, seq INTEGER, "
+                   "PRIMARY KEY (kind, value, role, field, port, seq)) WITHOUT ROWID")
         table = IndicatorTable(db, networks_view, settings is not None)
         table.hunt_id = hunt_id
         batch: list[tuple[int, dict]] = []
@@ -388,9 +429,13 @@ def collect(repo, findings: Iterable[dict], internal_networks: dict | None, *, h
                 batch = []
         if batch:
             _add_batch(repo, db, batch, check, table)
+        # the aggregation and the export passes read each value's rows in finding order from this index rather than
+        # sorting in SQLite's own temporary files
+        db.execute("CREATE INDEX row_by_finding ON row (kind, value, seq)")
         db.execute("CREATE TABLE ind AS SELECT r.kind AS kind, r.value AS value, '' AS scope, "
                    "min(f.observed_at) AS first_seen, max(f.observed_at) AS last_seen, "
-                   "count(DISTINCT r.seq) AS findings, count(*) AS rows FROM row r JOIN finding f ON f.seq = r.seq "
+                   "count(DISTINCT r.seq) AS findings, count(*) AS rows, min(f.provenance = 'agent') AS agent_only "
+                   "FROM row r JOIN finding f ON f.seq = r.seq "
                    "GROUP BY r.kind, r.value")
         db.execute("CREATE UNIQUE INDEX ind_key ON ind (kind, value)")
         db.create_function("scope_of", 2, check.scope, deterministic=True)
@@ -426,9 +471,10 @@ def _add_batch(repo, db, batch: list[tuple[int, dict]], check: _Checker, table: 
                                  "host": row.get("host")}
     rows = []
     for seq, finding in batch:
-        db.execute("INSERT INTO finding VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (
+        db.execute("INSERT INTO finding VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (
             seq, finding["id"], finding.get("lane"), finding.get("severity"), finding.get("confidence"),
-            finding.get("provenance") or "deterministic", finding.get("rule_id"), _utc(finding.get("observed_at"))))
+            finding.get("provenance") or "deterministic", finding.get("analyst_status") or "new",
+            finding.get("rule_id"), _utc(finding.get("observed_at"))))
         sources = [finding_values(finding), _fleet_values(repo, table, finding)]
         for event_id in subjects[finding["id"]]:
             if event_id in events:
@@ -437,21 +483,22 @@ def _add_batch(repo, db, batch: list[tuple[int, dict]], check: _Checker, table: 
                 table.counts["events_not_retained"] += 1
         for source in sources:
             for kind, value, role, field in source:
-                exported, detail = check(kind, value)
+                exported, detail, port = check(kind, value)
                 if exported is None:
                     table.withheld[(kind, detail)] += 1
                     continue
-                rows.append((exported, detail, role, field, seq))
+                rows.append((exported, detail, role, field, port, seq))
                 if len(rows) >= ROW_BATCH:          # a fleet appendix can hold many members: insert as they come
-                    db.executemany("INSERT OR IGNORE INTO row VALUES (?, ?, ?, ?, ?)", rows)
+                    db.executemany("INSERT OR IGNORE INTO row VALUES (?, ?, ?, ?, ?, ?)", rows)
                     rows = []
-    db.executemany("INSERT OR IGNORE INTO row VALUES (?, ?, ?, ?, ?)", rows)
+    db.executemany("INSERT OR IGNORE INTO row VALUES (?, ?, ?, ?, ?, ?)", rows)
 
 
 # ---- writers ---------------------------------------------------------------------------------------------------
 
-CSV_HEADER = ["kind", "value", "role", "field", "network_scope", "finding_id", "finding_lane", "finding_severity",
-              "finding_confidence", "finding_provenance", "rule_id", "finding_observed_at", "indicator_first_seen",
+CSV_HEADER = ["kind", "value", "port", "role", "field", "network_scope", "finding_id", "finding_lane",
+              "finding_severity", "finding_confidence", "finding_provenance", "finding_analyst_status", "rule_id",
+              "finding_observed_at", "indicator_first_seen",
               "indicator_last_seen", "indicator_findings"]
 
 
@@ -538,7 +585,8 @@ def write_stix(table: IndicatorTable, stream, manifest: dict) -> dict:
     identity = {"type": "identity", "spec_version": "2.1", "id": romulus_id("identity", "ROMULUS"),
                 "created": IDENTITY_TIME, "modified": IDENTITY_TIME, "name": "ROMULUS", "identity_class": "system"}
     db = table.db
-    db.execute("CREATE TEMP TABLE written (id TEXT PRIMARY KEY, seq INTEGER) WITHOUT ROWID")
+    db.execute("DROP TABLE IF EXISTS written")
+    db.execute("CREATE TABLE written (id TEXT PRIMARY KEY, seq INTEGER) WITHOUT ROWID")
     order = 0
     stream.write('{"id": "' + romulus_id("bundle", {"hunt": hunt["id"], "revision": revision,
                                                     "object": "bundle"})
@@ -547,9 +595,9 @@ def write_stix(table: IndicatorTable, stream, manifest: dict) -> dict:
     counts = Counter()
     # one ordered pass over every row, grouped by value: per value only bounded state is held
     joined = db.execute(
-        "SELECT i.kind, i.value, i.scope, i.first_seen, i.last_seen, i.findings, r.role, r.field, f.seq, f.id, "
-        "f.lane, f.provenance FROM ind i JOIN row r ON r.kind = i.kind AND r.value = i.value "
-        "JOIN finding f ON f.seq = r.seq ORDER BY i.kind, i.value, f.seq")
+        "SELECT i.kind, i.value, i.scope, i.first_seen, i.last_seen, i.findings, r.role, r.field, r.port, f.seq, "
+        "f.id, f.lane, f.provenance, f.analyst_status FROM ind i JOIN row r ON r.kind = i.kind AND r.value = i.value "
+        "JOIN finding f ON f.seq = r.seq ORDER BY r.kind, r.value, r.seq")
     for (kind, value, scope, first, last, findings), group in groupby(joined, key=lambda row: row[:6]):
         objects = observables(kind, value)
         for item in objects:
@@ -557,9 +605,11 @@ def write_stix(table: IndicatorTable, stream, manifest: dict) -> dict:
                 order += 1
                 stream.write(",\n" + json.dumps(item, sort_keys=True, ensure_ascii=False))
                 counts["observables"] += 1
-        ids, lanes, provenance, pairs, previous = [], Counter(), Counter(), set(), None
-        for *_value, role, field, seq, finding_id, lane, origin in group:
+        ids, lanes, provenance, statuses, pairs, ports, previous = [], Counter(), Counter(), Counter(), set(), set(), None
+        for *_value, role, field, port, seq, finding_id, lane, origin, status in group:
             pairs.add((role, field))
+            if port and len(ports) < STIX_ROLES:
+                ports.add(port)
             if seq == previous:
                 continue
             previous = seq
@@ -567,11 +617,14 @@ def write_stix(table: IndicatorTable, stream, manifest: dict) -> dict:
                 ids.append(finding_id)
             lanes[lane] += 1
             provenance[origin] += 1
+            statuses[status] += 1
         roles = [f"{role} ({field})" for role, field in sorted(pairs)[:STIX_ROLES]]
         timed = first is not None
         observed = {
             "type": "observed-data", "spec_version": "2.1",
-            "id": romulus_id("observed-data", {"hunt": hunt["id"], "revision": revision, "object": objects[-1]["id"]}),
+            # one per value and kind: a path written as a file and run as a program shares its observables
+            "id": romulus_id("observed-data", {"hunt": hunt["id"], "revision": revision, "kind": kind,
+                                               "object": objects[-1]["id"]}),
             "created": when, "modified": when, "created_by_ref": identity["id"],
             "first_observed": first if timed else (_utc(window.get("start")) or when),
             "last_observed": last if timed else (_utc(window.get("end")) or when),
@@ -581,6 +634,8 @@ def write_stix(table: IndicatorTable, stream, manifest: dict) -> dict:
             "x_romulus_finding_count": findings, "x_romulus_finding_ids": ids,
             "x_romulus_finding_ids_more": findings - len(ids), "x_romulus_lanes": dict(sorted(lanes.items())),
             "x_romulus_provenance": dict(sorted(provenance.items())),
+            "x_romulus_analyst_status": dict(sorted(statuses.items())),
+            **({"x_romulus_ports": sorted(ports, key=int)} if ports else {}),
             "x_romulus_time_basis": ("times of the findings citing the value" if timed else
                                      "the hunt window: no finding citing the value recorded a time"),
         }

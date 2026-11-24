@@ -17,7 +17,7 @@ MARKDOWN_SHA256 = "916270762b901bf993ba001d5ee0f3ae6c6609fe69c7e3c5454e61f0a0b3f
 DOCX_SHA256 = "3bbb10c7fd1b6bf289e3d008e296c3748c5d3a67ba1d7f2f0450e258fcdbf25b"
 # The same hunt with those two sections: the Markdown gains its Recommendations and Indicators sections before
 # Coverage, the executive document its recommendations by priority and an indicator export paragraph; nothing else.
-MARKDOWN_WITH_PARTNER_SECTIONS_SHA256 = "84950f3845fd1f9a62b6db8240abc4c98d3e3011aac9b7a48e214e1cda294f31"
+MARKDOWN_WITH_PARTNER_SECTIONS_SHA256 = "3cda1573598a31e2d4c238b80f8cf4f936264add43bad7c4cb1466ba09cb4f36"
 DOCX_WITH_PARTNER_SECTIONS_SHA256 = "16189eb83f0df2afb46ce1ddd5b7ee0307dec09a19ee5ac5eaa5912726b5d523"
 PARTNER_SECTIONS = ("recommendations", "indicators")
 
