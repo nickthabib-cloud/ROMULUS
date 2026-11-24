@@ -155,3 +155,27 @@ def test_real_sweep_publishes_the_executed_override_at_high(tmp_path, monkeypatc
     found, _rule = sweep_run(tmp_path, monkeypatch, DeceptiveFileName(), [batch])
     [saved] = found
     assert saved["lane"] == "high" and "[U+202E]" in saved["claim"] and RLO not in saved["claim"]
+
+
+RLE, LRE, PDF, FSI, PDI = "\u202b", "\u202a", "\u202c", "\u2068", "\u2069"
+
+
+def test_direction_controls_without_an_override_in_an_executable_name_are_leads_folded_per_directory():
+    folder = "C:\\Users\\amir\\Documents\\" + RLE + "\u062a\u0642\u0627\u0631\u064a\u0631" + PDF + "\\"
+    events = [created(folder + name, n + 1) for n, name in enumerate(["notes.txt", "budget.xlsx", "photo.jpg"])]
+    rule = DeceptiveFileName()
+    try:
+        out = run(rule, [[event] for event in events])
+    finally:
+        rule.release_state()
+    assert len(out) == 1 and out[0].proposed_lane == "lead" and "3 Windows event record(s)" in out[0].claim
+    assert [h.lane for h in judge(created(DOWNLOADS + FSI + "\u0645\u0644\u0641" + PDI + ".docx"))] == ["lead"]
+    assert [h.lane for h in judge(created(DOWNLOADS + LRE + "report.pdf"))] == ["lead"]
+    assert [h.lane for h in judge(created(DOWNLOADS + "report" + RLO + "fdp.txt"))] == ["lead"]
+
+
+@pytest.mark.parametrize("name", ["invoice.pdf\u2003.exe", "invoice.pdf\u200b.exe", "invoice.pdf\u3000\u3000\u3000.exe",
+                                  "invoice.pdf\ufeff.exe"])
+def test_unicode_space_and_zero_width_padding_before_the_real_extension_is_read(name):
+    [hit] = judge(proc(DOWNLOADS + name))
+    assert hit.lane == "high" and "padding" in hit.text

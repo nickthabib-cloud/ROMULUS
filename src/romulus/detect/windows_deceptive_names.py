@@ -79,6 +79,17 @@ def bidi_controls(path: str) -> list[str]:
     return sorted({BIDI_CONTROLS[ch] for ch in path if ch in BIDI_CONTROLS})
 
 
+# Characters a name can be padded with before its real extension: spaces and underscores, every Unicode space
+# (U+00A0, U+1680, U+2000-U+200A, U+202F, U+205F, U+3000) and the invisible zero-width ones (U+180E, U+200B-U+200D,
+# U+2060, U+FEFF).
+_INVISIBLE = "\u180e\u200b\u200c\u200d\u2060\ufeff"
+_PADDING = (" _\u00a0\u1680\u202f\u205f\u3000" + "".join(chr(code) for code in range(0x2000, 0x200B))
+            + _INVISIBLE)
+# The override characters that reverse what follows them (UAX #9 LRO, RLO): the ones that make a name read as
+# another extension.
+OVERRIDES = frozenset({"\u202d", "\u202e"})
+
+
 def double_extension(name: str) -> tuple[str, str, bool] | None:
     """(visible decoy extension, real extension, padded) when a name ends in a document extension followed by an
     executable one ('invoice.pdf.exe', 'scan.jpg      .scr'); None otherwise."""
@@ -86,8 +97,8 @@ def double_extension(name: str) -> tuple[str, str, bool] | None:
     real = real[1:].casefold()
     if real not in EXECUTABLE_EXTENSIONS:
         return None
-    trimmed = stem.rstrip(" _\u00a0")
-    padded = len(stem) - len(trimmed) >= 3
+    trimmed = stem.rstrip(_PADDING)
+    padded = len(stem) - len(trimmed) >= 3 or any(ch not in " _" for ch in stem[len(trimmed):])
     inner_stem, decoy = ntpath.splitext(trimmed)
     decoy = decoy[1:].casefold()
     if decoy not in DECOY_EXTENSIONS or not inner_stem.strip():
@@ -208,14 +219,24 @@ class DeceptiveFileName(BehaviorFleetRule):
         return out
 
     def _bidi(self, event, path, name, controls, what, fields, *, executed):
+        """High for an override character in the final name of something run, or of a created file whose real
+        extension is executable; any other control (embeddings, isolates, or a control in a directory name, as
+        right-to-left folder names hold) is a lead folded per directory."""
+        real = ntpath.splitext(name)[1][1:].casefold()
+        deceptive = any(ch in OVERRIDES for ch in name) and (executed or real in EXECUTABLE_EXTENSIONS)
         shown = displayed(name)
         text = (f"Windows recorded a {what} whose path holds the Unicode control(s) {', '.join(controls)}: "
                 f"'{self.describe(escaped(path))}'")
         if "RIGHT-TO-LEFT OVERRIDE" in controls:
             text += f", whose name reads on screen roughly as '{self.describe(shown)}'"
         text += "; " + ("the process was created" if executed else "whether the file was opened or run is not shown")
+        directory = ntpath.dirname(path.replace("/", "\\")).casefold()
         return signal(event, "bidi_control", text, ("T1036.002",) + (("T1204.002",) if executed else ()),
-                      fields, lane="high", severity="high", content=json.dumps(["bidi", path.casefold()]),
+                      fields, lane="high" if deceptive else "lead", severity="high" if deceptive else "medium",
+                      content=(json.dumps(["bidi", path.casefold()]) if deceptive
+                               else json.dumps(["bidi", event.host, escaped(directory)])),
+                      common=("" if deceptive else "Names holding Unicode direction controls in one directory "
+                              "(no override in an executable name)"),
                       notes=(("Control characters are written as their code points here so that this text cannot be "
                              "reordered; the predicate's recorded value holds them as recorded."),))
 
