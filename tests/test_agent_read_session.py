@@ -7,7 +7,7 @@ cluster or model.
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -664,3 +664,20 @@ def test_the_reach_is_recorded_as_an_agent_read_link(tmp_path, monkeypatch):
     _read(toolbox, _session_alias(repo, SHELL_DOC))
     links = repo.expansion_links("h1")
     assert [link["link_type"] for link in links] == ["agent_read_session"]
+
+def test_a_read_covers_the_session_span_never_the_whole_hunt_window(tmp_path, monkeypatch):
+    repo, toolbox, _client, w = _setup(tmp_path, monkeypatch, [HTTP_DOC], http_rows=[_http_row(TS.timestamp())],
+                                       streams={HTTP_KEY: HTTP_STREAM})
+    first = _read(toolbox, _session_alias(repo, HTTP_DOC))
+    body = next(alias for alias in first["data"]["result"]["evidence"]
+                if AliasBook(repo, "h1").resolve(alias, {"E"}) == _events(repo, first)["http_body"]["id"])
+    # the same session through its rebuilt body (an event with one time): answered from the first read, its span kept
+    again = _read(toolbox, body)
+    assert len(w.packets.calls) == 1
+    cells = [cell for link in repo.expansion_links("h1") for cell in link["coverage"]]
+    assert cells and all((datetime.fromisoformat(cell["start"]), datetime.fromisoformat(cell["end"])) != (T, END) for cell in cells), cells
+    assert again["status"] in ("complete", "partial")
+    # a session seen at a single instant covers that millisecond
+    reader = toolbox.executor.sessions
+    cell = reader._cell(TARGET, "complete", [], 1, (TS, TS))
+    assert (cell.start, cell.end) == (TS, TS + timedelta(milliseconds=1))

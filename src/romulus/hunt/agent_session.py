@@ -99,6 +99,7 @@ MAX_LISTED_NAMES = 20
 ERROR_CHARS = 300
 # slack around a session's span when looking for the packet content a hunt already holds for it
 HELD_SLACK = timedelta(seconds=60)
+INSTANT = timedelta(milliseconds=1)
 
 
 def _utc(value: datetime) -> datetime:
@@ -288,7 +289,9 @@ class SessionReader:
         start, end = span or (self.window.start, self.window.end)
         start, end = max(start, self.window.start), min(end, self.window.end)
         if start >= end:
-            start, end = self.window.start, self.window.end
+            # a session seen at one instant covers that millisecond, never the whole hunt window
+            point = min(max(span[0] if span else start, self.window.start), self.window.end - INSTANT)
+            start, end = point, point + INSTANT
         unresolved = [] if status == "complete" else [
             _range(start, end, "; ".join(reasons[:3]) or "session read incomplete")]
         return PivotCoverage(target=f"{stage.PCAP_TARGET}:{target}" if target else stage.PCAP_TARGET, dataset=None,
@@ -388,7 +391,8 @@ class _Read:
         complete_read = status == "complete" and self.extracted
         if complete_read:
             # what a later read of the same session answers from
-            outcome.update(event_ids=listed, candidate_ids=candidates, content=content, notes=self.notes[:MAX_REASONS])
+            outcome.update(event_ids=listed, candidate_ids=candidates, content=content, notes=self.notes[:MAX_REASONS],
+                           span=[moment.isoformat() for moment in self.span] if self.span else None)
         pivot.repo.update_task(self.task_id, "executed", outcome=outcome, owner_token=pivot.owner_token)
         pivot.repo.update_task(self.task_id, "evaluated", owner_token=pivot.owner_token)
         if complete_read:
@@ -449,6 +453,9 @@ class _Read:
             self.events[event.id] = event
         self.candidates.extend(item for item in outcome.get("candidate_ids") or [] if isinstance(item, str))
         self.content = outcome["content"]
+        span = [_iso(item) for item in outcome.get("span") or []]
+        if len(span) == 2 and all(span):
+            self.span = (span[0], span[1])
         self.notes = [DONE_NOTE, *[note for note in outcome.get("notes") or [] if isinstance(note, str)]]
         return self.finish()
 
