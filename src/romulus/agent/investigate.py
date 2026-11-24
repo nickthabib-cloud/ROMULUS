@@ -21,8 +21,15 @@ from romulus.agent.admission import (
     typed_alias_arguments,
 )
 from romulus.agent.assessment import SECRET_GUARD_SUMMARY, assess_output, run_assessment, template_assessment
+from romulus.agent.clusters import (
+    ClusterView,
+    controller_clusters,
+    hunt_clusters,
+    hypothesis_leads,
+    unexplained_clusters,
+)
 from romulus.agent.context import SessionResults, issued_in, session_tag, strip_reasoning
-from romulus.agent.dossier import build_dossier
+from romulus.agent.dossier import build_dossier, mention_hint, mention_seed
 from romulus.agent.grounding import triage_context
 from romulus.agent.provider import (
     AgentBudget,
@@ -41,11 +48,11 @@ from romulus.agent.provider import (
 from romulus.agent.provider.base import PROVIDER_STATE, ToolCall, estimate_tokens, redact_value
 from romulus.agent.provider.budget import AgentStopped
 from romulus.agent.refusals import bounded, reason, tool_result_reasons
+from romulus.agent.safety import injection_flags
 from romulus.agent.toolbox import Toolbox
 from romulus.agent.triage import latest_summary
 from romulus.config import Settings, redact_text
 from romulus.hunt.rank import place_late_findings
-from romulus.report.incidents import build_incident_graph
 from romulus.store.db import digest, utcnow
 from romulus.store.repo import TRIAGE_PURPOSE, Repo, is_lease_lost
 
@@ -109,6 +116,23 @@ MIN_ORIENT_PAGE_TOKENS = 2_000
 SECRET_GUARD_REASON = "secret_guard"
 # The end reason of a session whose replayed reasoning the provider refused again after it was removed.
 REASONING_REJECTED_REASON = "reasoning_binding_rejected"
+# How many times orient's mention seed may be halved to fit its first request before the dossier page shrinks
+# (enough to empty a seed of MENTION_SEED_LIMIT groups, then drop its header).
+SEED_TRIMS = 6
+# The scheduling stops after this many rounds in a row whose every session failed, under SESSIONS_FAILED_REASON.
+FAILED_ROUNDS_LIMIT = 2
+# The end states of a session after which its hypothesis, with no open question left, is done. Every other end (a
+# failure or outage, a tool-call or context cap, a budget or analyst's stop) leaves the hypothesis pending up to
+# AGENT_MAX_SESSIONS_PER_HYPOTHESIS, so a later round or a continuation works it again; FAILED_ROUNDS_LIMIT bounds a
+# provider that fails every session within one run.
+DONE_STATES = frozenset({"finished", "refused", "secret_guard"})
+# The limits an agent run names when it ends with work left: hypotheses still pending, and clusters no hypothesis
+# explains (each with its count), so such a run is partial and says why.
+UNWORKED_HYPOTHESES = "unworked_hypotheses"
+UNEXPLAINED_CLUSTERS = "unexplained_clusters"
+# ... and open hypotheses that used their whole session limit with no session ending as done.
+EXHAUSTED_HYPOTHESES = "exhausted_hypotheses"
+SESSIONS_FAILED_REASON = "sessions_failed"
 # The reason an analyst's stop request ended a session or the phase (a stopped session's state is `interrupted`).
 # A run stopped this way is resumable: `hunt resume` continues it from its persisted work.
 STOPPED_REASON = "stopped_by_analyst"
@@ -470,38 +494,66 @@ def _id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:20]}"
 
 
-def _candidate_views(repo: Repo, hunt_id: str) -> list[dict]:
-    return [{"id": row["id"], "lane": row["lane"], "rule_id": row["rule_id"],
-             "observed_at": str(row["ts"]) if row["ts"] is not None else None,
-             "entities": row.get("entities") or [], "event_ids": row.get("event_ids") or [],
-             "citations": [], "source_link_id": row.get("source_link_id")}
-            for row in repo.candidates(hunt_id, ["urgent", "high", "lead"])]
+def _pending(settings: Settings, hypothesis: dict, repo: Repo | None = None) -> bool:
+    """Whether an open hypothesis still waits for investigation, with sessions to spare: never worked, worked with
+    questions left, or (given `repo`) its last session did not end as done (DONE_STATES): a failure, an outage, a
+    tool-call or context cap, a budget or analyst's stop all leave it pending, up to its session limit. A hypothesis
+    whose last session finished with no open question, or ended refused or at the secret guard, is done: another
+    session would re-prove what it recorded, or meet the same refusal."""
+    if hypothesis["status"] != "open":
+        return False
+    sessions = int(hypothesis.get("sessions_run") or 0)
+    if sessions >= settings.agent_max_sessions_per_hypothesis:
+        return False
+    if sessions == 0 or _has_open_questions(hypothesis):
+        return True
+    if repo is None:
+        return False
+    ran = [row for row in repo.agent_sessions(hypothesis["hunt_id"], hypothesis_id=hypothesis["id"],
+                                              purpose="investigate") if row["state"] != "running"]
+    return not ran or ran[-1]["state"] not in DONE_STATES
 
 
-def _controller_open_hypotheses(settings, repo, hunt_id: str, session_id: str, admission: AgentAdmission) -> None:
-    if repo.agent_hypotheses(hunt_id):
-        return
-    candidates = repo.candidates(hunt_id, ["urgent", "high", "lead"])
-    if not candidates:
-        return
-    graph = build_incident_graph(repo, hunt_id, _candidate_views(repo, hunt_id))
-    by_id = {row["id"]: row for row in candidates}
-    lane_priority = {"urgent": 3, "high": 2, "lead": 1}
-    ordered = sorted(graph["incidents"], key=lambda incident: (
-        -max((lane_priority.get(by_id[item]["lane"], 0) for item in incident["finding_ids"] if item in by_id),
-             default=0), incident["id"]))
-    existing_support = {row["target_id"] for hypothesis in repo.agent_hypotheses(hunt_id)
-                        for row in repo.agent_hypothesis_cites(hypothesis_id=hypothesis["id"])
-                        if row["role"] == "support" and row["target_kind"] == "finding"}
-    for incident in ordered:
-        if len(repo.agent_hypotheses(hunt_id)) >= min(settings.agent_max_initial_hypotheses,
-                                                      settings.agent_max_hypotheses):
-            break
-        top = min((by_id[item] for item in incident["finding_ids"] if item in by_id),
-                  key=lambda row: (-lane_priority.get(row["lane"], 0), -float(row["priority"]), row["id"]))
-        if top["id"] in existing_support:
-            continue
-        incident_alias = admission.aliases.alias_for("I", incident["id"])
+def _exhausted(settings: Settings, hypothesis: dict, repo: Repo) -> bool:
+    """Whether an open hypothesis used its whole session limit and none of its sessions ended as done (DONE_STATES):
+    every session failed, hit a cap or was stopped, so it was never worked through."""
+    if hypothesis["status"] != "open":
+        return False
+    if int(hypothesis.get("sessions_run") or 0) < settings.agent_max_sessions_per_hypothesis:
+        return False
+    ran = repo.agent_sessions(hypothesis["hunt_id"], hypothesis_id=hypothesis["id"], purpose="investigate")
+    return not any(row["state"] in DONE_STATES for row in ran)
+
+
+def _pending_cluster_hypotheses(settings: Settings, repo: Repo, hunt_id: str) -> int:
+    """The pending hypotheses that examine a cluster: those citing a finding, evidence or an expansion link. One that
+    cites none of them (a mention-led hypothesis, or one orient opened without citing) explains no cluster, so it never
+    holds a cluster's place; the hunt's hypothesis cap bounds them all together."""
+    return sum(1 for row in repo.agent_hypotheses(hunt_id) if _pending(settings, row, repo)
+               and any(cite["target_kind"] in ("finding", "evidence", "link")
+                       for cite in repo.agent_hypothesis_cites(hypothesis_id=row["id"])))
+
+
+def _controller_open_hypotheses(settings, repo, hunt_id: str, session_id: str, admission: AgentAdmission, *,
+                                view: ClusterView | None = None) -> int:
+    """Open a hypothesis for each unexplained cluster (`romulus.agent.clusters`: no hypothesis cites any of its
+    findings, its links or its findings' evidence), best first in report order, while fewer than
+    AGENT_MAX_INITIAL_HYPOTHESES cluster hypotheses are pending and the hunt's hypothesis cap allows. Called after
+    orient and whenever the scheduler runs out of pending hypotheses, so an orient that opened only a few never leaves
+    the other clusters unexamined while budget remains. Returns how many it opened."""
+    cap = min(settings.agent_max_initial_hypotheses, settings.agent_max_hypotheses)
+    room = cap - _pending_cluster_hypotheses(settings, repo, hunt_id)
+    if room <= 0:
+        return 0
+    view = view if view is not None else hunt_clusters(repo, hunt_id)
+    opened = 0
+    # a cluster the controller already opened a hypothesis for never gets a second one (its hypothesis explains it
+    # for good: explanation is fixed by the cites a hypothesis opens with)
+    covered = controller_clusters(repo, hunt_id, view)
+    candidates = [cluster for cluster in unexplained_clusters(repo, hunt_id, view) if cluster.key not in covered]
+    for cluster in candidates[:room]:
+        top = cluster.top
+        incident_alias = admission.aliases.alias_for("I", cluster.key)
         statement = f"Investigate incident {incident_alias}: {top['claim']}"
         if len(statement) < 10:
             statement = f"Investigate incident {incident_alias} and review its cited finding."
@@ -509,11 +561,12 @@ def _controller_open_hypotheses(settings, repo, hunt_id: str, session_id: str, a
             admission.create_controller_hypothesis(statement, finding_id=top["id"], alias=incident_alias)
         except ValueError:
             break
-        existing_support.add(top["id"])
+        opened += 1
+    return opened
 
 
 def _hypothesis_context(repo: Repo, hunt_id: str, hypothesis: dict, summaries: list[dict],
-                        *, owner_token=None) -> dict:
+                        *, owner_token=None, view: ClusterView | None = None) -> dict:
     from romulus.agent.aliases import AliasBook
     aliases = AliasBook(repo, hunt_id, owner_token=owner_token)
     cites = repo.agent_hypothesis_cites(hypothesis_id=hypothesis["id"])
@@ -526,6 +579,14 @@ def _hypothesis_context(repo: Repo, hunt_id: str, hypothesis: dict, summaries: l
             "techniques": hypothesis["techniques"], "entities": entities, "status": hypothesis["status"],
             "confidence": hypothesis["confidence"], "questions": hypothesis["questions"], "cites": mapped_cites,
             "previous_sessions": summaries}
+    # where to look: the hypothesis's clusters, what of them is already reported, and their findings no hypothesis
+    # cites yet, so a session widens from known findings instead of proving them again
+    leads = hypothesis_leads(repo, hunt_id, hypothesis["id"], aliases,
+                             view if view is not None else hunt_clusters(repo, hunt_id))
+    if leads is not None:
+        if flags := injection_flags(leads, "$.leads"):
+            leads["safety_flags"] = flags
+        body["leads"] = leads
     return body
 
 
@@ -666,6 +727,42 @@ def _cache_basis(result, request: ChatRequest, prompt_est: int, started_at: floa
             "completion": served.completion, "prompt_est": prompt_est, "cached": cached, "since": started_at}
 
 
+def _without_state(message: dict) -> dict:
+    """A message without its provider state: the replayable copy of the turn (its text and tool inputs again, its
+    signed reasoning), which an estimate over the whole message would count a second time."""
+    return {key: value for key, value in message.items() if key != PROVIDER_STATE} if PROVIDER_STATE in message \
+        else message
+
+
+def _reported_size(result, request: ChatRequest) -> dict | None:
+    """The prompt and output tokens the provider reported for a completed call, with the request they belong to;
+    None when the usage was estimated or the call did not complete."""
+    if result.status not in ("ok", "invalid_json", "invalid_tool_call", "truncated_output"):
+        return None
+    charge = charge_of(result)
+    if charge.estimated:
+        return None
+    served = charge.parts[-1] if charge.parts else charge
+    return {"messages": len(request.messages), "digest": digest(request.messages), "prompt": served.prompt,
+            "completion": served.completion}
+
+
+def _prompt_size(messages: list[dict], tools: list, reported: dict | None) -> int:
+    """The prompt the next call will send, in tokens, for the compaction ceiling. When the conversation extends the
+    previous call's unchanged, it is that call's reported prompt and output (the reply goes back as the next turn)
+    plus an estimate of the tool results and messages added since. Otherwise it is estimated, with each turn's
+    provider state left out: the state repeats the turn's text and tool inputs, and counting it again would make a
+    session compact long before its prompt is near the ceiling."""
+    if (reported is not None and len(messages) >= reported["messages"]
+            and digest(messages[:reported["messages"]]) == reported["digest"]):
+        added = [_without_state(message) for message in messages[reported["messages"]:]
+                 if message.get("role") != "assistant"]
+        return reported["prompt"] + reported["completion"] + (
+            estimate_tokens(json.dumps(added, sort_keys=True, default=str)) if added else 0)
+    return estimate_tokens(ChatRequest(messages=[_without_state(message) for message in messages], tools=tools,
+                                       tool_choice="auto").prompt_text())
+
+
 def _cache_positions(messages: list[dict]) -> int:
     """The content positions `messages` add to a request, as the cache lookback counts them: every block, a run of
     tool calls or of tool results counting once. Counted generously (each message's text is one position)."""
@@ -713,22 +810,39 @@ def _deterministic_tool_summary(calls: list[tuple[str, str]], changes: list[dict
 
 
 def _investigate_messages(repo: Repo, hunt_id: str, hypothesis: dict, prompts: dict[str, str], *,
-                          owner_token=None) -> tuple[dict, list[dict]]:
+                          owner_token=None, view: ClusterView | None = None) -> tuple[dict, list[dict]]:
     """An investigate session's first messages: the system and investigate prompts, the dossier header, and the
     hypothesis card with its cites and the summaries of its earlier sessions."""
     context = _hypothesis_context(repo, hunt_id, hypothesis, _summaries(repo, hunt_id, hypothesis["id"]),
-                                  owner_token=owner_token)
+                                  owner_token=owner_token, view=view)
     dossier = build_dossier(repo, hunt_id, token_budget=1000, owner_token=owner_token)
+    opening = {"dossier_header": {"header": dossier.payload.get("header"), "scope": dossier.payload.get("scope")},
+               "hypothesis": context}
+    # the mention pool, when it holds anything, with the groups on the hosts the hypothesis's findings name: the
+    # per-hunt hint goes in this card, never the system prompt or tool definitions, so the cached prefix holds
+    hint = mention_hint(repo, hunt_id, _cited_hosts(repo, hunt_id, hypothesis["id"]))
+    if hint is not None:
+        opening["mention_pool"] = hint
     return context, [{"role": "system", "content": prompts["system.md"] + "\n\n" + prompts["investigate.md"]},
-                     {"role": "user", "content": json.dumps({"dossier_header": {
-                         "header": dossier.payload.get("header"), "scope": dossier.payload.get("scope")},
-                         "hypothesis": context}, sort_keys=True, ensure_ascii=False, default=str)}]
+                     {"role": "user", "content": json.dumps(opening, sort_keys=True, ensure_ascii=False,
+                                                            default=str)}]
+
+
+def _cited_hosts(repo: Repo, hunt_id: str, hypothesis_id: str) -> list[str]:
+    """The hosts the findings a hypothesis cites name, in cite order (typed entities only)."""
+    ids = [str(row["target_id"]) for row in repo.agent_hypothesis_cites(hypothesis_id=hypothesis_id)
+           if row["target_kind"] == "finding"]
+    rows = {row["id"]: row for row in repo.candidates_by_ids(ids, hunt_id=hunt_id)} if ids else {}
+    hosts = [str(item[1]) for finding_id in ids for item in (rows.get(finding_id) or {}).get("entities") or []
+             if isinstance(item, (list, tuple)) and len(item) >= 2 and item[0] == "host" and item[1]]
+    return list(dict.fromkeys(hosts))
 
 
 def first_investigate_prompt(repo: Repo, hunt_id: str, hypothesis: dict, prompts: dict[str, str], tools: list, *,
-                             owner_token=None) -> tuple[int, ChatRequest]:
+                             owner_token=None, view: ClusterView | None = None) -> tuple[int, ChatRequest]:
     """The estimated tokens of a hypothesis's next session's first prompt, built as the session builds it."""
-    _context, messages = _investigate_messages(repo, hunt_id, hypothesis, prompts, owner_token=owner_token)
+    _context, messages = _investigate_messages(repo, hunt_id, hypothesis, prompts, owner_token=owner_token,
+                                               view=view)
     request = ChatRequest(messages=messages, tools=tools, tool_choice="auto")
     return estimate_tokens(request.prompt_text()), request
 
@@ -736,7 +850,7 @@ def first_investigate_prompt(repo: Repo, hunt_id: str, hypothesis: dict, prompts
 def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_gate: _BudgetGate,
                  toolbox_factory: Callable[[str], Toolbox], prompts: dict[str, str],
                  *, purpose: str, hypothesis: dict | None = None, owner_token=None,
-                 heartbeat: Callable[[], None] | None = None) -> dict:
+                 heartbeat: Callable[[], None] | None = None, view: ClusterView | None = None) -> dict:
     session_id = _id("as")
     now = utcnow()
     hypothesis_id = hypothesis["id"] if hypothesis else None
@@ -759,6 +873,8 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
     finish_refusals = 0
     # what the previous call left in the prompt cache, and the request it was made with (see `_BudgetGate`)
     cache_basis: dict | None = None
+    # the previous call's prompt and output as the provider reported them, for sizing the next prompt (_prompt_size)
+    reported: dict | None = None
     cache_trusted = True
     overruns = 0
     counted = True
@@ -859,13 +975,19 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                     "dossier page beside its output allowance. Added budget raises the share and lets it run."),
                     ORIENT_SHARE_LIMIT)
             room = min(room, share_room)
-            # Pagination estimates canonical data; measure the actual request envelope too.
-            for _ in range(4):
+            # the strong and medium mention groups ride beside the first page, whatever that page holds
+            seed = mention_seed(repo, hunt_id)
+            # Pagination estimates canonical data; measure the actual request envelope too. When the request is too
+            # large, the seed gives way first (half its groups at a time, counted as not shown, its header kept), and
+            # only then does the page shrink: findings are what orient is for.
+            for _ in range(4 + SEED_TRIMS):
                 dossier = build_dossier(repo, hunt_id, token_budget=room, owner_token=owner_token,
                                         followable=followable)
                 page = dossier.page(1)
                 user = {"message": "Dossier index page 1 of " + str(len(dossier.pages)) +
                         "; call list_findings for the rest.", "page": page}
+                if seed is not None:
+                    user["mention_pool"] = seed
                 messages = [{"role": "system", "content": system_text + "\n\n" + orientation},
                             {"role": "user", "content": json.dumps(user, sort_keys=True, ensure_ascii=False,
                                                                   default=str, separators=(",", ":"))}]
@@ -877,6 +999,16 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 share_excess = prompt_tokens - budget_gate.orient_prompt_room(provider.output_limit(request))
                 if excess <= 0 and share_excess <= 0:
                     break
+                groups = (seed or {}).get("strong_and_medium") or []
+                if groups:
+                    kept = groups[:len(groups) // 2]
+                    seed = {**seed, "strong_and_medium": kept,
+                            "groups_not_shown": int(seed.get("groups_not_shown") or 0) + len(groups) - len(kept)}
+                    continue
+                if seed is not None:
+                    # an emptied seed's header goes too: the page's own mention header still gives the pool's size
+                    seed = None
+                    continue
                 room = max(1, room - max(excess, share_excess) - 128)
             if excess > 0:
                 return finish("context_full", "Orient input exceeds the available context budget.", "context_full")
@@ -889,13 +1021,15 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
             call_limit = _tool_call_allowance(settings, reads=len(dossier.pages) - 1)
         else:
             call_limit = _tool_call_allowance(settings, reads=_cited_findings(repo, hypothesis_id))
-            context, messages = _investigate_messages(repo, hunt_id, hypothesis, prompts, owner_token=owner_token)
+            context, messages = _investigate_messages(repo, hunt_id, hypothesis, prompts, owner_token=owner_token,
+                                                      view=view)
             admission.issue_aliases(context, source="hypothesis")
         while True:
             # older results the model has seen are stubbed in one batch, before the prompt is sized and its cached
             # prefix checked: a compacted conversation no longer extends the previous request, so its prefix is not
             # counted as cached, and between compactions the conversation only grows at its end
-            compacted = results.compact(messages, provider.without_reasoning)
+            compacted = results.compact(messages, provider.without_reasoning,
+                                        prompt_tokens=_prompt_size(messages, tools, reported))
             if compacted:
                 log.info("agent session %s compacted %d earlier tool results", session_id, compacted)
             request = ChatRequest(messages=messages, tools=tools, tool_choice="auto")
@@ -1005,6 +1139,7 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                         f"{reserved} reserved, and {spent} of {limits.max_tokens} budget tokens are spent. "
                         + _deterministic_tool_summary(tool_history, hypothesis_changes)), "budget:tokens")
             cache_basis = _cache_basis(result, request, prompt_est, started_at) if cache_trusted else None
+            reported = _reported_size(result, request)
             if result.status in {"too_large", "truncated_input"}:
                 return finish("context_full", result.error or "Provider reported an oversized or truncated input.",
                               "context_full")
@@ -1223,8 +1358,10 @@ def _has_open_questions(hypothesis: dict) -> bool:
 
 
 def _next_hypotheses(settings: Settings, repo: Repo, hunt_id: str) -> list[dict]:
-    rows = [row for row in repo.agent_hypotheses(hunt_id) if row["status"] == "open" and
-            int(row.get("sessions_run") or 0) < settings.agent_max_sessions_per_hypothesis]
+    """The next round: of the pending hypotheses (`_pending`), those with the fewest sessions, in priority order. A
+    hypothesis its last session finished with no open question is not worked again: another session would re-prove
+    what is already recorded, and the budget goes to hypotheses with questions left and to unexplained clusters."""
+    rows = [row for row in repo.agent_hypotheses(hunt_id) if _pending(settings, row, repo)]
     if not rows:
         return []
     minimum = min(int(row.get("sessions_run") or 0) for row in rows)
@@ -1233,10 +1370,8 @@ def _next_hypotheses(settings: Settings, repo: Repo, hunt_id: str) -> list[dict]
     return sorted(round_rows, key=lambda row: _priority(repo, hunt_id, row, touched))
 
 
-def _investigation_done(repo: Repo, hunt_id: str) -> bool:
-    open_rows = [row for row in repo.agent_hypotheses(hunt_id) if row["status"] == "open"]
-    return not open_rows or all(int(row.get("sessions_run") or 0) >= 1 and not _has_open_questions(row)
-                                for row in open_rows)
+def _investigation_done(settings: Settings, repo: Repo, hunt_id: str) -> bool:
+    return not any(_pending(settings, row, repo) for row in repo.agent_hypotheses(hunt_id))
 
 
 def _recover_running_sessions(repo: Repo, hunt_id: str, *, owner_token=None) -> None:
@@ -1471,21 +1606,48 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
         if orient.get("reason") == ORIENT_SHARE_LIMIT:
             limits_hit.add(ORIENT_SHARE_LIMIT)
             reasons.remove(ORIENT_SHARE_LIMIT)
+
+    clusters: list[ClusterView] = []
+
+    def cluster_view() -> ClusterView | None:
+        """The hunt's clusters, built once per run (the deterministic findings do not change during it)."""
+        if not reportable_count:
+            return None
+        if not clusters:
+            clusters.append(hunt_clusters(repo, hunt_id))
+            if clusters[0].partial:
+                limits_hit.add(clusters[0].partial["reason"])
+        return clusters[0]
+
+    def top_up() -> int:
+        """Open hypotheses for unexplained clusters (the controller's, under the latest orient session), when the
+        hunt has reportable findings and orient has run; the cluster graph is built once per run."""
         orient_rows = repo.agent_sessions(hunt_id, purpose="orient")
-        latest_orient = orient_rows[-1] if orient_rows else None
-        if latest_orient and not str(orient.get("reason") or "").startswith("controller_error"):
-            admission = AgentAdmission(settings, repo, hunt_id, latest_orient["id"], owner_token=owner_token,
-                                       purpose="orient")
-            _controller_open_hypotheses(settings, repo, hunt_id, latest_orient["id"], admission)
-            limits_hit.update(admission.limits_hit)
+        if not reportable_count or not orient_rows:
+            return 0
+        pending = _pending_cluster_hypotheses(settings, repo, hunt_id)
+        if pending >= min(settings.agent_max_initial_hypotheses, settings.agent_max_hypotheses):
+            return 0
+        admission = AgentAdmission(settings, repo, hunt_id, orient_rows[-1]["id"], owner_token=owner_token,
+                                   purpose="orient")
+        opened = _controller_open_hypotheses(settings, repo, hunt_id, orient_rows[-1]["id"], admission,
+                                             view=cluster_view())
+        limits_hit.update(admission.limits_hit)
+        if opened:
+            log.info("agent controller opened %d hypotheses for unexplained clusters of hunt %s", opened, hunt_id)
+        return opened
 
     consecutive_outages = 1 if reportable_count and not orient_finished and orient.get("provider_unavailable") else 0
     stop_scheduling = str(orient.get("reason") or "").startswith("controller_error") or bool(stopped)
     probe_tools = _session_tools(Toolbox(repo, hunt_id))
+    failed_rounds = 0
     while not stop_scheduling:
         stopped = gate.stopped()
         if stopped:
             break
+        # every unexplained cluster gets a hypothesis while fewer than the initial cap are pending: an orient that
+        # opened only a few (or a continuation whose hypotheses are all worked) never leaves the rest unexamined
+        top_up()
         batch = _next_hypotheses(settings, repo, hunt_id)
         if not batch:
             break
@@ -1494,7 +1656,7 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
         room, firsts, no_room = [], [], None
         for hypothesis in batch[:settings.agent_concurrency]:
             prompt, request = first_investigate_prompt(repo, hunt_id, hypothesis, prompts, probe_tools,
-                                                       owner_token=owner_token)
+                                                       owner_token=owner_token, view=cluster_view())
             output = provider.output_limit(request)
             refused = gate.room_for(prompt, output, "investigate", also=firsts)
             if refused is not None:
@@ -1512,7 +1674,7 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
         with ThreadPoolExecutor(max_workers=len(room), thread_name_prefix="romulus-agent") as pool:
             futures = {pool.submit(_run_session, settings, repo, hunt_id, provider, gate, toolbox_factory, prompts,
                                    purpose="investigate", hypothesis=hypothesis, owner_token=owner_token,
-                                   heartbeat=heartbeat): hypothesis
+                                   heartbeat=heartbeat, view=cluster_view()): hypothesis
                        for hypothesis in room}
             for future in as_completed(futures):
                 try:
@@ -1543,8 +1705,29 @@ def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
         if not any(after.get(key, count) > count for key, count in before.items()):
             reasons.append("no_progress")
             break
-        if _investigation_done(repo, hunt_id):
+        # a provider that fails every session (an error that is not an outage) must not be fed one new cluster
+        # hypothesis after another: two rounds in a row of failed sessions end the scheduling
+        failed_rounds = failed_rounds + 1 if all(row.get("state") == "failed" for row in completed) else 0
+        if failed_rounds >= FAILED_ROUNDS_LIMIT:
+            reasons.append(SESSIONS_FAILED_REASON)
             break
+        if _investigation_done(settings, repo, hunt_id) and not top_up():
+            break
+
+    # what the investigation left undone is named, never a silent `completed`: hypotheses still pending (an outage,
+    # a cap, a stop or the budget ended their work) and clusters no hypothesis explains
+    left = sum(_pending(settings, row, repo) for row in repo.agent_hypotheses(hunt_id))
+    if left:
+        limits_hit.add(f"{UNWORKED_HYPOTHESES}:{left}")
+    # and hypotheses that used their whole session limit without a session ending as done (every one failed, hit
+    # a cap or was stopped): no longer pending, never worked through, so never read as completed either
+    spent = sum(_exhausted(settings, row, repo) for row in repo.agent_hypotheses(hunt_id))
+    if spent:
+        limits_hit.add(f"{EXHAUSTED_HYPOTHESES}:{spent}")
+    view = cluster_view()
+    unexplained = len(unexplained_clusters(repo, hunt_id, view)) if view is not None else 0
+    if unexplained:
+        limits_hit.add(f"{UNEXPLAINED_CLUSTERS}:{unexplained}")
 
     stopped = stopped or gate.stopped() or next(
         (STOPPED_REASON for session in all_sessions if session.get("reason") == STOPPED_REASON), None)

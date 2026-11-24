@@ -35,6 +35,8 @@ _SUPPORT = ("Aliases of supporting findings (F...), evidence (E...), raw records
             "an action), expansion links (L...) or agent links (A...).")
 # what a cited alias kind is stored as in a hypothesis's cites
 _CITE_KINDS = {"F": "finding", "E": "evidence", "L": "link", "A": "agent_link", "Q": "raw_record"}
+# The alias kinds a hypothesis's ATT&CK techniques may rest on: typed evidence, never a raw record or an agent link.
+TYPED_CITE_ALIASES = frozenset({"F", "E", "L"})
 RAW_ONLY_NOTE = ("rests only on raw records, not normalized: no typed fields were extracted and no detection rule ran "
                  "on them; they show that records with this text exist, not that an action happened")
 RAW_ALSO_NOTE = ("also cites raw records, not normalized: they show that records with this text exist, not that an "
@@ -225,7 +227,7 @@ _PIVOT_PATHS = ("result.evidence.*", "result.candidates.*", "result.entities.*.a
 _TOOL_ALIAS_PATHS = {
     "list_findings": tuple("findings.*." + p for p in _FINDING_PATHS),
     "get_finding": tuple("finding." + p for p in _FINDING_PATHS),
-    "get_evidence": ("evidence.*.alias",),
+    "get_evidence": ("evidence.*.alias", "evidence.*.cited_by_findings.*"),
     "list_incidents": ("incidents.*.alias",),
     "get_incident": tuple("incident." + p for p in _INCIDENT_PATHS),
     "entity_profile": ("entity.alias", "entity.events.*.alias"),
@@ -270,7 +272,10 @@ def typed_alias_arguments(tool_name: str, arguments: object) -> set[str]:
 def collect_issued_aliases(value: object, *, source: str = "tool", tool_name: str | None = None) -> set[str]:
     """Collect explicitly typed aliases in a prompt or tool payload shown to a session."""
     if source == "hypothesis":
-        return _path_aliases(value, ("alias", "entities.*", "cites.*.alias"))
+        # the card's leads (romulus.agent.clusters.hypothesis_leads) name its clusters and their findings no
+        # hypothesis cites yet: controller-built from stored state, never telemetry or model text
+        return _path_aliases(value, ("alias", "entities.*", "cites.*.alias", "leads.clusters.*.incident",
+                                     "leads.not_yet_cited.*.alias"))
     if source == "dossier":
         paths = ("findings.*.alias", "entities.*.alias", "expansion.unfinished_anchors.*.anchor",
                  "expansion.link_tiers_not_reached.*.anchor", "expansion.partial_links.*.alias",
@@ -343,6 +348,19 @@ class AgentAdmission:
                               "revoked_technique")
             accepted.append(attack_id)
         return list(dict.fromkeys(accepted))
+
+    def _typed_support(self, kind: str, target: str) -> bool:
+        """Whether a resolved supporting cite is typed evidence a technique may rest on: a typed event (E), an
+        expansion link (L), or a finding (F) that is deterministic or, if the agent proposed it, cites typed events.
+        An agent finding resting on raw records only (a mention claim) is not."""
+        if kind not in TYPED_CITE_ALIASES:
+            return False
+        if kind != "F":
+            return True
+        row = self.repo.candidate(target)
+        if row is None:
+            return False
+        return row.get("provenance", "deterministic") == "deterministic" or bool(row.get("event_ids"))
 
     def _resolve_many(self, aliases: list[str], kinds: set[str], field: str = "$") -> list[tuple[str, str]]:
         """`field` is the argument the aliases came from, which a refusal is recorded by."""
@@ -439,6 +457,13 @@ class AgentAdmission:
             techniques = self._check_techniques(args.techniques)
             entities = self._resolve_many(args.entities, {"N"}, "entities[]")
             supporting = self._resolve_many(args.supporting, {"F", "E", "L", "A", "Q"}, "supporting[]")
+            # an ATT&CK technique on a hypothesis rests on typed evidence: a finding, a typed event or an expansion
+            # link. A mention-led hypothesis (no cite, or raw records and agent links only) names none, so text a
+            # record contains can never put a technique on the hunt's hypotheses
+            if techniques and not any(self._typed_support(kind, target) for kind, target in supporting):
+                raise Refusal("techniques need at least one typed supporting citation (a finding F, evidence E or "
+                              "link L); open the hypothesis without techniques, or cite typed evidence",
+                              "techniques", "needs_typed_citation")
             statement = args.statement.strip()
             support_key = {(kind, target) for kind, target in supporting}
             for existing in self.repo.agent_hypotheses(self.hunt_id):
@@ -461,8 +486,12 @@ class AgentAdmission:
             }
             event = {"id": _id("he"), "hunt_id": self.hunt_id, "hypothesis_id": hypothesis_id,
                      "session_id": self.session_id, "kind": "opened",
+                     # the cites it was opened with: the clusters it explains are fixed by them
+                     # (romulus.agent.clusters.explanations), whatever it cites later
                      "payload": {"by": "agent", "statement": row["statement"], "techniques": techniques,
-                                 "entity_ids": row["entity_ids"], "questions": row["questions"]},
+                                 "entity_ids": row["entity_ids"], "questions": row["questions"],
+                                 "supporting": [{"kind": _CITE_KINDS[kind], "id": value}
+                                                for kind, value in supporting]},
                      "created_at": now}
             cites = [{"hunt_id": self.hunt_id, "hypothesis_id": hypothesis_id, "role": "support",
                       "target_kind": _CITE_KINDS[kind], "target_id": value} for kind, value in supporting]

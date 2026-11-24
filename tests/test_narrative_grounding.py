@@ -301,6 +301,26 @@ def _assessment_body(repo):
                    _p([_s(_f(repo, "f-0001"))], "Persistence")])
 
 
+@pytest.fixture(autouse=True)
+def _one_hypothesis_explains_every_cluster(monkeypatch):
+    """These tests are about triage and grounding, one investigation long: one orient hypothesis explains every
+    cluster here (a hunt otherwise counts at most CLUSTERS_PER_HYPOTHESIS per hypothesis; tests/test_agent_breadth.py
+    covers that)."""
+    from romulus.agent import clusters
+    monkeypatch.setattr(clusters, "CLUSTERS_PER_HYPOTHESIS", 10 ** 6)
+
+
+def _orient_covering(repo) -> list[ToolCall]:
+    """Orient's reply: one hypothesis citing every reportable finding, so every cluster is explained (with the
+    fixture above) and the controller opens no hypothesis of its own; the phase then investigates exactly that one."""
+    book = AliasBook(repo, "h1")
+    aliases = [book.alias_for("F", row["id"]) for row in repo.candidates("h1", ["urgent", "high", "lead"])]
+    assert len(aliases) <= 40
+    return [ToolCall("o1", "open_hypothesis", {"statement": "The reported findings are one intrusion",
+                                               "supporting": aliases}, "{}"),
+            ToolCall("of", "finish_session", {"summary": "One hypothesis opened."}, "{}")]
+
+
 def _agent_script(repo, seen: dict):
     finish = [ToolCall("f", "finish_session", {"summary": "The evidence review is complete."}, "{}")]
 
@@ -308,7 +328,7 @@ def _agent_script(repo, seen: dict):
         seen["assess_input"] = json.loads(request.messages[1]["content"].split("\n", 1)[1])
         seen["sessions_at_assess"] = [row["purpose"] for row in repo.agent_sessions("h1")]
         return response(parsed=_assessment_body(repo))
-    return ScriptedProvider([response(tool_calls=finish), response(tool_calls=finish), assess])
+    return ScriptedProvider([response(tool_calls=_orient_covering(repo)), response(tool_calls=finish), assess])
 
 
 def _phase_settings(**overrides):
@@ -1121,7 +1141,8 @@ def _cited_phase(tmp_path, cited_policy, *, name="cited", settings=None, cited_p
     finish = [ToolCall("f", "finish_session", {"summary": "The evidence review is complete."}, "{}")]
     body = _reply([_p([_s([_f(repo, "q-0"), _f(repo, "q-1"), _f(repo, "q-2")], "The tool ran at start-up.")],
                       "Persistence")])
-    provider = ScriptedProvider([response(tool_calls=finish), response(tool_calls=finish), response(parsed=body)])
+    provider = ScriptedProvider([response(tool_calls=_orient_covering(repo)), response(tool_calls=finish),
+                                 response(parsed=body)])
     extension = cited_provider or ta.FakeTriage(cited_policy)
 
     def triage(heartbeat, cited=None):
