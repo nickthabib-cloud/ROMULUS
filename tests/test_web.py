@@ -243,7 +243,7 @@ def test_running_stream_releases_sqlite_readers_before_yield_and_sleep(tmp_path,
     endpoint = next(route.endpoint for route in app.routes
                     if getattr(route, "path", None) == "/hunts/{hunt_id}/stream")
     create_user(repo.engine, "test", secrets.token_urlsafe(18), "analyst")
-    cookie = Sessions(settings.secret_key.get_secret_value()).issue({"username": "test", "role": "analyst"})
+    cookie = Sessions(settings.secret_key.get_secret_value()).issue({"username": "test", "role": "analyst", "generation": 0})
 
     async def receive():
         return {"type": "http.request", "body": b"", "more_body": False}

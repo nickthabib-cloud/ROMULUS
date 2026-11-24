@@ -478,14 +478,14 @@ def open_mode(mode: int) -> str | None:
 def check_home_modes(s: Settings, posix: bool | None = None,
                      mode_of: Callable[[Path], int] = lambda path: stat.S_IMODE(path.stat().st_mode)) -> Check:
     """Warn when the ROMULUS home, the database, report or log directory lets anyone but its owner in: they hold
-    findings, evidence that may carry credentials, and the audit log. A directory inside a home that is private to its
-    owner cannot be reached by others whatever its own mode, so it is judged only when the home itself is open (or
-    lives elsewhere, as ROMULUS_STAGE_DIR may)."""
+    findings, evidence that may carry credentials, and the audit log; the stage directory (staged telemetry) is judged
+    too. A directory inside a home that is private to its owner cannot be reached by others whatever its own mode, so
+    it is judged only when the home itself is open or the directory lives elsewhere (as ROMULUS_STAGE_DIR may)."""
     if not (os.name == "posix" if posix is None else posix):
         return Check("paths.home_mode", "ok", "permission modes are not checked on this platform")
     opened = []
     home_private = False
-    for path in (s.home, s.db_path.parent, s.reports_dir, s.logs_dir):
+    for path in (s.home, s.db_path.parent, s.reports_dir, s.logs_dir, s.stage_path):
         if home_private and s.home in path.parents:
             continue
         try:
@@ -501,8 +501,9 @@ def check_home_modes(s: Settings, posix: bool | None = None,
             home_private = True
     if opened:
         return Check("paths.home_mode", "warn", f"{'; '.join(opened)}: run chmod 700 on the ROMULUS home and the "
-                                                "directories in it, so only the service account can read them")
-    return Check("paths.home_mode", "ok", "the home, database, report and log directories are private to their owner")
+                                                "stage directory, so only the service account can read them")
+    return Check("paths.home_mode", "ok", "the home, database, report, log and stage directories are private to their "
+                                          "owner")
 
 
 def key_file_problem(mode: int) -> str | None:

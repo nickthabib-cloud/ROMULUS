@@ -40,10 +40,12 @@ def tls_half_configured(s: Settings) -> bool:
 
 def plaintext_state(s: Settings) -> str:
     """'tls' (built-in TLS), 'loopback' (plain HTTP reachable only from this machine), 'allowed' (plain HTTP on the
-    network under ROMULUS_WEB_ALLOW_PLAINTEXT) or 'refused' (plain HTTP on the network without it)."""
+    network under ROMULUS_WEB_ALLOW_PLAINTEXT) or 'refused' (plain HTTP on the network without it). Raises ValueError
+    for a malformed ROMULUS_WEB_BIND, with or without TLS."""
+    host, _port = bind_address(s)
     if s.web_tls_enabled:
         return "tls"
-    if is_loopback(bind_address(s)[0]):
+    if is_loopback(host):
         return "loopback"
     return "allowed" if s.web_allow_plaintext else "refused"
 
@@ -67,21 +69,19 @@ def refusal(s: Settings) -> str | None:
 
 
 def trusted_proxies(s: Settings) -> list[str]:
-    """Addresses or networks (CIDR) of the reverse proxies whose forwarded headers are trusted. A wildcard is refused:
-    any client could then choose the address the login throttle and the audit log see."""
+    """The addresses of the reverse proxies whose forwarded headers are trusted: single IP addresses only, which every
+    supported uvicorn release matches. A wildcard or a network is refused: a wildcard would let any client choose the
+    address the login throttle and the audit log see."""
     out = []
     for item in (part.strip() for part in s.web_trusted_proxies.split(",")):
         if not item:
             continue
-        if item == "*":
-            raise ValueError("ROMULUS_WEB_TRUSTED_PROXIES must list proxy addresses, not '*'")
         try:
-            network = ipaddress.ip_network(item, strict=False)
+            address = ipaddress.ip_address(item)
         except ValueError:
-            raise ValueError(f"ROMULUS_WEB_TRUSTED_PROXIES entry {item!r} is not an IP address or network") from None
-        if network.prefixlen == 0:
-            raise ValueError(f"ROMULUS_WEB_TRUSTED_PROXIES entry {item!r} trusts every address")
-        out.append(item)
+            raise ValueError(f"ROMULUS_WEB_TRUSTED_PROXIES entry {item!r} is not a single IP address (list each proxy "
+                             "address; '*' and networks are not accepted)") from None
+        out.append(str(address))
     return out
 
 

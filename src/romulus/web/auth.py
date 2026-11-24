@@ -25,17 +25,21 @@ _ph = PasswordHasher()
 
 # Login throttle.
 # - Per username: MAX_ATTEMPTS failures within WINDOW seconds lock that username until the oldest one ages out. Other
-#   accounts are not affected.
-# - Per client address: failures beyond ADDRESS_FREE_ATTEMPTS within WINDOW delay each further attempt from that
-#   address (doubling from BACKOFF_BASE up to BACKOFF_MAX seconds). The password is still checked, so a correct
-#   password is never refused because of its address alone; the delay only slows guessing across many usernames.
+#   accounts are not affected. A password check reserves a slot before it runs, and failures plus checks still running
+#   may not exceed MAX_ATTEMPTS, so a burst of parallel attempts gets no more checks than one attempt after another.
+# - Per client address: failures beyond ADDRESS_FREE_ATTEMPTS within WINDOW delay further attempts from that address
+#   (BACKOFF_BASE doubling up to BACKOFF_MAX seconds per attempt). Each attempt is given its own start time after the
+#   previous one's, so parallel connections queue rather than share one delay; no attempt waits longer than
+#   BACKOFF_WAIT_MAX. The password is still checked after the wait, so a correct password is never refused because of
+#   its address alone; the delay only slows guessing across many usernames.
 # - Each map keeps at most THROTTLE_KEYS keys and drops the least recently used one beyond that, and each key keeps a
-#   bounded number of failure times, so the state stays fixed-size whatever is sent. Usernames are kept as short
-#   digests, so neither a long value nor a password typed into the username field is held in memory, and only names
-#   of existing accounts are kept (a locked, an unknown and a wrong-password attempt answer alike).
+#   bounded number of failure times, so the state stays fixed-size whatever is sent; a reservation exists only while
+#   its check runs. Usernames are kept as short digests, so neither a long value nor a password typed into the username
+#   field is held in memory, and only names of existing accounts are kept (a locked, an unknown and a wrong-password
+#   attempt answer alike).
 MAX_ATTEMPTS, WINDOW = 5, 300
 ADDRESS_FREE_ATTEMPTS = 20
-BACKOFF_BASE, BACKOFF_MAX = 0.5, 4.0
+BACKOFF_BASE, BACKOFF_MAX, BACKOFF_WAIT_MAX = 0.5, 4.0, 30.0
 THROTTLE_KEYS = 4096
 _ADDRESS_DEPTH = ADDRESS_FREE_ATTEMPTS + 8
 
@@ -80,31 +84,71 @@ class RateLimiter:
 
     def __init__(self, clock: Callable[[], float] = time.monotonic, keys: int = THROTTLE_KEYS):
         self.clock = clock
+        self.keys = keys
         self._lock = threading.Lock()
         self.users = _Failures(keys, MAX_ATTEMPTS)
         self.addresses = _Failures(keys, _ADDRESS_DEPTH)
+        self.pending: dict[str, int] = {}                          # password checks running, per username key
+        self.next_start: OrderedDict[str, float] = OrderedDict()   # per address in backoff: the next start time
 
     def locked(self, username: str) -> bool:
         with self._lock:
-            return self.users.count(_user_key(username), self.clock()) >= MAX_ATTEMPTS
+            key = _user_key(username)
+            return self.users.count(key, self.clock()) + self.pending.get(key, 0) >= MAX_ATTEMPTS
 
-    def delay(self, client: str) -> float:
-        """Seconds to wait before checking a password from `client`."""
+    def admit(self, client: str) -> float:
+        """Seconds this attempt from `client` waits before its password is checked. Each attempt from an address in
+        backoff takes the next start time, one backoff step after the previous attempt's, at most BACKOFF_WAIT_MAX
+        from now."""
         with self._lock:
-            excess = self.addresses.count(client, self.clock()) - ADDRESS_FREE_ATTEMPTS
-        return 0.0 if excess < 0 else min(BACKOFF_BASE * 2 ** min(excess, 16), BACKOFF_MAX)
+            now = self.clock()
+            excess = self.addresses.count(client, now) - ADDRESS_FREE_ATTEMPTS
+            if excess < 0:
+                return 0.0
+            step = min(BACKOFF_BASE * 2 ** min(excess, 16), BACKOFF_MAX)
+            start = min(max(now, self.next_start.get(client, now)) + step, now + BACKOFF_WAIT_MAX)
+            self.next_start[client] = start
+            self.next_start.move_to_end(client)
+            while len(self.next_start) > self.keys:
+                self.next_start.popitem(last=False)
+            return start - now
+
+    def reserve(self, username: str) -> bool:
+        """Reserve a password check for an existing account; False while it is locked (recent failures plus checks
+        still running reach MAX_ATTEMPTS). Every True is followed by exactly one settle(username, ...)."""
+        with self._lock:
+            key = _user_key(username)
+            if self.users.count(key, self.clock()) + self.pending.get(key, 0) >= MAX_ATTEMPTS:
+                return False
+            self.pending[key] = self.pending.get(key, 0) + 1
+            return True
+
+    def settle(self, username: str | None, client: str, ok: bool) -> None:
+        """End a check: release the account's reservation (when `username` is given) and record the outcome. A
+        success clears only the account's failures: one good password must not reset its address's backoff."""
+        with self._lock:
+            now = self.clock()
+            if username is not None:
+                key = _user_key(username)
+                left = self.pending.get(key, 0) - 1
+                if left > 0:
+                    self.pending[key] = left
+                else:
+                    self.pending.pop(key, None)
+                if ok:
+                    self.users.clear(key)
+                else:
+                    self.users.add(key, now)
+            if not ok:
+                self.addresses.add(client, now)
 
     def fail(self, username: str | None, client: str) -> None:
+        """Record a failed attempt that reserved nothing."""
         with self._lock:
             now = self.clock()
             self.addresses.add(client, now)
             if username is not None:
                 self.users.add(_user_key(username), now)
-
-    def succeed(self, username: str) -> None:
-        # only the account's own failures: one good password must not reset its address's backoff
-        with self._lock:
-            self.users.clear(_user_key(username))
 
 
 def create_user(engine, username: str, password: str, role: str):
@@ -128,24 +172,25 @@ def authenticate(engine, username: str, password: str, client: str,
     with engine.connect() as c:
         row = c.execute(select(t.user).where(t.user.c.username == username)).mappings().first()
     known = row is not None
-    if limiter.locked(username):
+    # Only a real account is reserved and locked, so made-up names cannot evict a lock from the fixed-size map; an
+    # unknown name still counts against its address.
+    if known and not limiter.reserve(username):
         _ph.hash("timing-equalizer")          # a locked username answers in the same time as a wrong password
         limiter.fail(None, client)
         return None, known
     ok = False
-    if row and not row["disabled"]:
-        try:
-            ok = _ph.verify(row["password_hash"], password)
-        except (VerificationError, InvalidHashError):
-            ok = False
-    else:
-        _ph.hash("timing-equalizer")          # similar cost whether or not the user exists
+    try:
+        if row and not row["disabled"]:
+            try:
+                ok = _ph.verify(row["password_hash"], password)
+            except (VerificationError, InvalidHashError):
+                ok = False
+        else:
+            _ph.hash("timing-equalizer")      # similar cost whether or not the user exists
+    finally:
+        limiter.settle(username if known else None, client, ok)
     if not ok:
-        # only a real account's failures count toward a username lock, so made-up names cannot evict a lock from the
-        # fixed-size map; an unknown name still counts against its address
-        limiter.fail(username if known else None, client)
         return None, known
-    limiter.succeed(username)
     return {"username": row["username"], "role": row["role"], "generation": row["session_generation"]}, known
 
 
@@ -204,7 +249,7 @@ class Sessions:
         self.s = URLSafeTimedSerializer(secret, salt="romulus-session")
 
     def issue(self, user: dict) -> str:
-        return self.s.dumps({"u": user["username"], "r": user["role"], "g": int(user.get("generation", 0)),
+        return self.s.dumps({"u": user["username"], "r": user["role"], "g": int(user["generation"]),
                              "csrf": secrets.token_urlsafe(24)})
 
     def read(self, cookie: str | None) -> dict | None:

@@ -102,9 +102,10 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
     async def login(request: Request, username: str = Form(...), password: str = Form(...)):
         # the connection's address, or the forwarded one when the connection comes from a trusted proxy
         client = request.client.host if request.client else "unknown"
-        delay = limiter.delay(client)
+        delay = limiter.admit(client)
         if delay:
-            await asyncio.sleep(delay)          # an address with many recent failures waits; no thread is held
+            # an address with many recent failures waits its turn (parallel attempts queue); no thread is held
+            await asyncio.sleep(delay)
         u, known = await run_in_threadpool(authenticate, repo.engine, username, password, client, limiter)
         if u is None:
             await run_in_threadpool(repo.audit, username[:64] if known else UNKNOWN_ACCOUNT, "web.login_failed",
@@ -214,15 +215,17 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
 
     @app.get("/hunts/{hunt_id}/stream")
     async def stream(request: Request, hunt_id: str, after_seq: str = "0"):
-        await run_in_threadpool(need, request)
+        u = await run_in_threadpool(need, request)
         if (not after_seq.isascii() or not after_seq.isdigit() or len(after_seq) > 19
                 or int(after_seq) > 9223372036854775807):
             raise HTTPException(400, "Invalid stream cursor")
         if await run_in_threadpool(repo.get_hunt, hunt_id) is None:
             raise HTTPException(404)
 
-        return StreamingResponse(agent_views.live_events(repo, request, hunt_id, asyncio.sleep, after_seq=int(after_seq)),
-                                 media_type="text/event-stream")
+        # the session is checked again on every poll, so a logout, disable, role or password change ends the stream
+        return StreamingResponse(agent_views.live_events(
+            repo, request, hunt_id, asyncio.sleep, after_seq=int(after_seq),
+            authorised=lambda: session_user(repo.engine, u) is not None), media_type="text/event-stream")
 
     # ------------------------------------------------------------------ findings
     @app.get("/findings/{cid}", response_class=HTMLResponse)

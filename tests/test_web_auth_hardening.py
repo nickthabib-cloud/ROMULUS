@@ -77,7 +77,7 @@ def test_role_in_cookie_is_never_trusted(accounts):
     c = TestClient(web.create_app(s))
     # a validly signed cookie that claims lead for an analyst account (e.g. issued before a demotion)
     c.cookies.set(web.COOKIE, auth.Sessions(s.secret_key.get_secret_value()).issue(
-        {"username": "analyst1", "role": "lead"}))
+        {"username": "analyst1", "role": "lead", "generation": 0}))
     assert c.get("/").status_code == 200
     assert c.get("/site").status_code == 403
 
@@ -88,7 +88,7 @@ def test_cookie_without_a_generation_or_for_a_missing_account_is_refused(account
     c = TestClient(web.create_app(s))
     c.cookies.set(web.COOKIE, signer.s.dumps({"u": "analyst1", "r": "analyst", "csrf": "x"}))
     assert c.get("/", follow_redirects=False).headers["location"] == "/login"
-    c.cookies.set(web.COOKIE, signer.issue({"username": "nobody", "role": "lead"}))
+    c.cookies.set(web.COOKIE, signer.issue({"username": "nobody", "role": "lead", "generation": 0}))
     assert c.get("/", follow_redirects=False).headers["location"] == "/login"
 
 
@@ -154,7 +154,7 @@ def test_one_locked_username_does_not_lock_another():
     for _ in range(auth.MAX_ATTEMPTS):
         limiter.fail("alice", "10.0.0.5")
     assert limiter.locked("alice") and not limiter.locked("bob")
-    assert limiter.delay("10.0.0.5") == 0
+    assert limiter.admit("10.0.0.5") == 0
     clock.now += auth.WINDOW
     assert not limiter.locked("alice")
 
@@ -164,15 +164,61 @@ def test_address_backoff_is_short_bounded_and_survives_a_good_login():
     limiter = auth.RateLimiter(clock=clock)
     for n in range(auth.ADDRESS_FREE_ATTEMPTS):
         limiter.fail(f"user{n}", "10.0.0.9")
-    assert limiter.delay("10.0.0.9") == auth.BACKOFF_BASE
+    assert limiter.admit("10.0.0.9") == auth.BACKOFF_BASE
+    clock.now += 60
     for n in range(40):
         limiter.fail(f"more{n}", "10.0.0.9")
-    assert limiter.delay("10.0.0.9") == auth.BACKOFF_MAX
-    limiter.succeed("someone")
-    assert limiter.delay("10.0.0.9") == auth.BACKOFF_MAX
-    assert limiter.delay("10.0.0.10") == 0
+    assert limiter.admit("10.0.0.9") == auth.BACKOFF_MAX
+    clock.now += 60
+    assert limiter.reserve("someone")
+    limiter.settle("someone", "10.0.0.9", ok=True)
+    assert limiter.admit("10.0.0.9") == auth.BACKOFF_MAX
+    assert limiter.admit("10.0.0.10") == 0
     clock.now += auth.WINDOW
-    assert limiter.delay("10.0.0.9") == 0
+    assert limiter.admit("10.0.0.9") == 0
+
+
+def test_parallel_attempts_from_one_address_queue_rather_than_share_a_delay():
+    clock = Clock()
+    limiter = auth.RateLimiter(clock=clock)
+    for n in range(auth.ADDRESS_FREE_ATTEMPTS + 10):
+        limiter.fail(None, "10.0.0.9")
+    waits = [limiter.admit("10.0.0.9") for _ in range(20)]
+    # each parallel attempt starts one step after the one before it, and none waits longer than the cap
+    steps = [auth.BACKOFF_MAX * k for k in range(1, 21)]
+    assert waits == [min(step, auth.BACKOFF_WAIT_MAX) for step in steps]
+    assert len(limiter.next_start) == 1
+
+
+def test_parallel_wrong_passwords_get_at_most_max_attempts_checks(accounts, monkeypatch):
+    import threading
+    _s, repo, _pws = accounts
+    real = auth._ph
+    checks = []
+
+    class Counting:
+        def verify(self, stored, password):
+            checks.append(1)
+            return real.verify(stored, password)
+
+        def hash(self, password):
+            return real.hash(password)
+
+    monkeypatch.setattr(auth, "_ph", Counting())
+    limiter = auth.RateLimiter()
+    barrier = threading.Barrier(40)
+
+    def guess(n):
+        barrier.wait()
+        auth.authenticate(repo.engine, "analyst1", f"guess-{n}-wrong-password", f"10.0.0.{n}", limiter)
+
+    threads = [threading.Thread(target=guess, args=(n,)) for n in range(40)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(checks) <= auth.MAX_ATTEMPTS
+    assert limiter.locked("analyst1") and not limiter.pending
 
 
 def test_throttle_state_is_fixed_size():
@@ -289,9 +335,9 @@ def test_uvicorn_trusts_forwarded_headers_only_from_configured_proxies(tmp_path)
     plain = serve.uvicorn_options(_settings(tmp_path, web_bind="127.0.0.1:8443"))
     assert plain["proxy_headers"] is False and "forwarded_allow_ips" not in plain
     assert plain["host"] == "127.0.0.1" and plain["port"] == 8443
-    proxied = serve.uvicorn_options(_settings(tmp_path, web_trusted_proxies="10.0.0.1, 10.0.1.0/24"))
-    assert proxied["proxy_headers"] is True and proxied["forwarded_allow_ips"] == ["10.0.0.1", "10.0.1.0/24"]
-    for bad in ("*", "0.0.0.0/0", "::/0", "proxy.example"):
+    proxied = serve.uvicorn_options(_settings(tmp_path, web_trusted_proxies="10.0.0.1, ::1"))
+    assert proxied["proxy_headers"] is True and proxied["forwarded_allow_ips"] == ["10.0.0.1", "::1"]
+    for bad in ("*", "0.0.0.0/0", "::/0", "10.0.1.0/24", "proxy.example"):
         with pytest.raises(ValueError):
             serve.uvicorn_options(_settings(tmp_path, web_trusted_proxies=bad))
 
@@ -345,6 +391,20 @@ def test_web_serves_loopback_and_tls_without_the_override(tmp_path, monkeypatch)
     assert started[0]["forwarded_allow_ips"] == ["10.0.0.1"]
 
 
+def test_doctor_judges_a_stage_directory_outside_the_home(tmp_path):
+    stage = tmp_path / "elsewhere" / "stage"
+    s = _settings(tmp_path / "home", stage_dir=stage)
+    modes = {s.home: 0o700, s.db_path.parent: 0o700, s.reports_dir: 0o700, s.logs_dir: 0o700, stage: 0o755}
+    result = doctor.check_home_modes(s, posix=True, mode_of=lambda path: modes[path])
+    assert result.status == "warn" and str(stage) in result.detail
+
+
+def test_web_refuses_a_bind_without_a_port_under_tls(tmp_path, monkeypatch, capsys):
+    code, started = _run_web(tmp_path, monkeypatch, ["ROMULUS_WEB_BIND=0.0.0.0", "ROMULUS_WEB_TLS_CERT=/x/cert.pem",
+                                                     "ROMULUS_WEB_TLS_KEY=/x/key.pem"])
+    assert code == cli.EXIT_FAIL and not started and "ROMULUS_WEB_BIND" in capsys.readouterr().err
+
+
 def test_web_refuses_half_configured_tls_and_a_wildcard_proxy(tmp_path, monkeypatch):
     code, started = _run_web(tmp_path, monkeypatch, ["ROMULUS_WEB_TLS_CERT=/x/cert.pem"])
     assert code == cli.EXIT_FAIL and not started
@@ -368,6 +428,11 @@ def test_doctor_web_tls_states(tmp_path):
     assert check(_settings(tmp_path, web_bind="127.0.0.1:8443")).status == "ok"
     assert check(_settings(tmp_path, web_tls_cert=str(tmp_path / "c.pem"))).status == "fail"
     assert check(_settings(tmp_path, web_trusted_proxies="*")).status == "fail"
+    # a bind without a port is refused with or without TLS, never reported as fine
+    cert, key = _tls_files(tmp_path)
+    no_port = _settings(tmp_path, web_bind="0.0.0.0", web_tls_cert=str(cert), web_tls_key=str(key))
+    assert check(no_port, posix=False).status == "fail" and "ROMULUS_WEB_BIND" in check(no_port, posix=False).detail
+    assert serve.refusal(no_port) and "ROMULUS_WEB_BIND" in serve.refusal(no_port)
     cert, key = _tls_files(tmp_path)
     tls = _settings(tmp_path, web_bind="0.0.0.0:8443", web_tls_cert=str(cert), web_tls_key=str(key))
     assert check(tls, posix=False).status == "ok"
@@ -399,7 +464,7 @@ def test_doctor_home_mode_rule(tmp_path):
                                                  (0o755, 0o755, "warn"), (0o700, 0o700, "ok")])
 def test_doctor_judges_subdirectories_only_under_an_open_home(tmp_path, home, child, status):
     s = _settings(tmp_path)
-    modes = {s.home: home, s.db_path.parent: child, s.reports_dir: child, s.logs_dir: child}
+    modes = {s.home: home, s.db_path.parent: child, s.reports_dir: child, s.logs_dir: child, s.stage_path: child}
     result = doctor.check_home_modes(s, posix=True, mode_of=lambda path: modes[path])
     assert result.status == status
     if status == "warn":
