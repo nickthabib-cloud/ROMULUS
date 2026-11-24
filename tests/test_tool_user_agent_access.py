@@ -72,12 +72,19 @@ def test_hard_benign_lookalikes_are_not_tools():
 
 def test_missing_fields_are_counted_never_a_clean_no_match():
     rule, matches = run([
-        ev("http_access", source__host="client.example.test", user_agent__original="curl/8.0", url__original="/"),
+        ev("http_access", url__original="/", user_agent__original="curl/8.0"),       # no client at all
         ev("http_access", source__ip="198.51.100.7", url__original="/"),             # no user agent logged
         ev("http_tx", source__ip="198.51.100.7", user_agent__original="curl/8.0"),   # sensor record, no server
         ev("http_access", host=None, source__ip="198.51.100.7", user_agent__original="curl/8.0", url__original="/"),
     ])
     assert matches == [] and rule.missing_required == 4 and rule.evaluated == 0
+
+
+def test_a_client_logged_by_name_is_the_client():
+    _rule, [m] = run([ev("http_access", source__host="client.example.test", user_agent__original="curl/8.0",
+                         url__original="/")])
+    assert "from client.example.test recorded in the access log of web01" in m.claim
+    assert any(p.field == "source.host" for p in m.predicate)
 
 
 def test_the_span_runs_from_the_first_to_the_last_request_at_the_boundary():

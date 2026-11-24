@@ -280,11 +280,15 @@ def test_native_scale4_at_a_page_tight_cap_refuses_instead_of_failing(tmp_path, 
     monkeypatch.setattr(sw, "state_budget", lambda settings, stage_dir: budget)
     snapshot = fixture.run_stack(tmp_path, docs=fixture.build(4))
     assert not budget.broken
-    # pack@65: at this page-tight cap the larger rule set leaves room for 55 (the access-log web shell lead included;
-    # 60 before). The refused findings are context and correlation items, refused honestly (the budget is not
-    # broken); at 4.1 MiB every earlier finding is kept (test above). Open issue for the lead: the cause is not yet
-    # isolated (dropping the new rules alone does not restore them).
-    assert len(snapshot["candidates"]) >= 55
+    # Every finding the stack keeps with room to spare survives here, including the context and correlation items a
+    # heavier stage footprint once pushed out; a smaller count must come with a state limit named on coverage.
+    survivors = {row["rule_id"] for row in snapshot["candidates"]}
+    assert {"context.credential_access", "context.lateral_movement", "context.post_access_discovery",
+            "context.staging_and_transfer", "corr.alert_then_host_execution", "net.outbound_ssh_external",
+            "web.access_log_web_shell"} <= survivors
+    assert len(snapshot["candidates"]) >= 59
+    if len(snapshot["candidates"]) < 61:
+        assert any("state limit" in str(row.get("detail")) for row in snapshot["rule_cells"])
     assert any(row["rule_id"] == "host.shell_spawned_by_connected_process" and row["event_ids"]
                for row in snapshot["candidates"])
 

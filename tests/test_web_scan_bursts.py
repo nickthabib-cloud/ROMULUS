@@ -156,7 +156,8 @@ def test_mission_scale_clients_keep_holds_only_for_bursts():
     out = rule.finalize()
     assert [m.group_key.split("|")[1] for m in out] == [SCANNER]
     outstanding = sum(n for n in (+holds).values())
-    # open runs: one per client (its last hour) plus the scan's burst; a run holds at most its 20 examples, two bounds
-    # and five user agents
-    assert outstanding <= (clients + 1) * 27
+    # only error answers are held, and runs a later hour has left behind are closed batch by batch: what stays held
+    # is each source's two window bounds (as before bursts), the scan's 20 examples and at most one 404 per client of
+    # the last hour read
+    assert outstanding <= 2 * (clients + 1) + 20 + clients // 7 + 1
     rule.release_state()
