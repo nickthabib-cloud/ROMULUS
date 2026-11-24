@@ -870,7 +870,9 @@ def _named_paths(words: list[str], cwd) -> list[tuple[str, str, str]]:
     """(program, path, how) for each credential path a statement's arguments name. `how` is 'read' when the program
     reads the files it is given (or a `<` redirect feeds it), 'named' for any other program; a routine program gives
     nothing."""
-    name, args = basename(words[0]), words[1:]
+    name = basename(words[0])
+    # a word logged with the quotes the caller typed around it ('/etc/shadow') is that word
+    args = [word[1:-1] if len(word) > 1 and word[0] == word[-1] and word[0] in "'\"" else word for word in words[1:]]
     if name == "chmod":
         return _widened(args, cwd)
     if name in BROKER_CREDENTIAL_ROUTINE:

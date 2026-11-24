@@ -266,6 +266,7 @@ def test_the_strongest_named_store_decides_whatever_the_argument_order(command, 
     "/usr/bin/timeout -s KILL 5 cat /etc/shadow",
     "/usr/bin/ionice -c 2 -n 0 cat /etc/shadow",
     "/bin/busybox cat /etc/shadow",
+    "/bin/cat '/etc/shadow'",
 ])
 def test_unspaced_shell_syntax_and_wrapper_option_values_are_read(command):
     _rule, [m] = judge(sudo(command))
