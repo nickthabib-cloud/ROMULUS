@@ -369,13 +369,18 @@ def _stream_messages(repo, seen, hunt_id, changes, start_seq, last_run):
     return messages, last_run
 
 
-async def live_events(repo, request, hunt_id, sleep, *, after_seq=0):
-    # Every database operation, including the disk-backed revision set, runs off the event loop.
+async def live_events(repo, request, hunt_id, sleep, *, authorised, after_seq=0):
+    # Every database operation, including the disk-backed revision set, runs off the event loop. `authorised` is
+    # asked before each poll (one account read); once it is false the stream ends, so a session that was ended or an
+    # account that was disabled stops receiving events within one poll interval.
     with tempfile.TemporaryDirectory(prefix="romulus-stream-") as scratch:
         seen = await run_in_threadpool(_open_seen, Path(scratch) / "seen.sqlite")
         cursor, end_seq, last_run = after_seq, None, None
         try:
             while not await request.is_disconnected():
+                if not await run_in_threadpool(authorised):
+                    yield _event("end", {})
+                    return
                 hunt, active = await run_in_threadpool(_stream_snapshot, repo, hunt_id)
                 if hunt is None:
                     yield _event("end", {})

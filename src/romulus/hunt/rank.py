@@ -97,6 +97,8 @@ def compute_rank_pass(repo: Repo, hunt_id: str, pass_no: int, *, owner_token: st
         _cooccurrence(ws, batch_size, heartbeat)
         _score_entities(ws, batch_size, heartbeat)
         _rank_findings(ws, batch_size, heartbeat)
+        if pass_no == PASS_FINAL:
+            _discount_repeats(ws, batch_size, heartbeat)
         counts = ws.counts()
         ws.publish(owner_token)
         return {
@@ -253,10 +255,44 @@ def _rank_findings(ws, batch_size: int, heartbeat) -> None:
                 entities=by_finding.get(item["candidate_id"], []), fleet=item["fleet"])
             rows.append({"candidate_id": item["candidate_id"], "score": score, "reported": int(reported),
                          "entity_kind": best.kind if best else model.UNATTRIBUTED,
-                         "entity": best.value if best else None, "reasons": _json_list(reasons)})
+                         "entity": best.value if best else None, "reasons": _json_list(reasons),
+                         "inherited": model.inherited_score(by_finding.get(item["candidate_id"], []))})
         ws.set_finding_ranks(rows)
         ws.commit()
         after = page[-1]["candidate_id"]
+
+
+def _discount_repeats(ws, batch_size: int, heartbeat) -> None:
+    """Number each finding within its (listed entity, rule) group in one SQL statement, then lower the inherited
+    share of the leads past the first REPEAT_FULL_PLACES of their group, one keyset page at a time. The AI agent's
+    proposals are never numbered or discounted (they all share one rule id)."""
+    ws.number_repeats(model.LANE_TIER, model.DETERMINISTIC_PROVENANCE, model.AGENT_PROVENANCE)
+    ws.commit()
+    after = ""
+    while True:
+        page = ws.repeat_page(after, batch_size, model.REPEAT_LANE, model.REPEAT_FULL_PLACES)
+        if not page:
+            break
+        heartbeat()
+        rows = []
+        for item in page:
+            discount, reason = model.repeat_discount(
+                lane=item["lane"], ordinal=item["ordinal"], inherited=float(item["inherited"] or 0.0),
+                rule_id=item["rule_id"], entity_kind=item["entity_kind"], entity=item["entity"])
+            if reason is not None:
+                rows.append({"candidate_id": item["candidate_id"], "score": float(item["score"]) - discount,
+                             "reasons": _json_list(_with_repeat_reason(json.loads(item["reasons"]), reason))})
+        ws.set_repeat_scores(rows)
+        ws.commit()
+        after = page[-1]["candidate_id"]
+
+
+def _with_repeat_reason(reasons: list[str], reason: str) -> list[str]:
+    """The reasons with the repeat line after the rule prior (and the fleet reason, when there is one), so the
+    score's terms read in order before the reporting reason."""
+    at = next((index for index, line in enumerate(reasons) if line.startswith(("reported", "not reported"))),
+              len(reasons))
+    return [*reasons[:at], reason, *reasons[at:]]
 
 
 def run_rank_pass(repo: Repo, hunt_id: str, pass_no: int, *, owner_token: str | None = None,
@@ -335,7 +371,9 @@ def place_late_findings(repo: Repo, hunt_id: str, *, owner_token: str | None = N
 def rank_unranked(repo: Repo, hunt_id: str, candidates: list[dict], *, pass_no: int = PASS_FINAL) -> dict[str, dict]:
     """Ranks for pool findings stored after the pass ran (an AI agent's proposals), from the pass's stored entity
     scores. Such findings never change an entity's evidence, so the entity scores stand. An internal endpoint is
-    resolved by its address here (the pass's address map is not stored)."""
+    resolved by its address here (the pass's address map is not stored). In the final pass each takes its ordinal in
+    its (listed entity, rule) group after the pass's stored rows of that group (a lead past the first
+    REPEAT_FULL_PLACES inherits a share of the entity score), so no stored rank moves."""
     if not candidates:
         return {}
     hunt = repo.get_hunt(hunt_id) or {}
@@ -346,7 +384,7 @@ def rank_unranked(repo: Repo, hunt_id: str, candidates: list[dict], *, pass_no: 
     stored = repo.entity_ranks_for(hunt_id, pass_no, {key for keys in keyed.values() for key in keys})
     fleet = {item["rule_id"]: item for item in (rank_summary(repo, hunt_id, pass_no) or {}).get(
         "fleet_recurring_rules") or []}
-    out = {}
+    out, provenance_of, inherited = {}, {}, {}
     for row in candidates:
         entities = [model.EntityRank(kind, value, float(stored[(kind, value)]["score"]),
                                      bool(stored[(kind, value)]["reported"]))
@@ -354,14 +392,51 @@ def rank_unranked(repo: Repo, hunt_id: str, candidates: list[dict], *, pass_no: 
         reason = None
         if row["rule_id"] in fleet:
             reason = f"recurring fleet-wide rule {row['rule_id']} (-{model.FLEET_PENALTY})"
+        provenance_of[row["id"]] = (model.CASE_PROVENANCE if row.get("source_case_id") is not None
+                                    and row.get("provenance") != model.AGENT_PROVENANCE
+                                    else row.get("provenance", "deterministic"))
+        inherited[row["id"]] = model.inherited_score(entities)
         score, best, reported, reasons = model.finding_rank(
-            lane=row["lane"], prior=float(row["priority"]),
-            provenance=(model.CASE_PROVENANCE if row.get("source_case_id") is not None
-                        and row.get("provenance") != model.AGENT_PROVENANCE
-                        else row.get("provenance", "deterministic")),
+            lane=row["lane"], prior=float(row["priority"]), provenance=provenance_of[row["id"]],
             entities=entities, fleet=reason)
         out[row["id"]] = {"score": score, "position": None, "reported": reported,
                           "entity_kind": best.kind if best else model.UNATTRIBUTED,
                           "entity": best.value if best else None,
                           "reasons": [*reasons, "ranked from the stored entity scores after the last ranking pass"]}
+    if pass_no == PASS_FINAL:
+        _discount_late_repeats(repo, hunt_id, pass_no, candidates, out, provenance_of, inherited)
     return out
+
+
+def _discount_late_repeats(repo: Repo, hunt_id: str, pass_no: int, candidates: list[dict], out: dict[str, dict],
+                           provenance_of: dict[str, str], inherited: dict[str, float]) -> None:
+    """Give each late finding its ordinal in its (listed entity, rule) group, after the group's stored rows and then
+    in the group's own order among the late ones, and discount the repeated leads (`model.repeat_discount`). The AI
+    agent's proposals take no ordinal and are never discounted: they all carry one rule id, so distinct proposals are
+    not repeats of one rule."""
+    def key(row):
+        return out[row["id"]]["entity_kind"], out[row["id"]]["entity"], row["rule_id"]
+
+    grouped = [row for row in candidates if out[row["id"]]["entity"] is not None
+               and provenance_of[row["id"]] != model.AGENT_PROVENANCE]
+    if not any(row["lane"] == model.REPEAT_LANE for row in grouped):
+        return
+    taken = repo.rank_group_sizes(hunt_id, pass_no, {key(row) for row in grouped})
+    grouped.sort(key=lambda row: model.repeat_order_key(
+        provenance=provenance_of[row["id"]], lane=row["lane"], prior=float(row["priority"]),
+        ts=_order_time(row.get("ts")), candidate_id=row["id"]))
+    for row in grouped:
+        taken[key(row)] = taken.get(key(row), 0) + 1
+        item = out[row["id"]]
+        discount, reason = model.repeat_discount(
+            lane=row["lane"], ordinal=taken[key(row)], inherited=inherited[row["id"]], rule_id=row["rule_id"],
+            entity_kind=item["entity_kind"], entity=item["entity"])
+        if reason is not None:
+            item["score"] -= discount
+            item["reasons"] = [*_with_repeat_reason(item["reasons"][:-1], reason), item["reasons"][-1]]
+
+
+def _order_time(value) -> str | None:
+    if value is None or isinstance(value, str):
+        return value
+    return stored_time(value)

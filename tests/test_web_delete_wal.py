@@ -22,7 +22,7 @@ def test_hunt_delete_compacts_and_checkpoints_without_a_followup_write(tmp_path,
         monkeypatch.setattr(web, "open_repo", lambda _: repo)
         app = web.create_app(settings)
         sessions = Sessions(settings.secret_key.get_secret_value())
-        cookie = sessions.issue({"username": "lead", "role": "lead"})
+        cookie = sessions.issue({"username": "lead", "role": "lead", "generation": 0})
         csrf = sessions.read(cookie)["csrf"]
         with TestClient(app) as client:
             client.cookies.set(web.COOKIE, cookie)
@@ -97,7 +97,7 @@ def test_delete_compaction_blocks_claim_for_its_entire_duration_and_reports_fail
 
     monkeypatch.setattr(web, "compact", checked_compact)
     sessions = Sessions(settings.secret_key.get_secret_value())
-    cookie = sessions.issue({"username": "lead", "role": "lead"})
+    cookie = sessions.issue({"username": "lead", "role": "lead", "generation": 0})
     try:
         with TestClient(web.create_app(settings)) as client:
             client.cookies.set(web.COOKIE, cookie)

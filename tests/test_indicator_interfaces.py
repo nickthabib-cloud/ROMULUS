@@ -26,7 +26,7 @@ def ui(tmp_path):
     client = TestClient(create_app(settings))
     def login(role='analyst'):
         username = 'a' if role == 'analyst' else 'l'
-        cookie = Sessions(settings.secret_key.get_secret_value()).issue({'username': username, 'role': role})
+        cookie = Sessions(settings.secret_key.get_secret_value()).issue({'username': username, 'role': role, 'generation': 0})
         client.cookies.set('romulus_session', cookie)
         return Sessions(settings.secret_key.get_secret_value()).read(cookie)['csrf']
     yield client, repo, login

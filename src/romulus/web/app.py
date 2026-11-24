@@ -31,15 +31,18 @@ from romulus.site import SiteChangedError, SiteValidationError, load_site_facts,
 from romulus.store.db import compact, maintenance_lease
 from romulus.web import agent_views, site_form
 from romulus.web.agent_routes import register_agent_routes
-from romulus.web.auth import RateLimiter, Sessions, csrf_ok, verify
+from romulus.web.auth import RateLimiter, Sessions, authenticate, csrf_ok, end_sessions, session_user
 from romulus.web.catalog_routes import register_catalog_routes
 from romulus.web.control_routes import new_hunt_context, register_control_routes, start_grant
 from romulus.web.hunt_routes import make_hunt_page, register_hunt_routes
 from romulus.web.indicator_routes import IndicatorBodyLimit, register_indicator_routes
 from romulus.web.request_routes import DetectionRequestBodyLimit, register_request_routes
+from romulus.web_exposure import cookie_secure
 
 HERE = Path(__file__).resolve().parent
 COOKIE = "romulus_session"
+# recorded in place of a submitted username that names no account: it may be a password typed in the wrong field
+UNKNOWN_ACCOUNT = "(unknown account)"
 STATUSES = ("under_review", "confirmed_malicious", "benign", "expected_activity", "unresolved", "escalated")
 SECURITY_HEADERS = {
     "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
@@ -68,11 +71,13 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
             resp.headers.setdefault(k, v)
         return resp
 
-    def user_of(request: Request) -> dict | None:
-        return sessions.read(request.cookies.get(COOKIE))
-
     def need(request: Request) -> dict:
-        u = user_of(request)
+        """The signed session, checked against the account on every request: a missing or disabled account, or a
+        session from before a logout, disable, role or password change, is sent to the login page. The role is the
+        account's current one, never the one the cookie was issued with."""
+        u = sessions.read(request.cookies.get(COOKIE))
+        if u is not None:
+            u = session_user(repo.engine, u)
         if u is None:
             raise HTTPException(status_code=303, headers={"Location": "/login"})
         return u
@@ -94,16 +99,22 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
                                                             "banner": "UNCLASSIFIED // FOR TRAINING USE"})
 
     @app.post("/login")
-    def login(request: Request, username: str = Form(...), password: str = Form(...)):
+    async def login(request: Request, username: str = Form(...), password: str = Form(...)):
+        # the connection's address, or the forwarded one when the connection comes from a trusted proxy
         client = request.client.host if request.client else "unknown"
-        u = verify(repo.engine, username, password, client, limiter)
+        delay = limiter.admit(client)
+        if delay:
+            # an address with many recent failures waits its turn (parallel attempts queue); no thread is held
+            await asyncio.sleep(delay)
+        u, known = await run_in_threadpool(authenticate, repo.engine, username, password, client, limiter)
         if u is None:
-            repo.audit(username[:64], "web.login_failed", detail={"client": client})
+            await run_in_threadpool(repo.audit, username[:64] if known else UNKNOWN_ACCOUNT, "web.login_failed",
+                                    detail={"client": client})
             return RedirectResponse("/login?error=1", status_code=303)
-        repo.audit(u["username"], "web.login", detail={"client": client})
+        await run_in_threadpool(repo.audit, u["username"], "web.login", detail={"client": client})
         resp = RedirectResponse("/", status_code=303)
         resp.set_cookie(COOKIE, sessions.issue(u), httponly=True, samesite="strict",
-                        secure=bool(os.environ.get("ROMULUS_COOKIE_SECURE", "1") == "1" and s.web_tls_enabled))
+                        secure=cookie_secure(s, request.url.scheme))
         return resp
 
     @app.post("/logout")
@@ -111,8 +122,11 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         u = need(request)
         if not csrf_ok(u, csrf):
             raise HTTPException(403, "bad CSRF token")
+        # every session of the account ends, not only this browser's copy of the cookie
+        end_sessions(repo.engine, u["u"])
+        repo.audit(u["u"], "web.logout", detail={"client": request.client.host if request.client else "unknown"})
         resp = RedirectResponse("/login", status_code=303)
-        resp.delete_cookie(COOKIE)
+        resp.delete_cookie(COOKIE, httponly=True, samesite="strict", secure=cookie_secure(s, request.url.scheme))
         return resp
 
     # ------------------------------------------------------------------ hunts
@@ -185,7 +199,8 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
               ["hunt", "start", "--start", start, "--end", end, "--style", style,
                "--agent" if requested else "--no-agent", "--budget-grant", grant]
         if hypothesis.strip():
-            cmd += ["--hypothesis", hypothesis.strip()[:500]]
+            # one argument, so text that starts with "-" is never read as an option
+            cmd += [f"--hypothesis={hypothesis.strip()[:500]}"]
         s.logs_dir.mkdir(parents=True, exist_ok=True)
         env = {**os.environ, "USER": f"web:{u['u']}"}
         with open(s.logs_dir / f"hunt-{datetime.now():%Y%m%d-%H%M%S}.log", "ab") as log:
@@ -200,15 +215,17 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
 
     @app.get("/hunts/{hunt_id}/stream")
     async def stream(request: Request, hunt_id: str, after_seq: str = "0"):
-        need(request)
+        u = await run_in_threadpool(need, request)
         if (not after_seq.isascii() or not after_seq.isdigit() or len(after_seq) > 19
                 or int(after_seq) > 9223372036854775807):
             raise HTTPException(400, "Invalid stream cursor")
         if await run_in_threadpool(repo.get_hunt, hunt_id) is None:
             raise HTTPException(404)
 
-        return StreamingResponse(agent_views.live_events(repo, request, hunt_id, asyncio.sleep, after_seq=int(after_seq)),
-                                 media_type="text/event-stream")
+        # the session is checked again on every poll, so a logout, disable, role or password change ends the stream
+        return StreamingResponse(agent_views.live_events(
+            repo, request, hunt_id, asyncio.sleep, after_seq=int(after_seq),
+            authorised=lambda: session_user(repo.engine, u) is not None), media_type="text/event-stream")
 
     # ------------------------------------------------------------------ findings
     @app.get("/findings/{cid}", response_class=HTMLResponse)
@@ -280,16 +297,9 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
 
     # ------------------------------------------------------------------ deletion
     def need_lead(request: Request) -> dict:
-        """Lead check against the database, not just the cookie: a demoted or disabled account
-        must lose delete rights immediately, not when its 8-hour session expires."""
+        """need() reads the role from the account, so a demoted or disabled account loses lead rights at once."""
         u = need(request)
-        from sqlalchemy import select as _select
-
-        from romulus.store import schema as _t
-        with repo.engine.connect() as c:
-            row = c.execute(_select(_t.user.c.role, _t.user.c.disabled)
-                            .where(_t.user.c.username == u.get("u"))).first()
-        if u.get("r") != "lead" or row is None or row.disabled or row.role != "lead":
+        if u.get("r") != "lead":
             raise HTTPException(403, "only an active lead account can do this")
         return u
 

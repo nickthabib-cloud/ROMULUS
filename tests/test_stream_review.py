@@ -23,7 +23,7 @@ async def no_sleep(_):
 def collect(repo, after_seq=0, sleep=no_sleep):
     async def consume():
         return [unpack(value) async for value in live_events(
-            repo, Connected(), "h1", sleep, after_seq=after_seq)]
+            repo, Connected(), "h1", sleep, after_seq=after_seq, authorised=lambda: True)]
     return asyncio.run(consume())
 
 
