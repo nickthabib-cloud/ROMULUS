@@ -5,16 +5,18 @@ from romulus.detect.bounded import StateBudget
 from romulus.hunt import sweep as sw
 from tests import throughput_fixture as tf
 
-# All budgets retain the same 40 candidates and complete citation detail (event ids of evidence epoch 17; with the
+# All budgets retain the same 41 candidates and complete citation detail (event ids of evidence epoch 17; with the
 # evidence version set back to 16 the digest is the earlier one).
 # Discovery and transfer executions already cited by a folded alert are not repeated as context.
 # Shared execution and lineage state keep the 4 MiB candidate result identical to larger budgets.
 # Evidence version 21 rehashes the event ids (with the version set back to 20 the prior-version digest is 11b53998...).
 # host.account_or_group_change 7->8 moves only that rule's version here (the throughput scenario's candidates
 # digest with the prior versions restored is unchanged).
-CANDIDATE_GOLDENS = {4: (40, '2910177e36ae77129ffe7648eb9661e2073af0a6d68a7fbc29640e81e4f7fd4b'),
- 8: (40, '2910177e36ae77129ffe7648eb9661e2073af0a6d68a7fbc29640e81e4f7fd4b'),
- 16: (40, '2910177e36ae77129ffe7648eb9661e2073af0a6d68a7fbc29640e81e4f7fd4b')}
+# pack@65 adds the access-log web shell rule's lead on the planted shell request (41 candidates); with that
+# candidate left out and the prior versions restored the digest is the earlier one.
+CANDIDATE_GOLDENS = {4: (41, '05c55f96f3109b84e55b15dd4549715d38fc1decf2073099c078559e9a33fe9c'),
+ 8: (41, '05c55f96f3109b84e55b15dd4549715d38fc1decf2073099c078559e9a33fe9c'),
+ 16: (41, '05c55f96f3109b84e55b15dd4549715d38fc1decf2073099c078559e9a33fe9c')}
 
 
 @pytest.mark.parametrize("mib", CANDIDATE_GOLDENS)
@@ -35,7 +37,8 @@ def test_linux_stack_candidates_at_physical_byte_budget(mib, tmp_path, monkeypat
     # physical budget, restoring the prior versions must reproduce the prior decisions and citations digest.
     persistence = [row for row in snapshot["candidates"] if row["rule_id"] == "host.persistence_path_change"]
     assert persistence and {row["rule_version"] for row in persistence} == {"9"}
-    previous = tf.with_prior_versions(snapshot)
+    previous = tf.with_prior_versions(dict(snapshot, candidates=[row for row in snapshot["candidates"]
+                                                                 if row["rule_id"] != "web.access_log_web_shell"]))
     assert tf.deterministic_golden_digests(previous)["candidates"] == (
         "1ba3a7d45c7a29301e9ee253f8bee2f2fa1bbe288d5769f958940e4dfbb1878b")
     assert (len(snapshot["candidates"]), tf.deterministic_golden_digests(snapshot)["candidates"]) == CANDIDATE_GOLDENS[mib]

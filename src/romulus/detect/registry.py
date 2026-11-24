@@ -29,6 +29,7 @@ from romulus.detect.smb_impact import SmbImpact
 from romulus.detect.tamper import TAMPER_PLAYBOOKS
 from romulus.detect.tls import TLS_PLAYBOOKS
 from romulus.detect.vpn import VPN_PLAYBOOKS
+from romulus.detect.web_access_shell import RULES as WEB_ACCESS_SHELL_RULES
 from romulus.detect.web_attacks import WEB_ATTACK_PLAYBOOKS
 from romulus.detect.windows_account_events import WINDOWS_ACCOUNT_PLAYBOOKS
 from romulus.detect.windows_auth_events import WINDOWS_AUTH_EVENT_PLAYBOOKS
@@ -37,6 +38,7 @@ from romulus.detect.windows_catalog_state import RULES as WINDOWS_CATALOG_STATE_
 from romulus.detect.windows_common import WindowsProcessRule, share_windows_lineage
 from romulus.detect.windows_correlations import WINDOWS_CORRELATION_PLAYBOOKS
 from romulus.detect.windows_credentials import WINDOWS_CREDENTIAL_PLAYBOOKS
+from romulus.detect.windows_deceptive_names import RULES as WINDOWS_DECEPTIVE_NAME_RULES
 from romulus.detect.windows_defense import WINDOWS_DEFENSE_PLAYBOOKS
 from romulus.detect.windows_directory_events import WINDOWS_DIRECTORY_PLAYBOOKS
 from romulus.detect.windows_driver_hashes import RULES as WINDOWS_DRIVER_HASH_RULES
@@ -69,7 +71,7 @@ from romulus.detect.zeek_rates import RULES as ZEEK_RATE_PLAYBOOKS
 from romulus.detect.zeek_smb import RULES as ZEEK_SMB_PLAYBOOKS
 from romulus.detect.zeek_transfer import RULES as ZEEK_TRANSFER_PLAYBOOKS
 
-PACK_VERSION = "pack@64"
+PACK_VERSION = "pack@65"
 WINDOWS_PROCESS_PLAYBOOKS = (WINDOWS_LINEAGE_PLAYBOOKS + WINDOWS_PROXY_PLAYBOOKS + WINDOWS_CREDENTIAL_PLAYBOOKS
                              + WINDOWS_DEFENSE_PLAYBOOKS + WINDOWS_REMOTE_PLAYBOOKS)
 WINDOWS_HOST_PLAYBOOKS = list(WINDOWS_MEMORY_PLAYBOOKS + WINDOWS_REGISTRY_PLAYBOOKS
@@ -85,7 +87,7 @@ _WINDOWS_ADDITIONS = (tuple(WINDOWS_PROCESS_W4_RULES) + tuple(ELEVATION_EVENT_RU
                       + tuple(WINDOWS_INJECTION_RULES) + tuple(WINDOWS_LOLBIN_RULES)
                       + tuple(WINDOWS_TUNNEL_RULES) + tuple(WINDOWS_RPC_RULES)
                       + WINDOWS_DRIVER_HASH_RULES + WINDOWS_HOUSEKEEPING_RULES
-                      + WINDOWS_IMAGE_FILE_RULES + WINDOWS_SEQUENCE_RULES)
+                      + WINDOWS_IMAGE_FILE_RULES + WINDOWS_SEQUENCE_RULES + WINDOWS_DECEPTIVE_NAME_RULES)
 WINDOWS_PROCESS_PLAYBOOKS += [rule for rule in _WINDOWS_ADDITIONS if issubclass(rule, WindowsProcessRule)]
 WINDOWS_HOST_PLAYBOOKS += [rule for rule in _WINDOWS_ADDITIONS
                          if issubclass(rule, WindowsEventRule) and not issubclass(rule, WindowsProcessRule)]
@@ -102,7 +104,8 @@ ALL_PLAYBOOKS = (HOST_PLAYBOOKS + HIJACK_PLAYBOOKS + KERNEL_FILE_PLAYBOOKS + LIN
                  + list(ICS_PLAYBOOKS)
                  + LINUX_DIRECT_RULES + LINUX_SEQUENCE_RULES + PRIVILEGE_BROKER_RULES
                  + SERVICE_AUTH_PLAYBOOKS + MAIL_PLAYBOOKS + VPN_PLAYBOOKS + BASELINE_PLAYBOOKS
-                 + [SmbImpact, ServiceCatalog] + list(WEB_ATTACK_PLAYBOOKS) + list(NET_HOST_JOIN_RULES))
+                 + [SmbImpact, ServiceCatalog] + list(WEB_ATTACK_PLAYBOOKS) + list(WEB_ACCESS_SHELL_RULES)
+                 + list(NET_HOST_JOIN_RULES))
 _ANCHOR_CLASSES = {playbook.id: playbook.anchor_class for playbook in ALL_PLAYBOOKS}
 
 
