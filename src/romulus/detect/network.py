@@ -695,8 +695,7 @@ class ToolUserAgentHttp(_Grouped):
     REQUIRED_BY_FAMILY: ClassVar[dict[str, tuple[str, ...]]] = {"http_tx": ("destination.ip",), "http_access": ()}
     severity, lane = "low", "lead"
     attack = ("T1105",)
-    benign = ("health checks, package managers, monitoring scripts",
-              "site uptime probes and API clients written with curl, Python or Go HTTP libraries")
+    benign = ("health checks, package managers, monitoring scripts",)
     next_checks = ("process executions on the source host at the same time", "file_transfer for what was fetched")
     card: ClassVar[dict] = {
         "behavior": "HTTP requests whose self-reported user agent begins with a command-line tool's own identifier "

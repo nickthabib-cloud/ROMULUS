@@ -108,10 +108,17 @@ def writable_directory(path: str) -> str | None:
 
 
 def upload_like(method: str, path: str) -> bool:
-    """A request that may store a file: a write method, or a POST to an upload endpoint."""
+    """A request that may store a file: a write method, or a POST to an upload endpoint, named by the request's
+    last segment ('/wp-admin/async-upload.php', '/api/files/upload'), or by its directory when that segment is an
+    index ('/upload/index.php'). A POST to a script that merely lies under an uploads directory is no upload."""
     if method in WRITE_METHODS:
         return True
-    return method == "POST" and bool(_UPLOAD_ENDPOINT.search(path))
+    if method != "POST":
+        return False
+    leaf = posixpath.basename(path)
+    if posixpath.splitext(leaf)[0].lower() in ("", "index", "default"):
+        leaf = posixpath.basename(posixpath.dirname(path))
+    return bool(_UPLOAD_ENDPOINT.search(leaf))
 
 
 def _decode(value: str) -> str:
@@ -343,15 +350,17 @@ class AccessLogWebShell(Playbook):
         event = expand_event(blob)
         return event.model_copy(update={"caveats": [*event.caveats, COMPACT_CITATION_NOTE]})
 
-    def _upload_before(self, host: str, client: str, first: float):
-        """The upload-style request on `host` closest before `first` within the window, preferring the same client:
-        (event, same client) or None."""
+    def _upload_before(self, host: str, path: str, client: str, first: float):
+        """The upload-style request on `host`, to another path than the script's own (a write to the script itself is
+        its own link), closest before `first` within the window, preferring the same client: (event, same client) or
+        None."""
         if not self._uploads_ready:
             return None
         spill = self._uploads()
         row = spill.execute(
-            "SELECT blob, src=? FROM uploads WHERE host=? AND ts>=? AND ts<=? ORDER BY src=? DESC, ts DESC, id LIMIT 1",
-            (client, host, first - self.UPLOAD_WINDOW.total_seconds(), first, client)).fetchone()
+            "SELECT blob, src=? FROM uploads WHERE host=? AND path<>? AND ts>=? AND ts<=? "
+            "ORDER BY src=? DESC, ts DESC, id LIMIT 1",
+            (client, host, path, first - self.UPLOAD_WINDOW.total_seconds(), first, client)).fetchone()
         return (self._event(row[0]), bool(row[1])) if row else None
 
     def finalize(self):
@@ -365,7 +374,7 @@ class AccessLogWebShell(Playbook):
             host, path = key
             first = self._event(state.first[1])
             client = str(first.get("source.ip") or first.get("source.host") or "")
-            upload = self._upload_before(host, client, state.first[0])
+            upload = self._upload_before(host, path, client, state.first[0])
             if upload is not None and not upload[1] and not self._history_read(host, first):
                 # With less than a day of the host's log behind it, a script's first answer is often just the first
                 # request the hunt read (a resizer at the window's start); another client's upload before it is then
@@ -435,7 +444,7 @@ class AccessLogWebShell(Playbook):
         linked = exact_write or upload is not None
         high = (linked and bool(commands)) or exact_write
         claim += (" This is the request pattern of a web shell; the log records requests and status codes, not what "
-                  "the script ran or what the upload held.")
+                  "the script ran" + (" or what the upload held." if linked else "."))
         evs = sorted({event.id: event for event in cited}.values(), key=lambda event: (event.ts, event.id))
         predicate = [pf(first, "url.original"), pf(first, "http.response.status_code")]
         if first.has("source.ip"):

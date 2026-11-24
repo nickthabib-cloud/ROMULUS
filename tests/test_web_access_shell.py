@@ -168,6 +168,23 @@ def test_the_result_does_not_depend_on_read_order():
     assert [(m.proposed_lane, m.claim) for m in forward] == [(m.proposed_lane, m.claim) for m in backward]
 
 
+def test_a_post_to_the_script_itself_is_no_upload():
+    # a shell driven by POST under an uploads directory: the POST is a request to the script, not an upload before it
+    events = history() + [req(0, "/uploads/shell.php?cmd=id", method="POST")]
+    _rule, [m] = run(events)
+    assert m.proposed_lane == "lead" and "upload-style request" not in m.claim
+
+
+@pytest.mark.parametrize("method, path, upload", [
+    ("POST", "/wp-admin/async-upload.php", True), ("POST", "/api/files/upload", True),
+    ("POST", "/upload/index.php", True), ("POST", "/uploads/shell.php", False), ("POST", "/login.php", False),
+    ("PUT", "/x.jsp", True), ("GET", "/upload.php", False),
+])
+def test_upload_style_requests(method, path, upload):
+    from romulus.detect.web_access_shell import upload_like
+    assert upload_like(method, path) is upload
+
+
 def test_request_paths_are_decoded_and_normalised():
     assert request_path("/a/../uploads/%2e%2e/uploads/x.php?y=1") == "/uploads/x.php"
     assert request_path("http://host/x.php") is None and request_path("host:443") is None
