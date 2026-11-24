@@ -778,7 +778,7 @@ def test_a_failed_executive_document_never_costs_the_revision_its_json_and_markd
     (tmp_path / f"{manifest['revision']['id']}.md").unlink()
     (tmp_path / f"{manifest['revision']['id']}.json").unlink()
     paths = bundle.write_reports(repo, manifest, tmp_path)
-    assert set(paths) == {"json", "md", "docx_error"}
+    assert set(paths) == {"json", "md", "docx_error", "iocs_csv", "iocs_stix"}
     assert paths["json"].is_file() and paths["md"].is_file()
     note = paths["docx_error"].read_text(encoding="utf-8")
     assert "was not written" in note and "RuntimeError: injected executive failure" in note
@@ -787,7 +787,7 @@ def test_a_failed_executive_document_never_costs_the_revision_its_json_and_markd
     assert not list(tmp_path.glob(".report-*"))
     monkeypatch.undo()
     again = bundle.write_reports(repo, manifest, tmp_path)
-    assert set(again) == {"json", "md", "docx"} and not paths["docx_error"].exists()
+    assert set(again) == {"json", "md", "docx", "iocs_csv", "iocs_stix"} and not paths["docx_error"].exists()
 
 
 def test_a_failure_message_with_an_unpaired_surrogate_still_leaves_json_and_markdown(tmp_path, monkeypatch):
@@ -803,7 +803,7 @@ def test_a_failure_message_with_an_unpaired_surrogate_still_leaves_json_and_mark
 
     monkeypatch.setattr(executive, "write", broken)
     paths = bundle.write_reports(repo, manifest, tmp_path)
-    assert set(paths) == {"json", "md", "docx_error"}
+    assert set(paths) == {"json", "md", "docx_error", "iocs_csv", "iocs_stix"}
     assert paths["json"].is_file() and paths["md"].is_file()
     assert "\\ud800" in paths["docx_error"].read_text(encoding="utf-8")
 

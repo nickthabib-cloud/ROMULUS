@@ -53,7 +53,7 @@ def register_hunt_routes(app, repo, s, need, hunt_page):
         head = hunt_views.header(repo, h, u, "overview")
         return hunt_page(request, "hunt_overview.html", u, h, "overview", head, ov=hunt_views.overview(repo, h),
                          internal_networks=internal_networks_view(repo, hunt_id, h["manifest"]),
-                         reports=hunt_views.reports(repo, hunt_id))
+                         reports=hunt_views.reports(repo, hunt_id, s.reports_dir))
 
     @app.get("/hunts/{hunt_id}/findings", response_class=HTMLResponse)
     def hunt_findings(request: Request, hunt_id: str, lane: str = "", rule: str = "", after: str = ""):

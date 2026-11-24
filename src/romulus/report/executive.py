@@ -23,7 +23,9 @@ from romulus.report.markdown import (
     NARRATIVE_EMPTY,
     NARRATIVE_NOTE,
     NARRATIVE_TITLE,
+    PRIORITY_TITLES,
     cite_text,
+    indicator_files,
     is_ranked,
     narrative_context_reason,
     narrative_heading,
@@ -35,6 +37,9 @@ from romulus.report.markdown import (
     narrative_weak_reason,
     outcome_sentence,
     ranked_sections,
+    recommendation_findings,
+    recommendation_reasons,
+    recommendations_intro,
 )
 from romulus.report.mentions import coverage_lines, snippet
 from romulus.report.ooxml import LANE_COLORS, MUTED_COLOR, cell, paragraph, run
@@ -48,6 +53,8 @@ EXECUTIVE_MENTIONS = 25
 EXECUTIVE_MENTION_CHARS = 160
 # recommended checks gathered from the findings when no recommendation set is in the manifest
 EXECUTIVE_CHECKS = 25
+# findings named per recommendation (the rest are counted; the technical report lists more)
+EXECUTIVE_RECOMMENDATION_FINDINGS = 8
 # narrative sentences shown per drawn incident, hypothesis links listed, analyst links listed
 INCIDENT_SENTENCES = 12
 HYPOTHESIS_LINKS = 40
@@ -668,22 +675,44 @@ def _recommendations(body: _Body, m: dict, sections, numbers: dict, technical_na
     """Recommendations from the manifest when it carries them; until then, the checks the rules recommend."""
     body.heading("Recommendations")
     body.p("Suggestions for human decision, never automated actions.", style="Muted")
-    items = m.get("recommendations")
+    view = m.get("recommendations") or {}
+    items = view.get("items") if isinstance(view, dict) else None
     if items:
-        known = ("immediate", "near_term", "longer_term")
-        groups = [(priority, [item for item in items if item.get("priority") == priority]) for priority in known]
-        groups.append(("other", [item for item in items if item.get("priority") not in known]))
-        for priority, chosen in groups:
+        body.p(recommendations_intro(view), style="Muted")
+        for priority, title in PRIORITY_TITLES.items():
+            chosen = [item for item in items if item.get("priority") == priority]
             if not chosen:
                 continue
-            body.heading(priority.replace("_", "-").capitalize(), 2)
+            body.heading(title, 2)
             for item in chosen:
-                addressed = ", ".join(f"F{numbers[f]}" if f in numbers else str(f)
-                                      for f in item.get("finding_ids") or [])
-                mitigations = ", ".join(str(value) for value in item.get("mitigations") or [])
-                body.p(str(item.get("text") or "") + (f" (addresses {addressed})" if addressed else "")
-                       + (f"; ATT&CK mitigation {mitigations}" if mitigations else ""), style="ListLine")
+                ids, total = recommendation_findings(item, EXECUTIVE_RECOMMENDATION_FINDINGS)
+                addressed = ", ".join(f"F{numbers[f]}" if f in numbers else str(f) for f in ids)
+                addressed += f" and {total - len(ids)} more" if total > len(ids) else ""
+                agent = (item.get("findings") or {}).get("agent") or 0
+                if item.get("kind") == "attack_mitigation":
+                    techniques = (item.get("techniques") or {}).get("items") or []
+                    named = ", ".join(row["id"] for row in techniques[:6])
+                    named += (f" and {(item.get('techniques') or {}).get('count', 0) - min(6, len(techniques))} more"
+                              if (item.get("techniques") or {}).get("count", 0) > min(6, len(techniques)) else "")
+                    text = (f"{item['text']} Addresses {total} finding(s) ({addressed}) through ATT&CK technique(s) "
+                            f"{named}.")
+                else:
+                    text = (f"{item.get('text') or ''} {total} finding(s): {addressed} "
+                            f"({recommendation_reasons(view, item)}).")
+                if agent:
+                    text += f" {agent} of them from the AI agent, unconfirmed."
+                body.p(text, style="ListLine")
+        mentions = view.get("mentions") or {}
+        if mentions.get("count"):
+            body.p(f"{mentions.get('note')}: {mentions['count']} finding(s).", style="Muted")
+        if (view.get("attack") or {}).get("attribution"):
+            body.p(view["attack"]["attribution"], style="Muted")
+        body.p(f"Each recommendation's techniques, findings, entities and checks are listed in {technical_name}.",
+               style="Muted")
         return
+    if isinstance(view, dict) and view.get("status") == "unavailable":
+        body.p(f"Recommendations were not built for this revision: {view.get('reason') or 'unavailable'}.",
+               style="Callout")
     body.p("No recommendation set is part of this report revision. The checks the rules recommend for the findings "
            "follow, most common first within report order; each is listed with its finding under Key findings and "
            f"in {technical_name}.")
@@ -701,6 +730,28 @@ def _recommendations(body: _Body, m: dict, sections, numbers: dict, technical_na
     elif len(ordered) > EXECUTIVE_CHECKS:
         body.p(f"{len(ordered) - EXECUTIVE_CHECKS} more distinct check(s) are listed with their findings in "
                f"{technical_name}.", style="Muted")
+
+
+def _indicators(body: _Body, m: dict, technical_name: str) -> None:
+    """One paragraph on the indicator export: what it holds and where it is."""
+    view = m.get("indicators")
+    if not view:
+        return
+    body.heading("Indicator export", 2)
+    body.p(view.get("label", "") + ".", style="Muted")
+    if view.get("status") != "complete":
+        body.p(f"No indicator export was written for this revision: {view.get('reason') or view.get('status')}.",
+               style="Callout")
+        return
+    counts = view["counts"]
+    scopes = Counter()
+    for row in (counts.get("by_kind") or {}).values():
+        scopes.update({scope: row.get(scope, 0) for scope in ("external", "internal", "unknown")})
+    files = " and ".join(indicator_files(m).values())
+    body.p(f"{counts['indicators']} distinct value(s) seen in the typed evidence of {counts['findings_with_indicators']} "
+           f"finding(s): {scopes['external']} external address(es), {scopes['internal']} internal address(es) or "
+           f"host(s), {scopes['unknown']} name(s) or address(es) of unknown scope, and file, account and fingerprint "
+           f"values. Files: {files}. The preview and the counts by kind are in {technical_name}.")
 
 
 def _coverage(body: _Body, m: dict, technical_name: str) -> None:
@@ -865,6 +916,7 @@ def write(m, path, technical_name):
             _triage(body, m)
             _mentions(body, m, technical_name)
             _recommendations(body, m, sections, numbers, technical_name)
+            _indicators(body, m, technical_name)
             _coverage(body, m, technical_name)
             _finding_index(body, m, sections, numbers, technical_name)
             _versions(body, m, technical_name)

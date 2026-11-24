@@ -154,11 +154,22 @@ def overview(repo, hunt: dict) -> dict:
             "history_held": held_history(repo, hunt_id)}
 
 
-def reports(repo, hunt_id: str) -> list[dict]:
+def reports(repo, hunt_id: str, reports_dir=None) -> list[dict]:
+    """The hunt's report revisions, newest first. With `reports_dir`, `indicators` says whether the revision's
+    indicator export files are on disk (a revision from before the export existed, or whose export failed, has
+    none)."""
+    from romulus.report.iocs import CSV_SUFFIX, STIX_SUFFIX
+
     with repo.engine.connect() as connection:
-        return [dict(row) for row in connection.execute(
+        rows = [dict(row) for row in connection.execute(
             select(t.report_manifest.c.id, t.report_manifest.c.revision, t.report_manifest.c.created_at)
             .where(t.report_manifest.c.hunt_id == hunt_id).order_by(t.report_manifest.c.revision.desc())).mappings()]
+    root = reports_dir.resolve() if reports_dir is not None else None
+    for row in rows:
+        files = [] if root is None else [(root / hunt_id / f"{row['id']}{suffix}").resolve()
+                                         for suffix in (CSV_SUFFIX, STIX_SUFFIX)]
+        row["indicators"] = bool(files) and all(root in path.parents and path.is_file() for path in files)
+    return rows
 
 
 # ---------------------------------------------------------------------------------------------------------- findings

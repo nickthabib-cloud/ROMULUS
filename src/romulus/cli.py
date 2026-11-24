@@ -318,16 +318,19 @@ def cmd_report(args) -> int:
     s = load_settings(_env_file(args))
     repo = open_repo(s)
     user = os.environ.get("USER") or os.environ.get("USERNAME") or "cli"
-    m = publish_revision(repo, args.hunt_id, actor=f"cli:{user}")
+    m = publish_revision(repo, args.hunt_id, actor=f"cli:{user}", settings=s)
     out_dir = s.reports_dir / args.hunt_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    paths = write_reports(repo, m, out_dir)
+    paths = write_reports(repo, m, out_dir, settings=s)
     print(f"revision {m['revision']['number']}: {len(m['findings'])} findings/leads, "
           f"broken citations={m['integrity']['broken_citations']}")
     for path in paths.values():
         print(f"  {path}")
     if "docx_error" in paths:
         print(f"the executive DOCX was not written; the reason is in {paths['docx_error']}", file=sys.stderr)
+    if "iocs_error" in paths:
+        print(f"the indicator export was not written; the reason is in {paths['iocs_error']}", file=sys.stderr)
+    if "docx_error" in paths or "iocs_error" in paths:
         return EXIT_FAIL
     return EXIT_OK if m["integrity"]["finalizable"] else EXIT_FAIL
 
@@ -406,7 +409,8 @@ def cmd_agent(args) -> int:
         print(f"assessment failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return EXIT_FAIL
     manifest = publish_revision(repo, args.hunt_id,
-                                actor=f"cli:{os.environ.get('USER') or os.environ.get('USERNAME') or 'cli'}")
+                                actor=f"cli:{os.environ.get('USER') or os.environ.get('USERNAME') or 'cli'}",
+                                settings=settings)
     print(json.dumps({"assessment_revision": (repo.agent_assessments(args.hunt_id)[-1]["revision"]),
                       "report_revision": manifest["revision"]["number"],
                       "source": repo.agent_assessments(args.hunt_id)[-1]["source"]}, indent=2))
