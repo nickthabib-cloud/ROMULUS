@@ -180,6 +180,13 @@ CASES: dict[str, list[tuple[dict, bool]]] = {
         (window(source="logs-a", source_fields=["a"] * 51), False), (window(source="logs-a", extra=1), False),
         (window(source="logs-a", start="2024-11-18T10:00:00"), False),
     ],
+    "read_session": [
+        ({"anchor": "F1", "session": "E3"}, True), ({"anchor": "F1", "session": "Q7"}, True),
+        ({"anchor": "F1", "session": "E3", "page": 2, "cursor": "P" + "0" * 20, "chunk_index": 2}, True),
+        ({"anchor": "F1"}, False), ({"session": "E3"}, False), ({"anchor": "F1", "session": "241118-AbCdEfGh"}, False),
+        ({"anchor": "F1", "session": "E3", "expression": "ip.src == 10.0.0.1"}, False),
+        ({"anchor": "F1", "session": "E3", "port": 23}, False), ({"anchor": "F1", "session": "E0"}, False),
+    ],
     "get_result": [
         ({"handle": "R1"}, True), ({"handle": "R12", "page": 3}, True), ({"handle": "R1", "page": 0}, False),
         ({"handle": "E1"}, False), ({"handle": "R0"}, False), ({"handle": "R" + "1" * 12}, False), ({}, False),
