@@ -16,6 +16,7 @@ from romulus.agent.aliases import AliasBook
 from romulus.agent.toolbox import Toolbox
 from romulus.config import Settings
 from romulus.evidence.normalize import normalize_hits
+from romulus.evidence.typed import RawRef, TypedEvent
 from romulus.hunt import agent_session as rs
 from romulus.hunt import packets as hp
 from romulus.hunt.agent_tools import HuntToolExecutor
@@ -242,24 +243,172 @@ def test_a_repeated_read_is_answered_from_its_stored_result(tmp_path, monkeypatc
     assert repo.agent_session_reads("h1") == (1, len(PCAP))
 
 
-def test_a_session_the_packet_stage_kept_returns_its_events_without_a_fetch(tmp_path, monkeypatch):
-    repo, toolbox, client, w = _setup(tmp_path, monkeypatch, [SHELL_DOC], streams={SHELL_KEY: SHELL_ROWS})
+def _stage(repo, tmp_path, w):
     hp.run_packet_stage(Settings(home=tmp_path), repo, None, "h1", Window(start=T, end=END),
                         {TARGET: _contract()}, packets=w.packets)
-    [staged] = [c for c in repo.candidates("h1") if c["rule_id"] == "pcap.cleartext_interactive_shell"]
-    fetched = list(w.packets.calls)
+    return [c for c in repo.candidates("h1") if c["rule_id"].startswith("pcap.")]
+
+
+def _other_session(toolbox, name="as-other"):
+    return Toolbox(toolbox.repo, "h1", executor=toolbox.executor, session_id=name)
+
+
+def test_a_shell_the_stage_kept_is_read_again_for_its_transcript_without_duplicates(tmp_path, monkeypatch):
+    repo, toolbox, _client, w = _setup(tmp_path, monkeypatch, [SHELL_DOC], streams={SHELL_KEY: SHELL_ROWS})
+    [staged] = _stage(repo, tmp_path, w)
+    stage_events = set(staged["event_ids"])
+    before = len(w.packets.calls)
     result = _read(toolbox, _session_alias(repo, SHELL_DOC))
-    assert w.packets.calls == fetched and client.calls == []              # nothing fetched or queried again
-    assert result["status"] == "partial"
-    assert rs.STAGED_NOTE in result["data"]["result"]["reasons"]
+    assert result["status"] == "complete", result["data"]["result"]["reasons"]
+    assert len(w.packets.calls) == before + 1                       # fetched again, for what was typed
+    lines = [line for turn in _content(result)["stream"]["transcript"] for line in turn.get("lines", [])]
+    assert "id" in lines and "uid=33(www-data) gid=33(www-data) groups=33(www-data)" in lines
+    # the same stream event and the same finding: nothing duplicated, the stage's row untouched
+    assert {row["id"] for row in _events(repo, result).values()} == stage_events
+    assert [c for c in repo.candidates("h1") if c["rule_id"].startswith("pcap.")] == [staged]
     assert AliasBook(repo, "h1").alias_for("F", staged["id"]) in result["data"]["result"]["candidates"]
+    assert rs.HELD_NOTE in result["data"]["result"]["search"]["notes"]
+    # the stage's own stream event names the same session: another session reading it gets the complete read back,
+    # transcript included, without fetching again
+    stream_alias = AliasBook(repo, "h1").alias_for("E", staged["event_ids"][0])
+    again = _read(_other_session(toolbox), stream_alias)
+    assert len(w.packets.calls) == before + 1 and again["status"] == "complete"
+    assert _content(again) == _content(result)
+    assert rs.DONE_NOTE in again["data"]["result"]["search"]["notes"]
+    assert repo.agent_session_reads("h1") == (1, len(PCAP))
+
+
+def test_a_stage_kept_telnet_login_is_read_with_its_password_masked(tmp_path, monkeypatch):
+    doc = _doc("241118-TELNET000002", OPERATOR, TELNETD, protocol=("tcp", "telnet"))
+    key = pk.stream_key(*OPERATOR, *TELNETD)
+    repo, toolbox, _client, w = _setup(tmp_path, monkeypatch, [doc], streams={
+        key: conversation(TELNET, client=OPERATOR, server=TELNETD, t0=TS)})
+    [staged] = _stage(repo, tmp_path, w)
+    stream_alias = AliasBook(repo, "h1").alias_for("E", staged["event_ids"][0])
+    result = _read(toolbox, stream_alias)
+    turns = _content(result)["stream"]["transcript"]
+    assert any(turn.get("withheld") for turn in turns)
+    assert any("uid=1000(admin)" in line for turn in turns for line in turn.get("lines", []))
+    assert "s3cret" not in json.dumps(result) and [c for c in repo.candidates("h1")
+                                                   if c["rule_id"].startswith("pcap.")] == [staged]
+
+
+def test_held_content_is_returned_when_the_read_cannot_fetch(tmp_path, monkeypatch):
+    repo, toolbox, _client, w = _setup(tmp_path, monkeypatch, [SHELL_DOC], streams={SHELL_KEY: SHELL_ROWS})
+    [staged] = _stage(repo, tmp_path, w)
+    w.packets.error = "Arkime packet download failed: HTTP 503"
+    result = _read(toolbox, AliasBook(repo, "h1").alias_for("E", staged["event_ids"][0]))
+    assert result["status"] == "partial"
+    reasons = result["data"]["result"]["reasons"]
+    assert any("503" in r for r in reasons) and any(r.startswith("only the packet events this hunt already held")
+                                                     for r in reasons)
     assert set(_events(repo, result)) == {"tcp_stream"}
-    assert repo.agent_session_reads("h1") == (0, 0)                        # no read was spent
-    # the stage's own packet event names the same session: reading it answers the same way
-    stream_alias = result["data"]["result"]["evidence"][0]
-    again = _read(toolbox, stream_alias)
-    assert again["data"]["result"]["candidates"] == result["data"]["result"]["candidates"]
-    assert w.packets.calls == fetched
+    assert repo.agent_session_reads("h1") == (0, 0)                 # nothing was read: the read was given back
+
+
+def test_a_busy_hunt_never_hides_or_loses_the_aliased_packet_event(tmp_path, monkeypatch):
+    repo, toolbox, _client, w = _setup(tmp_path, monkeypatch, [SHELL_DOC], streams={SHELL_KEY: SHELL_ROWS})
+    [staged] = _stage(repo, tmp_path, w)
+    [row] = repo.citation_events("h1", staged["event_ids"])
+    base = TypedEvent.model_validate(row["event"])
+    fillers = []
+    for i in range(2001):                    # other sessions' stream events at the same time (a busy hunt)
+        ref = RawRef(target=base.raw[0].target, native_id=f"filler{i}", digest="0" * 64)
+        fillers.append(base.model_copy(update={
+            "id": f"filler-{i:05d}", "raw": [ref], "ts": base.ts,
+            "fields": {k: v for k, v in base.fields.items() if k != "arkime.session_id"}}))
+    repo.save_evidence("h1", fillers, {f"{base.raw[0].target}/filler{i}": {"x": i} for i in range(2001)}, None)
+    found, cands, complete = repo.packet_session_evidence("h1", [SHELL_DOC["_id"]], T, END,
+                                                          include_ids=[base.id])
+    assert found == [base.id] and cands == [staged["id"]] and complete is False
+    # another hunt's event for the same session id is never this hunt's
+    repo.create_hunt("h2", {"window": {"start": T.isoformat(), "end": END.isoformat()}}, "d", "test")
+    other = base.model_copy(update={"id": "other-hunt-stream", "raw": [
+        RawRef(target=base.raw[0].target, native_id="other", digest="1" * 64)]})
+    repo.save_evidence("h2", [other], {f"{base.raw[0].target}/other": {"x": 1}}, None)
+    assert "other-hunt-stream" not in repo.packet_session_evidence("h1", [SHELL_DOC["_id"]], T, END)[0]
+    # the read of the stage's event cannot fetch: it says the look was cut short, never that the content is gone
+    w.packets.error = "Arkime packet download failed: HTTP 503"
+    result = _read(toolbox, AliasBook(repo, "h1").alias_for("E", base.id))
+    reasons = " | ".join(result["data"]["result"]["reasons"])
+    assert result["status"] == "partial" and "cut short" in reasons and "any more" not in reasons
+    assert {r["id"] for r in _events(repo, result).values()} == {base.id}
+
+
+def test_packet_raw_copies_reach_the_model_only_as_masked_lines(tmp_path, monkeypatch):
+    body = b"db_host=10.0.0.3\npassword=Sup3rS3cretValue\n"
+    repo, toolbox, _client, _w = _setup(tmp_path, monkeypatch, [HTTP_DOC], http_rows=[
+        _http_row(TS.timestamp(), body=body, uri="http://192.0.2.174/app.conf", ctype="text/plain")])
+    result = _read(toolbox, _session_alias(repo, HTTP_DOC))
+    evidence = toolbox.execute("get_evidence", {"evidence": result["data"]["result"]["evidence"]})
+    for shown in (json.dumps(result), json.dumps(evidence)):
+        assert "Sup3rS3cretValue" not in shown and b"Sup3rS3cretValue".hex() not in shown
+        assert "body_excerpt_hex" not in shown
+    assert "password=[withheld]" in json.dumps(evidence)       # the copy shows its excerpt as masked lines
+    # the stored copy is unchanged: its digest is part of the event's identity
+    [row] = [r for r in repo.citation_events("h1", [AliasBook(repo, "h1").resolve(a, {"E"})
+                                                    for a in result["data"]["result"]["evidence"]])
+             if r["family"] == "http_body"]
+    [stored] = repo.raw_records(row["raw_ids"])
+    assert stored["source"]["body_excerpt_hex"] == body.hex()
+
+
+def test_a_retried_read_holds_one_read_and_a_read_with_no_bytes_is_given_back(tmp_path, monkeypatch):
+    repo, toolbox, _client, w = _setup(tmp_path, monkeypatch, [SHELL_DOC], streams={SHELL_KEY: SHELL_ROWS},
+                                       packets=Packets(error="viewer 503"))
+    alias = _session_alias(repo, SHELL_DOC)
+    for _ in range(4):
+        assert _read(toolbox, alias)["status"] == "failed"
+    assert repo.agent_session_reads("h1") == (0, 0) and len(w.packets.calls) == 4
+    assert repo.reserve_agent_session_read("h1", 5, 10_000, "t-same")[2] is None
+    assert repo.reserve_agent_session_read("h1", 5, 10_000, "t-same")[2] is None
+    assert repo.agent_session_reads("h1") == (1, 0)                  # one task, one read
+
+
+def test_bytes_fetched_before_a_fetch_fails_partway_are_counted(tmp_path, monkeypatch):
+    class FailsSecond(Packets):
+        def fetch(self, ids, dest, max_bytes=None):
+            if self.calls:
+                raise pk.PacketError("refusing invalid Arkime session id(s)")
+            return super().fetch(ids, dest, max_bytes)
+
+    first = TS - timedelta(minutes=1)
+    later = _doc("241118-SEGMENT00011", VICTIM, ATTACKER, first=first, last=TS + timedelta(minutes=9))
+    earlier = _doc("241118-SEGMENT00012", VICTIM, ATTACKER, first=first, last=TS + timedelta(minutes=2))
+    repo, toolbox, _client, _w = _setup(tmp_path, monkeypatch, [later, earlier], packets=FailsSecond())
+    result = _read(toolbox, _session_alias(repo, later))
+    assert result["status"] == "failed"
+    assert repo.agent_session_reads("h1") == (1, len(PCAP))
+
+
+def test_an_event_past_the_keep_cap_gets_no_alias_in_the_previews(tmp_path, monkeypatch):
+    monkeypatch.setattr(rs, "MAX_SAVED_EVENTS", 0)
+    repo, toolbox, _client, _w = _setup(tmp_path, monkeypatch, [HTTP_DOC], http_rows=[_http_row(TS.timestamp())],
+                                        streams={HTTP_KEY: HTTP_STREAM})
+    result = _read(toolbox, _session_alias(repo, HTTP_DOC))
+    content = _content(result)
+    assert content["http_responses"][0]["evidence"] is None and content["http_responses"][0]["kept"] is False
+    assert content["stream"]["evidence"] is None and result["data"]["result"]["evidence"] == []
+    assert any("beyond the per-read cap" in r for r in result["data"]["result"]["reasons"])
+
+
+def test_telemetry_names_in_a_result_are_bounded_and_visible(tmp_path, monkeypatch):
+    doc = _doc("241118-UDPSESSION01", VICTIM, ATTACKER, protocol=("x" * 500 + chr(0x202E), "udp"))
+    doc["_source"]["ipProtocol"] = 17
+    repo, toolbox, _client, _w = _setup(tmp_path, monkeypatch, [doc])
+    result = _read(toolbox, _session_alias(repo, doc))
+    shown = json.dumps(result["data"]["result"])
+    assert result["status"] == "failed" and "x" * 60 not in shown and chr(0x202E) not in shown
+
+
+def test_the_session_read_caps_are_pinned_with_the_hunt_budget():
+    from romulus.agent import hunt_budget
+    s = Settings(agent_max_session_reads=50, agent_max_session_read_bytes=256 * 1024 * 1024)
+    assert hunt_budget.profile_limits(s, "standard")["max_session_reads"] == 50
+    assert hunt_budget.profile_limits(s, "deep")["max_session_reads"] == 200
+    assert hunt_budget.profile_limits(s, "quick")["max_session_read_bytes"] == 64 * 1024 * 1024
+    choice = hunt_budget.choose(s, "standard", role="analyst", chosen_by="t")
+    assert hunt_budget.pinned_block(choice)["max_session_reads"] == 50
 
 
 def test_a_read_of_another_session_leaves_a_stage_finding_as_it_is(tmp_path, monkeypatch):
@@ -444,12 +593,23 @@ def test_a_telnet_password_never_reaches_a_result_or_the_store(tmp_path, monkeyp
     ("ftp://bob:hunter2@files.example/x", "ftp://files.example/x", "hunter2"),
     ("Last login: Mon Nov 18 14:00:00 2024", "Last login: Mon Nov 18 14:00:00 2024", None),
     ("uid=0(root) gid=0(root)", "uid=0(root) gid=0(root)", None),
+    ("<user>bob</user><password>hunter2</password>", "<password>[withheld]</password>", "hunter2"),
+    ('<ns:Passwd xmlns:ns="u">hunter2</ns:Passwd>', "[withheld]</ns:Passwd>", "hunter2"),
+    ("data=user%3Dbob%26password%3Dhunter2", "password=[withheld]", "hunter2"),
+    ("user=bob&pass%77ord=hunter2", "password=[withheld]", "hunter2"),
 ])
 def test_credentials_are_masked_line_by_line(line, kept, gone):
     masked = rs.Masker(None).line(line)
     assert kept in masked
     if gone:
         assert gone not in masked
+
+
+def test_a_redis_auth_in_resp_framing_withholds_its_arguments():
+    masker = rs.Masker(None)
+    lines = masker.lines(["*2", "$4", "AUTH", "$7", "hunter2", "*1", "$4", "PING"])
+    assert lines == ["*2", "$4", "AUTH", "$7", "[withheld]", "*1", "$4", "PING"]
+    assert masker.line("AUTH default hunter2") == "AUTH [withheld]"
 
 
 def test_an_authentication_challenge_withholds_the_answer():

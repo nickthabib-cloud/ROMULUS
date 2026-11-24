@@ -8,30 +8,34 @@ this hunt's Arkime sources that can overlap the hunt window.
 
 A read then:
 
-1. answers from the packet content this hunt already holds for the session (what the packet stage, or an earlier read,
-   kept): its events and findings are returned and nothing is fetched again;
+1. answers from an earlier complete read of the same session in this hunt, when there is one: its events, findings and
+   content previews are returned and nothing is fetched again;
 2. otherwise re-reads the session's own record from the hunt's Arkime session index by its id (a typed `ids` query)
    and every saved document of a long session by typed equality on its endpoints and first packet, checks that it
-   overlaps the hunt window, and reserves one read under the hunt's session-read caps;
-3. fetches the session's packets once through the packet stage's own fetcher (every segment, merged in packet order,
-   byte capped), and runs the stage's own fixed TShark extraction on them: the HTTP rebuild (`http_body` events) for a
-   session Arkime saw HTTP in, and the cleartext stream analysis (one `tcp_stream` event, with its interactive-shell
-   indicators) for any TCP session. The stream filter is built only from the session record's typed endpoints;
+   overlaps the hunt window, and gathers the packet content this hunt already holds for it (what the packet stage
+   kept: only the events its rules retained, and never a stream's payload);
+3. reserves one read under the hunt's session-read caps and fetches the session's packets once through the packet
+   stage's own fetcher (every segment, merged in packet order, byte capped), and runs the stage's own fixed TShark
+   extraction on them: the HTTP rebuild (`http_body` events) for a session Arkime saw HTTP in, and the cleartext stream
+   analysis (one `tcp_stream` event, with its interactive-shell indicators) for any TCP session. The stream filter is
+   built only from the session record's typed endpoints. The events are the stage's own, with its ids, so content the
+   stage already kept is the same rows and a group it already published keeps its finding;
 4. saves the extracted events as citable evidence (E aliases), runs the packet rules over them and publishes their
    matches through the normal admission path as findings reached by the agent; and
-5. returns bounded previews of what was read: response headers' typed values and body excerpts, and the conversation's
-   first turns, each line made safe to show (`detect.packets.show`) after recognised credentials are masked. Packet
-   content is untrusted telemetry: it is never an instruction, and only the typed events are citable.
+5. returns bounded previews of what was read: response values and body excerpts, and the conversation's first turns,
+   masked and made visible by `detect.packet_preview`. Packet content is untrusted telemetry: it is never an
+   instruction, and only the typed events are citable.
 
-Every way a read can lose content (a cap, a failed or truncated fetch, a TShark run that failed, an unparseable frame,
-a response TShark could not rebuild) makes the result partial with its reason, in the result and its coverage cell.
-Nothing rebuilt is never a negative. Work files live in a private directory under the hunt home, removed afterwards.
+When the read cannot fetch (a cap, a failed lookup or download) but the hunt holds content for the session, that content
+is returned with the reason, as partial. Every way a read can lose content (a cap, a failed or truncated fetch, a TShark
+run that failed, an unparseable frame, a response TShark could not rebuild) makes the result partial or failed with its
+reason, in the result and its coverage cell. Nothing rebuilt is never a negative. Work files live in a private
+directory under the hunt home, removed afterwards.
 """
 from __future__ import annotations
 
 import json
 import logging
-import re
 import shutil
 import tempfile
 from collections.abc import Callable
@@ -42,11 +46,17 @@ from time import perf_counter
 from romulus.agent.models import PivotCoverage, PivotResult
 from romulus.config import Settings, redact_text
 from romulus.decide.policy import candidate_id as decided_candidate_id
-from romulus.detect.packets import PASSWORD_PROMPT, _clean, _text, show
+from romulus.detect.packet_preview import (
+    MAX_LINE_CHARS,
+    MAX_TURN_BYTES,
+    Masker,
+    body_excerpt,
+    transcript,
+)
+from romulus.detect.packets import show
 from romulus.detect.registry import bind_windows_site, fresh_direct_pack
-from romulus.detect.web_attacks import _credential_name, _redact_uri
+from romulus.detect.web_attacks import _redact_uri
 from romulus.evidence.typed import TypedEvent
-from romulus.evidence.zeek_credentials import strip_uri_userinfo
 from romulus.hunt import packets as stage
 from romulus.hunt.expansion import _target_names
 from romulus.hunt.pivot import (
@@ -65,51 +75,30 @@ from romulus.sources.models import Window
 from romulus.sources.packets import SESSION_ID, ArkimePackets, PacketError, stream_key
 from romulus.store.db import digest
 
+__all__ = ["MAX_TURN_BYTES", "Masker", "SessionReader", "body_excerpt", "transcript"]
+
 log = logging.getLogger("romulus.agent_session")
 
 READ_PURPOSE = "agent:read_session"
 NOTHING_STATEMENT = ("no content was rebuilt from this session's packets; this is not a confirmed absence: the packets "
                      "may be missing from the capture, encrypted, or in a protocol the extraction does not rebuild")
-STAGED_NOTE = ("already read in this hunt (by the packet stage or an earlier read): its stored events and findings "
-               "are returned; the packets were not fetched again")
-STAGED_DETAIL = ("the packet stage keeps only the events its rules retained, so the stored events are not everything "
-                 "the session holds")
+DONE_NOTE = ("answered from an earlier complete read of this session in this hunt: its events, findings and content "
+             "are returned and the packets were not fetched again")
+HELD_NOTE = ("this hunt already held packet events of this session (the packet stage keeps only the events its rules "
+             "retained, and never a stream's payload): they are listed with what this read extracted")
+HELD_ONLY = ("only the packet events this hunt already held for this session are returned: the packet stage keeps the "
+             "events its rules retained and never a stream's payload, so this is not everything the session holds")
 # what one read lists and keeps: its saved events (each citable), the findings it names, its previews
 MAX_SAVED_EVENTS = 200
 MAX_LISTED_CANDIDATES = 100
 MAX_PREVIEW_RESPONSES = 10
-MAX_PREVIEW_LINES = 24              # of one response body's excerpt
-MAX_TURN_LINES = 12                 # of one conversation turn
 MAX_CONTENT_BYTES = 48_000          # all previews of one read, as JSON text
-MAX_LINE_CHARS = 200
-MAX_TRANSCRIPT_TURNS = 60
-MAX_TURN_BYTES = 4_096
 MAX_REASONS = 20
 MAX_LISTED_IDS = 20
+MAX_LISTED_NAMES = 20
 ERROR_CHARS = 300
-WITHHELD = "[withheld]"
 # slack around a session's span when looking for the packet content a hunt already holds for it
 HELD_SLACK = timedelta(seconds=60)
-
-# Credential forms masked in previews (the typed events and their raw copies never hold this text).
-_SECRET_HEADERS = frozenset({"authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key",
-                             "x-auth-token", "api-key", "apikey", "x-access-token", "x-csrf-token", "x-xsrf-token"})
-_HEADER = re.compile(r"^(\s*)([A-Za-z0-9_-]{1,64})(\s*:\s*)(.*)$")
-# a line protocol's credential command and its arguments: FTP and POP3 PASS, SMTP and POP3 AUTH, IMAP's tagged LOGIN
-# and AUTHENTICATE (the arguments go; a prompt such as "Password:" or "Last login:" is no command)
-_COMMAND = re.compile(r"(?i)^(\s*)(PASS|PASSWORD|AUTH)\s+(\S.*)$")
-_TAGGED = re.compile(r"(?i)^(\s*\S{1,32}\s+)(LOGIN|AUTHENTICATE)\s+(\S.*)$")
-_PAIR = re.compile(r"""(["']?)([A-Za-z0-9_.\-]{1,64})\1(\s*[=:]\s*)("[^"]*"?|'[^']*'?|[^\s&;,"']+)""")
-# a prompt that asks for a secret (the next text the other side sends is withheld), and a server's request for the next
-# part of an authentication exchange (SMTP 334, IMAP and POP "+" continuations)
-# (anywhere in a line that ends in ":" or "?": "Password:", "[sudo] password for bob: ", "Enter passphrase for key
-# '...': ", "Password for bob@REALM: ", "Enter PEM pass phrase:")
-_SECRET_PROMPT = re.compile(
-    r"(?i)\b(?:pass(?:word|wd|phrase|code)?|pass phrase|pin|secret|token|otp)\b.{0,200}?[:?]\s*$")
-# what of a turn's end is read for a prompt (a prompt is the tail of the turn's last line)
-PROMPT_TAIL_BYTES = 512
-_CONTINUATION = re.compile(r"^(?:334|\+)(?:\s|$)")
-_LINE_SPLIT = re.compile(rb"\r\n|\r\x00|\n|\r")
 
 
 def _utc(value: datetime) -> datetime:
@@ -119,6 +108,11 @@ def _utc(value: datetime) -> datetime:
 def _bounded(text, limit: int = ERROR_CHARS) -> str:
     text = " ".join(str(text).split())
     return text if len(text) <= limit else f"{text[:limit]}…[{len(text) - limit} chars omitted]"
+
+
+def _names(values) -> list[str]:
+    """Telemetry names (Arkime protocols) as bounded, visible text."""
+    return sorted({show(value, 40) for value in values})[:MAX_LISTED_NAMES]
 
 
 def _epoch_ms(value) -> datetime | None:
@@ -138,101 +132,31 @@ def _iso(value) -> datetime | None:
     return _utc(moment) if moment.tzinfo is not None else None
 
 
-class Masker:
-    """Masks recognised credentials in preview text, line by line, with the state a conversation needs: the text one
-    side sends after the other asked for a password (or the next part of an authentication exchange) is withheld until
-    that side ends a line."""
-
-    def __init__(self, settings: Settings | None):
-        self.settings = settings
-        self.secret_owed: str | None = None          # the side whose next text is a secret
-
-    def line(self, text: str) -> str:
-        header = _HEADER.match(text)
-        if header and (header.group(2).casefold() in _SECRET_HEADERS or _credential_name(header.group(2))):
-            text = f"{header.group(1)}{header.group(2)}{header.group(3)}{WITHHELD}"
-        command = _COMMAND.match(text) or _TAGGED.match(text)
-        if command:
-            text = f"{command.group(1)}{command.group(2)} {WITHHELD}"
-        text = _PAIR.sub(lambda m: (f"{m.group(1)}{m.group(2)}{m.group(1)}{m.group(3)}{WITHHELD}"
-                                    if _credential_name(m.group(2)) else m.group(0)), text)
-        if "://" in text:
-            text = strip_uri_userinfo(text)[0]
-        if self.settings is not None:
-            text = redact_text(text, self.settings)
-        return text
-
-    def turn(self, side: str, raw: bytes, whole: bytes | None = None) -> dict:
-        """One side's bytes in a conversation turn, as preview lines (or a count of binary bytes). `raw` is what is
-        shown of the turn; `whole` (default `raw`) is the whole turn, whose end is read for a prompt and a line end."""
-        whole = raw if whole is None else whole
-        if self.secret_owed == side:
-            if _LINE_SPLIT.search(whole):
-                self.secret_owed = None
-            return {"from": side, "withheld": "text sent after a password prompt or an authentication challenge",
-                    "bytes": len(whole)}
-        # the prompt is read on the turn's real end, whatever of it is shown
-        tail = [_clean(piece) for piece in _LINE_SPLIT.split(whole[-PROMPT_TAIL_BYTES:])]
-        last = next((item for item in reversed(tail) if item), "")
-        if last and (PASSWORD_PROMPT.search(last) or _SECRET_PROMPT.search(last) or _CONTINUATION.match(last)):
-            self.secret_owed = "client" if side == "server" else "server"
-        pieces = _LINE_SPLIT.split(raw)
-        cleaned = [_clean(piece) for piece in pieces]
-        if any(item is None for item in cleaned):
-            return {"from": side, "binary_bytes": len(whole)}
-        lines = [item for item in cleaned if item]
-        shown = [show(self.line(item), MAX_LINE_CHARS) for item in lines[:MAX_TURN_LINES]]
-        out = {"from": side, "lines": shown}
-        if len(lines) > MAX_TURN_LINES:
-            out["lines_not_shown"] = len(lines) - MAX_TURN_LINES
-        return out
-
-
-def body_excerpt(head: bytes, settings: Settings | None) -> dict:
-    """A response body's first bytes as preview lines, or a note that they are binary."""
-    if not head:
-        return {"excerpt": [], "excerpt_note": "empty body"}
-    text = _text(head)
-    if text is None:
-        return {"excerpt": None, "excerpt_note": "binary content (not shown)"}
-    masker = Masker(settings)
-    lines = text.splitlines()
-    out = {"excerpt": [show(masker.line(line), MAX_LINE_CHARS) for line in lines[:MAX_PREVIEW_LINES]]}
-    if len(lines) > MAX_PREVIEW_LINES:
-        out["excerpt_lines_not_shown"] = len(lines) - MAX_PREVIEW_LINES
-    return out
-
-
-def transcript(data: dict[str, bytes], chunks, settings: Settings | None) -> tuple[list[dict], int]:
-    """The conversation's first turns (consecutive bytes of one side are one turn), each bounded and masked; and how
-    many turns were not shown."""
-    turns: list[tuple[str, int, int]] = []
-    for chunk in chunks:
-        if turns and turns[-1][0] == chunk.direction and turns[-1][2] == chunk.offset:
-            direction, start, _end = turns[-1]
-            turns[-1] = (direction, start, chunk.offset + chunk.length)
-        else:
-            turns.append((chunk.direction, chunk.offset, chunk.offset + chunk.length))
-    masker = Masker(settings)
-    out = []
-    for direction, start, end in turns[:MAX_TRANSCRIPT_TURNS]:
-        side = "client" if direction == "c2s" else "server"
-        raw = data[direction][start:min(end, start + MAX_TURN_BYTES)]
-        item = masker.turn(side, raw, data[direction][start:end])
-        if end - start > MAX_TURN_BYTES:
-            item["bytes_not_shown"] = end - start - MAX_TURN_BYTES
-        out.append(item)
-    return out, max(0, len(turns) - MAX_TRANSCRIPT_TURNS)
-
-
 class _Ref:
-    """The session a read names, resolved from a record the alias points at (never from model text)."""
+    """The session a read names, resolved from a record the alias points at (never from model text). `index` is the
+    concrete index the record came from (None for a packet event: any index of its target); `event_id` is an aliased
+    packet event; `span` bounds the session's packet times when the record tells them."""
 
-    def __init__(self, *, index: str, session_id: str, targets: list[str], origin: str,
-                 staged_ids: list[str] | None = None, span: tuple[datetime, datetime] | None = None):
-        self.index, self.session_id, self.targets, self.origin = index, session_id, targets, origin
-        self.staged_ids = staged_ids or []
+    def __init__(self, *, index: str | None, session_ids: list[str], targets: list[str], origin: str,
+                 event_id: str | None = None, span: tuple[datetime, datetime] | None = None):
+        self.index, self.session_ids, self.targets, self.origin = index, session_ids, targets, origin
+        self.session_id = session_ids[0]
+        self.event_id = event_id
         self.span = span
+
+
+class _Counting:
+    """The packet fetcher, counting the bytes every fetch wrote, so a read that stops partway still records them."""
+
+    def __init__(self, packets):
+        self.packets = packets
+        self.max_bytes = getattr(packets, "max_bytes", 32 * 1024 * 1024)
+        self.bytes = 0
+
+    def fetch(self, session_ids, dest, max_bytes=None):
+        fetched = self.packets.fetch(session_ids, dest, max_bytes=max_bytes)
+        self.bytes += int(fetched.bytes or 0)
+        return fetched
 
 
 class SessionReader:
@@ -287,7 +211,7 @@ class SessionReader:
                 return self._refused("not_retained", "the aliased evidence is no longer retained by this hunt")
             event = TypedEvent.model_validate(rows[0]["event"])
             if event.family in ("http_body", "tcp_stream"):
-                return self._packet_event(event)
+                return self._packet_event(event, rows[0].get("raw_ids") or [])
             if event.family != "net_session" or len(event.raw) != 1:
                 return self._refused("not_an_arkime_session", (
                     f"this evidence is a {event.family} record, not an Arkime session; read_session takes the "
@@ -306,9 +230,9 @@ class SessionReader:
         if not targets:
             return self._refused("not_hunt_arkime_source", (
                 "this session's record is not from one of this hunt's Arkime session sources"))
-        return _Ref(index=index, session_id=session_id, targets=targets, origin="record", span=span)
+        return _Ref(index=index, session_ids=[session_id], targets=targets, origin="record", span=span)
 
-    def _packet_event(self, event: TypedEvent) -> _Ref | dict:
+    def _packet_event(self, event: TypedEvent, raw_ids: list[str]) -> _Ref | dict:
         target = event.raw[0].target.partition(":")[2] if event.raw else ""
         if not event.raw or not event.raw[0].target.startswith(f"{stage.PCAP_TARGET}:") \
                 or target not in self.arkime_targets():
@@ -318,7 +242,14 @@ class SessionReader:
         ids = [item for item in ids if isinstance(item, str) and SESSION_ID.fullmatch(item)]
         if not ids:
             return self._refused("not_an_arkime_session", "this packet event names no valid Arkime session id")
-        return _Ref(index=target, session_id=ids[0], targets=[target], origin="packet_event", staged_ids=ids)
+        # the session's packet times, from the stream's raw copy when it keeps them, else the event's own time
+        first = last = _utc(event.ts)
+        for raw in self.pivot.repo.raw_records(raw_ids[:4]):
+            source = raw.get("source") or {}
+            first = _epoch_ms(source.get("first_packet_ms")) or first
+            last = _epoch_ms(source.get("last_packet_ms")) or last
+        return _Ref(index=None, session_ids=ids, targets=[target], origin="packet_event", event_id=event.id,
+                    span=(min(first, last), max(first, last)))
 
     def refusal(self, request) -> dict | None:
         found = self.resolve(request)
@@ -335,7 +266,7 @@ class SessionReader:
         fingerprint = digest({"case_id": case_id, "tool": request.model_dump(mode="json")})
         task_id = "t-" + fingerprint[:20]
         pivot.repo.upsert_task(task_id, pivot.hunt_id, "pivot", case_id, {
-            "purpose": READ_PURPOSE, "index": ref.index, "session_id": ref.session_id, "targets": ref.targets,
+            "purpose": READ_PURPOSE, "index": ref.index, "session_ids": ref.session_ids, "targets": ref.targets,
             "start": args.start.isoformat(), "end": args.end.isoformat(), "request_digest": fingerprint,
         }, fingerprint, owner_token=pivot.owner_token)
         pivot.repo.update_task(task_id, "leased", attempt=True, owner_token=pivot.owner_token)
@@ -344,7 +275,7 @@ class SessionReader:
             return read.run()
         except Exception as exc:
             log.exception("session read %s failed", ref.session_id)
-            return read.fail([f"the session read failed: {type(exc).__name__}: {_bounded(exc)}"])
+            return read.stop([f"the session read failed: {type(exc).__name__}: {_bounded(exc)}"])
 
     def _failed(self, target, reasons, started) -> PivotResult:
         return PivotResult(status="failed", reasons=sorted(set(reasons)),
@@ -385,29 +316,45 @@ class _Read:
         self.fetched = 0
         self.span: tuple[datetime, datetime] | None = ref.span
         self.direct: list | None = None
-        self.held = False                    # answered from packet content the hunt already held
+        self.held = 0                        # packet events of the session the hunt already held
+        self.held_cut = False                # the look for them was cut short
+        self.extracted = False               # this read fetched and extracted the packets
+        self.content: dict | None = None     # an earlier complete read's content, returned as it was
 
     # ---- outcome ------------------------------------------------------------------------------------------------
-    def fail(self, reasons: list[str], *, query: dict | None = None) -> PivotResult:
+    def stop(self, reasons: list[str]) -> PivotResult:
+        """The read cannot go on: partial with what the hunt already holds for the session, else failed."""
+        if self.events:
+            self.reasons.extend(reasons)
+            if self.held_cut:
+                self.reasons.append("the look for the packet events this hunt holds for this session was cut short; "
+                                    "more may be held than are listed")
+            self.reasons.append(HELD_ONLY)
+            self._held_previews()
+            return self.finish()
+        return self.fail(reasons)
+
+    def fail(self, reasons: list[str]) -> PivotResult:
         repo = self.pivot.repo
         repo.update_task(self.task_id, "failed", outcome={"completeness": "failed", "reasons": reasons[:MAX_REASONS]},
                          error=reasons[0], owner_token=self.pivot.owner_token)
         result = self.reader._failed(self.target, reasons, self.started)
         result.task_ids = [self.task_id]
-        result.query = {**result.query, **self._session_view(), **(query or {})}
+        result.query = {**result.query, **self._session_view()}
         return result
 
     def _session_view(self) -> dict:
         view: dict = {"session": {"origin": self.ref.origin, "arkime_session_ids": (
-            [seg["_id"] for seg in self.segments][:MAX_LISTED_IDS] or [self.ref.session_id])}}
+            [seg["_id"] for seg in self.segments][:MAX_LISTED_IDS] or self.ref.session_ids[:MAX_LISTED_IDS])}}
         if self.target:
             view["session"]["source"] = f"arkime:{self.target}"
         if self.segments:
             src = self.segments[0]["_source"]
             client, server = src.get("source") or {}, src.get("destination") or {}
             view["session"].update(
-                client=f"{client.get('ip')}:{client.get('port')}", server=f"{server.get('ip')}:{server.get('port')}",
-                protocols=sorted({str(p) for seg in self.segments for p in _list(seg["_source"].get("protocol"))}),
+                client=show(f"{client.get('ip')}:{client.get('port')}", 80),
+                server=show(f"{server.get('ip')}:{server.get('port')}", 80),
+                protocols=_names(p for seg in self.segments for p in _list(seg["_source"].get("protocol"))),
                 segments=len(self.segments))
         if self.span is not None:
             view["session"].update(first_packet=self.span[0].isoformat(), last_packet=self.span[1].isoformat())
@@ -420,7 +367,7 @@ class _Read:
         events = list(self.events.values())
         # content was found when a response was rebuilt, a stream carried bytes, or the hunt already held content
         stream_bytes = (self.stream or {}).get("client_bytes", 0) or (self.stream or {}).get("server_bytes", 0)
-        found = (bool(self.responses) or bool(stream_bytes) or self.held
+        found = (bool(self.responses) or bool(stream_bytes) or bool(self.held) or self.content is not None
                  or any(event.family == "http_body" for event in events))
         entities = {(entity.kind, entity.value, entity.role): entity
                     for event in events for entity in _event_entities(event)}
@@ -432,21 +379,30 @@ class _Read:
             reasons.append(f"{len(candidates) - MAX_LISTED_CANDIDATES} more finding(s) this read published or "
                            "reached are not listed")
             candidates = candidates[:MAX_LISTED_CANDIDATES]
-        pivot.repo.update_task(self.task_id, "executed", outcome={
-            "completeness": status, "reasons": reasons[:MAX_REASONS], "returned": len(events),
-            "fetched_bytes": self.fetched}, owner_token=pivot.owner_token)
+        content = self.content if self.content is not None else bounded_content(
+            {"http_responses": self.responses, "http_responses_not_shown": self.responses_not_shown,
+             "stream": self.stream})
+        listed = self._listed_order()
+        outcome = {"completeness": status, "reasons": reasons[:MAX_REASONS], "returned": len(events),
+                   "fetched_bytes": self.fetched}
+        complete_read = status == "complete" and self.extracted
+        if complete_read:
+            # what a later read of the same session answers from
+            outcome.update(event_ids=listed, candidate_ids=candidates, content=content, notes=self.notes[:MAX_REASONS])
+        pivot.repo.update_task(self.task_id, "executed", outcome=outcome, owner_token=pivot.owner_token)
         pivot.repo.update_task(self.task_id, "evaluated", owner_token=pivot.owner_token)
+        if complete_read:
+            pivot.repo.record_agent_session_read_done(
+                pivot.hunt_id, self.task_id, [seg["_id"] for seg in self.segments] or self.ref.session_ids,
+                owner_token=pivot.owner_token)
         sampled = _time_spread(events, MAX_EVENT_SUMMARIES, None)
         query = {**self._session_view(),
                  "negative": "content_found" if found else "unresolved",
                  "statement": None if found else NOTHING_STATEMENT,
-                 "fetched_bytes": self.fetched, "notes": self.notes[:MAX_REASONS],
-                 "content": bounded_content({"http_responses": self.responses,
-                                             "http_responses_not_shown": self.responses_not_shown,
-                                             "stream": self.stream})}
+                 "fetched_bytes": self.fetched, "notes": self.notes[:MAX_REASONS], "content": content}
         return PivotResult(
             status=status, task_ids=[self.task_id], event_ids=[event.id for event in sampled],
-            reach_event_ids=self._listed_order(), candidate_ids=candidates, entities=list(entities.values()),
+            reach_event_ids=listed, candidate_ids=candidates, entities=list(entities.values()),
             event_summaries=[_summary(event) for event in sampled], matched_event_count=len(events),
             coverage=[self.reader._cell(self.target, status, reasons, len(events), self.span)],
             reasons=sorted(set(reasons)), duration_ms=int((perf_counter() - self.started) * 1000), query=query)
@@ -460,62 +416,70 @@ class _Read:
 
     # ---- the steps ----------------------------------------------------------------------------------------------
     def run(self) -> PivotResult:
-        if self.ref.staged_ids:
-            return self._staged(self.ref.staged_ids)
-        held = self._held([self.ref.session_id])
-        if held is not None:
-            return held
+        repo = self.pivot.repo
+        done = repo.agent_session_read_done(self.pivot.hunt_id, self.ref.session_ids)
+        if done is not None:
+            answered = self._from_done(done)
+            if answered is not None:
+                return answered
         available = self.pivot.agent_available()
         if available is not None and available[0] == 0:
             cap = available[1]
             explained = _AGENT_CAP_EXPLAINED.get(cap.split(":", 1)[0], "the source-query budget is spent")
-            return self.fail([cap, f"{explained}: nothing was read, and nothing was found or ruled out"])
+            self._gather_held(self.ref.session_ids)
+            return self.stop([cap, f"{explained}: the packets were not read, and nothing was found or ruled out"])
         stop = self._lookup()
+        self._gather_held([seg["_id"] for seg in self.segments] or self.ref.session_ids)
         if stop is not None:
-            return stop
-        held = self._held([seg["_id"] for seg in self.segments])
-        if held is not None:
-            return held
+            return self.stop(stop)
         return self._read_packets()
 
-    def _held(self, ids: list[str]) -> PivotResult | None:
-        """The packet content this hunt already holds for these session ids, as a result; None when it holds none.
-        Only events timed inside the session's own span (when known, with a little slack) are read, so other
-        sessions' stored content cannot crowd it out."""
+    def _from_done(self, task_id: str) -> PivotResult | None:
+        """The result of an earlier complete read of this session, returned as it was (its events must still be
+        retained); None when it cannot be."""
+        outcome = (self.pivot.repo.task(task_id) or {}).get("outcome") or {}
+        ids = [item for item in outcome.get("event_ids") or [] if isinstance(item, str)]
+        if outcome.get("completeness") != "complete" or not isinstance(outcome.get("content"), dict):
+            return None
+        rows = self.pivot.repo.citation_events(self.pivot.hunt_id, ids) if ids else []
+        if len(rows) != len(ids):
+            return None
+        for row in rows:
+            event = TypedEvent.model_validate(row["event"])
+            self.events[event.id] = event
+        self.candidates.extend(item for item in outcome.get("candidate_ids") or [] if isinstance(item, str))
+        self.content = outcome["content"]
+        self.notes = [DONE_NOTE, *[note for note in outcome.get("notes") or [] if isinstance(note, str)]]
+        return self.finish()
+
+    def _gather_held(self, ids: list[str]) -> None:
+        """Add the packet events this hunt already holds for these session ids (and the findings citing them), timed
+        inside the session's span with a little slack, the aliased packet event always among them."""
         window = self.reader.window
         start, end = window.start, window.end
         if self.span is not None:
             start = max(start, self.span[0] - HELD_SLACK)
             end = min(end, self.span[1] + HELD_SLACK)
-        found, candidates, complete = self.pivot.repo.packet_session_evidence(self.pivot.hunt_id, ids, start, end)
-        if not found:
-            if not complete:
-                self.notes.append("this hunt holds too much packet content near this session to check all of it "
-                                  "for an earlier read; the packets are read again")
-            return None
-        return self._staged(ids, (found, candidates, complete))
-
-    def _staged(self, ids: list[str], held=None) -> PivotResult:
-        window = self.reader.window
-        found, candidates, complete = held or self.pivot.repo.packet_session_evidence(
-            self.pivot.hunt_id, ids, window.start, window.end)
-        if not found:
-            return self.fail(["this packet event's session holds no stored packet content in this hunt any more"])
-        self.held = True
-        self.reasons.append(STAGED_NOTE)
-        self.notes.append(STAGED_DETAIL)
-        if not complete:
-            self.reasons.append("this hunt holds more packet content near this session than one read lists; the "
-                                "events listed are the first ones found")
-        if len(found) > MAX_SAVED_EVENTS:
-            self.reasons.append(f"{len(found) - MAX_SAVED_EVENTS} more stored packet event(s) of this session are "
-                                "not listed")
-            found = found[:MAX_SAVED_EVENTS]
-        rows = self.pivot.repo.citation_events(self.pivot.hunt_id, found)
-        for row in rows:
+        found, candidates, complete = self.pivot.repo.packet_session_evidence(
+            self.pivot.hunt_id, ids, start, end, include_ids=[self.ref.event_id] if self.ref.event_id else [])
+        self.held_cut = self.held_cut or not complete
+        found = [event_id for event_id in found if event_id not in self.events]
+        room = MAX_SAVED_EVENTS - len(self.events)
+        if len(found) > room:
+            self.notes.append(f"{len(found) - room} more packet event(s) this hunt holds for this session are not "
+                              "listed")
+            found = ([self.ref.event_id] if self.ref.event_id in found else []) + [
+                event_id for event_id in found if event_id != self.ref.event_id][:max(0, room - 1)]
+        for row in self.pivot.repo.citation_events(self.pivot.hunt_id, found) if found else []:
             event = TypedEvent.model_validate(row["event"])
             self.events[event.id] = event
+        self.held = len(self.events)
         self.candidates.extend(candidates)
+
+    def _held_previews(self) -> None:
+        """Previews of the content the hunt already held: each response's stored excerpt; a stream event keeps no
+        payload, so it has no transcript."""
+        rows = self.pivot.repo.citation_events(self.pivot.hunt_id, sorted(self.events))
         raws = {}
         raw_ids = sorted({raw_id for row in rows if row["family"] == "http_body" for raw_id in row["raw_ids"] or []})
         for begin in range(0, len(raw_ids), 500):
@@ -528,49 +492,53 @@ class _Read:
                 self.stream = {"evidence": event.id, "transcript": None,
                                "transcript_note": ("the stored stream event keeps sizes, offsets and indicators, "
                                                    "never payload; its fields are in the event summaries")}
-        if self.target is None and self.ref.targets:
-            self.target = self.ref.targets[0]
-        return self.finish()
 
     def _spend(self) -> str | None:
         return self.reader.spend(self.task_id)
 
-    def _lookup(self) -> PivotResult | None:
-        """Re-read the session's record (and every saved document of a long session) from the hunt's Arkime index."""
+    def _lookup(self) -> list[str] | None:
+        """Re-read the session's record (and every saved document of a long session) from the hunt's Arkime index;
+        why the read cannot go on, or None."""
         pivot, ref = self.pivot, self.ref
-        body = {"query": {"ids": {"values": [ref.session_id]}}, "size": 2}
         doc = None
         errors = []
         for target in ref.targets:
             cap = self._spend()
             if cap is not None:
-                return self.fail([cap, "the agent's source-query cap is reached: the session's record was not read"])
-            try:
-                response = pivot.client.search(target, body)
-            except (SourceError, WriteAttemptBlocked) as exc:
-                text = _bounded(redact_text(str(exc), self.settings))
-                errors.append(f"{target}: the session's record could not be read: {text}")
-                continue
-            for hit in ((response or {}).get("hits") or {}).get("hits") or []:
-                if (isinstance(hit, dict) and hit.get("_id") == ref.session_id and hit.get("_index") == ref.index
-                        and isinstance(hit.get("_source"), dict)):
-                    doc, self.target = hit, target
+                return [cap, "the agent's source-query cap is reached: the session's record was not read"]
+            for session_id in ref.session_ids[:MAX_LISTED_IDS]:
+                try:
+                    response = pivot.client.search(target, {"query": {"ids": {"values": [session_id]}}, "size": 2})
+                except (SourceError, WriteAttemptBlocked) as exc:
+                    text = _bounded(redact_text(str(exc), self.settings))
+                    errors.append(f"{target}: the session's record could not be read: {text}")
                     break
+                for hit in ((response or {}).get("hits") or {}).get("hits") or []:
+                    if (isinstance(hit, dict) and hit.get("_id") == session_id
+                            and (ref.index is None or hit.get("_index") == ref.index)
+                            and isinstance(hit.get("_source"), dict)):
+                        doc, self.target = hit, target
+                        break
+                # a packet event names every document of its session: one found is enough
+                if doc is not None or ref.index is not None:
+                    break
+                cap = self._spend()
+                if cap is not None:
+                    return [cap, "the agent's source-query cap is reached: the session's record was not read"]
             if doc is not None:
                 break
         if doc is None:
-            return self.fail([*errors, ("the session's record was not found in this hunt's Arkime session sources "
-                                       "(it may have aged out of the index): no packets were read")])
+            return [*errors, ("the session's record was not found in this hunt's Arkime session sources (it may have "
+                              "aged out of the index): no packets were read")]
         src = doc["_source"]
         first, last = _epoch_ms(src.get("firstPacket")), _epoch_ms(src.get("lastPacket"))
         if first is None or last is None:
-            return self.fail([("the session's record carries no typed first and last packet times: its packets were "
-                              "not read")])
+            return ["the session's record carries no typed first and last packet times: its packets were not read"]
         self.span = (first, last)
         window = self.reader.window
         if last < window.start or first >= window.end:
-            return self.fail([(f"outside_hunt_window: this session ({first.isoformat()} to {last.isoformat()}) does "
-                              "not overlap the hunt window; its packets were not read")])
+            return [(f"outside_hunt_window: this session ({first.isoformat()} to {last.isoformat()}) does not overlap "
+                    "the hunt window; its packets were not read")]
         segments = [doc]
         contract = pivot.contracts[self.target]
         if stage._can_complete(contract):
@@ -603,45 +571,53 @@ class _Read:
         is_http = "http" in protocols
         is_tcp = src.get("ipProtocol") == 6 or "tcp" in protocols
         if not is_tcp:
-            return self.fail([(f"this session is not TCP (Arkime protocols: {', '.join(sorted(protocols)) or 'none'}): "
-                              "the extraction rebuilds HTTP and TCP streams only, so its packets were not read")])
+            named = ", ".join(_names(protocols)) or "none"
+            return self.stop([(f"this session is not TCP (Arkime protocols: {named}): the extraction rebuilds HTTP "
+                              "and TCP streams only, so its packets were not read")])
         client, server = src.get("source") or {}, src.get("destination") or {}
         try:
             key = stream_key(client.get("ip"), client.get("port"), server.get("ip"), server.get("port"))
         except PacketError:
-            return self.fail(["the session's endpoints are not typed addresses and ports: its packets were not read"])
+            return self.stop(["the session's endpoints are not typed addresses and ports: its packets were not read"])
         cap = self._spend()
         if cap is not None:
-            return self.fail([cap, "the agent's source-query cap is reached: the packets were not fetched"])
-        _ordinal, left, refused = pivot.repo.reserve_agent_session_read(
+            return self.stop([cap, "the agent's source-query cap is reached: the packets were not fetched"])
+        _held, left, refused = pivot.repo.reserve_agent_session_read(
             pivot.hunt_id, settings.agent_max_session_reads, settings.agent_max_session_read_bytes, self.task_id,
             owner_token=pivot.owner_token, session_id=getattr(pivot, "session_id", None))
         if refused is not None:
             what = ("sessions the agent may read" if refused.startswith("agent_session_reads:")
                     else "packet bytes the agent's reads may fetch")
-            return self.fail([refused, (f"the hunt's cap on {what} is reached: the packets were not fetched, and "
+            return self.stop([refused, (f"the hunt's cap on {what} is reached: the packets were not fetched, and "
                                        "nothing was found or ruled out")])
-        packets = self.reader.packets_factory() if self.reader.packets_factory else ArkimePackets(settings)
-        per_fetch = getattr(packets, "max_bytes", 32 * 1024 * 1024) if is_http else stage.STREAM_FETCH_BYTES
+        packets = _Counting(self.reader.packets_factory() if self.reader.packets_factory else ArkimePackets(settings))
+        per_fetch = packets.max_bytes if is_http else stage.STREAM_FETCH_BYTES
         budget = min(per_fetch, left)
         root = settings.stage_path
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         work = Path(tempfile.mkdtemp(prefix=PCAP_PREFIX, dir=root))
         try:
             try:
-                path, capped, fetched, error = stage._fetch_segments(settings, packets, work, "read", segs, budget)
+                path, capped, _fetched, error = stage._fetch_segments(settings, packets, work, "read", segs, budget)
             except PacketError as exc:
-                path, capped, fetched, error = None, False, 0, str(exc)
-            self.fetched = fetched
-            pivot.repo.record_agent_session_read_bytes(pivot.hunt_id, self.task_id, fetched,
+                path, capped, error = None, False, str(exc)
+            # every byte any fetch wrote, also when the fetch stopped partway
+            self.fetched = packets.bytes
+            pivot.repo.record_agent_session_read_bytes(pivot.hunt_id, self.task_id, self.fetched,
                                                        owner_token=pivot.owner_token)
+            if not self.fetched:
+                # nothing was read: the read is given back
+                pivot.repo.refund_agent_session_read(pivot.hunt_id, self.task_id, owner_token=pivot.owner_token)
             if error or path is None:
-                return self.fail([f"the packet download failed: {_bounded(error or 'no packets')}"])
+                return self.stop([f"the packet download failed: {_bounded(error or 'no packets')}"])
             if capped:
                 which = ("the hunt's remaining session-read byte budget" if budget < per_fetch
                          else f"the per-read byte cap ({per_fetch // (1024 * 1024)} MiB)")
                 self.reasons.append(f"the packet download stopped at {which}: the content read is the session's "
                                     "first bytes only")
+            self.extracted = True
+            if self.held:
+                self.notes.append(HELD_NOTE)
             if is_http:
                 self._http(work, path, capped)
             else:
@@ -649,7 +625,7 @@ class _Read:
             self._stream(work, path, capped, key)
         finally:
             shutil.rmtree(work, ignore_errors=True)
-            close = getattr(packets, "close", None)
+            close = getattr(packets.packets, "close", None)
             if callable(close):
                 close()
         if self.not_kept:
@@ -659,9 +635,11 @@ class _Read:
 
     # ---- the stage's extraction ---------------------------------------------------------------------------------
     def _keep(self, events: list[TypedEvent], raws: dict[str, dict]) -> None:
-        room = MAX_SAVED_EVENTS - len(self.events)
-        kept = [event for event in events if event.id not in self.events][:max(0, room)]
-        self.not_kept += sum(1 for event in events if event.id not in self.events) - len(kept)
+        """Save the extracted events not yet listed, within the per-read cap. An event the hunt already held is the
+        same stored row (the stage's own identity) and is not counted again."""
+        new = [event for event in events if event.id not in self.events]
+        kept = new[:max(0, MAX_SAVED_EVENTS - len(self.events))]
+        self.not_kept += len(new) - len(kept)
         if kept:
             self.pivot._save_selected_events(kept, raws, {}, [self.task_id])
             for event in kept:
@@ -731,7 +709,7 @@ class _Read:
                 self._direct([event], {event.raw[0].key: raw})
             turns, hidden = transcript(streams.data, streams.chunks, self.settings)
             self.stream = {
-                "evidence": event.id if event is not None else None,
+                "evidence": event.id if event is not None and event.id in self.events else None,
                 "client": f"{key.client_ip}:{key.client_port}", "server": f"{key.server_ip}:{key.server_port}",
                 "client_bytes": len(streams.data["c2s"]), "server_bytes": len(streams.data["s2c"]),
                 "opened_by": streams.opened_by, "shell_side": analysis.side,
@@ -754,7 +732,8 @@ class _Read:
         if len(self.responses) >= MAX_PREVIEW_RESPONSES:
             self.responses_not_shown += 1
             return
-        item = {"evidence": event.id, "time": event.ts.isoformat(),
+        kept = event.id in self.events
+        item = {"evidence": event.id if kept else None, "kept": kept, "time": event.ts.isoformat(),
                 "uri": show(_redact_uri(event.get("url.original")), MAX_LINE_CHARS) if event.has("url.original")
                 else None,
                 "status": event.get("http.response.status_code"),

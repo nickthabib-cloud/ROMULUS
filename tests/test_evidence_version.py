@@ -202,8 +202,8 @@ PACKET_TABLES = (packet_sources.STREAM_PREFS, packet_sources.QUERIES["tcp_payloa
                  packet_rules.OUTPUT_WINDOW_BYTES, packet_rules.MAX_COMMAND_CHARS, packet_rules.MAX_COMMANDS,
                  packet_rules.PROMPT_SCAN_BYTES, packet_rules.MIN_INDICATORS, sorted(packet_rules.TYPED_TEXT_KINDS),
                  packet_sources.MAX_ADDRESS_CHARS, packet_stage.STREAM_DIRECTION_BYTES)
-# The stream judgement was split at the fetched capture (judge_capture), with an optional observer, so the agent's
-# session reads judge a capture with the same code; no event or raw copy changed.
+# The stream judgement of a fetched capture (judge_capture) is pinned with the rest of the stream normalizer; its
+# optional observer sees the event and never changes it.
 PINNED_PACKETS = {"tshark-packets@5": "54a9c76d39f0aa572b2272f47e11c375677dcfca920aba91235a788101b6ecea"}
 
 

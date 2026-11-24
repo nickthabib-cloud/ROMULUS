@@ -32,6 +32,8 @@ LIMITS: dict[str, str] = {
     "max_hypotheses": "agent_max_hypotheses",
     "max_sessions_per_hypothesis": "agent_max_sessions_per_hypothesis",
     "max_tool_calls_per_session": "agent_max_tool_calls_per_session",
+    "max_session_reads": "agent_max_session_reads",
+    "max_session_read_bytes": "agent_max_session_read_bytes",
 }
 # the limits an extension may add to by amount (an extension to a profile may raise every limit)
 EXTENDABLE = ("max_calls", "max_tokens", "max_wall_seconds", "max_source_queries", "max_cost_usd")
@@ -47,7 +49,7 @@ TRIAGE_LIMITS: dict[str, str] = {
 MINIMUM: dict[str, float] = {
     "max_calls": 1, "max_tokens": 1000, "max_wall_seconds": 60, "max_cost_usd": 0.0, "max_source_queries": 1,
     "max_initial_hypotheses": 1, "max_hypotheses": 1, "max_sessions_per_hypothesis": 1,
-    "max_tool_calls_per_session": 1,
+    "max_tool_calls_per_session": 1, "max_session_reads": 0, "max_session_read_bytes": 1024 * 1024,
 }
 # A cost budget has no setting maximum; this one only rejects a mistyped amount.
 COST_MAXIMUM = 1_000_000.0
@@ -66,20 +68,24 @@ MAX_EXTENSIONS = 100
 #   per-hypothesis limits, decide where the extra effort goes (the agent works the strongest leads first). The wall
 #   clock grows six-fold (one standard hour becomes six) so that over a long mission hunt the calls and tokens, not
 #   the clock, are what the agent spends.
+# The packet session reads and the packet bytes they may fetch scale as the source queries do.
 MULTIPLIERS: dict[str, dict[str, float]] = {
     "quick": {"max_calls": 0.25, "max_tokens": 0.25, "max_wall_seconds": 0.5, "max_cost_usd": 0.25,
               "max_source_queries": 0.25, "max_initial_hypotheses": 0.5, "max_hypotheses": 0.25,
-              "max_sessions_per_hypothesis": 0.5, "max_tool_calls_per_session": 1.0},
+              "max_sessions_per_hypothesis": 0.5, "max_tool_calls_per_session": 1.0,
+              "max_session_reads": 0.25, "max_session_read_bytes": 0.25},
     "standard": dict.fromkeys(LIMITS, 1.0),
     "deep": {"max_calls": 4.0, "max_tokens": 4.0, "max_wall_seconds": 6.0, "max_cost_usd": 4.0,
              "max_source_queries": 4.0, "max_initial_hypotheses": 2.0, "max_hypotheses": 2.0,
-             "max_sessions_per_hypothesis": 2.0, "max_tool_calls_per_session": 1.5},
+             "max_sessions_per_hypothesis": 2.0, "max_tool_calls_per_session": 1.5,
+             "max_session_reads": 4.0, "max_session_read_bytes": 4.0},
 }
 LABELS = {
     "max_calls": "model calls", "max_tokens": "budget tokens", "max_wall_seconds": "wall clock (s)",
     "max_cost_usd": "cost (USD)", "max_source_queries": "source queries",
     "max_initial_hypotheses": "initial hypotheses", "max_hypotheses": "hypotheses",
     "max_sessions_per_hypothesis": "sessions per hypothesis", "max_tool_calls_per_session": "tool calls per session",
+    "max_session_reads": "packet session reads", "max_session_read_bytes": "packet bytes read",
 }
 
 
