@@ -7,7 +7,7 @@ cluster or model.
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -664,3 +664,70 @@ def test_the_reach_is_recorded_as_an_agent_read_link(tmp_path, monkeypatch):
     _read(toolbox, _session_alias(repo, SHELL_DOC))
     links = repo.expansion_links("h1")
     assert [link["link_type"] for link in links] == ["agent_read_session"]
+
+def _cells(repo):
+    return [(datetime.fromisoformat(cell["start"]), datetime.fromisoformat(cell["end"]), cell["status"])
+            for link in repo.expansion_links("h1") for cell in link["coverage"]]
+
+
+SESSION_SPAN = (TS - timedelta(minutes=1), TS + timedelta(minutes=5))
+
+
+def test_a_read_covers_the_session_span_never_the_whole_hunt_window(tmp_path, monkeypatch):
+    repo, toolbox, _client, w = _setup(tmp_path, monkeypatch, [HTTP_DOC], http_rows=[_http_row(TS.timestamp())],
+                                       streams={HTTP_KEY: HTTP_STREAM})
+    first = _read(toolbox, _session_alias(repo, HTTP_DOC))
+    body = next(alias for alias in first["data"]["result"]["evidence"]
+                if AliasBook(repo, "h1").resolve(alias, {"E"}) == _events(repo, first)["http_body"]["id"])
+    # the same session through its rebuilt body (an event with one time): answered from the first read, its span kept
+    again = _read(toolbox, body)
+    assert len(w.packets.calls) == 1 and again["status"] == "complete"
+    assert _cells(repo) == [(*SESSION_SPAN, "complete")] * 2
+
+
+def test_an_earlier_read_without_a_span_is_read_afresh(tmp_path, monkeypatch):
+    from romulus.evidence.raw_citation import build_raw_record
+    repo, toolbox, _client, w = _setup(tmp_path, monkeypatch, [SHELL_DOC], streams={SHELL_KEY: SHELL_ROWS})
+    _read(toolbox, _session_alias(repo, SHELL_DOC))
+    # a complete read stored by a build that kept no span
+    [done] = [link["task_ids"][0] for link in repo.expansion_links("h1")]
+    outcome = {key: value for key, value in repo.task(done)["outcome"].items() if key != "span"}
+    repo.update_task(done, "evaluated", outcome=outcome)
+    row = build_raw_record("h1", SHELL_DOC, source_kind="arkime_session", time_field="firstPacket", session_id=SESSION,
+                           task_id=None, query_digest="d", query_text="ip.src == 172.17.100.121", redact=lambda v: v,
+                           flagged=lambda v: False)
+    [kept], _refused = repo.save_agent_raw_records("h1", [row], max_count=10)
+    again = _read(toolbox, AliasBook(repo, "h1").alias_for("Q", kept))
+    assert len(w.packets.calls) == 2 and again["status"] == "complete"
+    assert all((start, end) != (T, END) for start, end, _status in _cells(repo)), _cells(repo)
+
+
+def test_a_cell_never_claims_more_than_the_session():
+    reader = rs.SessionReader(None, Settings(), lambda _target: None, Window(start=T, end=END))
+    # a session seen at one instant covers that millisecond
+    cell = reader._cell(TARGET, "complete", [], 1, (TS, TS))
+    assert (cell.start, cell.end, cell.status) == (TS, TS + timedelta(milliseconds=1), "complete")
+    # no known span is never a complete hunt window
+    cell = reader._cell(TARGET, "complete", [], 1)
+    assert cell.status == "partial" and cell.unresolved_ranges
+    # a window shorter than a millisecond keeps the cell inside it
+    tiny = rs.SessionReader(None, Settings(), lambda _target: None,
+                            Window(start=T, end=T + timedelta(microseconds=500)))
+    cell = tiny._cell(TARGET, "partial", ["x"], 0, (T - timedelta(hours=1), T - timedelta(hours=1)))
+    assert T <= cell.start < cell.end <= T + timedelta(microseconds=500)
+
+
+def test_a_failed_read_reports_the_session_span_unresolved(tmp_path, monkeypatch):
+    repo, toolbox, _client, _w = _setup(tmp_path, monkeypatch, [SHELL_DOC], packets=Packets(error="refused (403)"))
+    cells = []
+    failed = rs.SessionReader._failed
+
+    def spy(self, target, reasons, started, span=None):
+        result = failed(self, target, reasons, started, span)
+        cells.extend(result.coverage)
+        return result
+
+    monkeypatch.setattr(rs.SessionReader, "_failed", spy)
+    assert _read(toolbox, _session_alias(repo, SHELL_DOC))["status"] == "failed"
+    assert [(cell.start, cell.end, cell.status) for cell in cells] == [(*SESSION_SPAN, "failed")]
+    assert cells[0].unresolved_ranges
