@@ -540,7 +540,9 @@ def test_added_budget_lets_a_budget_limited_agent_continue_from_its_persisted_wo
         "severity": "high", "confidence": "high", "lane": "high", "priority": 2.0,
         "priority_reasons": [], "gate_results": {}, "benign_alternatives": [], "next_checks": [],
         "group_key": "c1", "source_case_id": None, "source_anchor_id": None, "source_link_id": None})
-    opens = [ToolCall("o1", "open_hypothesis", {"statement": "Review the first incident hypothesis"}, "{}"),
+    # it cites the hunt's one finding, so its cluster is explained and the controller opens no other hypothesis
+    opens = [ToolCall("o1", "open_hypothesis", {"statement": "Review the first incident hypothesis",
+                                                "supporting": ["F1"]}, "{}"),
              ToolCall("of", "finish_session", {"summary": "The initial review is complete."}, "{}")]
     finish = [ToolCall("f", "finish_session", {"summary": "The evidence review is complete."}, "{}")]
 

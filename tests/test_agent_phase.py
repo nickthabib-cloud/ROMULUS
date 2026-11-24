@@ -129,7 +129,9 @@ def test_scripted_orient_investigate_and_assess_keeps_deterministic_rows(tmp_pat
     })
     deterministic_before = repo.candidates("h1")
     opens = [
-        ToolCall("o1", "open_hypothesis", {"statement": "Review the first incident hypothesis"}, "{}"),
+        # the first cites the hunt's one finding, so its cluster is explained and the controller opens none
+        ToolCall("o1", "open_hypothesis", {"statement": "Review the first incident hypothesis",
+                                           "supporting": ["F1"]}, "{}"),
         ToolCall("o2", "open_hypothesis", {"statement": "Review an alternate incident hypothesis"}, "{}"),
         ToolCall("of", "finish_session", {"summary": "The initial review is complete."}, "{}"),
     ]
@@ -340,7 +342,8 @@ def test_two_consecutive_provider_outages_are_billed_then_assess_runs(tmp_path):
     assert all(row["options"]["billed_failure"] == "ProviderUnavailable" for row in calls[:2])
     assert repo.agent_usage("h1")["calls"] == 3
     assert [row["state"] for row in repo.agent_sessions("h1")] == ["failed", "failed", "finished"]
-    assert result.state == "partial" and result.reason == "provider_unavailable"
+    # the hypothesis the outage left unworked is named, so a continuation works it
+    assert result.state == "partial" and result.reason == "unworked_hypotheses:1; provider_unavailable"
     engine.dispose()
 
 

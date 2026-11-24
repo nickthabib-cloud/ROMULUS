@@ -228,7 +228,9 @@ def test_after_a_trip_the_run_continues_its_other_sessions_and_the_assessment(tm
         "priority_reasons": [], "gate_results": {}, "benign_alternatives": [], "next_checks": [],
         "group_key": "c1", "source_case_id": None, "source_anchor_id": None, "source_link_id": None,
     })
-    opens = [ToolCall("o1", "open_hypothesis", {"statement": "Review the first incident hypothesis"}, "{}"),
+    # the first cites the hunt's one finding, so its cluster is explained and the controller opens no other
+    opens = [ToolCall("o1", "open_hypothesis", {"statement": "Review the first incident hypothesis",
+                                                "supporting": ["F1"]}, "{}"),
              ToolCall("o2", "open_hypothesis", {"statement": "Review an alternate incident hypothesis"}, "{}"),
              ToolCall("of", "finish_session", {"summary": "The initial review is complete."}, "{}")]
     read = [ToolCall("r1", "list_findings", {}, "{}")]
