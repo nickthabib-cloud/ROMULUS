@@ -10,7 +10,8 @@ investigating. `SessionResults` keeps it bounded:
 - A result larger than one page enters the conversation as its envelope (status, counts, what to read next, the
   aliases it issued) and its first page; the rest is paged through ``get_result``.
 - Once the results the model has already been sent, older than the latest `KEEP_FULL_RESULTS`, add up to more than
-  `COMPACT_AFTER_TOKENS`, all of them are replaced by stubs at once. Between compactions the conversation is
+  `COMPACT_AFTER_TOKENS`, or the whole prompt reaches
+  `PROMPT_COMPACT_TOKENS` and they hold at least `PROMPT_COMPACT_MIN_TOKENS`, all of them are replaced by stubs at once. Between compactions the conversation is
   append-only, so the provider's prompt cache keeps reading its prefix; a stub, once written, never changes, so the
   stubs of earlier compactions stay part of every later prefix.
 
@@ -32,18 +33,34 @@ from romulus.agent.admission import collect_issued_aliases
 from romulus.agent.provider.base import CHARS_PER_TOKEN, PROVIDER_STATE, estimate_tokens, redact_value
 from romulus.config import Settings, redact_counted, redact_text
 
-# The latest tool results kept in full at a compaction (of those a stub would replace: write results and short ones
-# are never stubbed and not counted here). A reply often makes two to four calls at once, and the next step usually
-# compares the newest results with each other; older ones are re-read on demand through their handle.
-KEEP_FULL_RESULTS = 4
-# A compaction runs once the full results older than the kept ones reach this many estimated tokens. Each compaction
-# changes the conversation from its first newly stubbed result on, so the provider writes that tail to its cache again
-# once (about 1.25 times the input price) instead of reading it (about 0.1 times); in between, every call re-reads the
-# stale results (0.1 times each). Over a session of forty large query results (about 5,700 tokens each) the weighted
-# prompt cost is lowest between 32,000 and 48,000 (a compaction every 6 to 9 calls), and rises on either side (more
-# rewrites below, more stale re-reads above); the lower end also keeps the largest prompt lower. With a provider that
-# bills cached input at the full price, compaction is pure saving, and this threshold only keeps it batched.
+# The newest tool results a compaction keeps in full (write results and short ones are never stubbed and not counted
+# here), counting those the model has not been sent yet: a result after the model's last turn is never stubbed, so a
+# reply's parallel calls always reach the model whole and the next step can compare them with each other. With one
+# call per reply this keeps the result just returned and the one the model read last.
+#
+# Why so few: a compaction changes the conversation from its oldest newly stubbed result on, so everything after that
+# point, the kept results included, is written to the provider's cache again (about 1.25 times the input price)
+# instead of read from it (about 0.1 times). On a prompt-cached provider most of an investigation's weighted spend is
+# those writes: every new result and reply is written once anyway, and each compaction writes the kept tail again.
+# Keeping the four newest results whole (up to 40,000 tokens) made every compaction rewrite them. Modelled over
+# sessions of about 18 calls with results of 1,500 to 10,000 tokens, a 16,000-token fixed prefix and a re-read of a
+# recently stubbed result one time in seven, keeping two costs about a tenth less per unit of work than keeping four,
+# and the largest prompt falls by about a fifth. The model records what each result established in its own turns,
+# which are never compacted, and re-reads a stub through its handle.
+KEEP_FULL_RESULTS = 2
+# A compaction runs once the full results older than the kept ones reach this many estimated tokens. In between,
+# every call re-reads the stale results (0.1 times each); each compaction rewrites the kept tail once. In the same
+# model the weighted cost per unit of work is flat between 32,000 and 40,000 and rises on either side (more rewrites
+# below, more stale re-reads above); the lower end keeps the largest prompt lower. With a provider that bills cached
+# input at the full price, compaction is pure saving, and this threshold only keeps it batched.
 COMPACT_AFTER_TOKENS = 32_000
+# A compaction also runs below COMPACT_AFTER_TOKENS once the whole prompt is estimated at PROMPT_COMPACT_TOKENS or
+# more: some providers bill a prompt longer than a line (100,000 tokens is a common one) at a higher rate from its
+# first token, so a session's prompt is kept below that line while it can be. It runs only when it reclaims at least
+# PROMPT_COMPACT_MIN_TOKENS: once the model's own turns and the stubs alone fill the prompt, compacting each newly
+# stale result would rewrite the conversation's tail on every call for little gain.
+PROMPT_COMPACT_TOKENS = 90_000
+PROMPT_COMPACT_MIN_TOKENS = 8_000
 # For a model with a small context the threshold is at most this share of it, so compaction still runs well before
 # the context fills (the session wraps up at 85 % of it).
 COMPACT_CONTEXT_SHARE = 0.25
@@ -284,9 +301,11 @@ class SessionResults:
                 "next": f"get_result handle={handle} page={page + 1}" if page < entry.pages else None}
 
     # ---- compaction -------------------------------------------------------------------------------------------
-    def compact(self, messages: list[dict], without_reasoning: Callable[[dict], dict] | None = None) -> int:
+    def compact(self, messages: list[dict], without_reasoning: Callable[[dict], dict] | None = None, *,
+                prompt_tokens: int = 0) -> int:
         """Stub, in `messages`, every full tool result the model has been sent that is older than the latest
-        KEEP_FULL_RESULTS, once those add up to COMPACT_AFTER_TOKENS; returns how many were stubbed (0: unchanged).
+        KEEP_FULL_RESULTS, once those add up to COMPACT_AFTER_TOKENS, or once the whole prompt (`prompt_tokens`, as
+        the caller estimates it) reaches PROMPT_COMPACT_TOKENS and they hold at least PROMPT_COMPACT_MIN_TOKENS; returns how many were stubbed (0: unchanged).
 
         A compaction is the session's one declared edit of what it already sent. The model's turns, their text, tool
         calls and every tool_call_id stay. Their signed reasoning stays only where it is still valid: a provider that
@@ -307,7 +326,11 @@ class SessionResults:
         kept = {id(slot) for slot in full[-KEEP_FULL_RESULTS:]} if KEEP_FULL_RESULTS else set()
         # a result the model has not been sent yet (after its last turn) is never stubbed
         candidates = [slot for slot in full if id(slot) not in kept and slot.index < last_assistant]
-        if sum(slot.tokens for slot in candidates) < compact_threshold(self.context_tokens):
+        if not candidates:
+            return 0
+        stale = sum(slot.tokens for slot in candidates)
+        if stale < compact_threshold(self.context_tokens) and (
+                prompt_tokens < PROMPT_COMPACT_TOKENS or stale < PROMPT_COMPACT_MIN_TOKENS):
             return 0
         for slot in candidates:
             message = messages[slot.index]
