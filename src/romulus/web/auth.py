@@ -15,6 +15,7 @@ from argon2.exceptions import InvalidHashError, VerificationError
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from sqlalchemy import select
 
+from romulus.config import session_secret_problem
 from romulus.store import schema as t
 from romulus.store.db import utcnow, write_txn
 
@@ -243,9 +244,9 @@ def set_password(engine, username: str, password: str) -> bool:
 
 class Sessions:
     def __init__(self, secret: str):
-        if len(secret) < 32 or secret.lstrip().startswith("#") or " " in secret:
-            raise ValueError("ROMULUS_SECRET_KEY must be a random value of 32+ characters without spaces "
-                             "(e.g. python -c \"import secrets;print(secrets.token_urlsafe(32))\")")
+        problem = session_secret_problem(secret)
+        if problem:
+            raise ValueError(problem)
         self.s = URLSafeTimedSerializer(secret, salt="romulus-session")
 
     def issue(self, user: dict) -> str:

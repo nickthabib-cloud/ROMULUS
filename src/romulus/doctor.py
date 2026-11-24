@@ -25,6 +25,7 @@ from romulus.config import (
     Settings,
     redact_text,
     secret_settings,
+    session_secret_problem,
     short_secrets,
     triage_settings,
     weak_secret_names,
@@ -349,8 +350,9 @@ def check_agent(s: Settings, transport: httpx.BaseTransport | None = None,
     out = [Check("agent.provider", "ok", f"{readiness.provider} model {readiness.model} at {d.host}")]
     if d.egress == "remote":
         out.append(Check("agent.egress", "warn",
-                         f"remote endpoint {d.host}, allowed only by ROMULUS_MODEL_EGRESS={EGRESS_SWITCH_VALUE}: "
-                         "telemetry excerpts will be sent to it; hunt public data only"))
+                         f"remote endpoint {d.host}, allowed by ROMULUS_MODEL_EGRESS={EGRESS_SWITCH_VALUE}, the "
+                         "explicit opt-in for a remote endpoint the operator has approved for the hunt's data: "
+                         "telemetry excerpts will be sent to it"))
     else:
         out.append(Check("agent.egress", "warn" if s.model_egress else "ok",
                          f"local endpoint ({d.basis})" + ("; ROMULUS_MODEL_EGRESS is set but not needed: unset it"
@@ -432,6 +434,71 @@ def check_secret_strength(s: Settings, source_root: Path | None = None) -> Check
                  "back, and the session goes on rather than ending. Replace it with a long random value at a real "
                  "site",
                  {"settings": sorted(weak)})
+
+
+def check_index_patterns(s: Settings) -> Check:
+    """`es.index_patterns`: a hunt refuses to start without ES_INDEX_PATTERNS (hunt.run.create_hunt), so doctor
+    fails then, in the hunt's words."""
+    if not s.es_index_patterns:
+        return Check("es.index_patterns", "fail", "no ES_INDEX_PATTERNS configured: nothing to hunt")
+    return Check("es.index_patterns", "ok", f"{len(s.es_index_patterns)} pattern(s): {', '.join(s.es_index_patterns)}")
+
+
+def check_session_secret(s: Settings) -> Check:
+    """`web.secret_key`: ROMULUS_SECRET_KEY by the rule the web UI enforces when it starts. Never the value or its
+    length."""
+    problem = session_secret_problem(s.secret_key.get_secret_value())
+    if problem:
+        return Check("web.secret_key", "fail", f"{problem}; `romulus web` refuses to start without one")
+    return Check("web.secret_key", "ok", "set, and fit to sign web sessions")
+
+
+PACKETS_SKIPPED = ("no index in ES_INDEX_PATTERNS is an Arkime session index, so the packet stage will be skipped "
+                   "and Arkime and TShark are not needed")
+
+
+def packet_targets(s: Settings, client: ElasticClient | None = None) -> list[str] | None:
+    """The hunt targets the packet stage would read: the targets of ES_INDEX_PATTERNS whose contract is timed by
+    firstPacket (Arkime sessions), exactly as a hunt builds them, so an empty list means a hunt started now skips the
+    packet stage. None when that cannot be told (the cluster or the site file could not be read)."""
+    if not s.es_index_patterns:
+        return []
+    client = client or ElasticClient(s, timeout=ES_TIMEOUT)
+    try:
+        declared = load_site_facts(s.home).zeek.plain_sources
+        found = []
+        for pattern in s.es_index_patterns:
+            for target in client.resolve(pattern):
+                # a declared plain Zeek source is timed by ts in a hunt, whatever its mapping
+                if target in declared:
+                    continue
+                if contract_from_types(target, flatten_mapping(client.mapping(target))).time_field == "firstPacket":
+                    found.append(target)
+    except (SourceError, SiteValidationError, ValueError):
+        return None
+    return sorted(set(found))
+
+
+def check_packet_scope(s: Settings) -> Check:
+    """`packets.scope`: whether a hunt would run the packet stage. Its data carries `targets` (packet_targets) for
+    the Arkime and TShark checks after it (packet_optional); a result without it means unknown."""
+    targets = packet_targets(s)
+    if targets is None:
+        return Check("packets.scope", "warn", "the Arkime session indices could not be listed (see es.reachable); "
+                                              "Arkime and TShark are checked as required", {"targets": None})
+    if not targets:
+        return Check("packets.scope", "ok", PACKETS_SKIPPED, {"targets": []})
+    shown = ", ".join(targets[:10]) + (f" and {len(targets) - 10} more" if len(targets) > 10 else "")
+    return Check("packets.scope", "ok", f"Arkime session indices: {shown}; the packet stage needs Arkime and TShark",
+                 {"targets": targets})
+
+
+def packet_optional(check: Check, scope: dict) -> Check:
+    """An Arkime or TShark failure is a warning when no hunt would run the packet stage (`scope["targets"]` is an
+    empty list); while that is unknown or the stage would run, the result stands."""
+    if check.status == "fail" and scope.get("targets") == []:
+        return Check(check.name, "warn", f"{check.detail}; {PACKETS_SKIPPED}", {**check.data, "packet_stage": "skipped"})
+    return check
 
 
 def check_tshark(s: Settings) -> Check:
@@ -790,11 +857,13 @@ def check_linux_text_sources(s: Settings, client: ElasticClient | None = None) -
 @dataclass(frozen=True)
 class Step:
     """One check (or group of checks) run under its own deadline. `name` is the check a timeout or an unexpected
-    error is reported as; `critical` makes either a failure instead of a warning."""
+    error is reported as; `critical` makes either a failure instead of a warning. `adjust`, when given, is applied to
+    every result, a timeout or an error included, in the calling thread."""
     name: str
     run: Callable[[], Check | list[Check] | None]
     seconds: float
     critical: bool
+    adjust: Callable[[Check], Check] | None = None
 
 
 def run_step(step: Step, s: Settings) -> list[Check]:
@@ -814,15 +883,15 @@ def run_step(step: Step, s: Settings) -> list[Check]:
     worker.join(step.seconds)
     status = "fail" if step.critical else "warn"
     if worker.is_alive():
-        return [Check(step.name, status, f"timed out after {step.seconds:g} s; not verified",
-                      {"timed_out": True, "seconds": step.seconds})]
-    if "error" in box:
+        out = [Check(step.name, status, f"timed out after {step.seconds:g} s; not verified",
+                     {"timed_out": True, "seconds": step.seconds})]
+    elif "error" in box:
         error = box["error"]
-        return [Check(step.name, status, redact_text(f"check failed: {type(error).__name__}: {error}", s)[:500])]
-    value = box.get("value")
-    if value is None:
-        return []
-    return [value] if isinstance(value, Check) else list(value)
+        out = [Check(step.name, status, redact_text(f"check failed: {type(error).__name__}: {error}", s)[:500])]
+    else:
+        value = box.get("value")
+        out = [] if value is None else [value] if isinstance(value, Check) else list(value)
+    return [step.adjust(check) for check in out] if step.adjust is not None else out
 
 
 def doctor_steps(s: Settings, env_file: Path | None = None, check_seconds: float | None = None) -> list[Step]:
@@ -831,20 +900,35 @@ def doctor_steps(s: Settings, env_file: Path | None = None, check_seconds: float
         return check_seconds if check_seconds is not None else seconds
 
     integrity = bound(DB_INTEGRITY_SECONDS)
+    # whether a hunt would run the packet stage, as packets.scope found it: unknown until that step returns targets
+    scope: dict = {}
+
+    def record_scope(check: Check) -> Check:
+        if check.name == "packets.scope" and "targets" in check.data:
+            scope["targets"] = check.data["targets"]
+        return check
+
+    def optional(check: Check) -> Check:
+        return packet_optional(check, scope)
+
     return [
+        Step("es.index_patterns", lambda: check_index_patterns(s), bound(LOCAL_SECONDS), False),
         Step("es.reachable", lambda: check_es(s), bound(CHECK_SECONDS), True),
         Step("es.text_inventory", lambda: check_linux_text_sources(s), bound(INVENTORY_SECONDS), False),
         Step("site.internal_networks", lambda: check_site_networks(s), bound(INVENTORY_SECONDS), False),
-        Step("arkime.reachable", lambda: check_arkime(s), bound(LOCAL_SECONDS), True),
+        Step("packets.scope", lambda: check_packet_scope(s), bound(INVENTORY_SECONDS), False, record_scope),
+        # critical while a hunt would run the packet stage (or that is unknown); a warning when none would
+        Step("arkime.reachable", lambda: check_arkime(s), bound(LOCAL_SECONDS), True, optional),
         Step("arkime.auth", lambda: check_arkime_auth(s), bound(LOCAL_SECONDS), False),
         Step("ollama.reachable", lambda: check_ollama(s), bound(CHECK_SECONDS), True),
         Step("agent.provider", lambda: check_agent(s), bound(MODEL_SECONDS), True),
         Step("triage.provider", lambda: check_triage_model(s), bound(MODEL_SECONDS), True),
         Step("secrets.length", lambda: check_secret_lengths(s), bound(LOCAL_SECONDS), False),
         Step("secrets.strength", lambda: check_secret_strength(s), bound(CHECK_SECONDS), False),
-        Step("tshark", lambda: check_tshark(s), bound(LOCAL_SECONDS), True),
+        Step("tshark", lambda: check_tshark(s), bound(LOCAL_SECONDS), True, optional),
         Step("paths", lambda: check_paths(s, env_file), bound(LOCAL_SECONDS), False),
         Step("web.tls", lambda: check_web_tls(s), bound(LOCAL_SECONDS), False),
+        Step("web.secret_key", lambda: check_session_secret(s), bound(LOCAL_SECONDS), False),
         Step("site.collection", lambda: check_site(s), bound(LOCAL_SECONDS), False),
         Step("mentions.patterns", lambda: check_mention_patterns(s), bound(LOCAL_SECONDS), False),
         Step("db.integrity", lambda: check_db(s, integrity), integrity + DB_GRACE_SECONDS, False),

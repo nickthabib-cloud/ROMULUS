@@ -1,7 +1,7 @@
 """Adapter for any server that speaks the OpenAI Chat Completions API with tool calling and JSON-schema output.
 
-It serves a team's own model server (vLLM, SGLang, llama.cpp server, LM Studio, TGI, Ollama's /v1) and, in a
-lab on public data only, a hosted API. AGENT_BASE_URL is the API root that contains /chat/completions.
+It serves a team's own model server (vLLM, SGLang, llama.cpp server, LM Studio, TGI, Ollama's /v1) and a hosted
+API the operator has approved (ROMULUS_MODEL_EGRESS). AGENT_BASE_URL is the API root that contains /chat/completions.
 """
 from __future__ import annotations
 

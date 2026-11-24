@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from romulus.config import load_settings, triage_model, with_agent_model
+from romulus.config import load_settings, session_secret_problem, triage_model, with_agent_model
 
 EXIT_OK, EXIT_FAIL, EXIT_USAGE = 0, 1, 2
 
@@ -561,7 +561,8 @@ def cmd_web(args) -> int:
     from romulus import web_exposure as serve
     env = _env_file(args)
     s = load_settings(env)
-    refusal = serve.refusal(s)
+    # checked before anything is served, so a bad key is a message, never a traceback from the app
+    refusal = serve.refusal(s) or session_secret_problem(s.secret_key.get_secret_value())
     if refusal:
         print(f"romulus web: {refusal}", file=sys.stderr)
         return EXIT_FAIL

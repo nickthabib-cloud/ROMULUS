@@ -225,7 +225,9 @@ class Settings(BaseModel):
     # groups of Reported findings the AI narrative cites that the triage pass left without a verdict, triaged after
     # the assessment so the narrative check can weigh them (those cited by the most paragraphs first); 0 = none
     agent_triage_cited_max_groups: int = Field(default=20, ge=0, le=1000)
-    # Bootstrap-only switch: the one value that lets telemetry excerpts reach a non-local model endpoint.
+    # Bootstrap-only switch: the one value that lets telemetry excerpts reach a non-local model endpoint, the explicit
+    # opt-in for a remote endpoint the operator has approved for the hunt's data. The value's name is kept for
+    # existing installs.
     model_egress: Literal["", "lab-public-data"] = ""
     # Extra hosts, addresses or CIDR networks treated as local (e.g. a team's model server on an enclave address).
     model_local_hosts: list[str] = []
@@ -441,6 +443,19 @@ def load_settings(env_file: Path | None = None, environ: dict[str, str] | None =
         logging.getLogger("romulus.config").warning("AGENT_MODE is deprecated and ignored; use AGENT_DEFAULT and --agent/--no-agent")
     kwargs = {ENV_MAP[k]: v for k, v in merged.items() if k in ENV_MAP and v != ""}
     return Settings(**kwargs)
+
+
+MIN_SESSION_SECRET_LENGTH = 32
+SESSION_SECRET_RULE = ("ROMULUS_SECRET_KEY must be a random value of 32+ characters without spaces "
+                       "(e.g. python -c \"import secrets;print(secrets.token_urlsafe(32))\")")
+
+
+def session_secret_problem(secret: str) -> str | None:
+    """Why `secret` cannot sign web sessions (empty, short, a stray comment, or containing spaces), or None. The web
+    UI refuses to start on it and doctor fails it; the message never carries the value or its length."""
+    if len(secret) < MIN_SESSION_SECRET_LENGTH or secret.lstrip().startswith("#") or " " in secret:
+        return ("ROMULUS_SECRET_KEY is empty: " if not secret else "") + SESSION_SECRET_RULE
+    return None
 
 
 def with_agent_model(settings: Settings, model: str | None) -> Settings:
