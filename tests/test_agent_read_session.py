@@ -102,7 +102,9 @@ class World:
         self.intents = []
         monkeypatch.setattr(hp, "run_tshark", self._tshark)
         monkeypatch.setattr(hp, "execute", self._execute)
-        monkeypatch.setattr(hp, "merge_captures", lambda s, parts, dest, dirs: dest.write_bytes(PCAP))
+        self.merges = []
+        monkeypatch.setattr(hp, "merge_captures", lambda s, parts, dest, dirs: (
+            self.merges.append([part.name for part in parts]), dest.write_bytes(PCAP))[0])
 
     def _tshark(self, s, pcap, query, dirs, http_ports=(), stream=None):
         assert pcap.exists()
@@ -276,6 +278,25 @@ def test_a_read_of_another_session_leaves_a_stage_finding_as_it_is(tmp_path, mon
     assert AliasBook(repo, "h1").alias_for("F", before["id"]) in result["data"]["result"]["candidates"]
 
 
+def test_a_long_session_is_read_from_all_its_documents_in_packet_order(tmp_path, monkeypatch):
+    first = TS - timedelta(minutes=1)
+    later = _doc("241118-SEGMENT00001", VICTIM, ATTACKER, first=first, last=TS + timedelta(minutes=9))
+    earlier = _doc("241118-SEGMENT00002", VICTIM, ATTACKER, first=first, last=TS + timedelta(minutes=2))
+    repo, toolbox, client, w = _setup(tmp_path, monkeypatch, [later, earlier], streams={SHELL_KEY: SHELL_ROWS})
+    result = _read(toolbox, _session_alias(repo, later))         # the alias names the later document
+    assert result["status"] == "complete", result["data"]["result"]["reasons"]
+    assert len(client.calls) == 1
+    [lookup] = [i for i in w.intents if i.purpose == hp.STREAM_CONNECTION_PURPOSE]
+    assert {p.field for p in lookup.filters} == set(hp.CONNECTION_FIELDS)
+    # each document fetched alone, in lastPacket order, then merged once into one capture
+    assert [ids for ids, _cap in w.packets.calls] == [[earlier["_id"]], [later["_id"]]]
+    assert w.merges == [["read-seg0.pcap", "read-seg1.pcap"]]
+    stream = _events(repo, result)["tcp_stream"]["event"]["fields"]
+    assert stream["arkime.session_ids"]["value"] == [earlier["_id"], later["_id"]]
+    session = result["data"]["result"]["search"]["session"]
+    assert session["segments"] == 2 and session["arkime_session_ids"] == [earlier["_id"], later["_id"]]
+
+
 def test_a_raw_record_of_an_arkime_session_can_be_read(tmp_path, monkeypatch):
     from romulus.evidence.raw_citation import build_raw_record
     repo, toolbox, client, _w = _setup(tmp_path, monkeypatch, [SHELL_DOC], streams={SHELL_KEY: SHELL_ROWS})
@@ -436,6 +457,26 @@ def test_an_authentication_challenge_withholds_the_answer():
     assert masker.turn("server", b"334 VXNlcm5hbWU6\r\n")["lines"] == ["334 VXNlcm5hbWU6"]
     assert masker.turn("client", b"Ym9i\r\n").get("withheld")
     assert masker.turn("client", b"QUIT\r\n")["lines"] == ["QUIT"]
+
+
+@pytest.mark.parametrize("prompt", [b"[sudo] password for admin: ", b"Enter passphrase for key '/root/.ssh/id_rsa': ",
+                                    b"Password for bob@CORP.EXAMPLE: ", b"Enter PEM pass phrase:", b"\r\nPassword: "])
+def test_a_password_prompt_withholds_the_next_text_of_the_other_side(prompt):
+    masker = rs.Masker(None)
+    masker.turn("server", prompt)
+    assert masker.turn("client", b"hunter2\n") == {"from": "client", "bytes": 8, "withheld": (
+        "text sent after a password prompt or an authentication challenge")}
+    assert masker.turn("client", b"id\n")["lines"] == ["id"]
+
+
+def test_a_prompt_at_the_end_of_a_long_turn_is_still_seen():
+    from tests.test_packet_shell import KEY
+    long_output = b"".join(b"line %d of a long listing\r\n" % i for i in range(400)) + b"[sudo] password for www: "
+    streams = pk.reassemble_tcp(conversation([("s2c", long_output), ("c2s", b"hunter2\r\n"), ("s2c", b"ok\r\n")]),
+                                KEY, hp.STREAM_DIRECTION_BYTES)
+    turns, _hidden = rs.transcript(streams.data, streams.chunks, None)
+    assert len(long_output) > rs.MAX_TURN_BYTES and turns[0]["bytes_not_shown"] > 0
+    assert turns[1].get("withheld") and "hunter2" not in json.dumps(turns)
 
 
 # ---- admission ----------------------------------------------------------------------------------------------------

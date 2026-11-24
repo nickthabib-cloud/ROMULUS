@@ -35,7 +35,7 @@ import re
 import shutil
 import tempfile
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import perf_counter
 
@@ -88,6 +88,8 @@ MAX_REASONS = 20
 MAX_LISTED_IDS = 20
 ERROR_CHARS = 300
 WITHHELD = "[withheld]"
+# slack around a session's span when looking for the packet content a hunt already holds for it
+HELD_SLACK = timedelta(seconds=60)
 
 # Credential forms masked in previews (the typed events and their raw copies never hold this text).
 _SECRET_HEADERS = frozenset({"authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key",
@@ -100,7 +102,12 @@ _TAGGED = re.compile(r"(?i)^(\s*\S{1,32}\s+)(LOGIN|AUTHENTICATE)\s+(\S.*)$")
 _PAIR = re.compile(r"""(["']?)([A-Za-z0-9_.\-]{1,64})\1(\s*[=:]\s*)("[^"]*"?|'[^']*'?|[^\s&;,"']+)""")
 # a prompt that asks for a secret (the next text the other side sends is withheld), and a server's request for the next
 # part of an authentication exchange (SMTP 334, IMAP and POP "+" continuations)
-_SECRET_PROMPT = re.compile(r"(?i)\b(?:pass(?:word|phrase|code)?|passcode|pin|secret|token|otp)\s*[:?]\s*$")
+# (anywhere in a line that ends in ":" or "?": "Password:", "[sudo] password for bob: ", "Enter passphrase for key
+# '...': ", "Password for bob@REALM: ", "Enter PEM pass phrase:")
+_SECRET_PROMPT = re.compile(
+    r"(?i)\b(?:pass(?:word|wd|phrase|code)?|pass phrase|pin|secret|token|otp)\b.{0,200}?[:?]\s*$")
+# what of a turn's end is read for a prompt (a prompt is the tail of the turn's last line)
+PROMPT_TAIL_BYTES = 512
 _CONTINUATION = re.compile(r"^(?:334|\+)(?:\s|$)")
 _LINE_SPLIT = re.compile(rb"\r\n|\r\x00|\n|\r")
 
@@ -155,22 +162,25 @@ class Masker:
             text = redact_text(text, self.settings)
         return text
 
-    def turn(self, side: str, raw: bytes) -> dict:
-        """One side's bytes in a conversation turn, as preview lines (or a count of binary bytes)."""
+    def turn(self, side: str, raw: bytes, whole: bytes | None = None) -> dict:
+        """One side's bytes in a conversation turn, as preview lines (or a count of binary bytes). `raw` is what is
+        shown of the turn; `whole` (default `raw`) is the whole turn, whose end is read for a prompt and a line end."""
+        whole = raw if whole is None else whole
+        if self.secret_owed == side:
+            if _LINE_SPLIT.search(whole):
+                self.secret_owed = None
+            return {"from": side, "withheld": "text sent after a password prompt or an authentication challenge",
+                    "bytes": len(whole)}
+        # the prompt is read on the turn's real end, whatever of it is shown
+        tail = [_clean(piece) for piece in _LINE_SPLIT.split(whole[-PROMPT_TAIL_BYTES:])]
+        last = next((item for item in reversed(tail) if item), "")
+        if last and (PASSWORD_PROMPT.search(last) or _SECRET_PROMPT.search(last) or _CONTINUATION.match(last)):
+            self.secret_owed = "client" if side == "server" else "server"
         pieces = _LINE_SPLIT.split(raw)
         cleaned = [_clean(piece) for piece in pieces]
         if any(item is None for item in cleaned):
-            return {"from": side, "binary_bytes": len(raw)}
-        ended = len(pieces) > 1
-        if self.secret_owed == side:
-            if ended:
-                self.secret_owed = None
-            return {"from": side, "withheld": "text sent after a password prompt or an authentication challenge",
-                    "bytes": len(raw)}
+            return {"from": side, "binary_bytes": len(whole)}
         lines = [item for item in cleaned if item]
-        last = lines[-1] if lines else ""
-        if lines and (PASSWORD_PROMPT.search(last) or _SECRET_PROMPT.search(last) or _CONTINUATION.match(last)):
-            self.secret_owed = "client" if side == "server" else "server"
         shown = [show(self.line(item), MAX_LINE_CHARS) for item in lines[:MAX_TURN_LINES]]
         out = {"from": side, "lines": shown}
         if len(lines) > MAX_TURN_LINES:
@@ -208,7 +218,7 @@ def transcript(data: dict[str, bytes], chunks, settings: Settings | None) -> tup
     for direction, start, end in turns[:MAX_TRANSCRIPT_TURNS]:
         side = "client" if direction == "c2s" else "server"
         raw = data[direction][start:min(end, start + MAX_TURN_BYTES)]
-        item = masker.turn(side, raw)
+        item = masker.turn(side, raw, data[direction][start:end])
         if end - start > MAX_TURN_BYTES:
             item["bytes_not_shown"] = end - start - MAX_TURN_BYTES
         out.append(item)
@@ -469,10 +479,15 @@ class _Read:
         return self._read_packets()
 
     def _held(self, ids: list[str]) -> PivotResult | None:
-        """The packet content this hunt already holds for these session ids, as a result; None when it holds none."""
+        """The packet content this hunt already holds for these session ids, as a result; None when it holds none.
+        Only events timed inside the session's own span (when known, with a little slack) are read, so other
+        sessions' stored content cannot crowd it out."""
         window = self.reader.window
-        found, candidates, complete = self.pivot.repo.packet_session_evidence(
-            self.pivot.hunt_id, ids, window.start, window.end)
+        start, end = window.start, window.end
+        if self.span is not None:
+            start = max(start, self.span[0] - HELD_SLACK)
+            end = min(end, self.span[1] + HELD_SLACK)
+        found, candidates, complete = self.pivot.repo.packet_session_evidence(self.pivot.hunt_id, ids, start, end)
         if not found:
             if not complete:
                 self.notes.append("this hunt holds too much packet content near this session to check all of it "
