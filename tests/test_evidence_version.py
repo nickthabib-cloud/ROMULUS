@@ -187,6 +187,7 @@ PACKET_FUNCTIONS = (packet_stage._body_event, packet_rules.analyze_body, packet_
                     packet_sources.decode_hex_body, packet_stage._stream_event, packet_sources.addresses,
                     packet_sources._endpoint, packet_sources.reassemble_tcp, packet_sources.TcpStreams,
                     packet_sources._flag, packet_stage._StreamTarget._judge,
+                    packet_stage._StreamTarget.judge_capture,
                     packet_rules._echo, packet_sources._address, packet_sources._port, packet_sources.stream_key,
                     packet_sources._first, packet_sources._last, packet_stage._first, packet_stage._canon,
                     packet_rules.analyze_stream, packet_rules._Side, packet_rules._clean, packet_rules._lines,
@@ -201,7 +202,9 @@ PACKET_TABLES = (packet_sources.STREAM_PREFS, packet_sources.QUERIES["tcp_payloa
                  packet_rules.OUTPUT_WINDOW_BYTES, packet_rules.MAX_COMMAND_CHARS, packet_rules.MAX_COMMANDS,
                  packet_rules.PROMPT_SCAN_BYTES, packet_rules.MIN_INDICATORS, sorted(packet_rules.TYPED_TEXT_KINDS),
                  packet_sources.MAX_ADDRESS_CHARS, packet_stage.STREAM_DIRECTION_BYTES)
-PINNED_PACKETS = {"tshark-packets@5": "1d6045c6230687d41dd4c0d6b541dd16b23031598fa5eb2fea1bc17e7388054d"}
+# The stream judgement was split at the fetched capture (judge_capture), with an optional observer, so the agent's
+# session reads judge a capture with the same code; no event or raw copy changed.
+PINNED_PACKETS = {"tshark-packets@5": "54a9c76d39f0aa572b2272f47e11c375677dcfca920aba91235a788101b6ecea"}
 
 
 def _files_digest() -> str:
