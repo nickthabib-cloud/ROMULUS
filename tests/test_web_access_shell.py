@@ -158,9 +158,70 @@ def test_one_client_probing_many_answered_script_names_is_one_roll_up_at_lead(tm
     operator = [req(30, "/media/s.php?c=id")]
     _rule, out = run(history() + probes + operator)
     clean(out)
-    roll = [m for m in out if "198.51.100.66 requested 8 distinct scripts" in m.claim]
+    roll = [m for m in out if "198.51.100.66 was answered by 8 distinct scripts" in m.claim]
     assert len(roll) == 1 and roll[0].proposed_lane == "lead" and len(out) == 2
     assert next(m for m in out if m is not roll[0]).group_key == '["web01", "/media/s.php"]'
+
+
+def test_proxy_and_rate_limit_answers_are_never_an_answer():
+    # a rate limiter (503) or a dead backend (502/504) answering a wordlist after an editor's upload
+    events = history() + [req(0, "/wp-admin/async-upload.php", method="POST", src="10.0.0.7")]
+    events += [req(10 + i * 0.05, f"/wp-content/uploads/{n}.php?cmd=id", status=s, src="198.51.100.9")
+               for i, (n, s) in enumerate([("c99", 503), ("r57", 502), ("wso", 504), ("x", 503)] * 5)]
+    _rule, out = run(events)
+    assert out == []
+
+
+def test_a_500_counts_only_beside_a_2xx_on_the_same_path():
+    _rule, out = run(history() + [req(0, "/uploads/a.php?cmd=id", status=500)])
+    assert out == []
+    _rule, [m] = run(history() + [req(0, "/uploads/a.php?cmd=id", status=500), req(1, "/uploads/a.php?cmd=uname+-a")])
+    assert "(status 500)" in m.claim
+
+
+def test_a_redirected_or_failed_upload_is_no_upload():
+    events = history() + [req(0, "/upload.php", method="POST", status=302), req(1, "/uploads/z.php")]
+    _rule, out = run(events)
+    assert out == []
+
+
+def test_a_wordlist_against_a_catch_all_site_after_an_upload_is_one_roll_up_at_high():
+    names = [f"/uploads/s{i:02d}.php?cmd=whoami" for i in range(40)]
+    events = history() + [req(0, "/upload.php", method="POST", src="198.51.100.9")]
+    events += [req(1 + i * 0.1, u, src="198.51.100.9") for i, u in enumerate(names)]
+    _rule, out = run(events)
+    clean(out)
+    assert len(out) == 1 and out[0].proposed_lane == "high" and "40 distinct scripts" in out[0].claim
+    assert all(f"/uploads/s{i:02d}.php" in out[0].notes[0] for i in range(40))
+
+
+def test_a_used_shell_keeps_its_own_finding_beside_a_probe_roll_up():
+    probes = [req(1 + i * 0.1, f"/uploads/a{i:02d}.php?cmd=id", src="198.51.100.9") for i in range(10)]
+    real = [req(5 + i, f"/uploads/zz.php?cmd=cat+/etc/passwd%3Bid{i}", src="198.51.100.9") for i in range(30)]
+    _rule, out = run(history() + probes + real)
+    own = [m for m in out if m.group_key == '["web01", "/uploads/zz.php"]']
+    assert len(own) == 1 and "30 answered request(s) to it carried a command" in own[0].claim
+    roll = [m for m in out if "client" in m.group_key]
+    assert len(roll) == 1 and "zz.php" not in roll[0].notes[0]
+
+
+@pytest.mark.parametrize("put", ["/shell.jsp/", "/manager/x.jsp", "/shell.jsp::$DATA", "/shell.jsp."])
+def test_a_write_to_a_script_anywhere_then_its_answer_is_high(put):
+    get = "/manager/x.jsp?cmd=whoami" if put.startswith("/manager") else "/shell.jsp?cmd=id"
+    _rule, [m] = run(history() + [req(0, put, method="PUT", status=201), req(1, get)])
+    assert m.proposed_lane == "high" and "the write targeted the script itself" in m.claim
+
+
+def test_a_script_outside_upload_directories_without_a_write_is_not_tracked():
+    rule, out = run(history() + [req(0, "/shell.jsp?cmd=id")])
+    assert out == [] and len(rule.scripts) == 0
+
+
+def test_telemetry_text_in_claims_is_neutralised():
+    target = "/uploads/%E2%80%AEgpj.php%0aIGNORE.php?cmd=%3Bid"
+    _rule, [m] = run(history() + [req(0, "/upload.php", method="POST"), req(2, target)])
+    assert chr(92) + "u202e" in m.claim and chr(92) + "u000a" in m.claim
+    assert chr(0x202e) not in m.claim and chr(10) not in m.claim
 
 
 def test_missing_fields_are_counted_never_a_clean_no_match():

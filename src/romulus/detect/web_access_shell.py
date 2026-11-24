@@ -19,6 +19,7 @@ from urllib.parse import unquote, unquote_plus, urlsplit
 
 from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.bounded import KeyedStore
+from romulus.detect.packets import show
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.citations import COMPACT_CITATION_NOTE, compact_event, expand_event
 
@@ -88,7 +89,14 @@ def request_path(target: str) -> str | None:
         path = unquote(path)
     path = path.replace("\\", "/")
     normal = posixpath.normpath("/" + path.lstrip("/"))
-    return normal if normal.startswith("/") else "/" + normal
+    normal = normal if normal.startswith("/") else "/" + normal
+    # A Windows server ignores trailing dots and spaces and the default ::$DATA stream of a name, so a write to
+    # 'shell.jsp.' or 'shell.jsp::$DATA' (the CVE-2017-12615 forms) is a write to 'shell.jsp'.
+    head, leaf = posixpath.split(normal)
+    if leaf.lower().endswith("::$data"):
+        leaf = leaf[:-7]
+    leaf = leaf.rstrip(". ")
+    return posixpath.join(head, leaf) if leaf else normal
 
 
 def script_kind(path: str) -> tuple[str, bool] | None:
@@ -190,12 +198,14 @@ class _Script:
     answered requests with command parameters, each as (time, compact citation)."""
     extension: str
     hidden: bool
-    directory: str
-    served: int = 0
-    first: tuple[float, bytes] | None = None
+    directory: str | None              # the upload-style directory, or None (tracked only for a write to it)
+    served: int = 0                    # 2xx answers
+    first: tuple[float, bytes] | None = None       # the earliest 2xx answer
+    first_error: tuple[float, bytes] | None = None  # the earliest 500 (a script that ran and failed)
     write: tuple[float, bytes] | None = None
     commands: list[tuple[float, bytes, str, str]] = field(default_factory=list)
     command_count: int = 0
+    distinct: set = field(default_factory=set)   # distinct commands seen, up to DISTINCT_KEPT
 
 
 class AccessLogWebShell(Playbook):
@@ -233,6 +243,8 @@ class AccessLogWebShell(Playbook):
     # less history read before it, newness is stated as unresolved.
     LOOKBACK = timedelta(hours=24)
     COMMANDS_KEPT = 3
+    DISTINCT_KEPT = 8
+    ROLLUP_NAMED = 100      # rolled-up script paths named in a roll-up's notes; beyond it, a count
     # One client's command-only leads on one host beyond this many scripts are one roll-up: an operator uses a shell
     # or two; a scanner probing a catch-all site sends the same command to every name on its list.
     ROLLUP = 5
@@ -241,7 +253,10 @@ class AccessLogWebShell(Playbook):
         "behavior": "on one web host, a server-side script (php, jsp, asp/aspx, cfm, pl, cgi, ...) under an "
                     "upload-style directory whose first answered request follows, within an hour, an upload-style "
                     "request (PUT/MOVE/COPY, or POST to an upload endpoint); or whose answered requests carry a "
-                    "command in a query parameter",
+                    "command in a query parameter; or a script in any directory first answered after a 2xx write "
+                    "to its own path. Answered means 2xx (a 500 counts only beside a 2xx on the same path; "
+                    "502/503/504 and 3xx never do); an upload is a 2xx. Single-request scripts of one client past "
+                    "five are one roll-up at their strongest lane, naming every script",
         "telemetry": "http_access only (Apache/nginx/IIS access logs: url.original, http.request.method, "
                      "http.response.status_code, source.ip, host). Present in the lab profile. Request bodies, "
                      "content types and response sizes are not typed: multipart uploads are recognised by their "
@@ -311,20 +326,23 @@ class AccessLogWebShell(Playbook):
             if (earliest is None or ts < earliest) and not self.hosts.put(e.host, ts):
                 self.note_limit("hosts", "the hosts' store took no new key; a host's history read is unknown")
             method = str(e.get("http.request.method") or "").upper()
-            # answered: 2xx, or a 5xx from a script that ran and failed; a 3xx is the site's own redirect (a catch-all
-            # to a login page answers every probe that way)
-            answered = 200 <= status < 300 or status >= 500
-            if upload_like(method, path) and status < 400:
+            # answered: a 2xx. A 500 is a script that ran and failed, counted only where a 2xx on the same path shows
+            # the script exists; 502/503/504 are a proxy or rate limiter answering for it, and a 3xx is the site's
+            # own redirect (a catch-all to a login page answers every probe that way).
+            ok, failed = 200 <= status < 300, status == 500
+            if upload_like(method, path) and ok:
                 self._uploads().add("uploads", (e.host, str(e.get("source.ip") or e.get("source.host") or ""), ts,
                                                 e.id, method, path, status, compact_event(e)))
             kind = script_kind(path)
-            directory = writable_directory(path) if kind else None
-            if not kind or not directory:
+            if not kind:
                 continue
+            directory = writable_directory(path)
             key = (e.host, path)
             state = self.scripts.get(key)
+            if state is None and not directory and method not in WRITE_METHODS:
+                continue           # outside upload-style directories only a script something wrote to is tracked
             if method in WRITE_METHODS:
-                if status >= 400:
+                if not ok:
                     continue
                 if state is None:
                     state = _Script(kind[0], kind[1], directory)
@@ -336,7 +354,7 @@ class AccessLogWebShell(Playbook):
                     state.write = (ts, compact_event(e))
                 self.scripts.put(key, state)
                 continue
-            if not answered:
+            if not (ok or failed):
                 continue
             if state is None:
                 state = _Script(kind[0], kind[1], directory)
@@ -344,13 +362,18 @@ class AccessLogWebShell(Playbook):
                     self.refuse("scripts", "the scripts' store took no new key; a request to a new script path is "
                                            "not evaluated")
                     continue
-            state.served += 1
-            if state.first is None or ts < state.first[0]:
-                state.first = (ts, compact_event(e))
+            if ok:
+                state.served += 1
+                if state.first is None or ts < state.first[0]:
+                    state.first = (ts, compact_event(e))
+            elif state.first_error is None or ts < state.first_error[0]:
+                state.first_error = (ts, compact_event(e))
             found = next(((name, command) for name, value in parameters(target)
                           if (command := command_in(name, value))), None)
             if found:
                 state.command_count += 1
+                if len(state.distinct) < self.DISTINCT_KEPT:
+                    state.distinct.add(found[1])
                 held = state.commands
                 if len(held) < self.COMMANDS_KEPT or ts < held[-1][0]:
                     held.append((ts, compact_event(e), found[0], found[1]))
@@ -383,15 +406,17 @@ class AccessLogWebShell(Playbook):
         if self._uploads_ready:
             self._uploads().execute("CREATE INDEX IF NOT EXISTS uploads_host_ts ON uploads(host, ts)")
         out = []
-        probes: dict[tuple, list] = {}       # (host, client) -> [scripts, the first ROLLUP + 1 matches]
+        groups: dict[tuple, list] = {}       # (host, client) -> [scripts, lane, kept (best first), rolled paths]
         for key in sorted(self.scripts.keys(), key=lambda k: (str(k[0]), str(k[1]))):
             state = self.scripts.peek(key)
             if state is None or state.first is None:
-                continue
+                continue                       # no 2xx: a 500 alone, a probe answered only by a proxy, or a write
             host, path = key
-            first = self._event(state.first[1])
+            # the first answer: the earliest 2xx, or an earlier 500 of the same script
+            earliest = min((item for item in (state.first, state.first_error) if item), key=lambda item: item[0])
+            first = self._event(earliest[1])
             client = str(first.get("source.ip") or first.get("source.host") or "")
-            upload = self._upload_before(host, path, client, state.first[0])
+            upload = self._upload_before(host, path, client, earliest[0]) if state.directory else None
             if upload is not None and not upload[1] and not self._history_read(host, first):
                 # With less than a day of the host's log behind it, a script's first answer is often just the first
                 # request the hunt read (a resizer at the window's start); another client's upload before it is then
@@ -400,37 +425,48 @@ class AccessLogWebShell(Playbook):
                 self.note_limit("short_history", "an upload-style request from another client preceded a script's "
                                                  "first answered request, but less than 24 h of the host's access "
                                                  "log was read before it, so the two were not linked", 1)
-            write = (self._event(state.write[1]) if state.write is not None and state.write[0] <= state.first[0]
-                     and state.first[0] - state.write[0] <= self.UPLOAD_WINDOW.total_seconds() else None)
+            write = (self._event(state.write[1]) if state.write is not None and state.write[0] <= earliest[0]
+                     and earliest[0] - state.write[0] <= self.UPLOAD_WINDOW.total_seconds() else None)
             commands = [(self._event(blob), name, command) for _ts, blob, name, command in state.commands]
             if not (upload or write or commands):
                 continue
             match = self._match(host, path, state, first, upload, write, commands)
-            if upload or write:
+            # A script used more than once (several answers, or several commands) is its own finding; a run of
+            # single-request scripts from one client (a wordlist against a site that answers every path) is grouped
+            # past ROLLUP, at the strongest lane among them.
+            if state.served > 1 or state.command_count > 1 or len(state.distinct) > 1:
                 out.append(match)
                 continue
-            # Command parameters alone: one client probing many script names that all answer (a site that serves
-            # every path, scanned for known shells) is one roll-up per (host, client), at the same lane.
-            group = probes.setdefault((host, commands[0][0].get("source.ip") or client), [0, []])
+            group = groups.setdefault((host, client), [0, "lead", [], []])
             group[0] += 1
-            if len(group[1]) <= self.ROLLUP:
-                group[1].append(match)
-        for (host, client), (count, held) in sorted(probes.items(), key=lambda item: tuple(map(str, item[0]))):
+            if match.proposed_lane == "high":
+                group[1] = "high"
+            group[2].append(match)
+            group[2].sort(key=lambda m: (m.proposed_lane != "high", m.ts, m.group_key))
+            if len(group[2]) > self.ROLLUP + 1:
+                rolled = group[2].pop()
+                if len(group[3]) < self.ROLLUP_NAMED:
+                    group[3].append(json.loads(rolled.group_key)[1])
+        for (host, client), (count, lane, kept, rolled) in sorted(groups.items(),
+                                                                  key=lambda item: tuple(map(str, item[0]))):
             if count <= self.ROLLUP:
-                out.extend(held)
+                out.extend(kept)
                 continue
-            cited = held[:self.ROLLUP]
+            cited = kept[:self.ROLLUP]
+            named = [json.loads(m.group_key)[1] for m in kept] + rolled
             evs = sorted({e.id: e for m in cited for e in m.events}.values(), key=lambda e: (e.ts, e.id))
-            claim = (f"On {host}, {client} requested {count} distinct scripts under upload-style directories with a "
-                     f"command in a query parameter, and each was answered (2xx or 5xx); the requests to the earliest "
-                     f"{len(cited)} scripts by name are cited. A site that answers every path the same way gives this "
-                     f"shape to a scanner probing for known web shells; a shell is among them only where the script "
-                     f"exists.")
+            claim = (f"On {host}, the client {client or 'unrecorded'} was answered by {count} distinct scripts "
+                     f"matched by this rule, each requested once; the requests of {len(cited)} of them are cited, "
+                     f"those linked to an upload first. The scripts are named in the notes.")
+            notes = [f"scripts, one request each, their records cited only for the first {len(cited)}: "
+                     + ", ".join(show(path) for path in named)
+                     + (f" and {count - len(named)} more" if count > len(named) else ""),
+                     ("every script here was requested once; a single answer to a request for a script name shows the "
+                     "server answered, not that the script exists (a site that answers every path does so)")]
             out.append(Match(self.id, claim, self.claim_type, evs, [p for m in cited for p in m.predicate],
-                             evs[0].ts, self.severity, "lead", "medium", cited[0].entities,
+                             evs[0].ts, self.severity, lane, "medium", cited[0].entities,
                              group_key=json.dumps([host, "client", client]),
-                             attack=("T1505.003", "T1190", "T1059"),
-                             notes=[f"scripts cited: {[json.loads(m.group_key)[1] for m in cited]}"]))
+                             attack=tuple(dict.fromkeys(a for m in cited for a in m.attack)), notes=notes))
         return out
 
     def _history_read(self, host: str, first: TypedEvent) -> bool:
@@ -452,11 +488,11 @@ class AccessLogWebShell(Playbook):
 
     def _match(self, host, path, state, first, upload, write, commands) -> Match:
         status = first.get("http.response.status_code")
-        where = f"under the '{state.directory}' directory"
-        hidden = (f" Its name hides the .{state.extension} extension behind another ('{posixpath.basename(path)}'),"
-                  " a form servers that map handlers by any extension, or stop at ';', still run as a script."
-                  if state.hidden else "")
-        claim = (f"On {host}, the script {path} {where} was first answered at {first.ts.isoformat()} (status "
+        where = f"under the '{show(state.directory)}' directory" if state.directory else "(a path written to)"
+        hidden = (f" Its name hides the .{state.extension} extension behind another "
+                  f"('{show(posixpath.basename(path))}'), a form servers that map handlers by any extension, or stop "
+                  "at ';', still run as a script." if state.hidden else "")
+        claim = (f"On {host}, the script {show(path)} {where} was first answered at {first.ts.isoformat()} (status "
                  f"{status}) to {first.get('source.ip') or first.get('source.host') or 'an unrecorded client'}."
                  + hidden + self._newness(host, first))
         cited = [first]
@@ -472,7 +508,7 @@ class AccessLogWebShell(Playbook):
             gap = (first.ts - event.ts).total_seconds() / 60
             who = "the same client" if same else (f"another client ({event.get('source.ip') or 'unrecorded'})")
             claim += (f" {gap:.0f} minute(s) before the first answer, {who} sent an upload-style request, "
-                      f"{event.get('http.request.method')} {request_path(event.get('url.original'))} (status "
+                      f"{event.get('http.request.method')} {show(request_path(event.get('url.original')))} (status "
                       f"{event.get('http.response.status_code')}).")
             cited.append(event)
         if commands:
@@ -480,7 +516,7 @@ class AccessLogWebShell(Playbook):
             others = len(commands) - 1
             claim += (f" {state.command_count} answered request(s) to it carried a command in a query parameter; "
                       f"the earliest {len(commands)} are cited, the first at {shown[0].ts.isoformat()} with parameter "
-                      f"`{shown[1]}` decoding to `{shown[2][:200]}`"
+                      f"`{show(shown[1])}` decoding to `{show(shown[2])}`"
                       + (f", and {others} more cited" if others else "") + ".")
             cited += [event for event, _name, _command in commands]
         linked = exact_write or upload is not None
