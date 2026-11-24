@@ -436,6 +436,14 @@ def check_secret_strength(s: Settings, source_root: Path | None = None) -> Check
                  {"settings": sorted(weak)})
 
 
+def check_index_patterns(s: Settings) -> Check:
+    """`es.index_patterns`: a hunt refuses to start without ES_INDEX_PATTERNS (hunt.run.create_hunt), so doctor
+    fails then, in the hunt's words."""
+    if not s.es_index_patterns:
+        return Check("es.index_patterns", "fail", "no ES_INDEX_PATTERNS configured: nothing to hunt")
+    return Check("es.index_patterns", "ok", f"{len(s.es_index_patterns)} pattern(s): {', '.join(s.es_index_patterns)}")
+
+
 def check_session_secret(s: Settings) -> Check:
     """`web.secret_key`: ROMULUS_SECRET_KEY by the rule the web UI enforces when it starts. Never the value or its
     length."""
@@ -904,6 +912,7 @@ def doctor_steps(s: Settings, env_file: Path | None = None, check_seconds: float
         return packet_optional(check, scope)
 
     return [
+        Step("es.index_patterns", lambda: check_index_patterns(s), bound(LOCAL_SECONDS), False),
         Step("es.reachable", lambda: check_es(s), bound(CHECK_SECONDS), True),
         Step("es.text_inventory", lambda: check_linux_text_sources(s), bound(INVENTORY_SECONDS), False),
         Step("site.internal_networks", lambda: check_site_networks(s), bound(INVENTORY_SECONDS), False),

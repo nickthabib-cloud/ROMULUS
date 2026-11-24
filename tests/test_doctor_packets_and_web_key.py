@@ -3,6 +3,7 @@ ES_INDEX_PATTERNS, judged as a hunt judges it), and ROMULUS_SECRET_KEY is checke
 which refuses a bad key with a message instead of a traceback."""
 import secrets
 import threading
+from datetime import UTC, datetime
 
 import pytest
 
@@ -16,6 +17,7 @@ ARKIME_MAPPING = {"arkime_sessions3-x": {"mappings": {"properties": {
     "firstPacket": {"type": "date"}, "lastPacket": {"type": "date"},
     "network": {"properties": {"community_id": {"type": "keyword"}}},
     "source": {"properties": {"ip": {"type": "ip"}}}}}}}
+REAL_CHECK_INDEX_PATTERNS = doctor.check_index_patterns
 HOST_MAPPING = {"logs-host": {"mappings": {"properties": {
     "@timestamp": {"type": "date"}, "host": {"properties": {"name": {"type": "keyword"}}}}}}}
 
@@ -32,6 +34,30 @@ class FakeClient:
 
     def mapping(self, target):
         return self.targets[target]
+
+
+# ---------------------------------------------------------------- a hunt needs index patterns
+
+def test_doctor_fails_without_index_patterns_as_a_hunt_refuses_to_start(tmp_path):
+    from romulus.hunt.run import create_hunt
+
+    s = Settings(home=tmp_path)
+    check = doctor.check_index_patterns(s)
+    assert check.status == "fail"
+    with pytest.raises(ValueError) as refused:
+        create_hunt(s, datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 2, tzinfo=UTC), created_by="test")
+    assert check.detail == str(refused.value)                      # the hunt's own words
+    assert "es.index_patterns" in {step.name for step in doctor.doctor_steps(s)}
+    ok = doctor.check_index_patterns(Settings(home=tmp_path, es_index_patterns=["logs-*"]))
+    assert ok.status == "ok" and "logs-*" in ok.detail
+
+
+def test_doctor_exits_1_on_empty_index_patterns_even_when_arkime_and_tshark_only_warn(tmp_path, monkeypatch):
+    _quiet_with(monkeypatch, [], _arkime_down, _no_tshark)
+    monkeypatch.setattr(doctor, "check_index_patterns", REAL_CHECK_INDEX_PATTERNS)
+    checks = {check.name: check for check in run_all(Settings(home=tmp_path), check_seconds=5)}
+    assert checks["es.index_patterns"].status == "fail"
+    assert checks["arkime.reachable"].status == "warn" and checks["tshark"].status == "warn"
 
 
 # ---------------------------------------------------------------- which targets the packet stage reads
@@ -59,7 +85,8 @@ def _quiet_with(monkeypatch, scope_targets, arkime, tshark):
     """Every check an instant OK, except the packet scope (with these targets) and the Arkime and TShark checks."""
     for function in ("check_es", "check_linux_text_sources", "check_site_networks", "check_ollama", "check_agent",
                      "check_triage_model", "check_secret_lengths", "check_secret_strength", "check_site",
-                     "check_db_space", "check_mention_patterns", "check_web_tls", "check_session_secret"):
+                     "check_db_space", "check_mention_patterns", "check_web_tls", "check_session_secret",
+                     "check_index_patterns"):
         monkeypatch.setattr(doctor, function, lambda *_a, _n=function, **_k: Check(_n, "ok"))
     monkeypatch.setattr(doctor, "check_arkime_auth", lambda _s: None)
     monkeypatch.setattr(doctor, "check_paths", lambda *_a: [Check("disk.free", "ok")])

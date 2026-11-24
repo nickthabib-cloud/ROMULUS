@@ -115,6 +115,7 @@ The checks you are most likely to act on:
 | `es.reachable` | FAIL | Check `ES_URL`, network reach, credentials and the TLS settings (`ES_CA_CERT`, `ES_VERIFY_TLS`). |
 | `os.flavor_version` | FAIL | Set `ES_FLAVOR` to what the cluster is; ROMULUS needs Elasticsearch 8+ or OpenSearch 2.4+. |
 | `es.account` | FAIL | The account is a superuser (`elastic`, `superuser` or `all_access`). Use a read-only account. |
+| `es.index_patterns` | FAIL | `ES_INDEX_PATTERNS` is empty, so a hunt refuses to start. Set it. |
 | `es.index[<pattern>]` | FAIL | The pattern resolves to no index. Fix `ES_INDEX_PATTERNS`. |
 | `es.least_privilege`, `os.read_only` | FAIL / WARN | FAIL: the account can write. Remove write privileges. WARN: read-only could not be shown (on OpenSearch, set `ES_READ_ONLY_ROLES`). |
 | `arkime.reachable` | FAIL / WARN | Check `ARKIME_URL`, `ARKIME_BASE_PATH`, `ARKIME_AUTH` and the credentials. HTTP 401 usually means the wrong scheme or password. WARN: no Arkime session index is configured, so it is not needed. |
