@@ -28,11 +28,11 @@ from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from itertools import groupby
+from urllib.parse import parse_qsl, urlsplit
 
 from romulus.content.indicator_values import (
     _SECRET_ASSIGNMENT,
     _SECRET_LITERAL,
-    _SECRET_URL_PATH,
     _URI_USERINFO,
     normalize_value,
 )
@@ -136,39 +136,55 @@ def _utc(value) -> str | None:
 # the reason a value holding a credential or a configured secret is withheld: one reason for both, so the export never
 # says which values a configured secret is part of
 CREDENTIAL_REASON = "holds a credential or secret"
-# what may stand on either side of a weak secret for it to count as the credential in a value: the whole value, or a
-# token set off as a credential is written (`user:secret@`, `pass=secret`, quoted); never a part of a name or path
-_TOKEN_EDGE = r"[\s=:@'\"&?;,]"
+# a URL whose path is itself the credential: chat webhooks and bot tokens (checked here only, on exported values;
+# indicator import and the sweep's URL matching keep their own rules)
+_SECRET_URL_PATH = re.compile(
+    r"(?:hooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9]+/[A-Za-z0-9]+/[A-Za-z0-9]+"
+    r"|discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]+"
+    r"|\.webhook\.office\.com/webhookb2/[^/\s]+/IncomingWebhook/[^/\s]+"
+    r"|outlook\.office(?:365)?\.com/webhook/[^/\s]+/IncomingWebhook/[^/\s]+"
+    r"|/bot\d+:[A-Za-z0-9_-]{20,})", re.IGNORECASE)
+# URL query or fragment keys whose value is a credential, by exact name (`error_code`, `country_code` are not)
+_CREDENTIAL_URL_KEYS = frozenset({"code", "access_key", "access-key", "accesskey"})
+
+
+def _credential_url_key(text: str) -> bool:
+    """Whether a URL's query or fragment has a parameter named exactly as a credential (an OAuth code, an access
+    key); names that merely contain one (`error_code`) do not count."""
+    if "://" not in text:
+        return False
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return False
+    return any(key.strip().lower() in _CREDENTIAL_URL_KEYS
+               for section in (parts.query, parts.fragment)
+               for key, _value in parse_qsl(section, keep_blank_values=True))
 
 
 class _Secrets:
-    """The configured secrets an exported value must not hold. A strong secret is found anywhere in a value, as the
-    other redaction paths find it; a weak one (`romulus.config.weak_secret_names`: short, low-entropy or a word the
-    product's own text holds) only as the whole value or a credential token, so a weak password such as `admin`
-    never withholds `admin-ws01` or `/home/admin/.ssh/authorized_keys`."""
+    """The configured secrets an exported value must not hold, found anywhere in a value as the other redaction
+    paths find them. A weak secret (`romulus.config.weak_secret_names`: short, low-entropy or a word the product's
+    own text holds) is not looked for: the other renderers print the same values, so withholding them here would only
+    point at the secret, and a weak password such as `admin` would withhold ordinary names."""
 
     def __init__(self, settings):
         self.strong: list[str] = []
-        self.weak: list[re.Pattern] = []
         if settings is None:
             return
         from romulus.config import _secret_forms, secret_settings, weak_secret_names
 
         weak_names = weak_secret_names(settings)
         for name, secret in secret_settings(settings):
-            if len(secret) < 4:          # below this, no redaction path matches a secret at all
+            if len(secret) < 4 or name in weak_names:    # below 4 characters no redaction path matches a secret
                 continue
-            for form in _secret_forms(secret):
-                if name in weak_names:
-                    self.weak.append(re.compile(f"(?:^|(?<={_TOKEN_EDGE})){re.escape(form)}(?:$|(?={_TOKEN_EDGE}))"))
-                else:
-                    self.strong.append(form)
+            self.strong.extend(_secret_forms(secret))
 
     def __bool__(self) -> bool:
-        return bool(self.strong or self.weak)
+        return bool(self.strong)
 
     def held(self, text: str) -> bool:
-        return any(form in text for form in self.strong) or any(pattern.search(text) for pattern in self.weak)
+        return any(form in text for form in self.strong)
 
 
 class _Checker:
@@ -188,7 +204,8 @@ class _Checker:
         if len(text) > MAX_TEXT or _CONTROL.search(text) or any(0xD800 <= ord(c) <= 0xDFFF for c in text):
             return None, "too long or holds control characters", ""
         if (self.secrets.held(text) or mask_credentials(text) != text or _SECRET_ASSIGNMENT.search(text)
-                or _SECRET_LITERAL.search(text) or _URI_USERINFO.search(text) or _SECRET_URL_PATH.search(text)):
+                or _SECRET_LITERAL.search(text) or _URI_USERINFO.search(text) or _SECRET_URL_PATH.search(text)
+                or (kind == "url" and _credential_url_key(text))):
             return None, CREDENTIAL_REASON, ""
         port = ""
         if kind == "domain" and not _is_address(text) and (split := _HOST_PORT.fullmatch(text)):

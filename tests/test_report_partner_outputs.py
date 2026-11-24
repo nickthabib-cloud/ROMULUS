@@ -351,11 +351,12 @@ def test_credentials_and_secrets_are_withheld_never_exported_in_part(tmp_path):
     assert summary["secrets_checked"] is True
 
 
-def test_a_weak_secret_withholds_only_a_whole_value_or_credential_token(tmp_path):
-    """A weak configured password (`admin`) never withholds a name or path it is part of, and is never named."""
+def test_a_weak_secret_withholds_nothing(tmp_path):
+    """A weak configured password (`admin`) is not looked for: the other renderers print the same values, so
+    withholding them would only point at the secret. Values holding a credential pattern are still withheld."""
     settings = Settings(home=tmp_path, arkime_password="admin")
     from romulus.config import weak_secret_names
-    assert "ARKIME_PASSWORD" in weak_secret_names(settings)
+    assert "ARKIME_PASSWORD" in weak_secret_names(settings) and not iocs._Secrets(settings)
     events = [_event("e1", "auth", {"user.name": "admin", "auth.target_user": "admin2",
                                     "file.path": "/home/admin/.ssh/authorized_keys",
                                     "url.full": "http://203.0.113.5/login?user=x&pass=admin",
@@ -363,16 +364,27 @@ def test_a_weak_secret_withholds_only_a_whole_value_or_credential_token(tmp_path
     findings = [_finding("F1", entities=[["host", "admin-ws01", "host"]], citations=[{"event_id": "e1"}])]
     summary, text, _stix = _export(findings=findings, events=events, settings=settings)
     values = {row["value"] for row in csv.DictReader(io.StringIO(text))}
-    assert {"admin-ws01", "/home/admin/.ssh/authorized_keys", "admin2", "203.0.113.5"} <= values
-    assert "admin" not in values
-    assert summary["withheld"] == {"url": {iocs.CREDENTIAL_REASON: 1}, "user_account": {iocs.CREDENTIAL_REASON: 1}}
+    assert {"admin", "admin-ws01", "/home/admin/.ssh/authorized_keys", "admin2", "203.0.113.5"} <= values
+    assert summary["withheld"] == {"url": {iocs.CREDENTIAL_REASON: 1}}        # the `pass=` credential, not `admin`
 
 
-def test_a_strong_secret_is_withheld_wherever_it_appears():
-    secrets = iocs._Secrets(None)
-    assert not secrets and not secrets.held("anything")
+def test_a_weak_secret_that_is_a_whole_host_name_is_exported(tmp_path):
+    settings = Settings(home=tmp_path, arkime_password="web01")
+    repo, _ = _repo_with_finding()
+    m = publish_revision(repo, "h1", "test", settings=settings)
+    assert m["indicators"]["withheld"] == {}
+    paths = bundle.write_reports(repo, m, tmp_path / "out", settings=settings)
+    assert "web01" in paths["iocs_csv"].read_text(encoding="utf-8")
+
+
+def test_a_strong_secret_is_withheld_wherever_it_appears_and_never_named(tmp_path):
+    settings = Settings(home=tmp_path, es_password="Wh1spered-Pa55word")
+    secrets = iocs._Secrets(settings)
+    assert secrets.held("/srv/Wh1spered-Pa55word.txt") and not secrets.held("/srv/x")
     check = iocs._Checker(None, secrets)
+    assert check("file_path", "/srv/Wh1spered-Pa55word.txt") == (None, iocs.CREDENTIAL_REASON, "")
     assert check("file_path", "/srv/x") == ("file_path", "/srv/x", "")
+    assert not iocs._Secrets(None)
 
 
 @pytest.mark.parametrize("url", [
@@ -387,6 +399,39 @@ def test_a_strong_secret_is_withheld_wherever_it_appears():
 def test_credential_urls_are_withheld(url):
     exported, reason, _port = iocs._Checker(None, iocs._Secrets(None))("url", url)
     assert exported is None and reason in (iocs.CREDENTIAL_REASON, "invalid or credential-bearing URL")
+
+
+# parameters that only contain a credential name, and a bot URL: the shared detectors (import, sweep matching) keep
+# their behaviour; only the export withholds the exact credential keys and the credential URL paths
+BASE_URLS = {"http://x.example/a?error_code=5": "http://x.example/a?error_code=5",
+             "http://x.example/a?country_code=US": "http://x.example/a?country_code=US",
+             "http://x.example/a?code=1": "http://x.example/a?code=1",
+             "http://x.example/a?access_key=1": "http://x.example/a?access_key=1",
+             "https://API.telegram.org/bot123456:ABCdefGhIJKlmnoPQRstuVWXyz/sendMessage":
+                 "https://api.telegram.org/bot123456:ABCdefGhIJKlmnoPQRstuVWXyz/sendMessage"}
+
+
+@pytest.mark.parametrize("url", sorted(BASE_URLS))
+def test_indicator_matching_and_import_keep_their_url_rules(url):
+    from romulus.content.indicator_values import normalize_value
+    assert normalize_value("url", url) == BASE_URLS[url]
+
+
+def test_a_csv_indicator_import_keeps_urls_with_code_parameters(tmp_path):
+    from romulus.content.indicator_import import parse_indicator_file
+    path = tmp_path / "list.csv"
+    path.write_text("kind,value\nurl,http://x.example/a?error_code=5\nurl,http://x.example/a?code=1\n",
+                    encoding="utf-8")
+    result = parse_indicator_file(path)
+    assert [row.value for row in result.rows] == ["http://x.example/a?error_code=5", "http://x.example/a?code=1"]
+
+
+def test_the_export_withholds_only_exact_credential_keys():
+    check = iocs._Checker(None, iocs._Secrets(None))
+    for url in ("http://x.example/a?error_code=5", "http://x.example/a?country_code=US"):
+        assert check("url", url) == ("url", url, "")
+    for url in ("http://x.example/a?code=1", "http://x.example/a?Access_Key=1", "http://x.example/a#code=xyz"):
+        assert check("url", url) == (None, iocs.CREDENTIAL_REASON, "")
 
 
 def test_a_port_is_kept_apart_from_the_name_it_was_written_with():

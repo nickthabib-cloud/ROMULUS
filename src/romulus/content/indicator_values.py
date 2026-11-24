@@ -16,20 +16,12 @@ _DIGEST_LENGTHS = {'md5': 32, 'sha1': 40, 'sha256': 64,
                    'x509_sha1': 40, 'x509_sha256': 64, 'ja3': 32, 'hassh': 32}
 _SECRET_KEY = re.compile(
     r'(?:^|[^a-z0-9])(?:password|passwd|pwd|secret|client[_-]?secret|access[_-]?token|'
-    r'refresh[_-]?token|auth[_-]?token|api[_-]?key|access[_-]?key|authorization|credentials?|token|'
-    r'signature|x-amz-signature|x-amz-credential|sig|code)(?:$|[^a-z0-9])', re.IGNORECASE,
+    r'refresh[_-]?token|auth[_-]?token|api[_-]?key|authorization|credentials?|token|'
+    r'signature|x-amz-signature|x-amz-credential|sig)(?:$|[^a-z0-9])', re.IGNORECASE,
 )
 _SECRET_ASSIGNMENT = re.compile(
-    r'(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|authorization|credential)\s*[:=]',
-    re.IGNORECASE,
+    r'(?:password|passwd|pwd|secret|token|api[_-]?key|authorization|credential)\s*[:=]', re.IGNORECASE,
 )
-# a URL whose path is itself the credential: chat webhooks and bot tokens
-_SECRET_URL_PATH = re.compile(
-    r'(?:hooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9]+/[A-Za-z0-9]+/[A-Za-z0-9]+'
-    r'|discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]+'
-    r'|\.webhook\.office\.com/webhookb2/[^/\s]+/IncomingWebhook/[^/\s]+'
-    r'|outlook\.office(?:365)?\.com/webhook/[^/\s]+/IncomingWebhook/[^/\s]+'
-    r'|/bot\d+:[A-Za-z0-9_-]{20,})', re.IGNORECASE)
 _SECRET_LITERAL = re.compile(r'(?:\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\beyJ[a-zA-Z0-9_-]+\.'
                              r'[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\b|\b(?:ghp_|sk-)[a-zA-Z0-9]{20,})')
 _URI_USERINFO = re.compile(r'://[^/?#\s]*@')
@@ -43,8 +35,7 @@ def _safe_text(value: str, *, limit: int = MAX_VALUE_CHARS) -> str:
         raise ValueError('control character in field')
     if any(0xD800 <= ord(c) <= 0xDFFF for c in value):
         raise ValueError('invalid Unicode in field')
-    if (_SECRET_ASSIGNMENT.search(value) or _SECRET_LITERAL.search(value) or _URI_USERINFO.search(value)
-            or _SECRET_URL_PATH.search(value)):
+    if _SECRET_ASSIGNMENT.search(value) or _SECRET_LITERAL.search(value) or _URI_USERINFO.search(value):
         raise ValueError('credential-like content refused')
     return value
 
