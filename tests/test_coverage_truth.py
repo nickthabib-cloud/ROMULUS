@@ -75,6 +75,7 @@ def _range_start(body: dict) -> datetime:
 
 def _access_doc(n: int, ts: datetime, *, status=200, url: str | None = "/index.html") -> dict:
     source = {"@timestamp": _iso(ts), "event": {"dataset": "apache.access"}, "host": {"name": "web1"},
+              "user_agent": {"original": "Mozilla/5.0 (X11; Linux x86_64) Firefox/128.0"},
               "source": {"ip": "198.51.100.7"}, "http": {"request": {"method": "GET"},
                                                          "response": {"status_code": status}}}
     if url is not None:

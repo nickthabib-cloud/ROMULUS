@@ -752,6 +752,7 @@ PRIOR_RULE_VERSIONS = {
     "net.beaconing": "7",
     "host.account_or_group_change": "6",
     "net.dns_zone_transfer_or_any_request": "7",
+    "net.tool_user_agent_http": "4",
 }
 
 

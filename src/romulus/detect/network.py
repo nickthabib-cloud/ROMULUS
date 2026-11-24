@@ -2,7 +2,9 @@
 accumulated across every partition, so bursts spanning partition boundaries are not lost."""
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import ClassVar
+from urllib.parse import urlsplit
 
 from romulus.detect.alert_lanes import BENIGN_LOW_PRIORITY_CATEGORIES, alert_stack_lane, attack_tagged
 from romulus.detect.base import Match, Playbook, pf
@@ -10,16 +12,20 @@ from romulus.detect.bounded import HOT_COUNT, CitationUnavailable, KeyedStore
 from romulus.detect.citing import (
     BoundStage,
     Ends,
+    Holds,
     Named,
     bound_note,
     citation_group,
     cite_extra,
     cited_phrase,
+    drained_holds,
     more,
 )
 from romulus.detect.dns import endpoints
 from romulus.detect.flows import PORTED, SURICATA, ZEEK, source_opened
+from romulus.detect.packets import show
 from romulus.evidence.typed import TypedEvent
+from romulus.hunt.citations import COMPACT_CITATION_NOTE, compact_event, expand_event
 
 # Lower-cased user-agent prefixes of command-line HTTP tools, and the tool each one is the signature of.
 TOOL_UA_SIGNATURES = {
@@ -313,7 +319,38 @@ class SuricataAlertStack(_Grouped):
         return match
 
 
+class _Burst:
+    """One run of a source's requests to one web host, as read from one source target: consecutive requests less than
+    WebScanBurst.GAP apart. The records bounding it are kept compact in the run's own state (no stage write per
+    record); its first error answers are stage holds (ids), released when the run ends without qualifying."""
+
+    __slots__ = ("count", "errors", "first", "first_blob", "held", "last", "last_blob", "target", "uas", "urls")
+
+    def __init__(self, ts, target):
+        self.count = 0
+        self.errors = 0
+        self.first = self.last = ts
+        self.first_blob: bytes | None = None   # the earliest record, compact
+        self.last_blob: bytes | None = None    # the latest record, compact
+        self.held: list[str] = []              # held ids of the run's first EXAMPLE_LIMIT error answers
+        self.uas: set = set()                  # recorded user agents, at most AGENTS_NAMED
+        self.urls: set = set()                 # distinct request targets, at most URLS_HELD
+        self.target = target
+
+
 class WebScanBurst(_Grouped):
+    """Each burst is its own finding: a run of one source's requests to one web host with no pause of GAP or more,
+    holding at least MIN_REQUESTS requests of which at least MIN_ERROR_RATIO were answered 4xx/5xx. A burst cites its
+    own records (its first EXAMPLE_LIMIT error answers, the records that bound it, and one per user agent it names).
+
+    Runs are read per (host, source, source target) in time order: the sweep reads one target's partitions in time
+    order and each batch is sorted here. One run per key is open; a later record past the gap closes it, and a run
+    that closes without qualifying releases its held records, so only qualifying bursts keep citations on the stage.
+    A record from before an open run (more than GAP earlier than its first record) cannot be placed in a closed run:
+    it is counted in the source's window totals and named on coverage (partial), never dropped.
+
+    A source that reaches the thresholds over the whole hunt window but in no single burst (a slow scan with long
+    pauses) is still reported, once for the window, citing its first error responses."""
     id = "web.scan_burst"
     title = "High-volume error-heavy web requests from one source"
     families = ("http_access",)
@@ -324,59 +361,266 @@ class WebScanBurst(_Grouped):
     next_checks = ("http_requests from the source with 2xx status after the burst",
                    "ids_alerts for the source", "entity_timeline of the web host after the burst")
     MIN_REQUESTS, MIN_ERROR_RATIO = 200, 0.5
-    version = "2"
+    # A pause this long ends a burst. Scanners and fuzzers send requests seconds apart even when rate-limited (one per
+    # minute is already a slow scan); half an hour without a request from the source is a different session, on any
+    # site, whatever its traffic.
+    GAP = timedelta(minutes=30)
+    version = "3"
     AGENTS_NAMED = 5
+    URLS_HELD = 1000            # distinct targets counted per run; beyond it the count is a lower bound
+    STALE_CHECKED = 4096        # open runs examined per batch for closing (least recently used first)
+    card: ClassVar[dict] = {
+        "behavior": "one source sent at least 200 requests to one web host in a burst (no pause of 30 minutes or "
+                    "more) and at least half were answered with a 4xx/5xx status: wordlist or vulnerability scanning",
+        "telemetry": "http_access (web-server access logs: source.ip, http.response.status_code, url.original, "
+                     "user_agent.original); present in the lab profile",
+        "fidelity": "aggregate observation of requests and the server's answers; it does not show that any request "
+                    "exploited anything",
+        "benign_and_cost": "authorized vulnerability scans, crawlers, broken client loops; one lead per burst, so a "
+                           "source scanning twice gives two leads, each citing its own records",
+        "query_cost": "none beyond the sweep",
+        "next_pivot": "the source's 2xx answers after the burst, and the web host's activity after it",
+        "adds": "access-log-only scan detection; each burst is placed in time with its own records",
+        "research_basis": "ATT&CK Enterprise 20.0 T1595.002, T1595.003",
+        "retrieval": "the sweep retrieves every record of the target in each partition with no field filter, a "
+                     "superset of what this evaluator reads",
+        "state": "one open run per (host, source, target) in a keyed store (hot set over the rule's disk spill), "
+                 "its bounding records compact in its own state and at most 20 error answers held on the stage; "
+                 "runs quiet for longer than the gap behind the target's newest record are closed as batches are "
+                 "read; qualifying bursts kept on disk to the end; window totals per (host, source); a run that ends "
+                 "without qualifying releases its held records",
+        "lanes": "lead, severity medium: scanning is reconnaissance; what followed decides more",
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.open = KeyedStore(self, "scan_open", self.HOT)
+        self.bursts = KeyedStore(self, "scan_bursts", self.HOT)
+        self.holds = Holds()
+        self._unstaged: dict[str, TypedEvent] = {}   # held records not yet handed to the stage
+        self._latest: dict[tuple, TypedEvent] = {}   # open run -> its latest record this batch (compacted at the end)
+        self.late = 0
 
     def reportable(self, state: _Group) -> bool:
         return state.count >= self.MIN_REQUESTS and state.errors / state.count >= self.MIN_ERROR_RATIO
 
+    def qualifies(self, burst: _Burst) -> bool:
+        return burst.count >= self.MIN_REQUESTS and burst.errors / burst.count >= self.MIN_ERROR_RATIO
+
+    # ---- staging --------------------------------------------------------------------------------------------------
+    def _hold(self, e: TypedEvent) -> str:
+        self.holds.hold(e)
+        self._unstaged[e.id] = e
+        return e.id
+
+    def _release(self, event_id: str | None) -> None:
+        if event_id:
+            self.holds.release(event_id)
+
+    def drain_staged(self) -> list[TypedEvent]:
+        for key in list(self._latest):
+            burst = self.open.get(key)
+            if burst is not None:
+                self._settle(key, burst)
+                self.open.put(key, burst)
+        self._latest.clear()
+        out = super().drain_staged() + self.holds.drain()
+        self._unstaged.clear()
+        return out
+
+    def drain_bounds(self) -> tuple[list[str], list[str]]:
+        return drained_holds(self.bounds, self.holds)
+
+    def trim(self) -> None:
+        super().trim()
+        self.open.trim()
+        self.bursts.trim()
+
+    def release_state(self) -> None:
+        self.open.clear()
+        self.bursts.clear()
+        self.holds.clear()
+        self._unstaged.clear()
+        super().release_state()
+
+    # ---- evaluation -----------------------------------------------------------------------------------------------
     def consume(self, events):
+        counted = []
         for e in self.applicable(events):
-            key = (e.host, e.get("source.ip"))
-            state = self.keep(key, e)
-            if state is None:
-                continue
             try:
-                st = int(e.get("http.response.status_code"))
+                status = int(e.get("http.response.status_code"))
             except (TypeError, ValueError):
                 self.evaluated -= 1
                 self.missing_required += 1
                 continue
-            if st >= 400:
-                state.errors += 1
-            urls = state.bag("urls")
-            if len(urls) < 5000:
-                urls.add(e.get("url.original"))
-            ua = e.get("user_agent.original")
-            uas = state.bag("uas")
-            if ua and len(uas) < 10:
-                uas.add(ua)
-            if ua:
-                self.name(state, "uas", ua, e, self.AGENTS_NAMED)
+            error = status >= 400
+            host, src = e.host, e.get("source.ip")
+            window = self.state((host, src), e)
+            if window is None:
+                continue
+            window.count += 1
+            window.first, window.last = min(window.first, e.ts), max(window.last, e.ts)
+            if error:
+                window.errors += 1
+                if len(window.held) < EXAMPLE_LIMIT:         # the window's cited records: its first error answers
+                    window.held.append(e)
+                    self._fresh.append((window, len(window.held) - 1))
+                    self._pending.append(e)
+            self.bounds.offer_at((host, src), window.ends, e)
+            counted.append((e, error))
+        # bursts are read in time order: the batch's records sorted, after the target's earlier partitions
+        for e, error in sorted(counted, key=lambda item: (item[0].ts, item[0].id)):
+            self._place(e, e.host, e.get("source.ip"), error)
+        if counted:
+            self._close_stale(self.raw_target(), max(e.ts for e, _error in counted))
         return []
 
+    def _close_stale(self, target, newest) -> None:
+        """Close the open runs of this target whose last record is more than GAP behind its newest record read (no
+        later record can join them while the target is read in time order), so their holds go as early as possible.
+        The least recently used runs in memory are examined first, at most STALE_CHECKED per batch."""
+        checked = 0
+        for key in list(self.open.hot):
+            if checked >= self.STALE_CHECKED:
+                break
+            checked += 1
+            if key[2] != target:
+                continue
+            burst = self.open.hot.get(key)
+            if burst is not None and burst.last < newest - self.GAP:
+                self._close(key, burst)
+
+    def _place(self, e: TypedEvent, host, src, error: bool) -> None:
+        target = self.raw_target()
+        key = (host, src, target)
+        burst = self.open.get(key)
+        if burst is not None and e.ts > burst.last + self.GAP:
+            self._close(key, burst)
+            burst = None
+        if burst is not None and e.ts < burst.first - self.GAP:
+            self.late += 1
+            self.note_limit("late_records", "requests arrived after a later burst of the same source and host had "
+                                            "begun; they are counted in the source's window totals but not placed "
+                                            "in a burst", 1)
+            return
+        if burst is None:
+            burst = _Burst(e.ts, target)
+            if not self.open.put(key, burst):
+                # counted in the source's window totals already: only its place in a burst is not evaluated
+                self.note_limit("burst_disk", "the burst store took no new key (its disk budget is spent); records "
+                                              "that would start a new burst are counted in their source's window "
+                                              "totals but are in no burst", 1)
+                return
+        burst.count += 1
+        burst.errors += error
+        if e.ts < burst.first or burst.first_blob is None:
+            burst.first, burst.first_blob = e.ts, compact_event(e)
+        if e.ts >= burst.last or burst.last_blob is None:
+            burst.last, burst.last_blob = e.ts, None      # compacted when the batch ends (one per run, not per record)
+            self._latest[key] = e
+        if error and len(burst.held) < EXAMPLE_LIMIT:
+            burst.held.append(self._hold(e))
+        if len(burst.urls) < self.URLS_HELD:
+            burst.urls.add(e.get("url.original"))
+        ua = e.get("user_agent.original")
+        if isinstance(ua, str) and ua and len(burst.uas) < self.AGENTS_NAMED:
+            burst.uas.add(ua)
+        self.open.put(key, burst)
+
+    def _settle(self, key, burst: _Burst) -> None:
+        latest = self._latest.pop(key, None)
+        if latest is not None and burst.last_blob is None:
+            burst.last_blob = compact_event(latest)
+
+    def _close(self, key, burst: _Burst) -> None:
+        self._settle(key, burst)
+        self.open.pop(key)
+        if not self.qualifies(burst):
+            for held in burst.held:
+                self._release(held)
+            return
+        host, src, _target = key
+        if not self.bursts.put((*key, burst.first.isoformat()), burst):
+            # its held records stay on the stage; the burst is published from the window group instead
+            self.note_limit("burst_disk_kept", "the store of qualifying bursts took no new key (its disk budget is "
+                                               "spent); such a burst is reported only within its source's window "
+                                               "finding")
+            return
+        window = self.groups.get((host, src))
+        if window is not None:
+            window.extra["bursts"] = window.extra.get("bursts", 0) + 1
+            self.groups.put((host, src), window)
+
+    def _load(self, ids: list[str]) -> list[TypedEvent]:
+        """The held records by id: those not yet staged as they are, the rest from the stage."""
+        wanted = [i for i in ids if i not in self._unstaged]
+        found = {e.id: e for e in self.load(wanted)} if wanted else {}
+        missing = [i for i in wanted if i not in found]
+        if missing:
+            raise CitationUnavailable(f"{self.id}: {len(missing)} cited event(s) absent from the stage")
+        return [self._unstaged.get(i) or found[i] for i in dict.fromkeys(ids)]
+
     def finalize(self):
+        for key in list(self.open.keys()):
+            burst = self.open.peek(key)
+            self._close(key, burst)
         out = []
+        for key in sorted(self.bursts.keys(), key=lambda k: tuple(str(part) for part in k)):
+            burst = self.bursts.peek(key)
+            with citation_group(self, out, key[:2] + key[3:], burst):
+                out.append(self._burst_match(key, burst))
         for key, state in self.reported():
+            if state.extra.get("bursts"):
+                continue                       # its bursts are reported, each with its own records
             with citation_group(self, out, key, state):
                 n, errs = state.count, state.errors
                 if n < self.MIN_REQUESTS or errs / n < self.MIN_ERROR_RATIO:
                     continue
                 evs, missing, context = self.cite(state)
                 host, src = key
-                uas = sorted(state.names("uas", self.AGENTS_NAMED).values())
                 claim = (f"{n} HTTP requests to {host} from {src} ({self.span(state)}), {errs} ({errs / n:.0%}) with "
-                         f"4xx/5xx responses across {len(state.bag('urls'))}+ distinct URLs."
-                         + self.told(evs, state, missing, "requests", "request"))
-                m = Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "source.ip")], evs[0].ts, self.severity,
-                          self.lane, "high", evs[0].entities(), group_key=f"{host}|{src}", context_ids=context)
-                if uas:
-                    every = len(state.bag("uas"))
-                    m.notes.append("user-agent strings of cited requests (self-reported, not proof of tool): "
-                                   + "; ".join(f"'{ua}'" for ua in uas)
-                                   + (more(len(uas), every) if every < 10 else " and possibly more"))
-                out.append(m)
+                         f"4xx/5xx responses, spread over the hunt window with pauses of 30 minutes or more, so none of "
+                         f"its bursts qualifies on its own."
+                         + self.told(evs, state, missing, "requests", "request")
+                         + " The cited records are the source's first error responses.")
+                out.append(Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "source.ip")], evs[0].ts,
+                                 self.severity, self.lane, "high", evs[0].entities(), group_key=f"{host}|{src}",
+                                 context_ids=context))
         return out
+
+    def _burst_match(self, key, burst: _Burst) -> Match:
+        host, src, _target, _first = key
+        own = self._load(burst.held)
+        bounding = [expand_event(blob).model_copy(update={"caveats": [*expand_event(blob).caveats,
+                                                                       COMPACT_CITATION_NOTE]})
+                    for blob in (burst.first_blob, burst.last_blob) if blob]
+        cited = {e.id: e for e in own}
+        for event in bounding:
+            cited.setdefault(event.id, event)
+        evs = sorted(cited.values(), key=lambda e: (e.ts, e.id))
+        context = set(cited) - {e.id for e in own}
+        n, errs = burst.count, burst.errors
+        claim = (f"{n} HTTP requests to {host} from {src} in one burst ({burst.first.isoformat()} – "
+                 f"{burst.last.isoformat()}), {errs} ({errs / n:.0%}) with 4xx/5xx responses across "
+                 f"{'at least ' if len(burst.urls) >= self.URLS_HELD else ''}{len(burst.urls)} distinct URLs; no "
+                 f"request "
+                 f"from this source to this host came within 30 minutes before or after it."
+                 + cited_phrase(len(evs), n, True, "requests", "request"))
+        window = self.groups.peek((host, src))
+        m = Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "source.ip")], burst.first, self.severity,
+                  self.lane, "high", evs[0].entities(), group_key=f"{host}|{src}|{burst.first.isoformat()}",
+                  context_ids=context)
+        if window is not None and window.count > n:
+            m.notes.append(f"over the hunt window this source sent {window.count} requests to {host}, "
+                           f"{window.extra.get('bursts', 1)} burst(s) of which are reported; those other records "
+                           f"are not cited here")
+        agents = sorted({e.get("user_agent.original") for e in evs if isinstance(e.get("user_agent.original"), str)
+                         and e.get("user_agent.original")})
+        if agents:
+            m.notes.append("user-agent strings of cited requests (self-reported, not proof of tool): "
+                           + "; ".join(f"'{show(ua)}'" for ua in agents[:self.AGENTS_NAMED])
+                           + (" and possibly more" if len(burst.uas) > len(agents[:self.AGENTS_NAMED]) else ""))
+        return m
 
 
 class DnsSubdomainEnumeration(_Grouped):
@@ -475,32 +719,83 @@ class DnsSubdomainEnumeration(_Grouped):
 
 class ToolUserAgentHttp(_Grouped):
     """Positive-only: the user agent is self-reported, attacker-controlled text, so its absence
-    proves nothing; the prefix list also cannot see tools whose agent string does not start with the name."""
+    proves nothing; the prefix list also cannot see tools whose agent string does not start with the name.
+
+    Reads sensor HTTP transactions (`http_tx`) and web-server or proxy access-log lines (`http_access`). An access-log
+    line names no server address: the server is the host whose log holds the line (origin-form request targets), or,
+    for a forward proxy's line, the host of the absolute-form URL it fetched."""
     id = "net.tool_user_agent_http"
-    version = "4"
+    version = "5"
     URLS_NAMED = 3
     AGENTS_NAMED = 3            # recorded user agents quoted, each with a cited record
     AGENTS_COUNTED = 50         # distinct recorded user agents counted per group; beyond it, "and possibly more"
     assures_negative = False
     title = "HTTP requests whose user agent begins with a known command-line tool name"
-    families = ("http_tx",)
-    required_fields = ("source.ip", "destination.ip", "user_agent.original")
+    families = ("http_tx", "http_access")
+    required_fields = ("user_agent.original",)
+    # A sensor transaction needs its client and server addresses; an access-log line's server is the logging host
+    # and its client may be logged by name (source.host) when the server resolves addresses.
+    REQUIRED_BY_FAMILY: ClassVar[dict[str, tuple[str, ...]]] = {"http_tx": ("source.ip", "destination.ip"),
+                                                                "http_access": ()}
     severity, lane = "low", "lead"
     attack = ("T1105",)
     benign = ("health checks, package managers, monitoring scripts",)
     next_checks = ("process executions on the source host at the same time", "file_transfer for what was fetched")
+    card: ClassVar[dict] = {
+        "behavior": "HTTP requests whose self-reported user agent begins with a command-line tool's own identifier "
+                    "(curl, wget, python-requests, Go net/http, PowerShell, nmap, sqlmap, nikto, ffuf, gobuster, ...)",
+        "telemetry": "http_tx (Zeek/Suricata HTTP: source.ip, destination.ip, user_agent.original, url.original, "
+                     "http.hostname) and http_access (Apache/nginx combined access logs and proxy logs that record a "
+                     "user agent: source.ip, user_agent.original, url.original; the server is the logging host). "
+                     "Both are present in the lab profile",
+        "fidelity": "a self-reported string, never proof of the tool: any client can send it, and a tool can send "
+                    "another agent",
+        "benign_and_cost": "health checks, package managers, monitoring and API scripts; one grouped lead per "
+                           "(client, server, tool token)",
+        "query_cost": "none beyond the sweep",
+        "next_pivot": "process executions on the client at the same time; what the requests fetched",
+        "adds": "web servers with no sensor in front of them: their own access logs show the same agent strings",
+        "research_basis": "the tools' published default user agents; ATT&CK Enterprise 20.0 T1105",
+        "retrieval": "the sweep retrieves every record of the target in each partition with no field filter, a "
+                     "superset of what this evaluator reads",
+        "lanes": "lead, severity low: the string alone shows a tool may have been used, nothing about what it did",
+    }
+
+    @staticmethod
+    def _access_server(e) -> str | None:
+        """The server an access-log line's request went to: the logging host for an origin-form target, the URL's
+        host for a proxy's absolute-form target, None when neither is recorded."""
+        target = e.get("url.original")
+        if isinstance(target, str) and target and not target.startswith(("/", "*")):
+            # absolute form (a proxy's GET http://site/...) or authority form (a proxy's CONNECT site:443)
+            try:
+                host = urlsplit(target if "://" in target.split("?", 1)[0] else "//" + target).hostname
+            except ValueError:
+                host = None
+            return host or None
+        return e.host or None
 
     def consume(self, events):
         for e in self.applicable(events):
             ua = e.get("user_agent.original")
-            if not isinstance(ua, str):
+            needed = self.REQUIRED_BY_FAMILY.get(e.family, ())
+            if not isinstance(ua, str) or any(e.get(name) in (None, "", [], {}) for name in needed):
                 self.evaluated -= 1
                 self.missing_required += 1
                 continue
             recorded, ua = ua, ua.lower()
             if not ua.startswith(TOOL_UA_PREFIXES):
                 continue
-            key = (e.get("source.ip"), e.get("destination.ip"), e.get("http.hostname"), ua.split(" ")[0])
+            if e.family == "http_access":
+                server = self._access_server(e)
+                client = e.get("source.ip") or e.get("source.host")
+                if server is None or not client:
+                    self.evaluated -= 1
+                    self.missing_required += 1
+                    continue
+                key = ("access", client, server, ua.split(" ")[0])
+            else:
+                key = (e.get("source.ip"), e.get("destination.ip"), e.get("http.hostname"), ua.split(" ")[0])
             state = self.keep(key, e)
             if state is None:
                 continue
@@ -521,7 +816,12 @@ class ToolUserAgentHttp(_Grouped):
         for key, state in self.reported():
             with citation_group(self, out, key, state):
                 evs, missing, context = self.cite(state)
-                src, dst, hostname, ua = key
+                access = key[0] == "access"
+                if access:
+                    _kind, src, dst, ua = key
+                    hostname = None
+                else:
+                    src, dst, hostname, ua = key
                 urls = sorted(u for u in state.names("urls", self.URLS_NAMED).values())
                 every = len([u for u in state.bag("urls") if u])
                 # the user agents as recorded (each quoted one with a cited record); the grouping token is not a value
@@ -530,14 +830,24 @@ class ToolUserAgentHttp(_Grouped):
                 quoted = ", ".join(f"'{agent}'" for agent in agents) + (
                     more(len(agents), n_agents) if n_agents < self.AGENTS_COUNTED else " and possibly more")
                 tools = " or ".join(sorted(state.bag("tools")))
-                claim = (f"{state.count} HTTP request(s) from {src} to {dst} (Host: {hostname}) with user agent(s) "
+                if not access:
+                    where = f"from {src} to {dst} (Host: {hostname})"
+                elif dst == evs[0].host:
+                    where = f"from {src} recorded in the access log of {dst}"
+                else:
+                    where = f"from {src} to {dst} recorded in the proxy access log on {evs[0].host}"
+                claim = (f"{state.count} HTTP request(s) {where} with user agent(s) "
                          f"{quoted} ({self.span(state)}), which matched the {tools} tool signature; URLs include {urls}"
                          + (more(len(urls), every) if every < 50 else " and possibly more") + "."
                          + self.told(evs, state, missing, "requests", "request") + " The user agent is self-reported.")
-                out.append(Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "user_agent.original"),
-                                                                         pf(evs[0], "source.ip")],
+                predicate = [pf(evs[0], "user_agent.original")]
+                predicate += [pf(evs[0], name) for name in ("source.ip", "source.host") if evs[0].has(name)][:1]
+                if access and evs[0].has("url.original"):
+                    predicate.append(pf(evs[0], "url.original"))
+                out.append(Match(self.id, claim, self.claim_type, evs, predicate,
                                  evs[0].ts, self.severity, self.lane, "medium", evs[0].entities(),
-                                 group_key=f"{src}|{dst}|{ua}", context_ids=context))
+                                 group_key=f"access|{dst}|{src}|{ua}" if access else f"{src}|{dst}|{ua}",
+                                 context_ids=context))
         return out
 
 
