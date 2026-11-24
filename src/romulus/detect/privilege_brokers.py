@@ -27,9 +27,10 @@ from romulus.detect.linux_argv import PATTERN_READERS, PLAIN_READERS, normalize_
 from romulus.detect.linux_direct import FoldedLinuxDirect, observed
 from romulus.detect.linux_semantics import classify_credential
 from romulus.detect.log_writer import line_subject, writer_sentence, writer_state
+from romulus.detect.packets import show
 from romulus.evidence.linux_service_text import PKEXEC_AMBIGUOUS_CAVEAT
 from romulus.evidence.linux_text_types import SUDO_AMBIGUOUS_CAVEAT
-from romulus.evidence.shellparse import SHELLS
+from romulus.evidence.shellparse import SHELLS, classify_redirect, parse_script
 from romulus.evidence.typed import Outcome
 from romulus.hunt.citations import COMPACT_CITATION_NOTE, compact_event, expand_event
 
@@ -711,8 +712,6 @@ BROKER_CREDENTIAL_ROUTINE = frozenset({
     "ssh-keygen", "ssh-add", "ssh-copy-id",
     "echo", "printf", "true", "false", "sleep",
 })
-_COMMAND_WRAPPERS = frozenset({"nice", "nohup", "ionice", "stdbuf", "chrt", "taskset", "setsid", "time", "command",
-                               "exec", "xargs"})
 # Directories whose whole contents are credentials, named by an archiver or copier (tar czf x /root/.ssh).
 _CREDENTIAL_DIRS = (("/.ssh", "T1552.004", "an SSH key directory"), ("/.gnupg", "T1552.004", "a GnuPG home"),
                     ("/.aws", "T1552.001", "an AWS credential directory"),
@@ -750,17 +749,70 @@ def broker_credential_class(path: str) -> tuple[str, str] | None:
     return None
 
 
+# Wrappers that run the command after their own options, with the options that take a value (`nice -n 10`,
+# `timeout -s KILL 5`, `env -u NAME`) and how many leading operands are theirs (timeout's duration, chrt's priority).
+_WRAPPER_VALUES = {
+    "env": ({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}, 0),
+    "nice": ({"-n", "--adjustment"}, 0),
+    "timeout": ({"-s", "--signal", "-k", "--kill-after"}, 1),
+    "ionice": ({"-c", "--class", "-n", "--classdata", "-p", "--pid", "-P", "--pgid", "-u", "--uid"}, 0),
+    "stdbuf": ({"-i", "-o", "-e"}, 0),
+    "chrt": (set(), 1),
+    "taskset": ({"-c"}, 0),
+    "xargs": ({"-n", "-I", "-i", "-d", "-P", "-L", "-l", "-s", "-E", "-e", "-a"}, 0),
+    "nohup": (set(), 0), "setsid": (set(), 0), "time": ({"-f", "-o"}, 0), "command": (set(), 0),
+    "exec": ({"-a"}, 0), "busybox": (set(), 0), "sudo": ({"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U"}, 0),
+    "doas": ({"-u", "-C"}, 0), "pkexec": ({"--user"}, 0),
+}
+
+
+def _unwrap(words: list[str]) -> list[str]:
+    """The command a wrapper runs: its options, their values and its own operands stepped over."""
+    while words and basename(words[0]) in _WRAPPER_VALUES:
+        name = basename(words[0])
+        valued, operands = _WRAPPER_VALUES[name]
+        rest = words[1:]
+        while rest:
+            word = rest[0]
+            if name == "env" and "=" in word and not word.startswith("-"):
+                rest = rest[1:]
+            elif word.startswith("-") and word != "-":
+                rest = rest[2:] if word in valued else rest[1:]
+            else:
+                break
+        if name == "taskset" and rest and not any(w in ("-c", "--cpu-list") for w in words[1:]):
+            operands = 1                    # the mask
+        words = rest[operands:]
+    return words
+
+
 def _statements(words: list[str]) -> list[list[str]]:
-    """A logged command as statements: a shell's `-c` script (sudo logs the words joined by spaces, so the script's
-    quoting is gone) split on its separators, or the command itself. Wrappers (env with its assignments, nice, nohup,
-    timeout N, ...) are stepped over."""
+    """A logged command as statements. A shell's `-c` script (sudo logs the words joined by spaces, so its quoting
+    is gone) is parsed with the shell grammar (`romulus.evidence.shellparse`), so unspaced pipes, separators and
+    redirects (`cat</etc/shadow|base64`) are read; a script the grammar cannot model is split on spaced separators.
+    Each command's input redirects are kept as `<` operands; wrappers are stepped over."""
+    words = _unwrap(words)
     if not words:
         return []
     name = basename(words[0])
     if name in SHELLS and "-c" in words[1:]:
-        script = words[words.index("-c", 1) + 1:]
+        script = " ".join(words[words.index("-c", 1) + 1:])
+        if len(script) > 1 and script[0] == script[-1] and script[0] in "'\"":
+            script = script[1:-1]          # a script logged with the quotes the caller typed around it
+        parsed = parse_script(script)
+        if parsed.ok and not parsed.partial:
+            out = []
+            for command in parsed.commands():
+                argv = list(command.argv)
+                for op, target in command.redirects:
+                    read = classify_redirect(op, target).reads_file
+                    if read:
+                        argv += ["<", read]
+                if argv:
+                    out.extend(_statements(argv))
+            return out
         out, current = [], []
-        for word in [*script, ";"]:
+        for word in [*words[words.index("-c", 1) + 1:], ";"]:
             if word in _SCRIPT_SEPARATORS or (word.endswith(";") and word != ";"):
                 if word.endswith(";") and word not in _SCRIPT_SEPARATORS:
                     current.append(word[:-1])
@@ -770,26 +822,18 @@ def _statements(words: list[str]) -> list[list[str]]:
             else:
                 current.append(word)
         return out
-    while words:
-        name = basename(words[0])
-        if name == "env":
-            rest = words[1:]
-            while rest and ("=" in rest[0] or rest[0].startswith("-")):
-                rest = rest[1:]
-            words = rest
-        elif name == "timeout":
-            rest = [w for w in words[1:]]
-            while rest and rest[0].startswith("-"):
-                rest = rest[1:]
-            words = rest[1:]                        # the duration
-        elif name in _COMMAND_WRAPPERS:
-            rest = words[1:]
-            while rest and rest[0].startswith("-"):
-                rest = rest[1:]
-            words = rest
-        else:
-            break
-    return [words] if words else []
+    return [words]
+
+
+def _hit_strength(hit: tuple[str, str, str]) -> int:
+    """How strongly a hit shows credential access: a read of the hash files or a private key, then a mode that
+    exposes them, then a read of other credential material, then a hash file or key only named, then the rest
+    (sudoers last among equals)."""
+    _program, path, how = hit
+    technique = broker_credential_class(path)[0]
+    strong = technique in _HASH_AND_KEY
+    rank = {("read", True): 5, ("widened", True): 4, ("read", False): 3, ("named", True): 2}.get((how, strong), 1)
+    return rank * 2 - (technique == "T1548.003")
 
 
 _OCTAL_MODE = re.compile(r"[0-7]{3,4}")
@@ -942,6 +986,8 @@ class PrivilegeBrokerCredentialArgs(FoldedLinuxDirect):
             return []
         if e.outcome == Outcome.unknown:
             self.missing_required += 1      # positive, but the decision is unknown: never a clean evaluation
+        # the strongest hit decides the lane, the severity and the path the claim leads with; the rest are named
+        hits = sorted(hits, key=_hit_strength, reverse=True)
         program, path, how = hits[0]
         technique, description = broker_credential_class(path)
         actor, target = e.get("user.name"), e.get("auth.target_user")
@@ -959,8 +1005,8 @@ class PrivilegeBrokerCredentialArgs(FoldedLinuxDirect):
         else:
             decision = "logged, with an unknown decision,"
         said = f"{subject} says that {service} {decision}" if subject else f"{service} {decision}"
-        shown = (f"the command '{command}'" if len(command) <= 300 else
-                 f"a command of {len(command)} characters beginning `{command[:300]}`")
+        shown = (f"the command '{show(command, 300)}'" if len(command) <= 300 else
+                 f"a command of {len(command)} characters beginning `{show(command, 300)}`")
         claim = (f"On {e.host}, {said} {_quote(actor)} to run as {_quote(target)} {shown}"
                  + (f" from terminal {tty}" if on_tty else " without a terminal") + ". ")
         if how == "read":
@@ -973,7 +1019,7 @@ class PrivilegeBrokerCredentialArgs(FoldedLinuxDirect):
         claim += " The record shows the broker's decision, not that the command ran to completion or read the file."
         others = sorted({hit[1] for hit in hits[1:] if hit[1] != path})
         if others:
-            claim += f" Its arguments also name {len(others)} other credential path(s): {others[:5]}."
+            claim += f" Its arguments also name {len(others)} other credential path(s): {[show(o) for o in others[:5]]}."
         if kind in {"web", "never", "daemon"}:
             claim += f" {_quote(actor)} is a {'web-service' if kind == 'web' else 'system or daemon'} account."
         if e.has("sudo.chunk") or SUDO_AMBIGUOUS_CAVEAT in e.caveats or PKEXEC_AMBIGUOUS_CAVEAT in e.caveats:
