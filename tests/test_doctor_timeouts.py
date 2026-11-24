@@ -19,7 +19,10 @@ def _quiet(monkeypatch, **overrides):
              "check_ollama": "ollama.reachable", "check_agent": "agent.provider",
              "check_triage_model": "triage.provider", "check_secret_lengths": "secrets.length",
              "check_secret_strength": "secrets.strength", "check_tshark": "tshark", "check_site": "site.collection",
-             "check_db_space": "db.space", "check_mention_patterns": "mentions.patterns"}
+             "check_db_space": "db.space", "check_mention_patterns": "mentions.patterns",
+             # no targets in its data: whether a hunt would run the packet stage stays unknown, so Arkime and TShark
+             # are judged as required
+             "check_packet_scope": "packets.scope", "check_session_secret": "web.secret_key"}
     for function, name in names.items():
         monkeypatch.setattr(doctor, function, overrides.get(function, lambda *_a, _n=name, **_k: Check(_n, "ok")))
     monkeypatch.setattr(doctor, "check_arkime_auth", overrides.get("check_arkime_auth", lambda _s: None))

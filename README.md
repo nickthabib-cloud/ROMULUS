@@ -10,7 +10,7 @@ ROMULUS works **with or without an AI model**. Initial finding comes from determ
 
 ---
 
-## How it works (In progress)
+## How it works
 
 1. **Sweeps** the hunt window across your sources with a catalog of typed detection rules: web shells, reverse shells, credential-file reads, downloads piped to a shell, firewall tampering, privilege-escalation tooling, port scans, beaconing, suspicious IDS alert stacks, indicator matches and much more. The goal is to find any malicious activity the telemetry can show, on any mission network. The detection catalog is being built from systematic research:
   - MITRE ATT&CK Enterprise and ICS techniques;
@@ -59,33 +59,35 @@ Nothing that might be attacker activity is dropped: noise is handled by grouping
 - Python 3.12+
 - Elasticsearch or OpenSearch holding the telemetry, and an account with read access to the indices only
 - Arkime (sessions, and the PCAP its viewer serves) and TShark, which decodes the packets ROMULUS fetches from Arkime
-- Optional: a model server for the AI agent (see [AI investigating agent](#ai-investigating-agent-in-progress)); hunts run without one
+- Optional: a model server for the AI agent (see [AI investigating agent](#ai-investigating-agent)); hunts run without one
 
 ## Quick start
 
 For a step-by-step setup (install, `.env`, web exposure, doctor, accounts, a first hunt and troubleshooting), see the [operator quick-start](docs/OPERATOR_GUIDE.md).
 
+The code, its venv and the `.env` all live under the ROMULUS home (`$ROMULUS_HOME/app`, `$ROMULUS_HOME/venv`, `$ROMULUS_HOME/.env`), the layout `scripts/deploy.ps1` creates and `scripts/web-restart.sh` expects:
+
 ```bash
-git clone https://github.com/nickthabib-cloud/ROMULUS.git && cd ROMULUS
-python3.12 -m venv venv
-venv/bin/pip install -e .
-
 export ROMULUS_HOME=~/romulus && mkdir -p "$ROMULUS_HOME" && chmod 700 "$ROMULUS_HOME"
-cp .env.example "$ROMULUS_HOME/.env" && chmod 600 "$ROMULUS_HOME/.env"
-# edit .env: ROMULUS_HOME (the same path), ES_URL, ES_USERNAME/ES_PASSWORD (read-only), ES_INDEX_PATTERNS, ROMULUS_SECRET_KEY, optional Arkime and PCAP settings
+git clone https://github.com/nickthabib-cloud/ROMULUS.git "$ROMULUS_HOME/app"
+python3.12 -m venv "$ROMULUS_HOME/venv"
+"$ROMULUS_HOME/venv/bin/pip" install -e "$ROMULUS_HOME/app"
 
-venv/bin/romulus --env-file "$ROMULUS_HOME/.env" doctor
-venv/bin/romulus --env-file "$ROMULUS_HOME/.env" hunt start --start 2026-01-01T10:00:00Z --end 2026-01-01T17:30:00Z
-venv/bin/romulus --env-file "$ROMULUS_HOME/.env" report <hunt-id>
+cp "$ROMULUS_HOME/app/.env.example" "$ROMULUS_HOME/.env" && chmod 600 "$ROMULUS_HOME/.env"
+# edit .env: ROMULUS_HOME (the same path, written out in full), ES_URL, ES_USERNAME/ES_PASSWORD (read-only), ES_INDEX_PATTERNS, ROMULUS_SECRET_KEY, Arkime settings
+
+"$ROMULUS_HOME/venv/bin/romulus" --env-file "$ROMULUS_HOME/.env" doctor
+"$ROMULUS_HOME/venv/bin/romulus" --env-file "$ROMULUS_HOME/.env" hunt start --start 2026-01-01T10:00:00Z --end 2026-01-01T17:30:00Z
+"$ROMULUS_HOME/venv/bin/romulus" --env-file "$ROMULUS_HOME/.env" report <hunt-id>
 ```
 
-`doctor` checks connectivity, that the account is read-only, the configured indices, TShark, the PCAP paths and storage, the web UI's TLS setup and that the ROMULUS home is private to its owner, and tells you what to fix. Each check has its own deadline (60 to 400 s; `--check-timeout SECONDS` sets one for all). A check that overruns is reported as timed out, a failure for a source, TShark or a model endpoint and a warning otherwise, and the other checks still run. The storage checks open the database read-only: `doctor` never migrates it or writes its data (SQLite may create the empty `-wal`/`-shm` side files a read-only reader needs).
+`doctor` checks connectivity, that the account is read-only, the configured indices, TShark, the PCAP paths and storage, the web UI's TLS setup and that the ROMULUS home is private to its owner, and tells you what to fix. Arkime and TShark are required only when `ES_INDEX_PATTERNS` includes an Arkime session index; without one the packet stage is skipped and `doctor` only warns about them. Each check has its own deadline (60 to 400 s; `--check-timeout SECONDS` sets one for all). A check that overruns is reported as timed out, a failure for a source, TShark or a model endpoint and a warning otherwise, and the other checks still run. The storage checks open the database read-only: `doctor` never migrates it or writes its data (SQLite may create the empty `-wal`/`-shm` side files a read-only reader needs).
 
 To use the browser UI:
 
 ```bash
-venv/bin/romulus --env-file "$ROMULUS_HOME/.env" user add alice --role lead
-venv/bin/romulus --env-file "$ROMULUS_HOME/.env" web      # serves on ROMULUS_WEB_BIND (default 127.0.0.1:8443)
+"$ROMULUS_HOME/venv/bin/romulus" --env-file "$ROMULUS_HOME/.env" user add alice --role lead
+bash "$ROMULUS_HOME/app/scripts/web-restart.sh"     # runs `romulus web` in the background on ROMULUS_WEB_BIND (default 127.0.0.1:8443)
 ```
 
 On the default loopback bind the UI is plain HTTP and reachable only from the same machine. To serve it to other machines, give it a certificate and key; `romulus web` refuses plain HTTP on any other address. A self-signed pair for a small team:
@@ -110,6 +112,11 @@ Behind a TLS reverse proxy instead, keep the loopback bind, list the proxy's IP 
 | `hunt extend <id> --calls N --tokens N --minutes N --source-queries N` (or `--effort deep`) | Give a hunt's AI agent more budget; a stopped or budget-limited agent continues from where it was, without sweeping again |
 | `findings <id> [--lane urgent --lane high]` | List ranked findings |
 | `report <id>` | Publish a new immutable report revision (JSON, Markdown, executive DOCX, indicator CSV and STIX) |
+| `agent reassess <id> [--max-calls N] [--max-tokens N]` | Write a fresh AI assessment for a stored hunt, optionally with extra calls or tokens, and publish a new report revision |
+| `triage <id> [--export FILE] [--no-run] [--force] [--allow-stale] [--agent-model ID]` | Run the AI triage pass (a labelled, promote-only order over the surfaced findings) on a finished hunt; `--export` writes its order as JSON, `--no-run` exports the stored pass. The deterministic report order stays authoritative |
+| `indicators import <file> --name N --source S [--expires ISO] [--lane high\|lead\|context] [--severity S] [--reason TEXT] [--user NAME]` / `indicators export <list-id> [--version N] [--format yaml\|csv] [--out FILE]` | Import a local CSV or STIX/MISP JSON indicator file as a new list version (a high lane needs a lead account and a reason) / export a complete list version |
+| `sigma import <dir> --upstream URL --commit ID` / `sigma list` / `sigma show <rule-id>` | Import a local Sigma rule directory (rules arrive as draft or reference-only), list or show the rules |
+| `sigma activate <rule-id> --positive FILE --benign FILE [--lane lead\|high] [--reason TEXT]` / `sigma retire <rule-id>` | As a lead (its password is asked): activate a rule whose positive fixture matches and whose benign fixture does not, or retire it |
 | `user add <name> --role lead\|analyst` | Create a web UI account (interactive) |
 | `user disable\|enable\|passwd\|logout <name>` / `user role <name> --role lead\|analyst` | Disable or re-enable an account, change its password or role, or end its web sessions. Each change ends the account's open sessions |
 | `web` | Serve the browser UI |
@@ -139,12 +146,11 @@ Tick the sync-account declaration after checking the site's complete list, inclu
 
 Windows logs cannot show whether a kind of event was being recorded at all. Results therefore name the collection that was not attested, so analysts can see where the hunt was blind. ROMULUS reports what it finds; it never claims that nothing is there. Every change is validated and audited, and hunts record the file's digest. A stopped hunt cannot resume after the file changes; start a new hunt over its window instead.
 
-## AI investigating agent (In progress)
+## AI investigating agent
 
-After the deterministic hunt, an AI agent will read everything ROMULUS found, form hypotheses about what the attacker did, follow leads through typed, read-only pivots, and open the report with a cited **AI assessment**, labelled as AI-generated and unconfirmed. It can add findings (marked as agent findings), but it can never hide, close or demote anything the deterministic layer found.
+After the deterministic stages, the AI agent reads everything ROMULUS found, forms hypotheses about what the attacker did, follows leads through typed, read-only pivots and its own read-only source queries (bounded to the hunt's sources and window), and opens the report with a cited **AI assessment**, labelled as AI-generated and unconfirmed. It can add findings (marked as agent findings), but it can never hide, close or demote anything the deterministic layer found.
 
-- Teams connect it to **their own model server**, so telemetry stays on their network.
-- A hosted model is allowed only for testing on public data, behind an explicit install-time switch, with a banner on every hunt and report that used it.
+- It talks to the team's own model server, or to a remote model endpoint the operator has approved for the hunt's data. A remote endpoint needs the explicit opt-in `ROMULUS_MODEL_EGRESS=lab-public-data` and `https`, and every hunt and report that used it carries a banner naming the host and model.
 - Usage is bounded by per-hunt budgets (calls, tokens, time, source queries, hypotheses, sessions and tool calls, optional cost). If a budget runs out, the deterministic results are unaffected.
 - Each hunt pins its agent budget when it starts: a profile (**quick**, **standard** = the `.env` values, or **deep** for long mission hunts) plus optional per-limit values. Resumes read the pinned budget, so a later `.env` change only affects new hunts. More budget can be added later from the hunt's Run tab or with `hunt extend`. Analysts stay within the site ceiling (`AGENT_BUDGET_CEILING_MULTIPLIER`); only a lead can go above it.
 
@@ -169,8 +175,8 @@ Analysts may stop or extend the hunts they started; leads may stop or extend any
 |---|---|---|
 | `openai_compatible` (default) | A team's own model server (vLLM, SGLang, llama.cpp `server`, LM Studio, TGI, Ollama's `/v1`), or a hosted API | Set `AGENT_BASE_URL`, `AGENT_MODEL` and, for a remote endpoint, `AGENT_API_KEY` |
 | `ollama` | Small local runs on Ollama's native API | The context window is always explicit |
-| `openai_responses` | OpenAI reasoning models through the Responses API (they take function tools only there) | The endpoint defaults to `https://api.openai.com/v1`, which is remote: it needs `ROMULUS_MODEL_EGRESS=lab-public-data`, so use it on public data only. Set `AGENT_MODEL` and `AGENT_API_KEY`; `AGENT_EFFORT` and `AGENT_THINKING_TOKENS` tune reasoning. Reasoning models can think silently for minutes, so set `AGENT_TIMEOUT_SECONDS` to 600 or more at effort `high` and above |
-| `anthropic` | Claude models through the Claude Messages API | Install the optional SDK first (`pip install -e ".[anthropic]"`; `scripts/deploy.ps1 -Extras anthropic` on a host). The endpoint defaults to `https://api.anthropic.com`, which is remote: like any hosted API it needs `ROMULUS_MODEL_EGRESS=lab-public-data`, so use it on public data only. Set `AGENT_MODEL` to an exact model id and `AGENT_API_KEY`; `AGENT_EFFORT`, `AGENT_THINKING_TOKENS` and `AGENT_REFUSAL_FALLBACK` tune it (see `.env.example`) |
+| `openai_responses` | OpenAI reasoning models through the Responses API (they take function tools only there) | The endpoint defaults to `https://api.openai.com/v1`, which is remote: it needs `ROMULUS_MODEL_EGRESS=lab-public-data`, the explicit opt-in for a remote endpoint the operator has approved for the hunt's data. Set `AGENT_MODEL` and `AGENT_API_KEY`; `AGENT_EFFORT` and `AGENT_THINKING_TOKENS` tune reasoning. Reasoning models can think silently for minutes, so set `AGENT_TIMEOUT_SECONDS` to 600 or more at effort `high` and above |
+| `anthropic` | Claude models through the Claude Messages API | Install the optional SDK first (`pip install -e ".[anthropic]"`; `scripts/deploy.ps1 -Extras anthropic` on a host). The endpoint defaults to `https://api.anthropic.com`, which is remote: like any hosted API it needs `ROMULUS_MODEL_EGRESS=lab-public-data`, the explicit opt-in for a remote endpoint the operator has approved for the hunt's data. Set `AGENT_MODEL` to an exact model id and `AGENT_API_KEY`; `AGENT_EFFORT`, `AGENT_THINKING_TOKENS` and `AGENT_REFUSAL_FALLBACK` tune it (see `.env.example`) |
 
 `romulus doctor` checks the configured provider with a tiny request that carries no telemetry.
 
@@ -178,14 +184,14 @@ Full design: [`docs/architecture/ai-investigating-agent.md`](docs/architecture/a
 
 - **Strong indicators are reported on their own, immediately.** Correlation and attack paths come second.
 - **Nothing reportable is lost** to UI limits, model context or rendering. One report manifest feeds every output.
-- **Read-only and on-site.** ROMULUS never writes to your telemetry and sends nothing off the host it runs on (except the optional, labelled test-model exception above). Secrets never appear in logs, prompts or reports.
+- **Read-only and on-site.** ROMULUS never writes to your telemetry and sends nothing off the host it runs on, except to a remote model endpoint the operator has explicitly opted into, which every hunt and report that used it names. Secrets never appear in logs, prompts or reports.
 
 
 ## Architecture
 
 ```
 sources (ES/OpenSearch, Arkime, PCAP) ─► sweep ─► packet stage ─► expansion ─► incidents ─► report ─► JSON | Markdown | web UI
-                                                                                  └─► AI agent (planned)
+                                                                                  └─► AI agent (optional)
 ```
 
 Python 3.12 modular monolith (`src/romulus/`), SQLite (WAL) as the single state store with Alembic migrations, FastAPI + Jinja web UI with local logins, roles, CSRF protection and a strict CSP. Details: [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md) and the generated [`MODULE_MAP.md`](docs/architecture/MODULE_MAP.md).
@@ -218,8 +224,8 @@ Repository layout:
 
 ## Roadmap
 
-- **Now:** detection breadth. Windows and Active Directory first (process, logon, persistence, registry, WMI, Kerberos and directory rules on Windows event logs and Sysmon), then indicator-list import, Sigma import, Zeek and the OpenSearch/Malcolm source contract.
-- **Then:** testing on unseen datasets, the executive DOCX report and hardening, and the AI investigating agent last.
+- **Detection breadth:** Windows and Active Directory (process, logon, persistence, registry, WMI, Kerberos and directory rules on Windows event logs and Sysmon), cloud and identity logs, and ICS protocols.
+- **Assurance:** testing on unseen datasets, and hardening.
 
 ROMULUS is built to find what is there. It reports what each rule searched and where it was blind, and never claims that nothing is there.
 

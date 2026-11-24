@@ -4,7 +4,8 @@ An endpoint is local when its host is loopback, RFC 1918 or IPv6 unique-local, o
 MODEL_LOCAL_HOSTS (a hostname, an address, or a CIDR network no wider than /8, or /16 for IPv6). A hostname
 counts as local only when every address it resolves to is local; a name that does not resolve is remote. The
 name classified is the ASCII form the client connects to. Every other endpoint is remote and
-is refused unless the bootstrap configuration sets ROMULUS_MODEL_EGRESS=lab-public-data.
+is refused unless the bootstrap configuration sets ROMULUS_MODEL_EGRESS=lab-public-data: the explicit opt-in for a
+remote endpoint the operator has approved for the hunt's data.
 """
 from __future__ import annotations
 
@@ -147,8 +148,9 @@ def classify(base_url: str, local_hosts: list[str], egress_switch: str,
     if egress_switch != EGRESS_SWITCH_VALUE:
         return EgressDecision(host, url.scheme, egress, basis, addresses, False,
                               f"{host} is a remote endpoint ({basis}); telemetry may be sent to it only when the "
-                              f"bootstrap .env sets ROMULUS_MODEL_EGRESS={EGRESS_SWITCH_VALUE} (public data only), "
-                              "or when it is the team's own server listed in MODEL_LOCAL_HOSTS")
+                              f"bootstrap .env sets ROMULUS_MODEL_EGRESS={EGRESS_SWITCH_VALUE}, the explicit opt-in "
+                              "for a remote endpoint the operator has approved for the hunt's data, or when it is the "
+                              "team's own server listed in MODEL_LOCAL_HOSTS")
     if url.scheme != "https":
         return EgressDecision(host, url.scheme, egress, basis, addresses, False,
                               f"{host} is a remote endpoint over plain HTTP; a remote endpoint must use https")

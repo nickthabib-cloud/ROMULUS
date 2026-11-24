@@ -8,11 +8,11 @@ This guide takes you from a fresh Linux host to a finished hunt, a published rep
 |---|---|
 | Linux host | ROMULUS is developed and run on Ubuntu. Use a service account that owns the ROMULUS home. |
 | Python 3.12 or later | With `venv`. The deploy script creates the venv with the host's `python3`, so that must be 3.12+ too. |
-| TShark | On `PATH`, or set `TSHARK_BIN`. `doctor` fails without it. |
+| TShark | On `PATH`, or set `TSHARK_BIN`. Needed when `ES_INDEX_PATTERNS` includes an Arkime session index: `doctor` then fails without it, and only warns otherwise. |
 | Disk | The stage directory (`ROMULUS_STAGE_DIR`, default `$ROMULUS_HOME/stage`) holds staged events and detector state during a hunt. Put it on a volume no other service writes to, never the volume holding Elasticsearch, Arkime or docker data. `doctor` warns under 10 GB free in the home. |
 | Elasticsearch 8+ or OpenSearch 2.4+ | Network reach from this host, and an account with **read access to the telemetry indices only**. Never the `elastic` superuser or an OpenSearch `all_access` account; `doctor` fails on those. |
-| Arkime viewer | Network reach to its API (directly, or behind a proxy under a path prefix). Its session indices are read through Elasticsearch/OpenSearch, and the packets of selected sessions are fetched from the viewer and decoded with TShark. |
-| Model endpoint (optional) | The AI investigating agent needs one (see [Model providers](../README.md#model-providers)). Without one, hunts run deterministically and the agent is reported as not configured. |
+| Arkime viewer | Network reach to its API (directly, or behind a proxy under a path prefix). Its session indices are read through Elasticsearch/OpenSearch, and the packets of selected sessions are fetched from the viewer and decoded with TShark. Without an Arkime session index in `ES_INDEX_PATTERNS`, hunts skip the packet stage and need neither Arkime nor TShark. |
+| Model endpoint (optional) | The AI investigating agent needs one: the team's own model server, or a remote endpoint the operator has approved for the hunt's data (see [Model providers](../README.md#model-providers) and section 8). Without one, hunts run deterministically and the agent is reported as not configured. |
 
 ## 2. Install
 
@@ -50,19 +50,19 @@ Then edit it. `doctor` fails if the file is readable by anyone but its owner.
 | Variable | Required | Notes |
 |---|---|---|
 | `ROMULUS_HOME` | yes | Set it to the same `<romulus-home>`. The template's value is an example; a command run without `ROMULUS_HOME` exported takes the home from this line. |
-| `ROMULUS_SECRET_KEY` | for the web UI | A random value of 32+ characters without spaces, e.g. `python3 -c "import secrets;print(secrets.token_urlsafe(32))"`. It signs web sessions. |
+| `ROMULUS_SECRET_KEY` | for the web UI | A random value of 32+ characters without spaces, e.g. `python3 -c "import secrets;print(secrets.token_urlsafe(32))"`. It signs web sessions; `doctor` fails without a fit one and `romulus web` refuses to start. |
 | `ES_URL`, `ES_FLAVOR` | yes | `ES_FLAVOR` is `elasticsearch` or `opensearch` and must match the cluster. |
 | `ES_USERNAME` + `ES_PASSWORD`, or `ES_API_KEY` | yes | The read-only account. An API key, when set, is used instead of the username. |
 | `ES_CA_CERT`, `ES_VERIFY_TLS` | for TLS | The CA that signed the cluster's certificate. Keep verification on. |
 | `ES_INDEX_PATTERNS` | yes | Comma-separated index or data-stream patterns, including the Arkime session indices. Without them there is nothing to hunt. |
 | `ES_READ_ONLY_ROLES` | OpenSearch | The names of your read-only roles, so `doctor` can show the account is read-only. |
-| `ARKIME_URL`, `ARKIME_USERNAME`, `ARKIME_PASSWORD` | for packets | Plus `ARKIME_BASE_PATH` and `ARKIME_AUTH` (`digest` or `basic`) behind a proxy. Use an `https` URL with `basic`. |
+| `ARKIME_URL`, `ARKIME_USERNAME`, `ARKIME_PASSWORD` | with an Arkime index | Plus `ARKIME_BASE_PATH` and `ARKIME_AUTH` (`digest` or `basic`) behind a proxy. Use an `https` URL with `basic`. |
 | `TSHARK_BIN` | as needed | The TShark binary, when it is not `tshark` on `PATH`. |
 | `PCAP_ALLOWED_DIRS` | no | `doctor` checks that each listed directory exists. Hunts fetch packets from Arkime, not from these directories. |
 | `ROMULUS_INTERNAL_NETWORKS`, `ROMULUS_EXTERNAL_NETWORKS` | strongly advised | The site's address space and carve-outs (CIDRs). Unset, the RFC 1918 ranges are assumed, rules that depend on direction report partial coverage and `doctor` warns. They can be set on the web UI's Site setup page instead, not in both places. |
 | `MISSION_TIMEZONE` | no | Times given without an offset are read in this zone (default `UTC`). |
 | `ROMULUS_STAGE_DIR` | advised | See Disk above. |
-| `AGENT_*` | for the AI agent | See section 5 and [Model providers](../README.md#model-providers). |
+| `AGENT_*` | for the AI agent | See section 5, section 8 and [Model providers](../README.md#model-providers). |
 
 **Secrets go only in this file:** `ROMULUS_SECRET_KEY`, `ES_PASSWORD`, `ES_API_KEY`, `ARKIME_PASSWORD` and `AGENT_API_KEY`. ROMULUS redacts their values from logs, prompts and reports; never put them in a command line, a script or a ticket. `doctor` warns about secrets that are short or easy to guess.
 
@@ -106,6 +106,8 @@ Each line is `[OK  ]`, `[WARN]` or `[FAIL]`. **FAIL** means a hunt started now w
 
 On a fresh install, expect these warnings: `db.integrity` (no database yet; it is created on first use), `site.collection` (no `site/collection.yaml`; optional) and, until the site's networks are set, `site.internal_networks`.
 
+`packets.scope` says whether a hunt would run the packet stage, that is whether `ES_INDEX_PATTERNS` includes an Arkime session index. When it does, or when that cannot be told because the cluster could not be read, `arkime.reachable` and `tshark` fail as usual. When it does not, they only warn that the packet stage will be skipped, so a host without Arkime passes `doctor`.
+
 The checks you are most likely to act on:
 
 | Check | Status | What to do |
@@ -115,14 +117,15 @@ The checks you are most likely to act on:
 | `es.account` | FAIL | The account is a superuser (`elastic`, `superuser` or `all_access`). Use a read-only account. |
 | `es.index[<pattern>]` | FAIL | The pattern resolves to no index. Fix `ES_INDEX_PATTERNS`. |
 | `es.least_privilege`, `os.read_only` | FAIL / WARN | FAIL: the account can write. Remove write privileges. WARN: read-only could not be shown (on OpenSearch, set `ES_READ_ONLY_ROLES`). |
-| `arkime.reachable` | FAIL | Check `ARKIME_URL`, `ARKIME_BASE_PATH`, `ARKIME_AUTH` and the credentials. HTTP 401 usually means the wrong scheme or password. |
-| `tshark` | FAIL | Install TShark or set `TSHARK_BIN`. |
+| `arkime.reachable` | FAIL / WARN | Check `ARKIME_URL`, `ARKIME_BASE_PATH`, `ARKIME_AUTH` and the credentials. HTTP 401 usually means the wrong scheme or password. WARN: no Arkime session index is configured, so it is not needed. |
+| `tshark` | FAIL / WARN | Install TShark or set `TSHARK_BIN`. WARN: as for `arkime.reachable`. |
 | `paths.pcap[<dir>]` | FAIL | A `PCAP_ALLOWED_DIRS` entry does not exist. |
 | `paths.env_mode` | FAIL | `chmod 600` the `.env`. |
 | `paths.home_mode` | WARN | `chmod 700` the home and the stage directory. |
 | `state.budget` | FAIL / WARN | See Troubleshooting: stage disk. |
 | `stage.volume`, `disk.free` | WARN | Move `ROMULUS_STAGE_DIR` to its own volume; free space. |
 | `web.tls` | FAIL / WARN | See section 3. |
+| `web.secret_key` | FAIL | Set `ROMULUS_SECRET_KEY` (section 2). |
 | `site.internal_networks` | WARN | Set the site's networks (section 2) and check the hosts it names as outside. |
 | `agent.*`, `triage.*` | FAIL / WARN | See Troubleshooting: agent endpoint. `agent.provider` OK with "agent not configured" is fine for a hunt without the agent. |
 | `secrets.length`, `secrets.strength` | WARN | Replace the named secret with a long random value. |
@@ -185,13 +188,50 @@ Recommendations are a section of the Markdown and DOCX reports, not a separate f
 - **Execution state:** `planned` (created, not yet started), `running`, `completed_within_scope`, `partial` or `failed`. A partial hunt (part of a source could not be read, a cap or time limit was reached, the stage disk hit its reserve, or someone stopped it) says what did not run and is never shown as complete. `hunt resume` reruns a sweep that was stopped part-way and the stages after the sweep that did not finish. It does not search again partitions that a finished sweep left partial: start a new hunt over that window for those. A `failed` hunt (a source preflight or sweep error) whose sweep did not finish cannot be resumed; fix the cause and start a new hunt. A `planned` hunt cannot be resumed either: delete it and start again.
 - **Coverage:** each rule reports `searched in full`, `searched in part` or `not assessable by design` (rules that can find something but cannot show it is absent). Coverage gaps lists every partition a rule did not fully search, and why. Data not assessed lists data in scope that no rule read. A baseline that could not be judged is `unresolved`, as is a link or a time range that could not be resolved. Caps, timeouts, missing fields and partial responses always appear in one of these forms, never as "no match". (`unresolved` is also a disposition an analyst can set on a finding.)
 
+### Other commands
+
+| Command | Use |
+|---|---|
+| `romulus agent reassess <hunt-id> [--max-calls N] [--max-tokens N]` | Write a fresh AI assessment for a stored hunt (optionally with extra calls or tokens) and publish a new report revision. |
+| `romulus triage <hunt-id> [--force] [--agent-model <id>]` | Run the AI triage pass on a finished hunt: a labelled, promote-only order over the surfaced findings. The deterministic report order stays authoritative; run `report` afterwards to publish it. |
+| `romulus triage <hunt-id> --no-run --export <file> [--allow-stale]` | Export the stored triage order as JSON without calling the model. |
+| `romulus indicators import <file> --name <name> --source <source> [--lane high\|lead\|context] [--reason <text>] [--expires <ISO>]` | Import a local CSV or STIX/MISP JSON indicator file as a new list version (default lane `lead`, expiry 90 days). A `high` lane asks for a lead account's password and needs `--reason`. `--list-id` adds a version to an existing list. |
+| `romulus indicators export <list-id> [--version N] [--format yaml\|csv] [--out <file>]` | Export a complete list version. |
+| `romulus sigma import <dir> --upstream <url> --commit <id>` | Import a local directory of Sigma rules; they arrive as `draft` or `reference-only`. |
+| `romulus sigma list [--status <status>]` / `romulus sigma show <rule-id>` | List or show the imported rules. |
+| `romulus sigma activate <rule-id> --positive <file> --benign <file> [--lane lead\|high] [--reason <text>]` / `romulus sigma retire <rule-id>` | A lead account (its password is asked) activates a rule only when its positive fixture matches and its benign fixture does not, or retires it. |
+
 ## 6. Web UI
 
 ```bash
 bash "$ROMULUS_HOME/app/scripts/web-restart.sh"     # start or restart; prints the pid or the log tail on failure
 ```
 
-The script runs `romulus web` in the background, records its pid in `$ROMULUS_HOME/web.pid` and logs to `$ROMULUS_HOME/logs/web.log`. It needs the layout from section 2; otherwise run `romulus web` directly. It does not restart the UI after a reboot: run it under your service manager if you need that.
+The script runs `romulus web` in the background, records its pid in `$ROMULUS_HOME/web.pid` and logs to `$ROMULUS_HOME/logs/web.log`. It needs the layout from section 2. It does not start the UI after a reboot.
+
+To keep the UI running across reboots, run it under systemd instead of the script (use one or the other, never both: they would compete for the port). A minimal unit, for example `/etc/systemd/system/romulus-web.service`:
+
+```ini
+[Unit]
+Description=ROMULUS web UI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=<service-account>
+Environment=ROMULUS_HOME=<romulus-home>
+ExecStart=<romulus-home>/venv/bin/romulus --env-file <romulus-home>/.env web
+Restart=on-failure
+# keep files the UI writes (reports, hunt logs) private to the service account
+UMask=0077
+# hunts started from the UI run as child processes: stopping or restarting the UI must not end them
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then `sudo systemctl daemon-reload && sudo systemctl enable --now romulus-web`. Its output goes to the journal (`journalctl -u romulus-web`); a refusal to start (section 7) is the last line there.
 
 Open `https://<romulus-host>:8443/login` (or the proxy's address) and log in with an account from section 4. Sessions last at most 8 hours. Five failed logins in five minutes lock that account for a while; other accounts are not affected.
 
@@ -202,14 +242,14 @@ Open `https://<romulus-host>:8443/login` (or the proxy's address) and log in wit
 
 ## 7. Troubleshooting
 
-**A source is unreachable.** `doctor` shows `es.reachable` or `arkime.reachable` as FAIL with the error text. Check, in order: network reach from this host to the URL; the URL's scheme and port; `ES_CA_CERT` or `ES_VERIFY_TLS` for a certificate error; the credentials; for Arkime behind a proxy, `ARKIME_BASE_PATH` and `ARKIME_AUTH`. A source that fails during a hunt is named in the result as a coverage gap or a partial reason. Fix the source, then start a new hunt over the affected window: `hunt resume` does not read again what a finished sweep could not. `doctor` always probes `ARKIME_URL` (it has a default), so a host with no Arkime viewer shows `arkime.reachable` FAIL. Hunts still run: with no Arkime session index in `ES_INDEX_PATTERNS`, the packet stage is skipped and says so.
+**A source is unreachable.** `doctor` shows `es.reachable` or `arkime.reachable` as FAIL with the error text. Check, in order: network reach from this host to the URL; the URL's scheme and port; `ES_CA_CERT` or `ES_VERIFY_TLS` for a certificate error; the credentials; for Arkime behind a proxy, `ARKIME_BASE_PATH` and `ARKIME_AUTH`. A source that fails during a hunt is named in the result as a coverage gap or a partial reason. Fix the source, then start a new hunt over the affected window: `hunt resume` does not read again what a finished sweep could not. A host with no Arkime viewer needs no Arkime session index in `ES_INDEX_PATTERNS`: hunts then skip the packet stage and say so, and `doctor` only warns about Arkime and TShark.
 
 **The web UI will not start.** `web-restart.sh` prints "web failed to start" and the end of `logs/web.log`.
 
 - `romulus web: refusing to serve plain HTTP on <address>`: the bind is not loopback and no TLS is set. Use one of the options in section 3.
 - `set both ROMULUS_WEB_TLS_CERT and ROMULUS_WEB_TLS_KEY`: only one is set.
 - `ROMULUS_WEB_TRUSTED_PROXIES entry ... is not a single IP address`: list each proxy's address, with no networks and no `*`.
-- `ROMULUS_SECRET_KEY must be a random value of 32+ characters without spaces`: set it (section 2). `doctor` does not check this.
+- `romulus web: ROMULUS_SECRET_KEY ...` ("is empty" or "must be a random value of 32+ characters without spaces"): set it (section 2). `doctor` reports the same as `web.secret_key`.
 - A TLS error from the server: run `doctor` and read `web.tls`; a key file must be readable by the service account and by nobody else.
 
 **`doctor` warns about the database.**
@@ -224,9 +264,13 @@ Open `https://<romulus-host>:8443/login` (or the proxy's address) and log in wit
 **The agent endpoint fails.** Run `romulus doctor` and read the `agent.*` lines.
 
 - "agent not configured: AGENT_BASE_URL is empty" (or `AGENT_MODEL`, `AGENT_API_KEY`): set them. With `AGENT_PROVIDER=anthropic`, "needs its optional SDK" means install the `anthropic` extra (section 2).
-- "agent blocked: ... is a remote endpoint": the endpoint is not loopback, private (RFC 1918 or IPv6 unique-local) or listed in `MODEL_LOCAL_HOSTS`. If the server is your own, list its host or network in `MODEL_LOCAL_HOSTS`. Otherwise the remote endpoint is allowed only with `ROMULUS_MODEL_EGRESS=lab-public-data`; read [`.env.example`](../.env.example) on what that permits before setting it. A remote endpoint must use `https`.
+- "agent blocked: ... is a remote endpoint": the endpoint is not loopback, private (RFC 1918 or IPv6 unique-local) or listed in `MODEL_LOCAL_HOSTS`. If the server is your own, list its host or network in `MODEL_LOCAL_HOSTS`. For a remote endpoint you have approved for the hunt's data, set `ROMULUS_MODEL_EGRESS=lab-public-data` (section 8).
 - "agent blocked: ... is set but ... not set above 0": a cost budget needs every price setting it names.
 - `agent.reachable` or `agent.model` FAIL: check the URL, the key and the model id. `romulus doctor --agent-model <id>` tests another model id without changing `.env`.
 - `agent.timeout` WARN: raise `AGENT_TIMEOUT_SECONDS` as the warning says.
 
 A hunt whose agent was blocked or failed keeps all its deterministic results. After a fix, `hunt resume <hunt-id> --agent-only` continues an agent run that ended partial (the provider became unavailable, or it was interrupted, stopped, or given more budget). For a hunt with no agent run to continue, start a new hunt over the same window.
+
+## 8. Remote model endpoints
+
+An endpoint is local when its host is loopback, private (RFC 1918 or IPv6 unique-local) or listed in `MODEL_LOCAL_HOSTS`. Telemetry excerpts may go to any other endpoint only when the operator has approved that endpoint for the hunt's data and opts in explicitly with `ROMULUS_MODEL_EGRESS=lab-public-data` in `.env` (the value keeps its name for existing installs). A remote endpoint must use `https`. `doctor` names it in `agent.egress`, and every hunt and report that used it carries a banner naming the host and model. Without the opt-in, the agent is blocked and the hunt runs without it.
