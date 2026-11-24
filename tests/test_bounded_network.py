@@ -237,5 +237,6 @@ def test_web_scan_counts_every_url_group_without_a_shared_budget(monkeypatch, tm
     rule = small(monkeypatch, network.WebScanBurst, tmp_path)
     out = run_batches(rule, [events[:250], events[250:]])
     assert [m.claim.split("across ")[1] for m in out] == [
-        "250+ distinct URLs. 21 of the 250 requests are cited, including the first and the last."] * 2
+        "250 distinct URLs; no request from this source to this host came within 30 minutes before or after it. "
+        "21 of the 250 requests are cited, including the first and the last."] * 2
     assert rule.limit_reasons() == []
