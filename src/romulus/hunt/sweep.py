@@ -2593,9 +2593,10 @@ class Sweep:
                 # families a rule reads only as context (its lineage) do not make a partition an evaluation of it
                 evaluated_families = set(pb.families) - set(pb.context_families)
                 sigma_events = sigma_index.for_rule(pb) if isinstance(pb, SigmaRule) else None
-                relevant_events = (sigma_events if sigma_events is not None else
-                                   [event for event in events if event.family in evaluated_families])
-                target_fallback = not relevant_events and (
+                # the partition's family set answers "any event of an evaluated family" without a scan per rule
+                has_relevant = (bool(sigma_events) if sigma_events is not None
+                                else not families.isdisjoint(evaluated_families))
+                target_fallback = not has_relevant and (
                     target_os == "unknown" or bool(target_oses & set(pb.os_families))
                 )
                 sigma_rule_reasons = []
