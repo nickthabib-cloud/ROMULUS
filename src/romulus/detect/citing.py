@@ -24,40 +24,106 @@ from datetime import UTC, datetime
 from romulus.detect.bounded import CitationUnavailable
 from romulus.evidence.typed import TypedEvent
 
+_REFERENCE_NAMES = frozenset({"id", "event_id", "ids", "events", "held", "cited", "cites", "examples",
+                              "opener_id", "first", "last", "longest", "parts", "staged"})
+# How a value of each type is walked, decided once per type (every test below depends on the type alone).
+_EVENT, _IDS, _NAMED, _STR, _DICT, _SEQ, _FIELDS, _SLOTS, _NOTHING, _CLASS = range(10)
+_SCALARS = frozenset({int, float, bool, type(None), bytes, complex})
+_WALK_KINDS: dict[type, tuple] = {}
 
-def state_citation_ids(state):
-    """Stream explicit citation references from bounded aggregate state, never telemetry text."""
+
+def _walk_kind(cls: type) -> tuple:
     from dataclasses import fields, is_dataclass
 
     from romulus.detect.bounded import HeldExamples
 
-    reference_names = {"id", "event_id", "ids", "events", "held", "cited", "cites", "examples",
-                       "opener_id", "first", "last", "longest", "parts", "staged"}
+    if issubclass(cls, type):
+        kind = (_CLASS,)              # a class object held as a value: walked value by value, as written
+    elif issubclass(cls, TypedEvent):
+        kind = (_EVENT,)
+    elif issubclass(cls, (HeldExamples, Ends)):
+        kind = (_IDS,)
+    elif issubclass(cls, Named):
+        kind = (_NAMED,)
+    elif issubclass(cls, str):
+        kind = (_STR,)
+    elif issubclass(cls, dict):
+        kind = (_DICT,)
+    elif issubclass(cls, (tuple, list)):
+        kind = (_SEQ,)
+    elif is_dataclass(cls):
+        kind = (_FIELDS, tuple((item.name, item.name in _REFERENCE_NAMES) for item in fields(cls)))
+    elif slots := getattr(cls, "__slots__", ()):
+        kind = (_SLOTS, tuple((name, name in _REFERENCE_NAMES) for name in slots))
+    else:
+        kind = (_NOTHING,)
+    _WALK_KINDS[cls] = kind
+    return kind
 
-    def visit(value, references=False):
-        if isinstance(value, TypedEvent):
-            yield value.id
-        elif isinstance(value, (HeldExamples, Ends)):
-            yield from value.ids()
-        elif isinstance(value, Named):
-            yield from value.ids.values()
-        elif isinstance(value, str):
-            if references:
-                yield value
-        elif isinstance(value, dict):
-            for name, item in value.items():
-                yield from visit(item, references or name in reference_names)
-        elif isinstance(value, (tuple, list)):
-            for item in value:
-                yield from visit(item, references)
-        elif is_dataclass(value):
-            for item in fields(value):
-                yield from visit(getattr(value, item.name), item.name in reference_names)
-        elif slots := getattr(type(value), "__slots__", ()):
-            for name in slots:
-                yield from visit(getattr(value, name, None), name in reference_names)
 
-    yield from visit(state)
+def _visit_class_value(value, references, out: list) -> None:
+    """A class object found in state: the per-value tests (a dataclass type reads its fields off the class)."""
+    from dataclasses import fields, is_dataclass
+
+    if is_dataclass(value):
+        for item in fields(value):
+            _visit(getattr(value, item.name), item.name in _REFERENCE_NAMES, out)
+    elif slots := getattr(type(value), "__slots__", ()):
+        for name in slots:
+            _visit(getattr(value, name, None), name in _REFERENCE_NAMES, out)
+
+
+def _visit(value, references: bool, out: list) -> None:
+    cls = type(value)
+    if cls in _SCALARS:
+        return
+    if cls is str:
+        if references:
+            out.append(value)
+        return
+    kind = _WALK_KINDS.get(cls) or _walk_kind(cls)
+    tag = kind[0]
+    if tag == _SEQ:
+        for item in value:
+            if type(item) not in _SCALARS:
+                _visit(item, references, out)
+    elif tag == _DICT:
+        for name, item in value.items():
+            if type(item) not in _SCALARS:
+                _visit(item, references or name in _REFERENCE_NAMES, out)
+    elif tag == _FIELDS:
+        for name, named in kind[1]:
+            item = getattr(value, name)
+            if type(item) not in _SCALARS:
+                _visit(item, named, out)
+    elif tag == _SLOTS:
+        for name, named in kind[1]:
+            item = getattr(value, name, None)
+            if type(item) not in _SCALARS:
+                _visit(item, named, out)
+    elif tag == _EVENT:
+        out.append(value.id)
+    elif tag == _IDS:
+        out.extend(value.ids())
+    elif tag == _NAMED:
+        out.extend(value.ids.values())
+    elif tag == _STR:
+        if references:
+            out.append(value)
+    elif tag == _CLASS:
+        _visit_class_value(value, references, out)
+
+
+def state_citation_ids(state):
+    """Stream explicit citation references from bounded aggregate state, never telemetry text.
+
+    Lists, tuples and dicts are walked item by item; a dataclass by its fields and a slotted object by its slots,
+    each field named in the reference names holding references; a held record, a HeldExamples, an Ends and a Named
+    give their own ids. How each type is walked is decided once per type, and numbers and other scalars are skipped
+    without a call, so a walk costs one step per container or reference rather than per scalar."""
+    out: list = []
+    _visit(state, False, out)
+    yield from out
 
 
 @contextmanager

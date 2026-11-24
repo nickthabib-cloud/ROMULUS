@@ -339,6 +339,108 @@ def plan_partitions(client: ElasticClient, target: str, contract: FieldContract,
     return parts
 
 
+def _windows_host_name(winlog: dict) -> str:
+    return str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
+
+
+def _windows_record_time(source: dict, winlog: dict) -> datetime | None:
+    raw_time = winlog.get("time_created") or source.get("@timestamp")
+    try:
+        return datetime.fromisoformat(str(raw_time)).astimezone(UTC)
+    except (TypeError, ValueError):
+        return None
+
+
+def _windows_collection_change(winlog: dict, host: str, when: datetime) -> tuple[str, bool] | None:
+    """The collection break one Winlogbeat-layout record reports, and whether it governs every channel of its host."""
+    try:
+        event_id = int(winlog.get("event_id"))
+    except (TypeError, ValueError):
+        return None
+    channel = str(winlog.get("channel") or "").casefold()
+    provider = str(winlog.get("provider_name") or "").strip()
+    change = COLLECTION_CHANGE_EVENTS.get((channel, provider.casefold(), event_id))
+    if (change and provider.casefold() == "microsoft-windows-sysmon" and event_id == 4
+            and str((winlog.get("event_data") or {}).get("State") or "").casefold() == "started"):
+        change = None
+    if not (change and host):
+        return None
+    reason = (
+        f"collection changed on {host} at {when.isoformat()}: "
+        f"{winlog.get('channel')}|{provider}|{event_id} ({change})"
+    )
+    # Security/audit-service controls invalidate every Windows channel; provider-operational
+    # controls govern only the channel that emitted them.
+    return reason, event_id in {104, 1102, 4719, 6006}
+
+
+class WindowsPartitionState:
+    """What every Windows rule's coverage reasons read from one partition's records, derived in one pass.
+
+    Hosts, each host/channel's first and last record times and the collection breaks are the same for every rule,
+    so a partition derives them once, and each event class's per-host reasons once, however many rules read them.
+    The state holds no more than the partition's own records imply (a partition is capped at PARTITION_MAX_DOCS),
+    plus one reason list per event class the partition's rules declare; the sweep drops it with the partition.
+    """
+
+    def __init__(self, contract: FieldContract, records: list[dict], partition: Window | None,
+                 continuity_times: dict[tuple[str, str], tuple[datetime, datetime]] | None):
+        self.contract = contract
+        self.records = records
+        self.partition = partition
+        self.continuity_times = continuity_times
+        self.derived = False
+        self.class_reasons: dict[object, tuple[str, ...]] = {}
+
+    def serves(self, contract: FieldContract, records: list[dict], partition: Window | None,
+               continuity_times: dict[tuple[str, str], tuple[datetime, datetime]] | None) -> bool:
+        return (self.contract is contract and self.records is records and self.partition == partition
+                and self.continuity_times is continuity_times)
+
+    def derive(self) -> None:
+        if self.derived:
+            return
+        hosts = {str(host).strip().rstrip(".").casefold() for host in self.contract.hosts if host}
+        observed_channels: set[tuple[str, str]] = set()
+        observed_times: dict[tuple[str, str], tuple[datetime, datetime]] = {}
+        collection_changes: dict[tuple[str, str], set[str]] = {}
+        cross_channel_collection_changes: dict[str, set[str]] = {}
+        for record in self.records:
+            source = windows_view(record.get("_source") or {})
+            winlog = source.get("winlog") or {}
+            host = _windows_host_name(winlog)
+            channel = str(winlog.get("channel") or "").casefold()
+            if host:
+                hosts.add(host)
+            observed_channels.add((host, channel))
+            when = _windows_record_time(source, winlog)
+            if when is None:
+                continue
+            key = (host, channel)
+            prior = observed_times.get(key)
+            observed_times[key] = (when, when) if prior is None else (min(prior[0], when), max(prior[1], when))
+            change = _windows_collection_change(winlog, host, when)
+            if change is not None:
+                reason, every_channel = change
+                if every_channel:
+                    cross_channel_collection_changes.setdefault(host, set()).add(reason)
+                else:
+                    collection_changes.setdefault(key, set()).add(reason)
+        if self.continuity_times is not None:
+            hosts.update(host for host, _channel in self.continuity_times)
+            observed_channels = set(self.continuity_times)
+            observed_times = dict(self.continuity_times)
+        self.hosts = tuple(sorted(hosts))
+        self.observed_channels = observed_channels
+        self.observed_times = observed_times
+        self.collection_changes = collection_changes
+        # every channel's break on a host the rule reads, added once the rule requires any event class
+        self.cross_channel_reasons = tuple(sorted(
+            {reason for host in self.hosts for reason in cross_channel_collection_changes.get(host, ())}
+        ))
+        self.derived = True
+
+
 class Sweep:
     def __init__(self, repo: Repo, client: ElasticClient, hunt_id: str, window: Window,
                  contracts: dict[str, FieldContract], on_candidate: Callable[[dict], None] | None = None,
@@ -1293,16 +1395,6 @@ class Sweep:
             self.stats.setdefault("windows_unassessed", {})[target] = unassessed
 
     @staticmethod
-    def _windows_hosts(contract: FieldContract, records: list[dict]) -> tuple[str, ...]:
-        hosts = {str(host).strip().rstrip(".").casefold() for host in contract.hosts if host}
-        for record in records:
-            winlog = windows_view(record.get("_source") or {}).get("winlog") or {}
-            computer = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
-            if computer:
-                hosts.add(computer)
-        return tuple(sorted(hosts))
-
-    @staticmethod
     def _raw_evtx_contract(contract: FieldContract) -> FieldContract | None:
         """A separate raw-layout aggregate view when Winlogbeat owns the target's grouped aliases."""
         if not (contract.windows_shapes and any(name.startswith("winlog.") for name in contract.linux_fields)):
@@ -1644,7 +1736,11 @@ class Sweep:
         gap_reasons: list[str],
         partition: Window | None = None,
         continuity_times: dict[tuple[str, str], tuple[datetime, datetime]] | None = None,
+        windows_state: WindowsPartitionState | None = None,
     ) -> list[str]:
+        """A Windows rule's collection reasons over one partition. The caller passes one WindowsPartitionState per
+        partition so its records are read once for every rule; without one (or with one built for other inputs) the
+        reasons are derived from the records given here."""
         if contract is not None and contract.ecar and "windows" in playbook.os_families:
             reasons = ["collection not attested: eCAR sensor", *gap_reasons]
             if playbook.windows_event_classes and not getattr(playbook, "ecar_compatible", False):
@@ -1695,45 +1791,29 @@ class Sweep:
                     f"{event_class.channel}|{event_class.provider}|{event_class.event_id}"
                 )
         reasons.extend(gap_reasons)
-        hosts = set(self._windows_hosts(contract, records))
-        if continuity_times is not None:
-            hosts.update(host for host, _channel in continuity_times)
-        hosts = tuple(sorted(hosts))
+        if windows_state is None or not windows_state.serves(contract, records, partition, continuity_times):
+            windows_state = WindowsPartitionState(contract, records, partition, continuity_times)
+        windows_state.derive()
         if not contract.host_inventory_complete:
             reasons.append("collection not attested: source host inventory truncated")
-        if not hosts:
+        if not windows_state.hosts:
             reasons.append("collection not attested: source host inventory unavailable")
-        if continuity_times is None:
-            observed_channels = {
-                (
-                    str((windows_view(record.get("_source") or {}).get("winlog") or {}).get("computer_name") or "")
-                    .strip().rstrip(".").casefold(),
-                    str((windows_view(record.get("_source") or {}).get("winlog") or {}).get("channel") or "").casefold(),
-                )
-                for record in records
-            }
-            observed_times: dict[tuple[str, str], tuple[datetime, datetime]] = {}
-            for record in records:
-                source = windows_view(record.get("_source") or {})
-                winlog = source.get("winlog") or {}
-                host = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
-                channel = str(winlog.get("channel") or "").casefold()
-                raw_time = winlog.get("time_created") or source.get("@timestamp")
-                try:
-                    when = datetime.fromisoformat(str(raw_time)).astimezone(UTC)
-                except (TypeError, ValueError):
-                    continue
-                key = (host, channel)
-                prior = observed_times.get(key)
-                observed_times[key] = (
-                    (when, when) if prior is None else (min(prior[0], when), max(prior[1], when))
-                )
-        else:
-            observed_channels = set(continuity_times)
-            observed_times = dict(continuity_times)
-        collection_changes, cross_channel_collection_changes = self._windows_collection_changes(records)
+        if required:
+            reasons.extend(windows_state.cross_channel_reasons)
+        for event_class in required:
+            reasons.extend(self._windows_class_reasons(windows_state, event_class))
+        return sorted(set(reasons))
 
-        def summarize(label: str, affected: list[str], event_class) -> str | None:
+    def _windows_class_reasons(self, state: WindowsPartitionState, event_class) -> tuple[str, ...]:
+        """One event class's per-host reasons over a partition: the same for every rule that requires the class."""
+        cached = state.class_reasons.get(event_class)
+        if cached is not None:
+            return cached
+        partition = state.partition
+        observed_times = state.observed_times
+        reasons: list[str] = []
+
+        def summarize(label: str, affected: list[str]) -> str | None:
             affected = sorted(set(affected))
             if not affected:
                 return None
@@ -1743,54 +1823,50 @@ class Sweep:
             token = f"{event_class.channel}|{event_class.provider}|{event_class.event_id}"
             return f"{label} on {len(affected):,} hosts [{token}] (sample: {sample})"
 
-        for event_class in required:
-            absent_hosts: list[str] = []
-            late_start_hosts: list[str] = []
-            early_stop_hosts: list[str] = []
-            unattested_by_label: dict[str, list[str]] = {}
-            single_edge_details: dict[tuple[str, str], str] = {}
-            for host in hosts:
-                channel_key = (host, event_class.channel.casefold())
-                reasons.extend(sorted(cross_channel_collection_changes.get(host, ())))
-                reasons.extend(sorted(collection_changes.get(channel_key, ())))
-                if channel_key not in observed_channels:
-                    absent_hosts.append(host)
-                elif partition is not None and observed_times.get(channel_key):
-                    first, last = observed_times[channel_key]
-                    if first > partition.start + self.windows_liveness_tolerance:
-                        late_start_hosts.append(host)
-                        single_edge_details[("before", host)] = first.isoformat()
-                    if last < partition.end - self.windows_liveness_tolerance:
-                        early_stop_hosts.append(host)
-                        single_edge_details[("after", host)] = last.isoformat()
-                for fact, arguments, label in collection_requirements(event_class):
-                    if not self.site_facts.attests(host, fact, **arguments):
-                        unattested_by_label.setdefault(label, []).append(host)
-            summarized = summarize(
-                f"shipper gaps unresolved: no records on {event_class.channel} in partition",
-                absent_hosts, event_class,
-            )
-            if summarized:
-                reasons.append(summarized)
-            for edge, affected in (("before", late_start_hosts), ("after", early_stop_hosts)):
-                if len(set(affected)) == 1:
-                    host = affected[0]
-                    reasons.append(
-                        f"no records from {host}/{event_class.channel} {edge} "
-                        f"{single_edge_details[(edge, host)]}"
-                    )
-                else:
-                    summarized = summarize(
-                        f"no records from {event_class.channel} near partition {edge} edge",
-                        affected, event_class,
-                    )
-                    if summarized:
-                        reasons.append(summarized)
-            for label, affected in unattested_by_label.items():
-                summarized = summarize(f"collection not attested: {label}", affected, event_class)
+        absent_hosts: list[str] = []
+        late_start_hosts: list[str] = []
+        early_stop_hosts: list[str] = []
+        unattested_by_label: dict[str, list[str]] = {}
+        single_edge_details: dict[tuple[str, str], str] = {}
+        requirements = collection_requirements(event_class)
+        for host in state.hosts:
+            channel_key = (host, event_class.channel.casefold())
+            reasons.extend(sorted(state.collection_changes.get(channel_key, ())))
+            if channel_key not in state.observed_channels:
+                absent_hosts.append(host)
+            elif partition is not None and observed_times.get(channel_key):
+                first, last = observed_times[channel_key]
+                if first > partition.start + self.windows_liveness_tolerance:
+                    late_start_hosts.append(host)
+                    single_edge_details[("before", host)] = first.isoformat()
+                if last < partition.end - self.windows_liveness_tolerance:
+                    early_stop_hosts.append(host)
+                    single_edge_details[("after", host)] = last.isoformat()
+            for fact, arguments, label in requirements:
+                if not self.site_facts.attests(host, fact, **arguments):
+                    unattested_by_label.setdefault(label, []).append(host)
+        summarized = summarize(
+            f"shipper gaps unresolved: no records on {event_class.channel} in partition", absent_hosts,
+        )
+        if summarized:
+            reasons.append(summarized)
+        for edge, affected in (("before", late_start_hosts), ("after", early_stop_hosts)):
+            if len(set(affected)) == 1:
+                host = affected[0]
+                reasons.append(
+                    f"no records from {host}/{event_class.channel} {edge} "
+                    f"{single_edge_details[(edge, host)]}"
+                )
+            else:
+                summarized = summarize(f"no records from {event_class.channel} near partition {edge} edge", affected)
                 if summarized:
                     reasons.append(summarized)
-        return sorted(set(reasons))
+        for label, affected in unattested_by_label.items():
+            summarized = summarize(f"collection not attested: {label}", affected)
+            if summarized:
+                reasons.append(summarized)
+        cached = state.class_reasons[event_class] = tuple(reasons)
+        return cached
 
     @staticmethod
     def _windows_collection_changes(
@@ -1802,33 +1878,18 @@ class Sweep:
         for record in records:
             source = windows_view(record.get("_source") or {})
             winlog = source.get("winlog") or {}
-            host = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
-            channel = str(winlog.get("channel") or "").casefold()
-            raw_time = winlog.get("time_created") or source.get("@timestamp")
-            try:
-                when = datetime.fromisoformat(str(raw_time)).astimezone(UTC)
-            except (TypeError, ValueError):
+            host = _windows_host_name(winlog)
+            when = _windows_record_time(source, winlog)
+            if when is None:
                 continue
-            try:
-                event_id = int(winlog.get("event_id"))
-            except (TypeError, ValueError):
+            change = _windows_collection_change(winlog, host, when)
+            if change is None:
                 continue
-            provider = str(winlog.get("provider_name") or "").strip()
-            change = COLLECTION_CHANGE_EVENTS.get((channel, provider.casefold(), event_id))
-            if (change and provider.casefold() == "microsoft-windows-sysmon" and event_id == 4
-                    and str((winlog.get("event_data") or {}).get("State") or "").casefold() == "started"):
-                change = None
-            if change and host:
-                reason = (
-                    f"collection changed on {host} at {when.isoformat()}: "
-                    f"{winlog.get('channel')}|{provider}|{event_id} ({change})"
-                )
-                # Security/audit-service controls invalidate every Windows channel; provider-operational
-                # controls govern only the channel that emitted them.
-                if event_id in {104, 1102, 4719, 6006}:
-                    cross_channel_collection_changes.setdefault(host, set()).add(reason)
-                else:
-                    collection_changes.setdefault((host, channel), set()).add(reason)
+            reason, every_channel = change
+            if every_channel:
+                cross_channel_collection_changes.setdefault(host, set()).add(reason)
+            else:
+                collection_changes.setdefault((host, str(winlog.get("channel") or "").casefold()), set()).add(reason)
         return collection_changes, cross_channel_collection_changes
 
     @staticmethod
@@ -2520,6 +2581,9 @@ class Sweep:
         from romulus.detect.sigma import SigmaEventIndex, SigmaRule
         sigma_index = SigmaEventIndex(events) if any(isinstance(pb, SigmaRule) for pb in self.pack) else None
         sigma_reasons = {}
+        # Hosts, channel times and collection breaks are read from the records once, for every Windows rule.
+        windows_state = (WindowsPartitionState(contract, out.records, w, continuity_times)
+                         if contract is not None else None)
         for pb in self.pack:
             if pb.id in self.failed_rules:
                 self._failed_rule_cell(pb, target, pkey, cells)
@@ -2529,9 +2593,10 @@ class Sweep:
                 # families a rule reads only as context (its lineage) do not make a partition an evaluation of it
                 evaluated_families = set(pb.families) - set(pb.context_families)
                 sigma_events = sigma_index.for_rule(pb) if isinstance(pb, SigmaRule) else None
-                relevant_events = (sigma_events if sigma_events is not None else
-                                   [event for event in events if event.family in evaluated_families])
-                target_fallback = not relevant_events and (
+                # the partition's family set answers "any event of an evaluated family" without a scan per rule
+                has_relevant = (bool(sigma_events) if sigma_events is not None
+                                else not families.isdisjoint(evaluated_families))
+                target_fallback = not has_relevant and (
                     target_os == "unknown" or bool(target_oses & set(pb.os_families))
                 )
                 sigma_rule_reasons = []
@@ -2540,7 +2605,8 @@ class Sweep:
                     signature = reason_signature(reason_view)
                     if signature not in sigma_reasons:
                         sigma_reasons[signature] = bounded_details({'reasons': self._windows_rule_reasons(
-                            target, contract, reason_view, out.records, gap_reasons, w, continuity_times)})
+                            target, contract, reason_view, out.records, gap_reasons, w, continuity_times,
+                            windows_state)})
                     sigma_reason_detail = sigma_reasons[signature]
                     windows_reasons = visible_reasons(sigma_reason_detail)
                     sigma_rule_reasons = list(exclusion_reasons(pb))
@@ -2548,7 +2614,7 @@ class Sweep:
                     windows_gate_reasons.update(sigma_rule_reasons)
                 else:
                     windows_reasons = self._windows_rule_reasons(
-                        target, contract, pb, out.records, gap_reasons, w, continuity_times,
+                        target, contract, pb, out.records, gap_reasons, w, continuity_times, windows_state,
                     )
                 if (script_metadata_reasons and contract.os_family == "windows"
                         and "script_block" in pb.families):
