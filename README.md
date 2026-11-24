@@ -93,7 +93,7 @@ openssl req -x509 -newkey rsa:3072 -nodes -days 365 -subj "/CN=romulus" -keyout 
 # .env: ROMULUS_WEB_BIND=0.0.0.0:8443  ROMULUS_WEB_TLS_CERT=$ROMULUS_HOME/cert.pem  ROMULUS_WEB_TLS_KEY=$ROMULUS_HOME/key.pem
 ```
 
-Behind a TLS reverse proxy instead, keep the loopback bind (or list the proxy in `ROMULUS_WEB_TRUSTED_PROXIES` so the client address it forwards is used for the login throttle and the audit log) and set `ROMULUS_COOKIE_SECURE=1`. `ROMULUS_WEB_ALLOW_PLAINTEXT=1` accepts plain HTTP on the network for an isolated lab; `doctor` warns about it.
+Behind a TLS reverse proxy instead, keep the loopback bind, list the proxy's address in `ROMULUS_WEB_TRUSTED_PROXIES` (`127.0.0.1` for a proxy on the same host) so the client address it forwards is used for the login throttle and the audit log, and set `ROMULUS_COOKIE_SECURE=1`. `ROMULUS_WEB_ALLOW_PLAINTEXT=1` accepts plain HTTP on the network for an isolated lab; `doctor` warns about it.
 
 ## Commands
 

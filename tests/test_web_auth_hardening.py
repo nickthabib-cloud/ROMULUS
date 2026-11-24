@@ -184,6 +184,17 @@ def test_throttle_state_is_fixed_size():
     assert max(len(v) for v in limiter.addresses.times.values()) <= auth._ADDRESS_DEPTH
 
 
+def test_made_up_usernames_cannot_evict_a_real_accounts_lock(accounts):
+    _s, repo, pws = accounts
+    limiter = auth.RateLimiter(clock=Clock(), keys=4)
+    for _ in range(auth.MAX_ATTEMPTS):
+        assert auth.verify(repo.engine, "analyst1", "wrong-password-x", "10.0.0.1", limiter) is None
+    for n in range(50):
+        auth.verify(repo.engine, f"junk{n}", "wrong-password-x", f"10.0.1.{n}", limiter)
+    assert limiter.locked("analyst1") and len(limiter.users.times) == 1
+    assert auth.verify(repo.engine, "analyst1", pws["analyst1"], "10.0.0.2", limiter) is None
+
+
 def test_correct_password_passes_under_address_backoff(accounts, monkeypatch):
     s, _repo, pws = accounts
     waits = []
@@ -382,6 +393,17 @@ def test_doctor_home_mode_rule(tmp_path):
     assert doctor.open_mode(0o705) == "others"
     assert doctor.open_mode(0o777) == "group and others"
     assert doctor.check_home_modes(_settings(tmp_path), posix=False).status == "ok"
+
+
+@pytest.mark.parametrize("home, child, status", [(0o700, 0o755, "ok"), (0o750, 0o700, "warn"),
+                                                 (0o755, 0o755, "warn"), (0o700, 0o700, "ok")])
+def test_doctor_judges_subdirectories_only_under_an_open_home(tmp_path, home, child, status):
+    s = _settings(tmp_path)
+    modes = {s.home: home, s.db_path.parent: child, s.reports_dir: child, s.logs_dir: child}
+    result = doctor.check_home_modes(s, posix=True, mode_of=lambda path: modes[path])
+    assert result.status == status
+    if status == "warn":
+        assert str(s.home) in result.detail and "chmod 700" in result.detail
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")

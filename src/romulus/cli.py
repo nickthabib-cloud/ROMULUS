@@ -476,7 +476,7 @@ def cmd_user(args) -> int:
         if args.action == "add":
             role = args.role or "analyst"
             auth.create_user(repo.engine, args.username, pw, role)
-            repo.audit(f"cli:{_cli_user()}", "user.create", detail={"username": args.username, "role": role})
+            repo.audit("cli", "user.create", detail={"username": args.username, "role": role})
             print(f"created {role} account '{args.username}'")
             return EXIT_OK
         if args.action == "role" and not args.role:

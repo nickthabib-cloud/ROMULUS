@@ -31,7 +31,8 @@ _ph = PasswordHasher()
 #   password is never refused because of its address alone; the delay only slows guessing across many usernames.
 # - Each map keeps at most THROTTLE_KEYS keys and drops the least recently used one beyond that, and each key keeps a
 #   bounded number of failure times, so the state stays fixed-size whatever is sent. Usernames are kept as short
-#   digests, so neither a long value nor a password typed into the username field is held in memory.
+#   digests, so neither a long value nor a password typed into the username field is held in memory, and only names
+#   of existing accounts are kept (a locked, an unknown and a wrong-password attempt answer alike).
 MAX_ATTEMPTS, WINDOW = 5, 300
 ADDRESS_FREE_ATTEMPTS = 20
 BACKOFF_BASE, BACKOFF_MAX = 0.5, 4.0
@@ -140,7 +141,9 @@ def authenticate(engine, username: str, password: str, client: str,
     else:
         _ph.hash("timing-equalizer")          # similar cost whether or not the user exists
     if not ok:
-        limiter.fail(username, client)
+        # only a real account's failures count toward a username lock, so made-up names cannot evict a lock from the
+        # fixed-size map; an unknown name still counts against its address
+        limiter.fail(username if known else None, client)
         return None, known
     limiter.succeed(username)
     return {"username": row["username"], "role": row["role"], "generation": row["session_generation"]}, known
