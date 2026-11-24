@@ -355,7 +355,9 @@ def test_a_capped_download_and_an_empty_rebuild_are_partial_with_reasons(tmp_pat
     assert "judged on a capped download or a capture cut short" in reasons
     assert "no payload was rebuilt although Arkime counted some" in reasons
     search = result["data"]["result"]["search"]
-    assert search["negative"] == "content_found"        # the stream event is kept even when it holds nothing
+    # the stream event is kept even when nothing was rebuilt, and that is no absence
+    assert search["negative"] == "unresolved" and "not a confirmed absence" in search["statement"]
+    assert len(result["data"]["result"]["evidence"]) == 1
     cell = result["data"]["result"]["coverage"][0]
     assert cell["status"] == "partial" and cell["target"] == f"arkime-pcap:{TARGET}"
 

@@ -375,6 +375,7 @@ class _Read:
         self.fetched = 0
         self.span: tuple[datetime, datetime] | None = ref.span
         self.direct: list | None = None
+        self.held = False                    # answered from packet content the hunt already held
 
     # ---- outcome ------------------------------------------------------------------------------------------------
     def fail(self, reasons: list[str], *, query: dict | None = None) -> PivotResult:
@@ -407,7 +408,10 @@ class _Read:
         reasons = list(dict.fromkeys(self.reasons))
         status = "partial" if reasons else "complete"
         events = list(self.events.values())
-        found = bool(events) or bool(self.responses) or bool(self.stream and self.stream.get("transcript"))
+        # content was found when a response was rebuilt, a stream carried bytes, or the hunt already held content
+        stream_bytes = (self.stream or {}).get("client_bytes", 0) or (self.stream or {}).get("server_bytes", 0)
+        found = (bool(self.responses) or bool(stream_bytes) or self.held
+                 or any(event.family == "http_body" for event in events))
         entities = {(entity.kind, entity.value, entity.role): entity
                     for event in events for entity in _event_entities(event)}
         if len(entities) > MAX_SEARCH_ENTITIES:
@@ -482,6 +486,7 @@ class _Read:
             self.pivot.hunt_id, ids, window.start, window.end)
         if not found:
             return self.fail(["this packet event's session holds no stored packet content in this hunt any more"])
+        self.held = True
         self.reasons.append(STAGED_NOTE)
         self.notes.append(STAGED_DETAIL)
         if not complete:
