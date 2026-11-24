@@ -14,6 +14,7 @@ never read as an action that ran.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import math
 import re
@@ -22,10 +23,13 @@ from typing import ClassVar
 from romulus.detect.base import Match, basename, pf
 from romulus.detect.bounded import KeyedStore
 from romulus.detect.host import INTERPRETERS, WEB_SERVICE_USERS
+from romulus.detect.linux_argv import PATTERN_READERS, PLAIN_READERS, normalize_path, read_operand_paths
 from romulus.detect.linux_direct import FoldedLinuxDirect, observed
+from romulus.detect.linux_semantics import classify_credential
 from romulus.detect.log_writer import line_subject, writer_sentence, writer_state
 from romulus.evidence.linux_service_text import PKEXEC_AMBIGUOUS_CAVEAT
 from romulus.evidence.linux_text_types import SUDO_AMBIGUOUS_CAVEAT
+from romulus.evidence.shellparse import SHELLS
 from romulus.evidence.typed import Outcome
 from romulus.hunt.citations import COMPACT_CITATION_NOTE, compact_event, expand_event
 
@@ -674,4 +678,281 @@ class PrivilegeBrokerSuspiciousSuccess(FoldedLinuxDirect):
                      group_key=json.dumps([success.host, actor, target, shape, lane, writer_state(success)]))
 
 
-PRIVILEGE_BROKER_RULES = [PrivilegeBrokerRefusal, PkexecEnvironmentRejection, PrivilegeBrokerSuspiciousSuccess]
+# ---- credential stores named in a broker's logged command -------------------------------------------------------
+# Programs that open the files they are given and show or copy their contents: the plain and pattern readers the
+# argv parser places operands for, and further readers, editors, archivers and copiers whose non-option operands are
+# files they read.
+_PLACED_READERS = PLAIN_READERS | PATTERN_READERS | {"dd"}
+_OPERAND_READERS = frozenset({
+    "tac", "view", "vim", "nvim", "vi", "ex", "emacs", "pico", "mcedit", "gedit", "bat", "batcat", "sqlite3",
+    "diff", "cmp", "comm", "paste", "join", "uniq", "wc", "rev", "fold", "fmt", "pr", "expand", "iconv", "jq",
+    "yq", "tee", "install", "rsync", "scp", "tar", "zip", "7z", "7za", "gzip", "bzip2", "xz", "zstd", "cpio",
+    "openssl", "gpg", "sha224sum", "sha384sum", "b2sum", "cksum", "sum", "split", "csplit", "egrep", "fgrep",
+    "rgrep", "zgrep", "gawk", "mawk", "nawk", "perl", "python", "python2", "python3", "ruby", "php", "node",
+    "john", "hashcat", "unshadow", "curl", "wget", "nc", "ncat", "netcat", "socat", "mail", "mutt",
+})
+# Programs whose use of a credential path is routine and documented, so a logged command naming one is not reported:
+# - account and policy management that reads and writes the hash files and sudoers by design (shadow-utils
+#   passwd(1), chpasswd(8), chage(1), usermod(8), vipw(8), pwck(8), pwconv(8); sudo's visudo(8) and sudoedit);
+# - package managers and their queries (dpkg -S /etc/shadow, rpm -qf, rpm -V name a path to look it up);
+# - metadata and permission tools that never read contents (ls, stat, chmod, chown, chattr, getfacl, restorecon);
+# - audit and integrity tooling whose path argument is a watch or a search key (auditctl -w /etc/shadow,
+#   ausearch -f, aide, debsums, rkhunter);
+# - key and agent management (ssh-keygen -l/-y fingerprints or derives the public key; ssh-add loads an agent);
+# - programs that only print or ignore their arguments (echo, printf, true, sleep).
+BROKER_CREDENTIAL_ROUTINE = frozenset({
+    "passwd", "chpasswd", "chage", "usermod", "useradd", "userdel", "adduser", "deluser", "groupadd", "groupmod",
+    "groupdel", "gpasswd", "newusers", "vipw", "vigr", "pwck", "grpck", "pwconv", "pwunconv", "grpconv", "grpunconv",
+    "chsh", "chfn", "visudo", "sudoedit", "cvtsudoers",
+    "apt", "apt-get", "aptitude", "apt-cache", "apt-file", "dpkg", "dpkg-query", "dpkg-statoverride", "rpm", "yum",
+    "dnf", "zypper", "pacman", "apk", "snap", "flatpak", "debsums",
+    "ls", "stat", "chmod", "chown", "chgrp", "chattr", "lsattr", "touch", "getfacl", "setfacl", "getfattr",
+    "setfattr", "restorecon", "chcon", "file", "test", "[", "du", "namei", "realpath", "readlink", "basename",
+    "dirname", "find", "locate", "rm", "shred", "ln", "mkdir",
+    "auditctl", "ausearch", "aureport", "aide", "tripwire", "rkhunter", "chkrootkit", "lynis", "osqueryi",
+    "ssh-keygen", "ssh-add", "ssh-copy-id",
+    "echo", "printf", "true", "false", "sleep",
+})
+_COMMAND_WRAPPERS = frozenset({"nice", "nohup", "ionice", "stdbuf", "chrt", "taskset", "setsid", "time", "command",
+                               "exec", "xargs"})
+# Directories whose whole contents are credentials, named by an archiver or copier (tar czf x /root/.ssh).
+_CREDENTIAL_DIRS = (("/.ssh", "T1552.004", "an SSH key directory"), ("/.gnupg", "T1552.004", "a GnuPG home"),
+                    ("/.aws", "T1552.001", "an AWS credential directory"),
+                    ("/.azure", "T1552.001", "an Azure CLI credential directory"),
+                    ("/.config/gcloud", "T1552.001", "a Google Cloud SDK credential directory"),
+                    ("/.kube", "T1552.001", "a Kubernetes client configuration directory"),
+                    ("/.password-store", "T1555.005", "a pass password store"))
+_HASH_AND_KEY = frozenset({"T1003.008", "T1552.004"})
+
+
+def broker_credential_class(path: str) -> tuple[str, str] | None:
+    """(ATT&CK technique, description) of a credential store a path names, or None: `classify_credential`'s classes,
+    the sudoers policy, password-manager vaults, cloud SDK credential files, older browser login stores, and whole
+    credential directories."""
+    found = classify_credential(path)
+    if found:
+        technique, _lane, description = found
+        return technique, description
+    low, name = path.lower(), basename(path).lower()
+    if path == "/etc/sudoers" or path.startswith("/etc/sudoers.d/"):
+        return "T1548.003", f"the sudoers policy {path}"
+    if name.endswith((".kdbx", ".kdb", ".psafe3", ".agilekeychain", ".opvault")):
+        return "T1555.005", f"a password-manager vault {path}"
+    if name in {"signons.sqlite", "key3.db", "signons3.txt"}:
+        return "T1555.003", f"a browser saved-login store {path}"
+    if low.endswith(("/.azure/accesstokens.json", "/.azure/msal_token_cache.json", "/.azure/msal_token_cache.bin",
+                     "/.config/gcloud/credentials.db", "/.config/gcloud/access_tokens.db",
+                     "/.config/gcloud/application_default_credentials.json")):
+        return "T1552.001", f"cloud SDK credentials ({path})"
+    for suffix, technique, description in _CREDENTIAL_DIRS:
+        if low.endswith(suffix) or low.rstrip("/").endswith(suffix):
+            return technique, f"{description} ({path})"
+    if path.rstrip("/") == "/etc/ssh":
+        return "T1552.004", f"the SSH configuration directory with the host keys ({path})"
+    return None
+
+
+def _statements(words: list[str]) -> list[list[str]]:
+    """A logged command as statements: a shell's `-c` script (sudo logs the words joined by spaces, so the script's
+    quoting is gone) split on its separators, or the command itself. Wrappers (env with its assignments, nice, nohup,
+    timeout N, ...) are stepped over."""
+    if not words:
+        return []
+    name = basename(words[0])
+    if name in SHELLS and "-c" in words[1:]:
+        script = words[words.index("-c", 1) + 1:]
+        out, current = [], []
+        for word in [*script, ";"]:
+            if word in _SCRIPT_SEPARATORS or (word.endswith(";") and word != ";"):
+                if word.endswith(";") and word not in _SCRIPT_SEPARATORS:
+                    current.append(word[:-1])
+                if current:
+                    out.extend(_statements([w.strip("'\"") for w in current]))
+                current = []
+            else:
+                current.append(word)
+        return out
+    while words:
+        name = basename(words[0])
+        if name == "env":
+            rest = words[1:]
+            while rest and ("=" in rest[0] or rest[0].startswith("-")):
+                rest = rest[1:]
+            words = rest
+        elif name == "timeout":
+            rest = [w for w in words[1:]]
+            while rest and rest[0].startswith("-"):
+                rest = rest[1:]
+            words = rest[1:]                        # the duration
+        elif name in _COMMAND_WRAPPERS:
+            rest = words[1:]
+            while rest and rest[0].startswith("-"):
+                rest = rest[1:]
+            words = rest
+        else:
+            break
+    return [words] if words else []
+
+
+def _named_paths(words: list[str], cwd) -> list[tuple[str, str, str]]:
+    """(program, path, how) for each credential path a statement's arguments name. `how` is 'read' when the program
+    reads the files it is given (or a `<` redirect feeds it), 'named' for any other program; a routine program gives
+    nothing."""
+    name, args = basename(words[0]), words[1:]
+    if name in BROKER_CREDENTIAL_ROUTINE:
+        return []
+    found: list[tuple[str, str, str]] = []
+    redirected = [args[i + 1] for i, word in enumerate(args[:-1]) if word in ("<", "0<")]
+    redirected += [word[1:] for word in args if word.startswith("<") and len(word) > 1 and word[1] != "<"]
+    for item in redirected:
+        path = normalize_path(item, cwd)
+        if path and broker_credential_class(path):
+            found.append((name, path, "read"))
+    plain = [arg for i, arg in enumerate(args) if arg not in ("<", "0<") and not (i and args[i - 1] in ("<", "0<"))
+             and not arg.startswith("<")]
+    if name in _PLACED_READERS:
+        placed, _unplaced = read_operand_paths(name, plain, cwd)
+        how, candidates = "read", placed
+    else:
+        how = "read" if name in _OPERAND_READERS else "named"
+        candidates = []
+        for arg in plain:
+            if arg.startswith("-") and "=" not in arg:
+                continue
+            # the word itself, a value after '=' (--file=/x, if=/x, field=@/x) and a curl-style '@file' operand
+            for value in {arg, arg.split("=", 1)[1] if "=" in arg else ""}:
+                value = value.removeprefix("@")
+                if not value or value.startswith(("-", "@")):
+                    continue
+                path = normalize_path(value, cwd)
+                if path:
+                    candidates.append(path)
+    # The broker joins the words with spaces and records no quoting, so a path with a space in it ('Login Data')
+    # arrives as two words: adjacent operands joined back are tried too.
+    words = [arg for arg in plain if not arg.startswith("-")]
+    for left, right in itertools.pairwise(words):
+        path = normalize_path(f"{left} {right}", cwd)
+        if path and path not in candidates:
+            candidates.append(path)
+    found += [(name, path, how) for path in candidates if broker_credential_class(path)]
+    return found
+
+
+class PrivilegeBrokerCredentialArgs(FoldedLinuxDirect):
+    """A command sudo or pkexec logged whose arguments name a credential store.
+
+    The broker's own record names the command it allowed (or refused) for the caller, so on a host without process
+    auditing it is the record of a privileged read of the password-hash files, private keys, cloud and password-manager
+    credentials. The command is the caller's text: the record shows the broker's decision, never that the program
+    ran to completion or read the file."""
+    version = "1"
+    id = "host.privilege_broker_credential_args"
+    title = "A privilege broker logged a command whose arguments name a credential store"
+    families = ("privilege_use",)
+    required_fields = ("auth.service",)
+    anchor_class = "credential_access"
+    severity, lane = "high", "lead"
+    attack = ("T1003.008", "T1552.001", "T1552.004", "T1555.003", "T1555.005", "T1548.003")
+    benign = (("an administrator reading the hash files or a key from a terminal while troubleshooting (named in the "
+              "claim with the terminal)"),
+              "backup or compare jobs run through sudo that name the hash files or key directories",
+              "account, package, permission, audit and key-management tools are not reported: "
+              + ", ".join(sorted(BROKER_CREDENTIAL_ROUTINE)))
+    next_checks = (("what the caller's session did next: copies, archives or transfers of the file, and outbound "
+                   "connections from the host"),
+                   "the caller's login: its source, its terminal and whether the account normally uses sudo",
+                   "whether the credential (hash, key, token) is used elsewhere after the record")
+    card: ClassVar[dict] = {
+        "behavior": "sudo or pkexec logged a command for a caller whose arguments name a credential store: the "
+                    "password-hash files (/etc/shadow, /etc/gshadow and their backups), sudoers, SSH and TLS private "
+                    "keys, Kerberos keytabs and caches, cloud SDK and CI credentials, password-manager vaults and "
+                    "browser saved-login stores",
+        "telemetry": "privilege_use from sudo's and pkexec's own syslog or journal lines in any Linux shipper shape: "
+                     "auth.service, user.name, auth.target_user, sudo.command or privilege.command (the caller's "
+                     "text, words joined by spaces), process.cwd, process.tty, privilege.denial_reason. The lab "
+                     "profile has sudo journal records. doas lines are not typed by any normalizer yet (unresolved)",
+        "fidelity": "the broker's decision record and the command text it logged: a read by a known file reader is "
+                    "stated as the command the broker allowed, never as a completed read",
+        "benign_and_cost": "administrators troubleshooting from a terminal, backup and compare jobs; account, "
+                           "package, permission, audit and key-management tools are not reported. One folded lead "
+                           "per (host, broker, account, target, program, path, outcome, terminal)",
+        "query_cost": "none beyond the sweep",
+        "next_pivot": "the caller's session after the record: copies, archives, transfers and outbound connections",
+        "adds": "hosts without process auditing: host.credential_store_read and host.credential_material_access "
+                "read exec and file-access records, which such hosts do not have",
+        "research_basis": _RESEARCH + "sudoers(5) COMMAND field; ATT&CK Enterprise 20.0 T1003.008, T1552.001, "
+                          "T1552.004, T1555.003, T1555.005, T1548.003; the register's credential-store path classes "
+                          "(romulus.detect.linux_semantics.classify_credential)",
+        "retrieval": "the sweep retrieves every record of the host datasets in each partition (dataset filter "
+                     "only), a superset of what this evaluator reads",
+        "lanes": "high when the broker allowed a known file reader on the hash files or a private key from an "
+                 "interactive terminal, or for a web-service, system or daemon account (which never reads them "
+                 "legitimately); lead otherwise, including refusals, an unknown outcome, other credential classes "
+                 "and programs not known to read their arguments. Severity high: the material gives other accounts",
+    }
+
+    def match(self, e):
+        service = str(e.get("auth.service"))
+        if service not in ("sudo", "pkexec"):
+            return []                       # su and runuser log no command
+        if e.has("privilege.rejected_variable"):
+            return []
+        command = e.get("sudo.command") if service == "sudo" else e.get("privilege.command")
+        if not isinstance(command, str) or not command.strip():
+            self.missing_required += 1      # the command was not recorded: it cannot be judged
+            return []
+        cwd = e.get("process.cwd")
+        hits = [hit for statement in _statements(command.split()) for hit in _named_paths(statement, cwd)]
+        if not hits:
+            return []
+        if e.outcome == Outcome.unknown:
+            self.missing_required += 1      # positive, but the decision is unknown: never a clean evaluation
+        program, path, how = hits[0]
+        technique, description = broker_credential_class(path)
+        actor, target = e.get("user.name"), e.get("auth.target_user")
+        tty = e.get("process.tty")
+        on_tty = isinstance(tty, str) and bool(tty) and tty.lower() not in NO_TTY
+        kind = account_class(str(actor)) if actor else "user"
+        sensitive = technique in _HASH_AND_KEY and how == "read" and e.outcome == Outcome.success
+        lane = "high" if sensitive and (on_tty or kind in {"web", "never", "daemon"}) else "lead"
+        subject = line_subject(e, service)
+        if e.outcome == Outcome.success:
+            decision = "allowed"
+        elif e.outcome == Outcome.failure:
+            reason = e.get("privilege.denial_reason")
+            decision = "refused" + (f" ({reason})" if reason else "")
+        else:
+            decision = "logged, with an unknown decision,"
+        said = f"{subject} says that {service} {decision}" if subject else f"{service} {decision}"
+        shown = (f"the command '{command}'" if len(command) <= 300 else
+                 f"a command of {len(command)} characters beginning `{command[:300]}`")
+        claim = (f"On {e.host}, {said} {_quote(actor)} to run as {_quote(target)} {shown}"
+                 + (f" from terminal {tty}" if on_tty else " without a terminal") + ". ")
+        if how == "read":
+            claim += f"'{program}' reads the files it is given, and its arguments name {description}."
+        else:
+            claim += (f"An argument of '{program}', a program not known here to read its arguments, names "
+                      f"{description}.")
+        claim += " The record shows the broker's decision, not that the command ran to completion or read the file."
+        others = sorted({hit[1] for hit in hits[1:] if hit[1] != path})
+        if others:
+            claim += f" Its arguments also name {len(others)} other credential path(s): {others[:5]}."
+        if kind in {"web", "never", "daemon"}:
+            claim += f" {_quote(actor)} is a {'web-service' if kind == 'web' else 'system or daemon'} account."
+        if e.has("sudo.chunk") or SUDO_AMBIGUOUS_CAVEAT in e.caveats or PKEXEC_AMBIGUOUS_CAVEAT in e.caveats:
+            claim += (" The record is incomplete or ambiguous, so the command may be cut short; only the words read "
+                      "are judged.")
+        match = observed(self, e, claim, lane,
+                         group=json.dumps([e.host, service, actor, target, program, path, how, decision.split()[0],
+                                           on_tty, lane, writer_state(e)]),
+                         names=(*_FIELDS, "log.identifier", "log.writer"))
+        # impact if adverse: the hash files, keys and stored credentials give other accounts; the sudoers policy shows
+        # who may become whom
+        match.severity = "medium" if technique == "T1548.003" else self.severity
+        match.attack = tuple(dict.fromkeys(technique for technique in (
+            broker_credential_class(hit[1])[0] for hit in hits)))
+        return [match]
+
+
+PRIVILEGE_BROKER_RULES = [PrivilegeBrokerRefusal, PkexecEnvironmentRejection, PrivilegeBrokerSuspiciousSuccess,
+                          PrivilegeBrokerCredentialArgs]

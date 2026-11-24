@@ -45,15 +45,15 @@ def test_access_log_requests_group_per_client_server_and_tool_across_batches(tmp
 
 
 def test_a_proxy_line_names_the_fetched_site_and_the_proxy_host():
-    rule, [m] = run([access("Wget/1.21.3", url="http://downloads.example.test/a.sh", host="proxy01",
+    _rule, [m] = run([access("Wget/1.21.3", url="http://downloads.example.test/a.sh", host="proxy01",
                             src="10.0.0.23", proxy__result="TCP_MISS")])
     assert "from 10.0.0.23 to downloads.example.test recorded in the proxy access log on proxy01" in m.claim
-    rule, [m] = run([access("curl/8.0", url="tunnel.example.test:443", host="proxy01", src="10.0.0.23")])
+    _rule, [m] = run([access("curl/8.0", url="tunnel.example.test:443", host="proxy01", src="10.0.0.23")])
     assert "to tunnel.example.test recorded in the proxy access log" in m.claim
 
 
 def test_sensor_transactions_keep_their_identity():
-    rule, [m] = run([ev("http_tx", source__ip="198.51.100.7", destination__ip="192.0.2.99",
+    _rule, [m] = run([ev("http_tx", source__ip="198.51.100.7", destination__ip="192.0.2.99",
                         http__hostname="192.0.2.99", user_agent__original="curl/7.81.0", url__original="/")])
     assert m.group_key == "198.51.100.7|192.0.2.99|curl/7.81.0"
     assert "to 192.0.2.99 (Host: 192.0.2.99)" in m.claim
