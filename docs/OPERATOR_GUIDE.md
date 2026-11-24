@@ -102,7 +102,7 @@ Set both files or neither. `doctor` fails if either file cannot be read or the k
 romulus doctor                      # add --check-timeout SECONDS to give every check the same deadline
 ```
 
-Each line is `[OK  ]`, `[WARN]` or `[FAIL]`. **FAIL** means a hunt started now would fail, stall, or run on an unsafe setup; fix it first. `doctor` exits 1 when any check fails. **WARN** means something is not verified or is weaker than it should be; read it, but a hunt can run. `doctor` only reads: it never writes to your telemetry or migrates the database.
+Each line is `[OK  ]`, `[WARN]` or `[FAIL]`. **FAIL** means a hunt started now would fail, stall, or run on an unsafe setup, or the web UI would refuse to start; fix it first. `doctor` exits 1 when any check fails. **WARN** means something is not verified or is weaker than it should be; read it, but a hunt can run. `doctor` never writes to your telemetry, migrates the database or writes its data; the only thing it creates is the ROMULUS home directory, when it is missing.
 
 On a fresh install, expect these warnings: `db.integrity` (no database yet; it is created on first use), `site.collection` (no `site/collection.yaml`; optional) and, until the site's networks are set, `site.internal_networks`.
 
@@ -127,10 +127,11 @@ The checks you are most likely to act on:
 | `stage.volume`, `disk.free` | WARN | Move `ROMULUS_STAGE_DIR` to its own volume; free space. |
 | `web.tls` | FAIL / WARN | See section 3. |
 | `web.secret_key` | FAIL | Set `ROMULUS_SECRET_KEY` (section 2). |
-| `site.internal_networks` | WARN | Set the site's networks (section 2) and check the hosts it names as outside. |
+| `site.internal_networks` | FAIL / WARN | FAIL: the networks are set both in `.env` and on the Site setup page, or the definition is invalid; keep it in one place. WARN: set the site's networks (section 2) and check the hosts it names as outside. |
 | `agent.*`, `triage.*` | FAIL / WARN | See Troubleshooting: agent endpoint. `agent.provider` OK with "agent not configured" is fine for a hunt without the agent. |
 | `secrets.length`, `secrets.strength` | WARN | Replace the named secret with a long random value. |
-| `db.integrity`, `db.space` | WARN | See Troubleshooting: database. |
+| `db.integrity` | FAIL / WARN | FAIL: SQLite's integrity check found damage, or the store cannot be read. WARN: see Troubleshooting: database. |
+| `db.space` | WARN | See Troubleshooting: database. |
 
 ### Web UI accounts
 
@@ -223,6 +224,8 @@ User=<service-account>
 Environment=ROMULUS_HOME=<romulus-home>
 ExecStart=<romulus-home>/venv/bin/romulus --env-file <romulus-home>/.env web
 Restart=on-failure
+# exit 1 is a refusal to start (TLS, bind or ROMULUS_SECRET_KEY): fix the configuration, retrying will not help
+RestartPreventExitStatus=1
 # keep files the UI writes (reports, hunt logs) private to the service account
 UMask=0077
 # hunts started from the UI run as child processes: stopping or restarting the UI must not end them
@@ -232,7 +235,7 @@ KillMode=process
 WantedBy=multi-user.target
 ```
 
-Then `sudo systemctl daemon-reload && sudo systemctl enable --now romulus-web`. Its output goes to the journal (`journalctl -u romulus-web`); a refusal to start (section 7) is the last line there.
+Then `sudo systemctl daemon-reload && sudo systemctl enable --now romulus-web`. Its output goes to the journal (`journalctl -u romulus-web`). A refusal to start (section 7) exits 1, which the unit does not retry: the reason is the last line in the journal, and `sudo systemctl restart romulus-web` starts it again once the configuration is fixed.
 
 Open `https://<romulus-host>:8443/login` (or the proxy's address) and log in with an account from section 4. Sessions last at most 8 hours. Five failed logins in five minutes lock that account for a while; other accounts are not affected.
 

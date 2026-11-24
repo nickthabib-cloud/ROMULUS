@@ -77,7 +77,7 @@ Pass 1 runs after the sweep, packet and baseline stages and adds to expansion's 
 | `detect` | Playbooks and typed evaluators: sweep rules, context rules, packet rules, indicator lists |
 | `decide` | Admission gates, lanes, priority, triage and suppressions; the evidence-ranking model |
 | `hunt` | Hunt orchestration: manifest, sweep, packet stage, deterministic expansion, pivots, resume |
-| `agent` | Optional model investigator today: cases, briefs, validated decisions, typed pivots. The planned AI investigating agent builds on it: [`ai-investigating-agent.md`](ai-investigating-agent.md) |
+| `agent` | The optional AI investigating agent: cases, briefs, hypotheses, validated decisions, typed pivots and its own read-only source queries, the AI triage order, the cited AI assessment, model providers and their egress gate, and per-hunt budgets: [`ai-investigating-agent.md`](ai-investigating-agent.md) |
 | `report` | Report manifest, incident graph and narratives, attack-path timeline layout, renderers |
 | `web` | FastAPI app, server-rendered templates, local auth |
 | `replay` | Replaying frozen investigator briefs through the model decision path |
