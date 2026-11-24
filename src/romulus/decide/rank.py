@@ -29,11 +29,13 @@ prior. The model must never raise the rank of the entities it chose to investiga
 
 Repeated leads. A finding inherits its best entity's score, and an entity's evidence counts each rule once (one rule,
 at most one tactic, one side of each co-occurring pair). In the final order the analyst reads, the first
-REPEAT_FULL_SHARE findings of one rule listed under one entity inherit that score in full; each further `lead` of that
-rule there, the n-th, inherits REPEAT_FULL_SHARE/n of it. How often a routine rule fires on a busy entity then never
-multiplies that entity's weight at the top of the order, and each repeat still ranks above the same lead on an entity
-with less evidence. Confirmed and `high` findings always inherit in full, so this never moves one below a lead; lanes,
-sections and the Reported set are unchanged, and every finding keeps its place in the order.
+REPEAT_FULL_PLACES findings of one rule listed under one entity inherit that score in full; each further `lead` of that
+rule there inherits REPEAT_SHARE of it. A repeat then ranks as the first finding of an entity with half the evidence
+would: it falls behind the findings of entities with comparable evidence (at least half), so how often a routine rule
+fires on a busy entity never fills the top of the order, and it stays above those of entities with less, so a long run
+of one attack rule on a compromised host is never buried under weaker hosts. Confirmed and `high` findings always
+inherit in full, so this never moves one below a lead; lanes, sections and the Reported set are unchanged, and every
+finding keeps its place in the order.
 
 This module holds the model only; `romulus.hunt.rank` runs it over a hunt's stored candidates in bounded batches.
 """
@@ -110,13 +112,15 @@ FLEET_PENALTY = 30
 
 # Repeated leads (see the module docstring). Two findings of one rule under one entity show the rule recurs there
 # rather than fired once, which is all an analyst needs from the order to open that entity's case; it is also the
-# number of places expansion gives one rule on one host. Past them, the n-th lead's share of the entity score is
-# REPEAT_FULL_SHARE/n, a harmonic share: a group of n repeats inherits about REPEAT_FULL_SHARE * (1 + ln(n /
-# REPEAT_FULL_SHARE)) entity scores in all, growing with the logarithm of how often the rule fired, not linearly. The
-# n-th repeat on an entity of score S ranks as the first finding of an entity of score S * REPEAT_FULL_SHARE / n would.
-# Only the final pass (the order analysts read) applies it; the pass before expansion keeps full inheritance, since
-# expansion bounds its own seeds per host and per rule.
-REPEAT_FULL_SHARE = 2
+# number of places expansion gives one rule on one host. Past them a lead inherits REPEAT_SHARE of the entity score:
+# entities within a factor of two of each other have comparable evidence (an entity with half the score holds about
+# half the tactics, rules and pairs), so a repeat yields to their findings and keeps its place above weaker entities'.
+# The share is a floor, not a decay: a decay with no floor (the n-th inheriting 1/n) would sink the tenth instance of
+# an intrusion's own rule below every host that barely meets the evidence bar. Only the final pass (the order analysts
+# read) applies it; the pass before expansion keeps full inheritance, since expansion bounds its own seeds per host and
+# per rule.
+REPEAT_FULL_PLACES = 2
+REPEAT_SHARE = 0.5
 REPEAT_LANE = "lead"
 # The order in which one (entity, rule) group's findings take their ordinals: deterministic findings before the AI
 # agent's and investigator pivots' (the model can never push a deterministic finding down), then the stronger lane,
@@ -386,7 +390,8 @@ def finding_rank(*, lane: str, prior: float, provenance: str, entities: list[Ent
     """A finding's rank, the entity it is listed under, whether it is reported, and why.
 
     Rank = the best entity's score + the finding's own rule prior - FLEET_PENALTY when its rule is recurring
-    fleet-wide (`fleet` is that rule's reason). A confirmed finding is always reported; a pool finding is reported
+    fleet-wide (`fleet` is that rule's reason); the final pass then lowers a repeated lead's share of the entity score
+    (`repeat_discount`). A confirmed finding is always reported; a pool finding is reported
     when any of its entities meets the evidence bar. A reported finding is listed under its best entity that meets the
     bar (so every reported finding appears under a reported entity); any other finding under its best entity."""
     best = best_entity(entities)
@@ -418,14 +423,14 @@ def finding_rank(*, lane: str, prior: float, provenance: str, entities: list[Ent
 def repeat_discount(*, lane: str, ordinal: int | None, inherited: float, rule_id: str, entity_kind: str | None,
                     entity: str | None) -> tuple[float, str | None]:
     """The part of a finding's inherited entity score it does not inherit as the `ordinal`-th finding of its rule
-    listed under its entity, with the reason, or (0, None). Only a `lead` past the first REPEAT_FULL_SHARE of its group
+    listed under its entity, with the reason, or (0, None). Only a `lead` past the first REPEAT_FULL_PLACES of its group
     is discounted; a confirmed or high finding, and a finding with no entity, always inherits in full."""
-    if lane != REPEAT_LANE or ordinal is None or ordinal <= REPEAT_FULL_SHARE or entity is None or inherited <= 0:
+    if lane != REPEAT_LANE or ordinal is None or ordinal <= REPEAT_FULL_PLACES or entity is None or inherited <= 0:
         return 0.0, None
-    discount = inherited * (1 - REPEAT_FULL_SHARE / ordinal)
-    return discount, (f"lead {ordinal} of {rule_id} listed under {entity_kind}:{entity}: inherits "
-                      f"{REPEAT_FULL_SHARE}/{ordinal} of the entity score; the first {REPEAT_FULL_SHARE} inherit it "
-                      f"in full (-{discount:g})")
+    discount = inherited * (1 - REPEAT_SHARE)
+    return discount, (f"lead {ordinal} of {rule_id} listed under {entity_kind}:{entity}: a repeat inherits "
+                      f"{REPEAT_SHARE:.0%} of the entity score; the first {REPEAT_FULL_PLACES} inherit it in full "
+                      f"(-{discount:g})")
 
 
 def repeat_order_key(*, provenance: str, lane: str, prior: float, ts, candidate_id: str) -> tuple:

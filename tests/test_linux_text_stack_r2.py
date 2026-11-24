@@ -192,7 +192,8 @@ def _assert_text_result(snapshot, trace, docs):
     assert not any(row["state"] in {"evaluated_partial", "match_on_partial", "executed_failed"} for row in unrelated)
 
 
-# The ranking version rank@3 moves this digest exactly as it moves the manifest digest above (the version string, and in the throughput stack its repeated leads' ranks).
+# The ranking version rank@3 moves this digest exactly as it moves the manifest digest above (the version
+# string only: no lead here is past the second of its rule under one entity).
 MANIFEST_BEFORE_PARTNER_SECTIONS = "2dd03093d2e91da01d63103e945ffdb3736c289e0f93c7c5cb5170b538709796"
 
 

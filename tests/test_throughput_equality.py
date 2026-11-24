@@ -430,10 +430,10 @@ GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe55
  # digests are the earlier ones.
  # The ranking version rank@2 -> rank@3 (a lead past the first two of its rule under one entity inherits a share
  # of that entity's score) moves the audit (the version string and the repeat step's rank statements) and the
- # manifest: web1's third to fifth context.staging_and_transfer leads and db1's third to tenth
- # net.protocol_port_mismatch leads rank lower, and the leads they passed move up two or three places; positions
- # 1-19 are unchanged. With the version set back and the repeat step's statements left out of the count the audit
- # digest is the earlier one, and with the share off as well the manifest's is too.
+ # manifest: web1's third to fifth context.staging_and_transfer leads fall from places 20-22 to 30-32, db1's third
+ # to tenth net.protocol_port_mismatch leads score lower in the places they held, and the ten leads in between move
+ # up three places; positions 1-19 are unchanged. With the version set back and the repeat step's statements left
+ # out of the count the audit digest is the earlier one, and with the share off as well the manifest's is too.
  'audit': '0acf61629c58c5634be3af90f6a942471734855abe34db0c41d4123c0549426b',
  'baseline_counts': 'be05fabb25336f21341b46eae7d8c2627828f7a7a7e8fdb24f4eb58576099354',
  'baseline_hunt_exclusions': 'c91eefda01c512d6d63e892dc9696016b01a71d44e4abcc429d954bd51864852',
@@ -451,7 +451,7 @@ GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe55
  'events': '9b9544ad6f24d002f3f71d874518df5ecee3d968e12ec1fd5c9dce2345d7a87f',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
  'links': '5fa22b4162492394955b6b1873f566f427a58dfd7529c0df73e87a6da8daa76f',
- 'manifest': 'ed0e696b657d318c5bf1d59fd3d7f46012763a755fbd6018249ded1502601a22',
+ 'manifest': '88c608ceea34d547dba7d28371a168723b2df2112790d3a653f843427e967cfa',
  'raw': '086888c80ae778b509acd5d6cdb73c185d54969d3820885e04de8b5d9c2d45cc',
  'rule_cells': '8ab351c31d22ad804ebc0ed29fa8e59bd6d6042bbc2faae26a76ecc96af2702e',
  'stats': '7a85376b388becf5bb871ff20305b06feb6e9b059594f20e89c2aab7c9911faa',
@@ -483,8 +483,9 @@ GOLDEN_STACK_BY_RULE_ESTIMATE = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e
  'tasks': '1e1eeb69d05da151bec8f6dff43c1863a4eb43a288f84c1ba35168311b303360'}
 GOLDEN_CANDIDATES_BY_RULE_ESTIMATE = GOLDEN_STACK_BY_RULE_ESTIMATE['candidates']
 # the two stacks' manifest digests without the partner sections, as captured before they existed
-# The ranking version rank@3 moves this digest exactly as it moves the manifest digest above (the version string, and in the throughput stack its repeated leads' ranks).
-MANIFEST_BEFORE_PARTNER_SECTIONS = ('33447613b0e22d11d580023d20316523adc83c8d367850ef278bdf1aecef51ca',
+# The ranking version rank@3 moves this digest exactly as it moves the manifest digest above (the version
+# string, and in the throughput stack its repeated leads' ranks).
+MANIFEST_BEFORE_PARTNER_SECTIONS = ('95cba57059bf6d40df0056ec54ebffa0c1a78a6563f1bd07171fc67e5ed52592',
                                     'bbf2001bcedd084b5767d47d8103792d14d6e7570367171d1b2cc23346c3f063')
 
 

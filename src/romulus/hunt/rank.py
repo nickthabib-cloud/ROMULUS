@@ -264,12 +264,12 @@ def _rank_findings(ws, batch_size: int, heartbeat) -> None:
 
 def _discount_repeats(ws, batch_size: int, heartbeat) -> None:
     """Number each finding within its (listed entity, rule) group in one SQL statement, then lower the inherited
-    share of the leads past the first REPEAT_FULL_SHARE of their group, one keyset page at a time."""
+    share of the leads past the first REPEAT_FULL_PLACES of their group, one keyset page at a time."""
     ws.number_repeats(model.LANE_TIER, model.DETERMINISTIC_PROVENANCE)
     ws.commit()
     after = ""
     while True:
-        page = ws.repeat_page(after, batch_size, model.REPEAT_LANE, model.REPEAT_FULL_SHARE)
+        page = ws.repeat_page(after, batch_size, model.REPEAT_LANE, model.REPEAT_FULL_PLACES)
         if not page:
             break
         heartbeat()
@@ -372,7 +372,7 @@ def rank_unranked(repo: Repo, hunt_id: str, candidates: list[dict], *, pass_no: 
     scores. Such findings never change an entity's evidence, so the entity scores stand. An internal endpoint is
     resolved by its address here (the pass's address map is not stored). In the final pass each takes its ordinal in
     its (listed entity, rule) group after the pass's stored rows of that group (a lead past the first
-    REPEAT_FULL_SHARE inherits a share of the entity score), so no stored rank moves."""
+    REPEAT_FULL_PLACES inherits a share of the entity score), so no stored rank moves."""
     if not candidates:
         return {}
     hunt = repo.get_hunt(hunt_id) or {}

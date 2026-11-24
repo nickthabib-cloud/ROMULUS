@@ -1,6 +1,6 @@
-"""Repeated leads in the final order: the first REPEAT_FULL_SHARE findings of one rule listed under one entity inherit
-the entity's score in full, each further lead a harmonic share of it. Lanes, sections, the Reported set and every
-confirmed or high finding's score are unchanged, and nothing leaves the order."""
+"""Repeated leads in the final order: the first REPEAT_FULL_PLACES findings of one rule listed under one entity inherit
+the entity's score in full, each further lead REPEAT_SHARE of it. Lanes, sections, the Reported set and every confirmed
+or high finding's score are unchanged, and nothing leaves the order."""
 from __future__ import annotations
 
 import json
@@ -29,11 +29,11 @@ def _lanes(rows) -> dict[str, str]:
     return {row["id"]: row["lane"] for row in rows}
 
 
-def _ranked(rows, monkeypatch=None, *, full_share=None, pass_no=PASS_FINAL, batch_size=2000):
+def _ranked(rows, monkeypatch=None, *, full_places=None, pass_no=PASS_FINAL, batch_size=2000):
     repo = _repo()
     _insert(repo, [dict(row) for row in rows])
-    if monkeypatch is not None and full_share is not None:
-        monkeypatch.setattr(model, "REPEAT_FULL_SHARE", full_share)
+    if monkeypatch is not None and full_places is not None:
+        monkeypatch.setattr(model, "REPEAT_FULL_PLACES", full_places)
     compute_rank_pass(repo, "h1", pass_no, batch_size=batch_size)
     if monkeypatch is not None:
         monkeypatch.undo()
@@ -64,9 +64,13 @@ def _busy_rows(admin_leads=8):
     return rows
 
 
+def _share(ordinal):
+    return 1.0 if ordinal <= model.REPEAT_FULL_PLACES else model.REPEAT_SHARE
+
+
 def test_many_routine_leads_on_a_busy_host_no_longer_fill_the_top(monkeypatch):
     rows = _busy_rows()
-    _repo_before, before, entities = _ranked(rows, monkeypatch, full_share=10**9)
+    _repo_before, before, entities = _ranked(rows, monkeypatch, full_places=10**9)
     _repo_after, after, _entities = _ranked(rows)
     srv = entities[("host", "srv")]["score"]
     net = entities[("host", "n1")]["score"]
@@ -76,17 +80,16 @@ def test_many_routine_leads_on_a_busy_host_no_longer_fill_the_top(monkeypatch):
     # before: the routine leads inherit the host's whole score and fill the top ten; no network finding is in it
     top_before = _order(before)[:10]
     assert sum(cid in admin for cid in top_before) >= 6 and not set(top_before) & set(network)
-    # after: two of them keep the full share, later ones a harmonic share, so every network finding outranks the
-    # fourth and later of them
+    # after: two of them keep the full share and the rest half of it, so every network finding (an entity with more
+    # than half the busy host's evidence) outranks the third and later of them
     order = _order(after)
-    assert sum(cid in admin for cid in order[:10]) <= model.REPEAT_FULL_SHARE + 1
+    assert sum(cid in admin for cid in order[:10]) == model.REPEAT_FULL_PLACES
     assert set(network) & set(order[:10])
-    fourth = min(order.index(cid) for cid in admin[3:])
-    assert all(order.index(cid) < fourth for cid in network)
+    third = min(order.index(cid) for cid in admin[model.REPEAT_FULL_PLACES:])
+    assert all(order.index(cid) < third for cid in network)
     for index, cid in enumerate(admin, start=1):
-        share = 1.0 if index <= model.REPEAT_FULL_SHARE else model.REPEAT_FULL_SHARE / index
-        assert after[cid]["score"] == pytest.approx(srv * share + 50)
-        assert (f"lead {index} of host.account_change" in str(after[cid]["reasons"])) is (share < 1)
+        assert after[cid]["score"] == pytest.approx(srv * _share(index) + 50)
+        assert (f"lead {index} of host.account_change" in str(after[cid]["reasons"])) is (_share(index) < 1)
     # every high and the busy host's other findings keep their scores, and their places at the top
     assert order[:3] == ["b-priv", "b-cred", "b-stop"] and _order(before)[:3] == order[:3]
     for cid in before:
@@ -98,28 +101,34 @@ def test_many_routine_leads_on_a_busy_host_no_longer_fill_the_top(monkeypatch):
 
 
 def test_a_host_whose_findings_are_one_attack_chain_stays_on_top(monkeypatch):
-    """Eight stages of one intrusion on one host, mostly leads, each seen one to three times, beside twenty hosts that
-    each meet the evidence bar on their own: the whole chain stays above every other host's findings, as it did with
-    full inheritance."""
+    """Six stages of one intrusion on one host, two of them repeated many times (lateral movement to host after host,
+    a beacon that keeps calling out): every repeat is the attack too. Twenty other hosts each meet the evidence bar on
+    their own with under half the victim's evidence. The whole chain stays above every other host's findings, as it
+    did with full inheritance, and its distinct stages hold the top places."""
     minute = timedelta(minutes=1)
-    chain = [("r.phish", "T1566", "high", 1), ("r.exec", "T1059", "lead", 2), ("r.task", "T1053.005", "lead", 3),
-             ("r.dump", "T1003", "high", 1), ("r.discover", "T1046", "lead", 3), ("r.lateral", "T1021", "lead", 2),
-             ("r.c2", "T1071", "lead", 3), ("r.exfil", "T1041", "lead", 2)]
-    rows = [_row(f"v-{rule}-{n}", rule, lane=lane, host="victim", attack=[technique],
-                 ts=START + (10 * stage + n) * minute)
-            for stage, (rule, technique, lane, times) in enumerate(chain) for n in range(times)]
+    chain = [("r.phish", "T1566", "high"), ("r.exec", "T1059", "high"), ("r.dump", "T1003", "lead"),
+             ("r.lateral", "T1021", "lead"), ("r.c2", "T1071", "lead"), ("r.exfil", "T1041", "lead")]
+    rows = [_row(f"v-{rule}", rule, lane=lane, host="victim", attack=[technique], ts=START + index * minute)
+            for index, (rule, technique, lane) in enumerate(chain)]
+    rows += [_row(f"v-lateral{index:02d}", "r.lateral", host="victim", attack=["T1021"],
+                  ts=START + (10 + index) * minute) for index in range(12)]
+    rows += [_row(f"v-c2{index:02d}", "r.c2", host="victim", attack=["T1071"], ts=START + (30 + index) * minute)
+             for index in range(12)]
     for host in range(20):
-        rows += [_row(f"o{host:02d}-{n}", f"r.other{n}", lane=("high", "lead")[n], host=f"other{host:02d}",
-                      attack=[["T1046", "T1595"][n]], ts=START + timedelta(hours=2, minutes=host + n))
-                 for n in range(2)]
-    _repo_before, before, _ = _ranked(rows, monkeypatch, full_share=10**9)
+        rows += [_row(f"o{host:02d}-{n}", f"r.other{n}", host=f"other{host:02d}", attack=[["T1046", "T1595"][n]],
+                      ts=START + timedelta(hours=2, minutes=host + n)) for n in range(2)]
+    _repo_before, before, _ = _ranked(rows, monkeypatch, full_places=10**9)
     _repo_after, after, entities = _ranked(rows)
-    assert all(entities[("host", f"other{host:02d}")]["reported"] for host in range(20))
+    victim_score = entities[("host", "victim")]["score"]
+    assert all(entities[("host", f"other{host:02d}")]["reported"]
+               and entities[("host", f"other{host:02d}")]["score"] < victim_score / 2 for host in range(20))
     order = _order(after)
     victim = [row["id"] for row in rows if row["id"].startswith("v-")]
     assert set(order[:len(victim)]) == set(victim) == set(_order(before)[:len(victim)])
-    # the third finding of a rule is a repeat: it ranks lower, still above every other host
-    assert after["v-r.c2-2"]["score"] < before["v-r.c2-2"]["score"]
+    assert set(order[:len(chain)]) == {f"v-{rule}" for rule, _technique, _lane in chain}
+    # the repeats past the first two of their rule rank lower than before, still above every other host
+    assert after["v-c211"]["score"] < before["v-c211"]["score"]
+    assert after["v-c211"]["score"] == pytest.approx(victim_score * model.REPEAT_SHARE + 30)
 
 
 # -- the hard rules -------------------------------------------------------------------------------------------------
@@ -142,7 +151,7 @@ def _random_rows(seed, count=400):
 def test_no_confirmed_or_high_finding_falls_below_a_lead_and_nothing_else_moves(monkeypatch, seed):
     rows = _random_rows(seed)
     lanes = _lanes(rows)
-    _repo_before, before, entities_before = _ranked(rows, monkeypatch, full_share=10**9)
+    _repo_before, before, entities_before = _ranked(rows, monkeypatch, full_places=10**9)
     _repo_after, after, entities_after = _ranked(rows)
     assert entities_after == entities_before                # entity evidence is untouched
     assert set(after) == set(before)
@@ -185,9 +194,10 @@ def test_ordinals_put_deterministic_findings_first_and_stronger_lanes_before_lea
     srv = entities[("host", "s")]["score"]
     assert findings["d-high"]["score"] == srv + 20                     # ordinal 1, a high: full
     assert findings["d0"]["score"] == srv + 30                         # ordinal 2: full
-    assert findings["d1"]["score"] == pytest.approx(srv * 2 / 3 + 30)  # ordinal 3
-    assert findings["d2"]["score"] == pytest.approx(srv * 2 / 4 + 30)  # ordinal 4
-    assert findings["a-early"]["score"] == pytest.approx(srv * 2 / 5 + 90)
+    assert findings["d1"]["score"] == pytest.approx(srv * model.REPEAT_SHARE + 30)  # ordinal 3
+    assert findings["d2"]["score"] == pytest.approx(srv * model.REPEAT_SHARE + 30)  # ordinal 4
+    assert findings["a-early"]["score"] == pytest.approx(srv * model.REPEAT_SHARE + 90)  # ordinal 5
+    assert "lead 5 of r.admin" in str(findings["a-early"]["reasons"])
 
 
 # -- findings stored after the pass --------------------------------------------------------------------------------
@@ -209,7 +219,7 @@ def test_a_late_agent_lead_takes_its_ordinal_after_the_stored_rows_and_moves_no_
         cid: tuple(row[key] for key in fields) for cid, row in before.items()}
     # the late high takes ordinal 9 at full share; the late lead ordinal 10
     assert after["z-agent-high"]["score"] == srv + 70
-    assert after["z-agent"]["score"] == pytest.approx(srv * 2 / 10 + 70)
+    assert after["z-agent"]["score"] == pytest.approx(srv * model.REPEAT_SHARE + 70)
     reasons = after["z-agent"]["reasons"]
     reasons = json.loads(reasons) if isinstance(reasons, str) else reasons
     assert any(line.startswith("lead 10 of host.account_change listed under host:srv") for line in reasons)
@@ -226,16 +236,18 @@ def test_repeat_discount_model():
                                      entity="a") == (0.0, None)
     assert model.repeat_discount(lane="lead", ordinal=5, inherited=100.0, rule_id="r", entity_kind=None,
                                  entity=None) == (0.0, None)
-    discount, reason = model.repeat_discount(lane="lead", ordinal=4, inherited=100.0, rule_id="r",
-                                             entity_kind="host", entity="a")
-    assert discount == 50.0 and reason.endswith("(-50)") and "lead 4 of r listed under host:a" in reason
+    for ordinal in (3, 4, 1000):
+        discount, reason = model.repeat_discount(lane="lead", ordinal=ordinal, inherited=100.0, rule_id="r",
+                                                 entity_kind="host", entity="a")
+        assert discount == 100.0 * (1 - model.REPEAT_SHARE) and reason.endswith(f"(-{discount:g})")
+        assert f"lead {ordinal} of r listed under host:a" in reason
 
 
 # -- mission scale --------------------------------------------------------------------------------------------------
 def test_one_huge_group_and_thousands_of_entities_stay_within_pages(tmp_path, monkeypatch):
     """One host with tens of thousands of leads of one rule beside three thousand other hosts: every finding is
-    ranked, each page holds at most one page of rows, statements grow with pages, and the huge group's n-th lead
-    inherits REPEAT_FULL_SHARE/n of its host's score."""
+    ranked, each page holds at most one page of rows, statements grow with pages, and the huge group's leads past
+    the first REPEAT_FULL_PLACES inherit REPEAT_SHARE of its host's score."""
     from romulus.store import schema as t
 
     repo = _repo(tmp_path / "repeats.db")
@@ -258,7 +270,7 @@ def test_one_huge_group_and_thousands_of_entities_stay_within_pages(tmp_path, mo
                 connection.execute(t.candidate.insert(), batch)
                 batch = []
         connection.execute(t.candidate.insert(), batch)
-    monkeypatch.setattr(model, "REPEAT_FULL_SHARE", 10**9)
+    monkeypatch.setattr(model, "REPEAT_FULL_PLACES", 10**9)
     full = compute_rank_pass(repo, "h1", PASS_FINAL, batch_size=batch_size)
     monkeypatch.undo()
     summary = compute_rank_pass(repo, "h1", PASS_FINAL, batch_size=batch_size)
@@ -271,10 +283,9 @@ def test_one_huge_group_and_thousands_of_entities_stay_within_pages(tmp_path, mo
     findings, entities = _ranks(repo)
     busy = entities[("host", "busy")]["score"]
     for index, ordinal in ((0, 1), (1, 2), (2, 3), (999, 1000), (huge - 1, huge)):
-        share = 1.0 if ordinal <= model.REPEAT_FULL_SHARE else model.REPEAT_FULL_SHARE / ordinal
-        assert findings[f"b{index:06d}"]["score"] == pytest.approx(busy * share + 30)
+        assert findings[f"b{index:06d}"]["score"] == pytest.approx(busy * _share(ordinal) + 30)
     order = _order(findings)
-    # the busy host's highs lead; every other host's high and first leads outrank its thousandth lead
+    # the busy host's highs lead; every other host (as much evidence as the busy host) outranks its third lead on
     assert order[:2] == ["a-dump", "a-exec"] or order[:2] == ["a-exec", "a-dump"]
-    thousandth = order.index("b000999")
-    assert all(order.index(f"o{index:05d}-{n}") < thousandth for index in range(0, hosts, 97) for n in range(3))
+    third = order.index("b000002")
+    assert all(order.index(f"o{index:05d}-{n}") < third for index in range(0, hosts, 97) for n in range(3))
