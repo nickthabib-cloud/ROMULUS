@@ -2017,7 +2017,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1105`](https://attack.mitre.org/techniques/T1105/)
 - Telemetry families: http_access<br>http_tx
-- Required typed fields: source.ip<br>user_agent.original
+- Required typed fields: user_agent.original
 - Behavior: HTTP requests whose self-reported user agent begins with a command-line tool's own identifier (curl, wget, python-requests, Go net/http, PowerShell, nmap, sqlmap, nikto, ffuf, gobuster, ...)
 
 <a id="rule-net-vnc-session"></a>
@@ -2146,7 +2146,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 - ATT&CK: [`T1190`](https://attack.mitre.org/techniques/T1190/), [`T1505.003`](https://attack.mitre.org/techniques/T1505/003/)
 - Telemetry families: http_access
 - Required typed fields: http.request.method<br>http.response.status_code<br>url.original
-- Behavior: on one web host, a server-side script (php, jsp, asp/aspx, cfm, pl, cgi, ...) under an upload-style directory whose first answered request follows, within an hour, an upload-style request (PUT/MOVE/COPY, or POST to an upload endpoint); or whose answered requests carry a command in a query parameter
+- Behavior: on one web host, a server-side script (php, jsp, asp/aspx, cfm, pl, cgi, ...) under an upload-style directory whose first answered request follows, within an hour, an upload-style request (PUT/MOVE/COPY, or POST to an upload endpoint); or whose answered requests carry a command in a query parameter; or a script in any directory first answered after a 2xx write to its own path. Answered means 2xx (a 500 counts only beside a 2xx on the same path; 502/503/504 and 3xx never do); an upload is a 2xx. Single-request scripts of one client past five are one roll-up at their strongest lane, naming every script
 - Positive-only reason: Access logs do not record request bodies, content types or what a script ran: a web shell driven by POST bodies, or uploaded through an endpoint not named as one, leaves no trace this rule can read, so absence is never asserted.
 
 <a id="rule-web-scan-burst"></a>
