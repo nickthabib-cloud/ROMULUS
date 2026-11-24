@@ -3006,6 +3006,25 @@ class Repo:
                     out[(row["entity_kind"], row["entity"])] = dict(row)
         return out
 
+    def rank_group_sizes(self, hunt_id: str, pass_no: int, keys) -> dict[tuple[str, str, str], int]:
+        """How many of a pass's finding ranks each given (entity kind, entity, rule) group holds: findings of that
+        rule listed under that entity."""
+        out: dict[tuple[str, str, str], int] = {}
+        ordered = sorted(set(keys))
+        rank, c = t.finding_rank, t.candidate
+        with self.engine.connect() as connection:
+            for offset in range(0, len(ordered), 250):
+                chunk = ordered[offset:offset + 250]
+                query = (select(rank.c.entity_kind, rank.c.entity, c.c.rule_id, func.count())
+                         .select_from(c.join(rank, and_(rank.c.hunt_id == c.c.hunt_id, rank.c["pass"] == pass_no,
+                                                        rank.c.candidate_id == c.c.id)))
+                         .where(c.c.hunt_id == hunt_id, c.c.rule_id.in_(sorted({key[2] for key in chunk})),
+                                tuple_(rank.c.entity_kind, rank.c.entity, c.c.rule_id).in_(chunk))
+                         .group_by(rank.c.entity_kind, rank.c.entity, c.c.rule_id))
+                for kind, entity, rule_id, count in connection.execute(query).all():
+                    out[(kind, entity, rule_id)] = int(count)
+        return out
+
     def delete_rank_pass(self, hunt_id: str, pass_no: int, *, owner_token: str | None = None) -> None:
         with write_txn(self.engine) as connection:
             self._fence_lease(connection, hunt_id, owner_token)

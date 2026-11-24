@@ -53,7 +53,11 @@ GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a
  # The ranking version rank@1 -> rank@2 (fleet member hosts keep the rule's evidence, timed by their own record) moves
  # only the version string in the rank audit rows and the manifest's ranking block: with the version set back, both
  # digests are the earlier ones.
- 'audit': 'c64a0572905fed66e789221eb9255853fb69cb70a2cb8e5ecfd4c18c4d02dbb9',
+ # The ranking version rank@2 -> rank@3 (a lead past the first two of its rule under one entity inherits a share
+ # of that entity's score) discounts no finding here: only the version string and the repeat step's rank
+ # statements moved, and with the version set back and those statements left out of the count both digests are
+ # the earlier ones.
+ 'audit': 'e2f958361f340ee1874824c8341ad114b338880bbd135be496c7485869043e96',
  'baseline_counts': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_hunt_exclusions': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_observations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
@@ -70,7 +74,7 @@ GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a
  'events': 'f0d612c20f67d030a43e835b8ef639a78c824b51fff59c169d3d5219700de383',
  'expansion': 'dae7cbd7929a4cb94bb232a7343d4d70f62885a979b52714b87bd3641a92169b',
  'links': 'd9f0da030bf1447f35601910ec18eb012f4a55a0a8feef7262ab6e745319890e',
- 'manifest': '385911657ea7b0520f0596b882d2ccc4f3381f332af62b3ff02fd133bb255d38',
+ 'manifest': '360b957ab8c75bcfa8284d3537c5e23298c7d2576613002bd758c376203e7bcd',
  'raw': '64be31e697a32f93b1a71657560af514b2d430469cb3be19f44b8827985a7775',
  # host.account_or_group_change 7->8 moves only the rule cells (its version); every other digest is unchanged.
  'rule_cells': '094f3986c5b0f48114a2b7fd7812b1c8dc1fd2cb4347c1743e1c927d22ede220',
@@ -188,7 +192,8 @@ def _assert_text_result(snapshot, trace, docs):
     assert not any(row["state"] in {"evaluated_partial", "match_on_partial", "executed_failed"} for row in unrelated)
 
 
-MANIFEST_BEFORE_PARTNER_SECTIONS = "e60a748678a6f94d9152b606b02e2da93af8210d2a98e22326b4fd3329800a65"
+# The ranking version rank@3 moves this digest exactly as it moves the manifest digest above (the version string, and in the throughput stack its repeated leads' ranks).
+MANIFEST_BEFORE_PARTNER_SECTIONS = "2dd03093d2e91da01d63103e945ffdb3736c289e0f93c7c5cb5170b538709796"
 
 
 def test_linux_text_whole_stack_retrieval_findings_and_partial_coverage(tmp_path, monkeypatch):

@@ -39,7 +39,7 @@ _CREATE = (
     """CREATE TEMP TABLE rk_finding (
         candidate_id TEXT PRIMARY KEY, rule_id TEXT NOT NULL, ts TEXT, lane TEXT NOT NULL, prior REAL NOT NULL,
         provenance TEXT NOT NULL, fleet TEXT, score REAL, reported INTEGER, entity_kind TEXT, entity TEXT,
-        reasons TEXT)""",
+        reasons TEXT, inherited REAL, ordinal INTEGER)""",
     # one row per (entity, ranked finding)
     """CREATE TEMP TABLE rk_member (
         entity_kind TEXT NOT NULL, entity TEXT NOT NULL, candidate_id TEXT NOT NULL, rule_id TEXT NOT NULL, ts TEXT,
@@ -399,7 +399,33 @@ class RankWorkspace:
 
     def set_finding_ranks(self, rows: list[dict]) -> None:
         self._many("UPDATE rk_finding SET score = :score, reported = :reported, entity_kind = :entity_kind, "
-                   "entity = :entity, reasons = :reasons WHERE candidate_id = :candidate_id", rows)
+                   "entity = :entity, reasons = :reasons, inherited = :inherited WHERE candidate_id = :candidate_id",
+                   rows)
+
+    def number_repeats(self, lane_tiers: dict[str, int], deterministic: str) -> None:
+        """Each listed finding's ordinal among the findings of its rule listed under its entity, in one SQL window
+        statement: deterministic findings first, then by lane tier, stronger prior, earlier time and id (the order
+        `romulus.decide.rank.repeat_order_key` states)."""
+        tier = "CASE lane " + " ".join(f"WHEN '{lane}' THEN {value}" for lane, value in lane_tiers.items()) +             f" ELSE {len(lane_tiers)} END"
+        self._run(f"""
+            UPDATE rk_finding SET ordinal = o.n FROM (
+                SELECT candidate_id, ROW_NUMBER() OVER (
+                    PARTITION BY entity_kind, entity, rule_id
+                    ORDER BY provenance != :deterministic, {tier}, prior DESC, ts IS NULL, ts, candidate_id) AS n
+                FROM rk_finding WHERE entity IS NOT NULL) AS o
+            WHERE rk_finding.candidate_id = o.candidate_id""", {"deterministic": deterministic})
+
+    def repeat_page(self, after: str, limit: int, lane: str, past: int) -> list[dict]:
+        """The next page (keyset on id) of findings in `lane` whose ordinal is past `past`."""
+        rows = self._run(
+            "SELECT candidate_id, rule_id, lane, score, inherited, ordinal, entity_kind, entity, reasons "
+            "FROM rk_finding WHERE lane = :lane AND ordinal > :past AND candidate_id > :after "
+            "ORDER BY candidate_id LIMIT :limit",
+            {"lane": lane, "past": past, "after": after, "limit": limit}).mappings().all()
+        return self._page([dict(row) for row in rows])
+
+    def set_repeat_scores(self, rows: list[dict]) -> None:
+        self._many("UPDATE rk_finding SET score = :score, reasons = :reasons WHERE candidate_id = :candidate_id", rows)
 
     def counts(self) -> dict[str, int]:
         findings, reported = self._run("SELECT COUNT(*), COALESCE(SUM(reported), 0) FROM rk_finding").one()
