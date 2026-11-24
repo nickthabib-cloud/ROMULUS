@@ -679,17 +679,15 @@ class PrivilegeBrokerSuspiciousSuccess(FoldedLinuxDirect):
 
 
 # ---- credential stores named in a broker's logged command -------------------------------------------------------
-# Programs that open the files they are given and show or copy their contents: the plain and pattern readers the
-# argv parser places operands for, and further readers, editors, archivers and copiers whose non-option operands are
-# files they read.
+# Programs that open the files they are given and show their contents: the plain and pattern readers the argv parser
+# places operands for (cp's destination excluded), and further readers and editors whose every non-option operand is a
+# file they read. Programs that can also write an operand (tee, install, rsync, tar, curl -o, openssl -out) are never
+# taken to read one: their credential operands are 'named'.
 _PLACED_READERS = PLAIN_READERS | PATTERN_READERS | {"dd"}
 _OPERAND_READERS = frozenset({
-    "tac", "view", "vim", "nvim", "vi", "ex", "emacs", "pico", "mcedit", "gedit", "bat", "batcat", "sqlite3",
-    "diff", "cmp", "comm", "paste", "join", "uniq", "wc", "rev", "fold", "fmt", "pr", "expand", "iconv", "jq",
-    "yq", "tee", "install", "rsync", "scp", "tar", "zip", "7z", "7za", "gzip", "bzip2", "xz", "zstd", "cpio",
-    "openssl", "gpg", "sha224sum", "sha384sum", "b2sum", "cksum", "sum", "split", "csplit", "egrep", "fgrep",
-    "rgrep", "zgrep", "gawk", "mawk", "nawk", "perl", "python", "python2", "python3", "ruby", "php", "node",
-    "john", "hashcat", "unshadow", "curl", "wget", "nc", "ncat", "netcat", "socat", "mail", "mutt",
+    "view", "vim", "nvim", "ex", "emacs", "pico", "bat", "batcat", "sqlite3", "diff", "cmp", "comm", "paste", "wc",
+    "rev", "fold", "fmt", "pr", "expand", "jq", "sha224sum", "sha384sum", "b2sum", "cksum", "sum", "egrep", "fgrep",
+    "rgrep", "zgrep", "john", "hashcat",
 })
 # Programs whose use of a credential path is routine and documented, so a logged command naming one is not reported:
 # - account and policy management that reads and writes the hash files and sudoers by design (shadow-utils
@@ -794,11 +792,43 @@ def _statements(words: list[str]) -> list[list[str]]:
     return [words] if words else []
 
 
+_OCTAL_MODE = re.compile(r"[0-7]{3,4}")
+
+
+def _world_readable(mode: str) -> bool:
+    """Whether a chmod mode gives every account read access: an octal mode whose 'other' digit has the read bit, or a
+    symbolic clause adding or setting read for others or for all (`o+r`, `a+rw`, `+r`, `go=r`)."""
+    if _OCTAL_MODE.fullmatch(mode):
+        return bool(int(mode[-1]) & 4)
+    for clause in mode.split(","):
+        found = re.fullmatch(r"([ugoa]*)([-+=])([rwxXst]*)", clause)
+        if found and found[2] in "+=" and "r" in found[3] and (not found[1] or "o" in found[1] or "a" in found[1]):
+            return True
+    return False
+
+
+def _widened(args: list[str], cwd) -> list[tuple[str, str, str]]:
+    """chmod operands that are the hash files or a private key, when the mode makes them readable by every account
+    (a tightening such as `chmod 600 id_rsa` is routine)."""
+    operands = [arg for arg in args if not arg.startswith("-") or _OCTAL_MODE.fullmatch(arg.lstrip("-"))]
+    if len(operands) < 2 or not _world_readable(operands[0]):
+        return []
+    found = []
+    for item in operands[1:]:
+        path = normalize_path(item, cwd)
+        cls = broker_credential_class(path) if path else None
+        if cls and cls[0] in _HASH_AND_KEY:
+            found.append(("chmod", path, "widened"))
+    return found
+
+
 def _named_paths(words: list[str], cwd) -> list[tuple[str, str, str]]:
     """(program, path, how) for each credential path a statement's arguments name. `how` is 'read' when the program
     reads the files it is given (or a `<` redirect feeds it), 'named' for any other program; a routine program gives
     nothing."""
     name, args = basename(words[0]), words[1:]
+    if name == "chmod":
+        return _widened(args, cwd)
     if name in BROKER_CREDENTIAL_ROUTINE:
         return []
     found: list[tuple[str, str, str]] = []
@@ -810,31 +840,35 @@ def _named_paths(words: list[str], cwd) -> list[tuple[str, str, str]]:
             found.append((name, path, "read"))
     plain = [arg for i, arg in enumerate(args) if arg not in ("<", "0<") and not (i and args[i - 1] in ("<", "0<"))
              and not arg.startswith("<")]
+    candidates: list[tuple[str, str]] = []
     if name in _PLACED_READERS:
         placed, _unplaced = read_operand_paths(name, plain, cwd)
-        how, candidates = "read", placed
-    else:
-        how = "read" if name in _OPERAND_READERS else "named"
-        candidates = []
-        for arg in plain:
-            if arg.startswith("-") and "=" not in arg:
+        candidates = [(path, "read") for path in placed]
+    # a placed reader's other words are patterns, options and destinations the parser has already set aside
+    for arg in [] if name in _PLACED_READERS else plain:
+        if arg.startswith("-") and "=" not in arg:
+            continue
+        # the word itself and a value after '=' (--file=/x, if=/x, field=@/x); a curl-style '@file' value is a file
+        # the program reads and sends
+        for value in {arg, arg.split("=", 1)[1] if "=" in arg else ""}:
+            sent = value.startswith("@")
+            value = value.removeprefix("@")
+            if not value or value.startswith(("-", "@")):
                 continue
-            # the word itself, a value after '=' (--file=/x, if=/x, field=@/x) and a curl-style '@file' operand
-            for value in {arg, arg.split("=", 1)[1] if "=" in arg else ""}:
-                value = value.removeprefix("@")
-                if not value or value.startswith(("-", "@")):
-                    continue
-                path = normalize_path(value, cwd)
-                if path:
-                    candidates.append(path)
-    # The broker joins the words with spaces and records no quoting, so a path with a space in it ('Login Data')
-    # arrives as two words: adjacent operands joined back are tried too.
+            path = normalize_path(value, cwd)
+            if path and not any(path == known for known, _how in candidates):
+                candidates.append((path, "read" if sent or name in _OPERAND_READERS else "named"))
+    # The broker joins the words with spaces and records no quoting, so a path with a space in its last component
+    # ('Login Data') arrives as two words: a word with no '/' is joined back onto the one before it.
     words = [arg for arg in plain if not arg.startswith("-")]
     for left, right in itertools.pairwise(words):
+        if "/" in right:
+            continue
         path = normalize_path(f"{left} {right}", cwd)
-        if path and path not in candidates:
-            candidates.append(path)
-    found += [(name, path, how) for path in candidates if broker_credential_class(path)]
+        if path and not any(path == known for known, _how in candidates):
+            reads = name in _PLACED_READERS or name in _OPERAND_READERS
+            candidates.append((path, "read" if reads else "named"))
+    found += [(name, path, how) for path, how in candidates if broker_credential_class(path)]
     return found
 
 
@@ -874,7 +908,8 @@ class PrivilegeBrokerCredentialArgs(FoldedLinuxDirect):
         "fidelity": "the broker's decision record and the command text it logged: a read by a known file reader is "
                     "stated as the command the broker allowed, never as a completed read",
         "benign_and_cost": "administrators troubleshooting from a terminal, backup and compare jobs; account, "
-                           "package, permission, audit and key-management tools are not reported. One folded lead "
+                           "package, permission, audit and key-management tools are not reported, except a chmod that "
+                           "makes the hash files or a private key readable by every account (lead). One folded lead "
                            "per (host, broker, account, target, program, path, outcome, terminal)",
         "query_cost": "none beyond the sweep",
         "next_pivot": "the caller's session after the record: copies, archives, transfers and outbound connections",
@@ -930,6 +965,8 @@ class PrivilegeBrokerCredentialArgs(FoldedLinuxDirect):
                  + (f" from terminal {tty}" if on_tty else " without a terminal") + ". ")
         if how == "read":
             claim += f"'{program}' reads the files it is given, and its arguments name {description}."
+        elif how == "widened":
+            claim += f"Its mode makes {description} readable by every account on the host."
         else:
             claim += (f"An argument of '{program}', a program not known here to read its arguments, names "
                       f"{description}.")

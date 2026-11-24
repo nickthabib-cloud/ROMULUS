@@ -63,7 +63,14 @@ BARE = frozenset({"id", "ls", "dir", "pwd", "ps", "env", "w", "who", "hostname",
 SHELL_PARAMETERS = frozenset({"cmd", "command", "exec", "execute", "run", "shell", "sh", "c", "e", "x", "z", "q0",
                               "code", "system", "passthru", "act", "action_cmd"})
 _SEPARATOR = re.compile(r"\s*(?:;|\|\|?|&&|\n|`|\$\()\s*")
-_OPERAND = re.compile(r"""(?:-{1,2}[a-z0-9]|[/\\~$.'"*]|[a-z]:[/\\]|(?:https?|ftp|tftp)://|\d)""", re.IGNORECASE)
+_OPERAND = re.compile(r"""(?:-{1,2}[a-z0-9]|[/\\~$.'"*]|[a-z]:[/\\]|(?:https?|ftp|tftp)://)""", re.IGNORECASE)
+# A path, variable, home or drive operand: what an English phrase starting with a command word does not have.
+_PATH_OPERAND = re.compile(r"""(?:[/\\~$]|[a-z]:[/\\]|\.{1,2}/)""", re.IGNORECASE)
+# Command names that are also everyday words ('type 2 diabetes', 'more -info', 'last week', 'find hotels'): a command
+# only with a path-like operand, under a shell-style parameter, or after a shell separator.
+EVERYDAY = frozenset({"type", "more", "less", "last", "find", "copy", "query", "net", "w", "who", "kill", "echo",
+                      "touch", "mount", "set", "service", "head", "tail", "ping", "cat", "dir", "id", "ls", "ps",
+                      "env", "df", "del", "sh", "run"})
 
 
 def request_path(target: str) -> str | None:
@@ -164,11 +171,15 @@ def command_in(name: str, value: str) -> str | None:
             return segment
         if program in ("powershell", "pwsh") and rest:
             return segment
-        if rest and _OPERAND.match(rest[0]):
-            return segment
-        if not rest and (program in UNAMBIGUOUS or (program in BARE and (shellish or separated))):
-            return segment
-        if rest and program in UNAMBIGUOUS:
+        if not rest:
+            if program in UNAMBIGUOUS or (program in BARE and (shellish or separated)):
+                return segment
+            continue
+        if program in EVERYDAY and not (shellish or separated):
+            if _PATH_OPERAND.match(rest[0]):
+                return segment
+            continue
+        if _OPERAND.match(rest[0]):
             return segment
     return None
 
@@ -222,6 +233,9 @@ class AccessLogWebShell(Playbook):
     # less history read before it, newness is stated as unresolved.
     LOOKBACK = timedelta(hours=24)
     COMMANDS_KEPT = 3
+    # One client's command-only leads on one host beyond this many scripts are one roll-up: an operator uses a shell
+    # or two; a scanner probing a catch-all site sends the same command to every name on its list.
+    ROLLUP = 5
     HOT: ClassVar[int] = 4096
     card: ClassVar[dict] = {
         "behavior": "on one web host, a server-side script (php, jsp, asp/aspx, cfm, pl, cgi, ...) under an "
@@ -297,7 +311,9 @@ class AccessLogWebShell(Playbook):
             if (earliest is None or ts < earliest) and not self.hosts.put(e.host, ts):
                 self.note_limit("hosts", "the hosts' store took no new key; a host's history read is unknown")
             method = str(e.get("http.request.method") or "").upper()
-            answered = status < 400 or status >= 500
+            # answered: 2xx, or a 5xx from a script that ran and failed; a 3xx is the site's own redirect (a catch-all
+            # to a login page answers every probe that way)
+            answered = 200 <= status < 300 or status >= 500
             if upload_like(method, path) and status < 400:
                 self._uploads().add("uploads", (e.host, str(e.get("source.ip") or e.get("source.host") or ""), ts,
                                                 e.id, method, path, status, compact_event(e)))
@@ -367,6 +383,7 @@ class AccessLogWebShell(Playbook):
         if self._uploads_ready:
             self._uploads().execute("CREATE INDEX IF NOT EXISTS uploads_host_ts ON uploads(host, ts)")
         out = []
+        probes: dict[tuple, list] = {}       # (host, client) -> [scripts, the first ROLLUP + 1 matches]
         for key in sorted(self.scripts.keys(), key=lambda k: (str(k[0]), str(k[1]))):
             state = self.scripts.peek(key)
             if state is None or state.first is None:
@@ -388,7 +405,32 @@ class AccessLogWebShell(Playbook):
             commands = [(self._event(blob), name, command) for _ts, blob, name, command in state.commands]
             if not (upload or write or commands):
                 continue
-            out.append(self._match(host, path, state, first, upload, write, commands))
+            match = self._match(host, path, state, first, upload, write, commands)
+            if upload or write:
+                out.append(match)
+                continue
+            # Command parameters alone: one client probing many script names that all answer (a site that serves
+            # every path, scanned for known shells) is one roll-up per (host, client), at the same lane.
+            group = probes.setdefault((host, commands[0][0].get("source.ip") or client), [0, []])
+            group[0] += 1
+            if len(group[1]) <= self.ROLLUP:
+                group[1].append(match)
+        for (host, client), (count, held) in sorted(probes.items(), key=lambda item: tuple(map(str, item[0]))):
+            if count <= self.ROLLUP:
+                out.extend(held)
+                continue
+            cited = held[:self.ROLLUP]
+            evs = sorted({e.id: e for m in cited for e in m.events}.values(), key=lambda e: (e.ts, e.id))
+            claim = (f"On {host}, {client} requested {count} distinct scripts under upload-style directories with a "
+                     f"command in a query parameter, and each was answered (2xx or 5xx); the requests to the earliest "
+                     f"{len(cited)} scripts by name are cited. A site that answers every path the same way gives this "
+                     f"shape to a scanner probing for known web shells; a shell is among them only where the script "
+                     f"exists.")
+            out.append(Match(self.id, claim, self.claim_type, evs, [p for m in cited for p in m.predicate],
+                             evs[0].ts, self.severity, "lead", "medium", cited[0].entities,
+                             group_key=json.dumps([host, "client", client]),
+                             attack=("T1505.003", "T1190", "T1059"),
+                             notes=[f"scripts cited: {[json.loads(m.group_key)[1] for m in cited]}"]))
         return out
 
     def _history_read(self, host: str, first: TypedEvent) -> bool:

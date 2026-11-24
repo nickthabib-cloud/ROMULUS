@@ -329,7 +329,7 @@ class _Burst:
         self.first = self.last = ts
         self.first_ref: str | None = None      # held id of the earliest record
         self.last_ref: str | None = None       # held id of the latest record
-        self.held: list[str] = []              # held ids of the run's first EXAMPLE_LIMIT records
+        self.held: list[str] = []              # held ids of the run's first EXAMPLE_LIMIT error answers
         self.uas: dict[str, str] = {}          # recorded user agent -> held id of its first record
         self.urls: set = set()
         self.target = target
@@ -341,7 +341,7 @@ class _Burst:
 class WebScanBurst(_Grouped):
     """Each burst is its own finding: a run of one source's requests to one web host with no pause of GAP or more,
     holding at least MIN_REQUESTS requests of which at least MIN_ERROR_RATIO were answered 4xx/5xx. A burst cites its
-    own records (its first EXAMPLE_LIMIT, the records that bound it, and one per user agent it names).
+    own records (its first EXAMPLE_LIMIT error answers, the records that bound it, and one per user agent it names).
 
     Runs are read per (host, source, source target) in time order: the sweep reads one target's partitions in time
     order and each batch is sorted here. One run per key is open; a later record past the gap closes it, and a run
@@ -479,7 +479,9 @@ class WebScanBurst(_Grouped):
         if burst is None:
             burst = _Burst(e.ts, target)
             if not self.open.put(key, burst):
-                self.refuse("disk", "the bursts' disk budget is spent; a record of a new burst is not evaluated")
+                # counted in the source's window totals already: only its place in a burst is not evaluated
+                self.note_limit("disk", "the bursts' disk budget is spent; a record of a new burst is not placed "
+                                        "in a burst", 1)
                 return
         burst.count += 1
         burst.errors += error
@@ -489,7 +491,7 @@ class WebScanBurst(_Grouped):
         if e.ts >= burst.last or burst.last_ref is None:
             self._release(burst.last_ref)
             burst.last, burst.last_ref = e.ts, self._hold(e)
-        if len(burst.held) < EXAMPLE_LIMIT:
+        if error and len(burst.held) < EXAMPLE_LIMIT:
             burst.held.append(self._hold(e))
         if len(burst.urls) < self.URLS_HELD:
             burst.urls.add(e.get("url.original"))

