@@ -278,20 +278,25 @@ class SessionReader:
             log.exception("session read %s failed", ref.session_id)
             return read.stop([f"the session read failed: {type(exc).__name__}: {_bounded(exc)}"])
 
-    def _failed(self, target, reasons, started) -> PivotResult:
+    def _failed(self, target, reasons, started, span: tuple[datetime, datetime] | None = None) -> PivotResult:
         return PivotResult(status="failed", reasons=sorted(set(reasons)),
-                           coverage=[self._cell(target, "failed", reasons, 0)],
+                           coverage=[self._cell(target, "failed", reasons, 0, span)],
                            duration_ms=int((perf_counter() - started) * 1000),
                            query={"negative": "unresolved", "statement": NOTHING_STATEMENT})
 
     def _cell(self, target: str | None, status: str, reasons: list[str], returned: int,
               span: tuple[datetime, datetime] | None = None) -> PivotCoverage:
+        if span is None and status == "complete":
+            # a read that cannot say which span it covered never claims the hunt window complete
+            status = "partial"
+            reasons = [*reasons, "the session's packet times are not known"]
         start, end = span or (self.window.start, self.window.end)
         start, end = max(start, self.window.start), min(end, self.window.end)
         if start >= end:
             # a session seen at one instant covers that millisecond, never the whole hunt window
-            point = min(max(span[0] if span else start, self.window.start), self.window.end - INSTANT)
-            start, end = point, point + INSTANT
+            point = max(min(max(span[0] if span else start, self.window.start), self.window.end - INSTANT),
+                        self.window.start)
+            start, end = point, min(point + INSTANT, self.window.end)
         unresolved = [] if status == "complete" else [
             _range(start, end, "; ".join(reasons[:3]) or "session read incomplete")]
         return PivotCoverage(target=f"{stage.PCAP_TARGET}:{target}" if target else stage.PCAP_TARGET, dataset=None,
@@ -341,7 +346,7 @@ class _Read:
         repo = self.pivot.repo
         repo.update_task(self.task_id, "failed", outcome={"completeness": "failed", "reasons": reasons[:MAX_REASONS]},
                          error=reasons[0], owner_token=self.pivot.owner_token)
-        result = self.reader._failed(self.target, reasons, self.started)
+        result = self.reader._failed(self.target, reasons, self.started, self.span)
         result.task_ids = [self.task_id]
         result.query = {**result.query, **self._session_view()}
         return result
@@ -445,6 +450,11 @@ class _Read:
         ids = [item for item in outcome.get("event_ids") or [] if isinstance(item, str)]
         if outcome.get("completeness") != "complete" or not isinstance(outcome.get("content"), dict):
             return None
+        span = [_iso(item) for item in outcome.get("span") or []]
+        span = (span[0], span[1]) if len(span) == 2 and all(span) else self.span
+        if span is None:
+            # an earlier read that kept no span: read afresh, so the result can say which span it covered
+            return None
         rows = self.pivot.repo.citation_events(self.pivot.hunt_id, ids) if ids else []
         if len(rows) != len(ids):
             return None
@@ -453,9 +463,7 @@ class _Read:
             self.events[event.id] = event
         self.candidates.extend(item for item in outcome.get("candidate_ids") or [] if isinstance(item, str))
         self.content = outcome["content"]
-        span = [_iso(item) for item in outcome.get("span") or []]
-        if len(span) == 2 and all(span):
-            self.span = (span[0], span[1])
+        self.span = span
         self.notes = [DONE_NOTE, *[note for note in outcome.get("notes") or [] if isinstance(note, str)]]
         return self.finish()
 
