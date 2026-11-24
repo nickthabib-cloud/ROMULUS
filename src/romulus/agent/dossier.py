@@ -37,6 +37,14 @@ LARGE_DOSSIER_PAGE_SIZE = 25
 MENTION_DOSSIER_LIMIT = 10
 MENTION_RULE = ("text a record contains, not an action and not citable: corroborate with typed evidence and cite "
                 "that; list_mentions pages the pool")
+# The strong and medium mention groups orient's first message carries beside the dossier page (`mention_seed`).
+MENTION_SEED_LIMIT = 15
+# The hosts an investigate card counts mention groups on (`mention_hint`), and the most groups it counts per host.
+MENTION_HINT_HOSTS = 8
+MENTION_HINT_COUNT = 25
+MENTION_SEED_STRENGTHS = frozenset({"strong", "medium"})
+MENTION_SEED_LABEL = ("mentions, not findings: lines of records no normalizer read where a curated pattern's text "
+                      "occurs; text a record contains, never an action, with no alias")
 # A finding's place in the report (from the hunt's final ranking); its stored lane stays the rule's own estimate.
 RANK_SECTIONS = ("confirmed", "reported", "ranked_not_reported")
 NOT_RANKED = "not_ranked"
@@ -445,6 +453,57 @@ def _mentions(repo: Repo, hunt_id: str) -> list[dict]:
             entry["safety_flags"] = flags
         out.append(entry)
     return out
+
+
+def mention_seed(repo: Repo, hunt_id: str) -> dict | None:
+    """The mention pool as orient's first message carries it, beside the dossier's first page and whatever that page
+    holds: its header, and its strong and medium groups (at most MENTION_SEED_LIMIT, in pool order), each labelled a
+    mention with its text bounded and flagged as untrusted telemetry. None when the pool is empty. The dossier lists
+    mentions after every finding, so on a hunt with many findings they never reach its first page; this keeps the
+    stronger ones in view. A mention is never a finding: it has no alias and cannot be cited."""
+    header = _mention_header(repo, hunt_id)
+    if not header["total"]:
+        return None
+    from romulus.report.mentions import mention_item
+    items = []
+    # pool order is pattern strength first: the strong and medium groups lead it
+    for row in repo.mentions(hunt_id, limit=MENTION_SEED_LIMIT):
+        if row["strength"] not in MENTION_SEED_STRENGTHS:
+            break
+        item = mention_item(row, line_chars=DATA_TEXT_LIMIT)
+        entry = {"rank": row["rank"], "kind": "mention", "pattern": _bounded_text(row["pattern_id"]),
+                 "headline": _bounded_text(item["headline"]), "strength": row["strength"],
+                 "host": _bounded_text(row["host"]) if row["host"] else None, "count": row["count"],
+                 "first_seen": _jsonable(row["first_ts"]), "text_around_match": item["line"],
+                 "suspicious_content": item["suspicious_content"]}
+        if flags := injection_flags(item["line"], "$.text_around_match"):
+            entry["safety_flags"] = flags
+        items.append(entry)
+    return {**header, "label": MENTION_SEED_LABEL, "strong_and_medium": items,
+            "next": "list_mentions pages the whole pool, weak groups included (host= filters it)"}
+
+
+def mention_hint(repo: Repo, hunt_id: str, hosts: Sequence[str]) -> dict | None:
+    """The mention pool as an investigate session's card carries it: its header, the pool's strongest strength, and
+    how many of its groups are on each host the hypothesis's findings name (at most MENTION_HINT_HOSTS hosts, each
+    count at most MENTION_HINT_COUNT, the host as the finding names it). None when the pool is empty, so the playbook
+    step to page it is offered whenever it holds anything, weak groups alone included. No mention text, and no
+    alias: list_mentions reads the groups."""
+    header = _mention_header(repo, hunt_id)
+    if not header["total"]:
+        return None
+    first = repo.mentions(hunt_id, limit=1)
+    on_hosts = []
+    for host in list(hosts)[:MENTION_HINT_HOSTS]:
+        count = len(repo.mentions(hunt_id, host=host, limit=MENTION_HINT_COUNT + 1))
+        if count:
+            on_hosts.append({"host": _bounded_text(host), "groups": min(count, MENTION_HINT_COUNT),
+                             "more": count > MENTION_HINT_COUNT})
+    return {"status": header["status"], "total": header["total"], "label": MENTION_SEED_LABEL,
+            "strongest": first[0]["strength"] if first else None, "on_hypothesis_hosts": on_hosts,
+            "rule": MENTION_RULE,
+            "next": ("list_mentions host=<a host above> for the groups on this hypothesis's hosts, else "
+                     "list_mentions for the top of the pool")}
 
 
 def _page_payload(payload: dict, page: int, pages: int, cursor: str) -> dict:

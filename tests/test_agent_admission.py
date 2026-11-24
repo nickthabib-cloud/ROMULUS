@@ -158,6 +158,42 @@ def test_output_admission_checks_alias_issue_claim_kind_lanes_duplicates_and_hyp
     assert "cap:findings" in admission.limits_hit
 
 
+def test_a_hypothesis_names_attack_techniques_only_on_typed_evidence(tmp_path):
+    repo, toolbox, _admission, finding, evidence, _entity = _fixture(tmp_path)
+    # a mention-led hypothesis (no cite) names no technique: text a record contains is not an observed technique
+    bare = toolbox.execute("open_hypothesis", {"statement": "A curl pipe to sh appears on web01",
+                                               "techniques": ["T1059"]})
+    assert bare["status"] == "refused" and bare["data"]["error"]["reasons"] == ["techniques: needs_typed_citation"]
+    assert repo.agent_hypotheses("h1") == []
+    # without techniques it opens; with a typed cite (a finding, or typed evidence) the technique is accepted
+    assert toolbox.execute("open_hypothesis", {"statement": "A curl pipe to sh appears on web01"})["status"] == (
+        "complete")
+    for alias in (finding, evidence):
+        opened = toolbox.execute("open_hypothesis", {"statement": f"Command execution on web01 ({alias})",
+                                                     "techniques": ["T1059"], "supporting": [alias]})
+        assert opened["status"] == "complete", opened
+
+
+def test_an_agent_mention_finding_is_no_typed_ground_for_a_technique(tmp_path):
+    repo, toolbox, admission, _finding, _evidence, _entity = _fixture(tmp_path)
+    base = {key: value for key, value in repo.candidate("deterministic").items() if key != "created_at"}
+    # an agent finding resting on raw records only (a mention claim), and one citing a typed event
+    repo.save_candidate({**base, "id": "agent-raw", "provenance": "agent", "event_ids": [], "lane": "lead",
+                         "group_key": "agent-raw"})
+    repo.save_candidate({**base, "id": "agent-typed", "provenance": "agent", "event_ids": ["ev1"],
+                         "group_key": "agent-typed"})
+    book = AliasBook(repo, "h1")
+    raw, typed = book.alias_for("F", "agent-raw"), book.alias_for("F", "agent-typed")
+    admission.issue_aliases([raw, typed])
+    refused = toolbox.execute("open_hypothesis", {"statement": "A mention-led finding names a technique",
+                                                  "techniques": ["T1059"], "supporting": [raw]})
+    assert refused["status"] == "refused"
+    assert refused["data"]["error"]["reasons"] == ["techniques: needs_typed_citation"]
+    accepted = toolbox.execute("open_hypothesis", {"statement": "An agent finding on a typed event names it",
+                                                   "techniques": ["T1059"], "supporting": [typed]})
+    assert accepted["status"] == "complete", accepted
+
+
 def test_agent_output_tools_preserve_deterministic_rows_coverage_and_incident_membership(tmp_path):
     settings = Settings(home=tmp_path, agent_max_hypotheses=12, agent_max_findings=12,
                         agent_max_links=18, agent_max_notes=120)
