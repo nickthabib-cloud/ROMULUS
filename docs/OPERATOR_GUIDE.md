@@ -43,7 +43,7 @@ The script copies the working tree to `<romulus-home>/app` (keeping the previous
 
 For a host with no route to a package index. One archive, built on a connected machine, carries ROMULUS and every Python dependency; the host needs only its own Python.
 
-**1. Build the bundle on a connected machine** (Windows or Linux, from a git checkout, with Python 3.11 or later and pip):
+**1. Build the bundle on a connected machine** (Windows or Linux, from a git checkout, with Python 3.12 or later and pip):
 
 ```bash
 python scripts/build_offline_bundle.py                    # for CPython 3.12 on x86_64 Linux, glibc 2.28 or later

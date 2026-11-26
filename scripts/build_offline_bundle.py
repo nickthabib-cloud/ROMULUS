@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build an offline install bundle: one archive that installs ROMULUS on a Linux host with no network access.
 
-Run it on a connected machine (Windows or Linux), from a git checkout, with nothing but Python 3.11+ and pip:
+Run it on a connected machine (Windows or Linux), from a git checkout, with nothing but Python 3.12+ and pip:
 
     python scripts/build_offline_bundle.py                       # CPython 3.12, x86_64, glibc 2.28 or later
     python scripts/build_offline_bundle.py --arch aarch64
