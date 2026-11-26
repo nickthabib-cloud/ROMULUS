@@ -110,13 +110,23 @@ class IndicatorSet:
     files: list[str] = field(default_factory=list)
 
 
+def _shipped_dir() -> Path:
+    return Path(__file__).resolve().parents[3] / "content" / "indicators"
+
+
 def indicator_dir() -> Path:
     override = os.environ.get("ROMULUS_INDICATOR_DIR")
-    return Path(override) if override else Path(__file__).resolve().parents[3] / "content" / "indicators"
+    return Path(override) if override else _shipped_dir()
 
 
 def load_indicators(directory: Path | None = None) -> IndicatorSet:
     root = directory or indicator_dir()
+    if directory is None and not os.environ.get("ROMULUS_INDICATOR_DIR") and not root.is_dir():
+        # The shipped lists are part of the install. Without their directory the install is incomplete, and loading
+        # nothing would let a hunt run that silently matches no indicator. An existing directory without lists is a
+        # deliberate choice and stays valid.
+        raise IndicatorFileError(f"the indicator directory {root} does not exist: this install is missing its "
+                                 "content/ directory, which ROMULUS reads beside its source tree")
     files = sorted(root.glob("*.yaml")) if root.is_dir() else []
     h = hashlib.sha256()
     out: list[Indicator] = []
