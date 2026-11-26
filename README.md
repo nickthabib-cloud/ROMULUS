@@ -81,6 +81,8 @@ cp "$ROMULUS_HOME/app/.env.example" "$ROMULUS_HOME/.env" && chmod 600 "$ROMULUS_
 "$ROMULUS_HOME/venv/bin/romulus" --env-file "$ROMULUS_HOME/.env" report <hunt-id>
 ```
 
+**No internet on the host?** Build an offline bundle on a connected machine with `python scripts/build_offline_bundle.py`, carry the archive and its checksum across, and run the `install-offline.sh` it contains: it installs ROMULUS and every Python dependency with no network access, into the same layout. The host needs only its own Python (with `venv`) and, for the packet stage, TShark. See [Offline install](docs/OPERATOR_GUIDE.md#offline-install).
+
 `doctor` checks connectivity, that the account is read-only, the configured indices, TShark, the PCAP paths and storage, the web UI's TLS setup and that the ROMULUS home is private to its owner, and tells you what to fix. Arkime and TShark are required only when `ES_INDEX_PATTERNS` includes an Arkime session index; without one the packet stage is skipped and `doctor` only warns about them. Each check has its own deadline (60 to 400 s; `--check-timeout SECONDS` sets one for all). A check that overruns is reported as timed out, a failure for a source, TShark or a model endpoint (a warning for Arkime and TShark when the packet stage would be skipped) and a warning otherwise, and the other checks still run. The storage checks open the database read-only: `doctor` never migrates it or writes its data (SQLite may create the empty `-wal`/`-shm` side files a read-only reader needs).
 
 To use the browser UI:
@@ -220,7 +222,7 @@ Repository layout:
 | `src/romulus/` | `config`, `store`, `sources`, `evidence`, `detect`, `decide`, `hunt`, `agent`, `report`, `web`, `cli` |
 | `tests/` | Unit, adversarial and regression tests |
 | `content/` | Indicator lists and vendored MITRE ATT&CK data |
-| `scripts/` | Deploy helper, web restart, architecture map, live smoke test |
+| `scripts/` | Deploy helper, offline bundle builder and installer, web restart, architecture map, live smoke test |
 | `docs/architecture/` | Architecture, module map, AI agent design |
 
 ## Roadmap

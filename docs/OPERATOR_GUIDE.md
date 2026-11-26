@@ -16,7 +16,7 @@ This guide takes you from a fresh Linux host to a finished hunt, a published rep
 
 ## 2. Install
 
-Both install routes below use the same layout, which `scripts/web-restart.sh` expects: `$ROMULUS_HOME/app` (the code), `$ROMULUS_HOME/venv` and `$ROMULUS_HOME/.env`.
+Every install route below uses the same layout, which `scripts/web-restart.sh` expects: `$ROMULUS_HOME/app` (the code), `$ROMULUS_HOME/venv` and `$ROMULUS_HOME/.env`. The first two need a package index (PyPI or a mirror) reachable from the host; on a host without one, use the [offline install](#offline-install).
 
 **From a checkout on the host:**
 
@@ -38,6 +38,61 @@ powershell -File scripts/deploy.ps1 -Target <ssh-host> -RemoteHome <romulus-home
 ```
 
 The script copies the working tree to `<romulus-home>/app` (keeping the previous copy as `app.old`), creates `db`, `logs`, `reports` and `cache`, runs `chmod 700` on the home, creates the venv if missing and installs the package. It records the shipped commit in `app/DEPLOYED_COMMIT`. It never creates or changes `.env`.
+
+### Offline install
+
+For a host with no route to a package index. One archive, built on a connected machine, carries ROMULUS and every Python dependency; the host needs only its own Python.
+
+**1. Build the bundle on a connected machine** (Windows or Linux, from a git checkout, with Python 3.11 or later and pip):
+
+```bash
+python scripts/build_offline_bundle.py                    # for CPython 3.12 on x86_64 Linux, glibc 2.28 or later
+python scripts/build_offline_bundle.py --arch aarch64     # for an ARM host
+python scripts/build_offline_bundle.py --python-version 3.13 --glibc 2.34
+```
+
+The bundle is built for one target: a Python version (`--python-version`), an architecture (`--arch`) and the oldest glibc it must run on (`--glibc`). Match them to the host (`python3 --version`, `uname -m`, `ldd --version`). The dependency wheels are downloaded for that target, not for the build machine. If a dependency publishes no binary wheel for the target, the build stops and names the package; a bundle never carries source the host would have to compile. `--no-extras` leaves out the optional AI provider SDK, and `--constraint <file>` pins dependency versions.
+
+The script prints the archive's path, size and SHA-256, and writes `<archive>.sha256` beside it. The archive is written under `build/offline-bundle/`.
+
+**2. Carry the archive and its `.sha256` file across**, by whatever transfer the site allows. Carry the checksum by a route you trust: it is what shows the archive arrived unchanged.
+
+**3. Verify and unpack on the host:**
+
+```bash
+sha256sum -c romulus-offline-<...>.tar.gz.sha256
+tar -xzf romulus-offline-<...>.tar.gz
+```
+
+**4. Install**, as the service account that owns the ROMULUS home:
+
+```bash
+sh romulus-offline-<...>/install-offline.sh <romulus-home>
+# --no-extras   install without the optional AI provider SDK
+# --python P    use this interpreter for the venv (default: python<target version>, then python3)
+# --no-doctor   do not run doctor at the end
+```
+
+The installer needs no network access and no root. It:
+
+- checks every file against the bundle's `SHA256SUMS` before it changes anything, and refuses a bundle with a changed, missing or extra file;
+- refuses a host whose Python version, architecture or glibc the bundle was not built for, and says which bundle to build instead;
+- creates the home (mode 700) with `db`, `logs`, `reports` and `cache`, and the venv if there is none;
+- installs the dependencies from the bundle's wheels with pip's index turned off, ignoring the host's pip configuration;
+- puts the application tree at `<romulus-home>/app`, keeping the previous one as `app.old`, records the bundle's commit in `app/DEPLOYED_COMMIT`, and installs it;
+- checks that the installed package finds its prompts, patterns and content, and puts the previous tree back if any of this fails;
+- runs `doctor` when `<romulus-home>/.env` exists, and otherwise prints the next steps.
+
+Run it again with a newer bundle to upgrade in place. It never creates, changes or removes `.env`, the database, reports, logs or the stage directory. Restart the web UI after an upgrade (section 6). To check an install by hand at any time: `<romulus-home>/venv/bin/python <romulus-home>/app/scripts/install_check.py`.
+
+**What the host still needs from its own package manager.** A bundle carries Python packages only:
+
+| Need | Debian / Ubuntu | RHEL family |
+|---|---|---|
+| Python of the bundle's version, with the `venv` module and its bundled pip | `python3.12-venv` (with `python3.12`) | `python3.12` |
+| TShark and mergecap, for the packet stage (not needed without an Arkime session index) | `tshark` | `wireshark-cli` |
+
+If the host has no route to its distribution's packages either, bring those packages in the way the site brings in any other system package. `sha256sum` and `tar` are part of every base install. Hosts whose C library is not glibc (Alpine, for example) are not supported by a bundle.
 
 ### The `.env` file
 
