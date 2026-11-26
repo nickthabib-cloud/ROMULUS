@@ -6,7 +6,8 @@ Run it on a connected machine (Windows or Linux), from a git checkout, with noth
     python scripts/build_offline_bundle.py                       # CPython 3.12, x86_64, glibc 2.28 or later
     python scripts/build_offline_bundle.py --arch aarch64
     python scripts/build_offline_bundle.py --python-version 3.13 --glibc 2.34 --no-extras
-    python scripts/build_offline_bundle.py --constraint tested-versions.txt    # pin what the wheelhouse carries
+    python scripts/build_offline_bundle.py --latest              # the newest releases instead of the pinned ones
+    python scripts/build_offline_bundle.py --refresh-constraints # rewrite requirements/constraints.txt
     python scripts/build_offline_bundle.py --verify <bundle.tar.gz or unpacked directory>
 
 The archive holds the application tree (the layout `scripts/deploy.ps1` ships: `src`, `content`, `scripts`,
@@ -14,6 +15,10 @@ the docs and `.env.example`), a wheelhouse with every dependency as a binary whe
 and platform, `install-offline.sh`, and `MANIFEST.json`/`SHA256SUMS` over every file. Nothing is taken from the
 build machine's own environment, and a dependency without a binary wheel for the target is an error that names
 the package: the bundle never carries a source distribution a disconnected host would have to compile.
+
+A bundle is pinned: it carries exactly the versions `requirements/constraints.txt` names, which are the ones the
+test suite runs on, and the installer installs exactly those. A disconnected host cannot fetch a fix for a bad
+release, so the newest release is taken only when asked for (`--latest`, marked in the archive name).
 
 The installer installs the application tree in place (`pip install --no-index -e <home>/app`), as the deploy
 script does, because the code reads `content/` beside `src/`. The wheelhouse therefore also carries the build
@@ -45,6 +50,20 @@ INSTALLER = "install-offline.sh"
 MANIFEST = "MANIFEST.json"
 CHECKSUMS = "SHA256SUMS"
 TARGET_FILE = "TARGET"
+CONSTRAINTS = "requirements/constraints.txt"
+CONSTRAINTS_HEADER = """\
+# Exact versions of every package an offline bundle carries: the runtime dependencies, the optional dependency
+# groups and the build backend, with everything they depend on.
+#
+# scripts/build_offline_bundle.py pins a bundle to this file unless it is given --latest or --constraint, and
+# refuses to build a pinned bundle that would carry a package this file does not pin.
+#
+# These are the versions the test suite runs on. To refresh the file: install the versions to ship into the
+# environment the tests run in, run the tests, and then, from that environment,
+#     python scripts/build_offline_bundle.py --refresh-constraints
+# A package that environment does not hold (the build backend) keeps the version pinned here; delete its line
+# first to take its newest release.
+"""
 
 # The application tree: tracked files only, from these places only.
 APP_FILES = ("pyproject.toml", "README.md", ".env.example", "scripts/web-restart.sh", "scripts/install_check.py")
@@ -58,7 +77,10 @@ PRIVATE_NAMES = frozenset({"CLAUDE" + ".md", "CLAUDE.local.md", "ENGINEERING_MAS
 PRIVATE_PARTS = frozenset({".claude", ".notes.git", ".git", ".venv", "__pycache__"})
 PRIVATE_DIRS = ("docs/project", "docs/adr", "docs/design", "docs/research", "docs/eval", "eval", "content/research",
                 "tests")
-PRIVATE_SUFFIXES = (".env", ".pem", ".key", ".db", ".db-wal", ".db-shm", ".sqlite", ".pcap", ".pcapng")
+PRIVATE_SUFFIXES = (".env", ".pem", ".key", ".db", ".db-wal", ".db-shm", ".sqlite", ".pcap", ".pcapng", ".bak",
+                    ".orig")
+# copies and backups of the above keep their secrets under another name: .env.local, hunt.db.bak, tls.key.old
+PRIVATE_INFIXES = (".env.", ".db.", ".key.", ".pem.")
 
 SAFE_PATH = re.compile(r"[A-Za-z0-9._+-]+(/[A-Za-z0-9._+-]+)*")
 SAFE_VALUE = re.compile(r"[A-Za-z0-9._+,-]*")
@@ -165,8 +187,9 @@ def private_reason(path: str) -> str | None:
     pure = PurePosixPath(path)
     if pure.name in PRIVATE_NAMES:
         return "a local working file"
-    if pure.name != ".env.example" and pure.name.endswith(PRIVATE_SUFFIXES):
-        return "a secret or captured-data file"
+    if pure.name != ".env.example" and (pure.name.startswith(".env") or pure.name.endswith(PRIVATE_SUFFIXES)
+                                        or any(infix in pure.name for infix in PRIVATE_INFIXES)):
+        return "a secret or captured-data file, or a copy of one"
     if PRIVATE_PARTS.intersection(pure.parts):
         return "inside a local tooling directory"
     for directory in PRIVATE_DIRS:
@@ -323,6 +346,38 @@ def target_closure(roots: list[str], wheels: dict[str, Wheel], target: Target) -
     return needed, list(missing)
 
 
+def parse_pins(text: str) -> dict[str, str]:
+    """The exact `name==version` pins in constraints or `pip freeze` text, by canonical project name. Any other
+    line (a comment, a range, a direct reference) pins nothing."""
+    _, canonicalize, _ = _packaging()
+    pins: dict[str, str] = {}
+    for line in text.splitlines():
+        match = re.fullmatch(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*==\s*([A-Za-z0-9][A-Za-z0-9.!+_-]*)\s*(?:#.*)?", line)
+        if match:
+            pins[canonicalize(match.group(1))] = match.group(2)
+    return pins
+
+
+def unpinned_wheels(wheels: list[Wheel], pins: dict[str, str]) -> list[str]:
+    """The wheels a constraints file does not pin to exactly the version at hand, described for an error."""
+    _, _, version_type = _packaging()
+    problems = []
+    for wheel in wheels:
+        pinned = pins.get(wheel.name)
+        if pinned is None:
+            problems.append(f"{wheel.name} {wheel.version} is not pinned")
+        elif version_type(pinned) != version_type(wheel.version):
+            problems.append(f"{wheel.name} {wheel.version} is pinned to {pinned}")
+    return problems
+
+
+def exact_requirements(roots: list[str], wheels: list[Wheel], target: Target, *, without: set[str] = frozenset()
+                       ) -> tuple[list[str], set[str]]:
+    """`name==version` for every wheel the target needs for `roots`, leaving out the projects in `without`."""
+    needed, _ = target_closure(roots, {wheel.name: wheel for wheel in wheels}, target)
+    return [f"{wheel.name}=={wheel.version}" for wheel in wheels if wheel.name in needed - without], needed
+
+
 def _run(command: list[str], **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(command, check=False, capture_output=True, text=True, encoding="utf-8",
                           errors="replace", **kwargs)
@@ -466,7 +521,9 @@ def verify_bundle(directory: Path) -> list[str]:
 
 def write_archive(directory: Path, name: str, archive: Path, mtime: int) -> list[str]:
     """Pack a bundle directory as `<name>/...` in a gzip-compressed tar with a fixed member order, owner, modes and
-    times, so the same inputs give the same bytes on any build machine. Returns the member names in order."""
+    times, so the archive does not depend on when, where or by whom it was packed: the same staged files give the
+    same tar stream. (The compressed bytes can still differ between zlib builds.) Returns the member names in
+    order."""
     files = bundle_files(directory)
     directories = sorted({parent.as_posix() for path in files for parent in PurePosixPath(path).parents} - {"."})
     members = sorted([(path, False) for path in files] + [(path, True) for path in directories])
@@ -517,6 +574,9 @@ def git(root: Path, *arguments: str) -> str:
 def stage_app(root: Path, files: list[str], app: Path) -> None:
     """Copy the application tree. Shell scripts are written with LF line endings whatever the checkout has."""
     for path in files:
+        if (root / path).is_symlink():
+            # a link would be followed here and its target shipped under the link's name, whatever it points at
+            raise BundleError(f"refusing to bundle {path}: it is a symbolic link")
         data = (root / path).read_bytes()
         if path.endswith(".sh"):
             data = data.replace(b"\r\n", b"\n")
@@ -529,10 +589,14 @@ def check_offline_build(app: Path, wheels: Path, project: Project, scratch: Path
     """Prove, with no index, that the wheelhouse can build the project: build its wheel and check that every
     package file and every force-included file is in it, then resolve the editable install the host will run."""
     # the build machine's interpreter stands in for the host's here, so its version is not held against the project
-    offline = ["--disable-pip-version-check", "--no-input", "--no-index", "--no-cache-dir", "--find-links",
-               str(wheels), "--no-deps", "--ignore-requires-python"]
+    # ... and neither this machine's pip configuration nor its PIP_* environment may supply an index or a link
+    offline = ["--isolated", "--disable-pip-version-check", "--no-input", "--no-index", "--no-cache-dir",
+               "--find-links", str(wheels), "--no-deps", "--ignore-requires-python"]
+    environment = {key: value for key, value in os.environ.items() if not key.upper().startswith("PIP_")}
+    environment["PIP_CONFIG_FILE"] = os.devnull
     out = scratch / "project-wheel"
-    built = run([sys.executable, "-m", "pip", "wheel", *offline, "--wheel-dir", str(out), str(app)])
+    built = run([sys.executable, "-m", "pip", "wheel", *offline, "--wheel-dir", str(out), str(app)],
+                env=environment)
     produced = sorted(out.glob("*.whl")) if out.is_dir() else []
     if built.returncode != 0 or len(produced) != 1:
         raise BundleError("the project wheel does not build offline from the bundle's wheelhouse:\n"
@@ -547,7 +611,8 @@ def check_offline_build(app: Path, wheels: Path, project: Project, scratch: Path
     absent = sorted(expected - inside)
     if absent:
         raise BundleError(f"the built wheel lacks {len(absent)} file(s), e.g. {', '.join(absent[:5])}")
-    editable = run([sys.executable, "-m", "pip", "install", *offline, "--dry-run", "--editable", str(app)])
+    editable = run([sys.executable, "-m", "pip", "install", *offline, "--dry-run", "--editable", str(app)],
+                   env=environment)
     if editable.returncode != 0:
         raise BundleError("the editable install the host runs does not resolve offline from the bundle's "
                           "wheelhouse:\n" + f"{editable.stdout}\n{editable.stderr}"[-2000:])
@@ -566,11 +631,20 @@ class Bundle:
 
 
 def build_bundle(*, root: Path = ROOT, out_dir: Path, target: Target, extras: tuple[str, ...] | None = None,
-                 wheelhouse: Path | None = None, constraints: Path | None = None,
+                 wheelhouse: Path | None = None, constraints: Path | None = None, latest: bool = False,
                  tracked: list[str] | None = None, commit: str | None = None,
                  mtime: int | None = None, check_build: bool = True, run=_run) -> Bundle:
-    """Build the bundle archive and its `.sha256` side file under `out_dir`."""
+    """Build the bundle archive and its `.sha256` side file under `out_dir`. The bundle is pinned to `constraints`
+    (the checkout's requirements/constraints.txt when none is given) unless `latest` asks for the newest releases."""
     project = read_project(root)
+    if latest and constraints is not None:
+        raise BundleError("--latest builds without pins and --constraint pins: give one of them")
+    if not latest:
+        constraints = root / CONSTRAINTS if constraints is None else constraints
+        if not constraints.is_file():
+            raise BundleError(f"{constraints} is missing: a bundle is pinned to it. Write it with "
+                              "--refresh-constraints, or build the newest releases with --latest")
+        pins = parse_pins(constraints.read_text(encoding="utf-8"))
     extras = tuple(sorted(project.extras)) if extras is None else tuple(extras)
     unknown = [extra for extra in extras if extra not in project.extras]
     if unknown:
@@ -589,8 +663,8 @@ def build_bundle(*, root: Path = ROOT, out_dir: Path, target: Target, extras: tu
     if not installer.is_file():
         raise BundleError(f"scripts/{INSTALLER} is missing from the checkout")
 
-    name = (f"romulus-offline-{project.version}-{commit.replace('+', '-')}-{target.abi}-"
-            f"manylinux_2_{target.glibc_minor}_{target.arch}")
+    name = (f"romulus-offline-{project.version}-{commit.replace('+', '-')}{'-latest' if latest else ''}-"
+            f"{target.abi}-manylinux_2_{target.glibc_minor}_{target.arch}")
     extra_requirements = [requirement for extra in extras for requirement in project.extras[extra]]
     roots = [*project.runtime, *extra_requirements, *project.build]
     with tempfile.TemporaryDirectory(prefix="romulus-bundle-") as scratch_name:
@@ -600,10 +674,23 @@ def build_bundle(*, root: Path = ROOT, out_dir: Path, target: Target, extras: tu
         (stage / INSTALLER).write_bytes(installer.read_bytes().replace(b"\r\n", b"\n"))
         wheels, dropped = collect_wheels(roots, stage / "wheels", target, wheelhouse=wheelhouse,
                                          constraints=constraints, run=run)
+        if not latest:
+            # holds for downloaded wheels by pip's own doing, and is what checks a wheelhouse that was handed in
+            adrift = unpinned_wheels(wheels, pins)
+            if adrift:
+                raise BundleError(f"the bundle would carry versions {constraints.name} does not pin: "
+                                  f"{'; '.join(adrift)}. Refresh the file (--refresh-constraints) or build the "
+                                  "newest releases knowingly with --latest")
+        # What the installer installs: one exact version of everything, so an upgrade moves a host to the bundle's
+        # versions and never keeps an older one that would also satisfy the project's ranges.
+        exact = {}
+        exact["runtime"], runtime_names = exact_requirements(list(project.runtime), wheels, target)
+        exact["extras"], _ = exact_requirements([*project.runtime, *extra_requirements], wheels, target,
+                                                without=runtime_names)
+        exact["build"], _ = exact_requirements(list(project.build), wheels, target)
         (stage / "requirements").mkdir()
-        (stage / "requirements" / "runtime.txt").write_bytes(("\n".join(project.runtime) + "\n").encode())
-        (stage / "requirements" / "extras.txt").write_bytes(("\n".join(extra_requirements) + "\n").encode())
-        (stage / "requirements" / "build.txt").write_bytes(("\n".join(project.build) + "\n").encode())
+        for part, lines in exact.items():
+            (stage / "requirements" / f"{part}.txt").write_bytes("".join(f"{line}\n" for line in lines).encode())
         facts = {"format": FORMAT_VERSION, "version": project.version, "commit": commit, "python": target.python,
                  "arch": target.arch, "glibc": target.glibc, "extras": ",".join(extras)}
         (stage / TARGET_FILE).write_bytes("".join(f"{key}={value}\n" for key, value in facts.items()).encode())
@@ -624,8 +711,12 @@ def build_bundle(*, root: Path = ROOT, out_dir: Path, target: Target, extras: tu
                        "arch": target.arch, "glibc": target.glibc, "platform_tags": list(target.platform_tags)},
             "extras": list(extras),
             "install": "editable install of app/ from wheels/ (pip install --no-index --find-links wheels -e app)",
-            "requirements": {"runtime": list(project.runtime), "extras": extra_requirements,
-                             "build": list(project.build)},
+            "constraints": ("none" if latest else
+                            {"file": CONSTRAINTS if constraints == root / CONSTRAINTS else constraints.name,
+                             "sha256": sha256_file(constraints)}),
+            "requirements": {"declared": {"runtime": list(project.runtime), "extras": extra_requirements,
+                                          "build": list(project.build)},
+                             "installed": exact},
             "wheels": [{"file": wheel.file, "name": wheel.name, "version": wheel.version} for wheel in wheels],
             "project_wheel_check": project_wheel,
         })
@@ -638,6 +729,31 @@ def build_bundle(*, root: Path = ROOT, out_dir: Path, target: Target, extras: tu
     Path(f"{archive}.sha256").write_bytes(f"{digest}  {archive.name}\n".encode("ascii"))
     return Bundle(archive=archive, sha256=digest, size=archive.stat().st_size, name=name, manifest=manifest,
                   members=members, dropped=dropped)
+
+
+def refresh_constraints(*, root: Path = ROOT, target: Target | None = None, run=_run) -> tuple[Path, list[Wheel]]:
+    """Rewrite the checkout's constraints file from the environment this script runs in: every package the bundle
+    needs is pinned to the version installed here, and one this environment does not hold keeps its current pin
+    (or, without one, takes its newest release). Downloads the wheels to learn what the target needs."""
+    target = target or Target()
+    project = read_project(root)
+    roots = [*project.runtime, *(requirement for extra in sorted(project.extras)
+                                 for requirement in project.extras[extra]), *project.build]
+    path = root / CONSTRAINTS
+    pins = parse_pins(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    frozen = run([sys.executable, "-m", "pip", "freeze", "--exclude-editable", "--disable-pip-version-check"])
+    if frozen.returncode != 0:
+        raise BundleError(f"pip freeze failed (exit {frozen.returncode}):\n{frozen.stderr}")
+    pins.update(parse_pins(frozen.stdout))
+    with tempfile.TemporaryDirectory(prefix="romulus-constraints-") as scratch_name:
+        scratch = Path(scratch_name)
+        merged = scratch / "constraints.txt"
+        merged.write_bytes("".join(f"{name}=={version}\n" for name, version in sorted(pins.items())).encode())
+        wheels, _ = collect_wheels(roots, scratch / "wheels", target, constraints=merged, run=run)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes((CONSTRAINTS_HEADER + "".join(f"{wheel.name}=={wheel.version}\n" for wheel in sorted(
+        wheels, key=lambda wheel: wheel.name))).encode())
+    return path, wheels
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -654,7 +770,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--wheelhouse", type=Path, default=None,
                         help="take the wheels from this directory and download nothing")
     parser.add_argument("--constraint", type=Path, default=None, metavar="FILE",
-                        help="a pip constraints file, to pin the dependency versions the bundle carries")
+                        help=f"pin the bundle to this constraints file instead of {CONSTRAINTS}")
+    parser.add_argument("--latest", action="store_true",
+                        help="carry the newest releases instead of the pinned, tested versions")
+    parser.add_argument("--refresh-constraints", action="store_true",
+                        help=f"rewrite {CONSTRAINTS} from the environment this script runs in, then exit")
     parser.add_argument("--skip-build-check", action="store_true",
                         help="do not prove the offline build from the wheelhouse on this machine")
     parser.add_argument("--verify", type=Path, default=None, metavar="PATH",
@@ -672,11 +792,15 @@ def main(argv: list[str] | None = None) -> int:
             return 1 if problems else 0
         target = (Target.from_platforms(options.python_version, options.platform) if options.platform
                   else Target(python=options.python_version, arch=options.arch, glibc=options.glibc))
+        if options.refresh_constraints:
+            path, wheels = refresh_constraints(target=target)
+            print(f"wrote {path}: {len(wheels)} packages pinned for {target.label}")
+            return 0
         extras = () if options.no_extras else (None if options.extras is None else
                                                tuple(part for part in options.extras.split(",") if part))
         bundle = build_bundle(out_dir=options.out_dir, target=target, extras=extras,
                               wheelhouse=options.wheelhouse, constraints=options.constraint,
-                              check_build=not options.skip_build_check)
+                              latest=options.latest, check_build=not options.skip_build_check)
     except BundleError as error:
         print(f"build_offline_bundle: {error}", file=sys.stderr)
         return 1
@@ -687,6 +811,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"target   {target.label}; extras: {', '.join(manifest['extras']) or 'none'}")
     print(f"contents {len(manifest['files'])} files, {len(manifest['wheels'])} wheels, "
           f"ROMULUS {manifest['romulus_version']} at {manifest['source_commit']}")
+    if manifest["constraints"] == "none":
+        print("versions NOT PINNED (--latest): this bundle carries the newest release of every dependency, which "
+              "the test suite has not run on. Build without --latest for a host that cannot be patched.")
+    else:
+        print(f"versions pinned by {manifest['constraints']['file']} (sha256 {manifest['constraints']['sha256']})")
     if bundle.dropped:
         print(f"left out {len(bundle.dropped)} wheel(s) the target does not need: {', '.join(bundle.dropped)}")
     print(f"Carry the archive and {bundle.archive.name}.sha256 across, check the SHA-256 there, unpack, and run "

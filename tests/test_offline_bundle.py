@@ -1,8 +1,8 @@
-"""The offline install bundle: its builder (scripts/build_offline_bundle.py), the installer it carries
-(scripts/install-offline.sh) and the install check (scripts/install_check.py).
+"""The offline install bundle's builder (scripts/build_offline_bundle.py) and the install check
+(scripts/install_check.py). The installer the bundle carries is covered in tests/test_offline_installer.py.
 
-Nothing here reaches a package index. Wheels are small synthetic archives with real metadata, pip is a stand-in
-where a download would happen, and the installer is only driven as far as its refusals, which need no Linux host.
+Nothing here reaches a package index. Wheels are small synthetic archives with real metadata, and pip is a stand-in
+where a download would happen.
 """
 
 from __future__ import annotations
@@ -21,100 +21,22 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "scripts"
-
-
-def _load(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-bundle = _load("romulus_build_offline_bundle", SCRIPTS / "build_offline_bundle.py")
-
-PYPROJECT = """\
-[project]
-name = "romulus"
-version = "9.9.9"
-dependencies = ["alpha>=1", "winonly>=1; sys_platform == 'win32'"]
-
-[project.optional-dependencies]
-anthropic = ["beta[fast]>=2"]
-
-[build-system]
-requires = ["backend>=1"]
-build-backend = "fake.backend"
-"""
-TRACKED = ["pyproject.toml", "README.md", ".env.example", "scripts/web-restart.sh", "scripts/install_check.py",
-           "scripts/install-offline.sh", "scripts/deploy.ps1", "src/romulus/__init__.py",
-           "src/romulus/agent/prompts/system.md", "content/mentions/a.yaml", "docs/OPERATOR_GUIDE.md",
-           "tests/test_something.py"]
-# Names of local working files, spelled in parts: tests/test_private_adr_references.py keeps the literal names out
-# of every tracked file, this one included.
-AGENT_NOTES = "CLAUDE" + ".md"
-MASTER_PROMPT = "ENGINEERING_MASTER_PROMPT" + ".md"
-PROJECT_STATUS = "docs/project/" + "STATUS" + ".md"
-DECISION_RECORD = "docs/" + "adr" + "/0001-store.md"
-# present in the working tree and named by git, but never to be shipped
-LOCAL_ONLY = [AGENT_NOTES, "CLAUDE.local.md", MASTER_PROMPT, ".env", ".claude/agents/reviewer.md",
-              ".notes.git/HEAD", "eval/gold.json"]
-
-
-def make_wheel(directory: Path, name: str, version: str, requires: tuple[str, ...] = (),
-               tags: str = "py3-none-any") -> Path:
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{name}-{version}-{tags}.whl"
-    metadata = f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n" + "".join(
-        f"Requires-Dist: {requirement}\n" for requirement in requires)
-    with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr(f"{name}/__init__.py", f"# {name}\n")
-        archive.writestr(f"{name}-{version}.dist-info/METADATA", metadata)
-    return path
-
-
-def make_wheelhouse(directory: Path, arch: str = "x86_64", abi: str = "cp312") -> Path:
-    make_wheel(directory, "alpha", "1.2", ("gamma>=1", "linuxonly>=1; sys_platform == 'linux'",
-                                           "winonly>=1; sys_platform == 'win32'"))
-    make_wheel(directory, "gamma", "1.0", tags=f"{abi}-{abi}-manylinux2014_{arch}.manylinux_2_17_{arch}")
-    make_wheel(directory, "linuxonly", "1.0")
-    make_wheel(directory, "beta", "2.0", ("delta>=1; extra == 'fast'", "never>=1; extra == 'slow'"))
-    make_wheel(directory, "delta", "1.0", tags=f"cp310-abi3-manylinux_2_28_{arch}")
-    make_wheel(directory, "backend", "1.0")
-    make_wheel(directory, "stray", "3.0")
-    return directory
-
-
-def make_repo(root: Path) -> Path:
-    for path in [*TRACKED, *LOCAL_ONLY]:
-        target = root / path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(f"# {path}\n".encode())
-    (root / "pyproject.toml").write_text(PYPROJECT, encoding="utf-8")
-    (root / "scripts" / "web-restart.sh").write_bytes(b"#!/usr/bin/env bash\r\necho restart\r\n")
-    (root / "scripts" / "install-offline.sh").write_bytes((SCRIPTS / "install-offline.sh").read_bytes())
-    (root / ".env").write_bytes(b"ES_PASSWORD=not-for-a-bundle\n")
-    return root
-
-
-def build(tmp_path: Path, *, out: str = "out", target=None, **overrides):
-    repo = tmp_path / "repo"
-    if not repo.exists():
-        make_repo(repo)
-    options = {"root": repo, "out_dir": tmp_path / out, "target": target or bundle.Target(),
-               "wheelhouse": tmp_path / "wheelhouse", "tracked": [*TRACKED, *LOCAL_ONLY], "commit": "abc1234",
-               "mtime": 1_700_000_000, "check_build": False}
-    options.update(overrides)
-    if options["wheelhouse"] is not None and not options["wheelhouse"].exists():
-        make_wheelhouse(options["wheelhouse"], options["target"].arch, options["target"].abi)
-    return bundle.build_bundle(**options)
-
-
-def unpack(built, dest: Path) -> Path:
-    return bundle.unpack_archive(built.archive, dest)
-
+from tests.offline_bundle_support import (
+    AGENT_NOTES,
+    DECISION_RECORD,
+    LOCAL_ONLY,
+    MASTER_PROMPT,
+    PROJECT_STATUS,
+    ROOT,
+    SCRIPTS,
+    TRACKED,
+    build,
+    bundle,
+    make_repo,
+    make_wheel,
+    make_wheelhouse,
+    unpack,
+)
 
 # ---------------------------------------------------------------------------------------------------------------
 # manifest, checksums and the verifier
@@ -145,8 +67,25 @@ def test_bundle_lists_every_file_with_its_digest_and_verifies(tmp_path):
     assert sums["MANIFEST.json"] == hashlib.sha256((directory / "MANIFEST.json").read_bytes()).hexdigest()
     assert (directory / "TARGET").read_text() == (
         "format=1\nversion=9.9.9\ncommit=abc1234\npython=3.12\narch=x86_64\nglibc=2.28\nextras=anthropic\n")
-    assert (directory / "requirements" / "runtime.txt").read_text().splitlines()[0] == "alpha>=1"
-    assert (directory / "requirements" / "extras.txt").read_text() == "beta[fast]>=2\n"
+    assert manifest["requirements"]["declared"] == {
+        "runtime": ["alpha>=1", "winonly>=1; sys_platform == 'win32'"], "extras": ["beta[fast]>=2"],
+        "build": ["backend>=1"]}
+
+
+def test_the_installer_is_handed_one_exact_version_of_every_package(tmp_path):
+    """The requirement files the installer installs from name exact versions, split so that an install without the
+    optional groups gets none of their packages."""
+    built = build(tmp_path)
+    directory = unpack(built, tmp_path / "unpacked")
+    assert (directory / "requirements" / "runtime.txt").read_text() == "alpha==1.2\ngamma==1.0\nlinuxonly==1.0\n"
+    assert (directory / "requirements" / "extras.txt").read_text() == "beta==2.0\ndelta==1.0\n"
+    assert (directory / "requirements" / "build.txt").read_text() == "backend==1.0\n"
+    assert built.manifest["requirements"]["installed"] == {
+        "runtime": ["alpha==1.2", "gamma==1.0", "linuxonly==1.0"], "extras": ["beta==2.0", "delta==1.0"],
+        "build": ["backend==1.0"]}
+    plain = unpack(build(tmp_path, out="plain", extras=()), tmp_path / "plain-unpacked")
+    assert (plain / "requirements" / "extras.txt").read_text() == ""
+    assert (plain / "requirements" / "runtime.txt").read_text() == "alpha==1.2\ngamma==1.0\nlinuxonly==1.0\n"
 
 
 def test_wheelhouse_holds_what_the_target_needs_and_nothing_else(tmp_path):
@@ -228,6 +167,7 @@ def test_no_binary_wheel_for_the_target_fails_naming_the_package(tmp_path, arch)
 
     command = calls[0]
     assert command[:4] == [sys.executable, "-m", "pip", "download"] and "--only-binary=:all:" in command
+    assert command[command.index("--constraint") + 1] == str(tmp_path / "repo" / "requirements" / "constraints.txt")
     assert command[command.index("--python-version") + 1] == "3.12"
     assert command[command.index("--abi") + 1] == "cp312" and command[command.index("--implementation") + 1] == "cp"
     platforms = [command[index + 1] for index, part in enumerate(command) if part == "--platform"]
@@ -364,20 +304,26 @@ def test_shell_scripts_are_lf_inside_the_archive(tmp_path):
 # ---------------------------------------------------------------------------------------------------------------
 # what never goes in
 
+SECRET_COPIES = ["content/.env.bak", "src/romulus/.env.local", "docs/.env.backup", "content/hunt.db.bak",
+                 "content/.envrc", "docs/site.env.old", "content/tls.key.old", "content/cert.pem.1",
+                 "src/romulus/store/romulus.db.2026", "content/indicators/tools.yaml.bak",
+                 "src/romulus/config.py.orig"]
 NEVER_SHIPPED = [".env", AGENT_NOTES, "CLAUDE.local.md", ".claude/agents/reviewer.md", ".claude/settings.json",
                  PROJECT_STATUS, DECISION_RECORD, "docs/design/agent.md",
                  "docs/research/sources.md", "docs/eval/run-01.md", "eval/gold.json", "content/research/notes.yaml",
                  MASTER_PROMPT, ".notes.git/HEAD", ".notes.git/objects/aa/bb"]
 
 
-@pytest.mark.parametrize("path", NEVER_SHIPPED)
+@pytest.mark.parametrize("path", [*NEVER_SHIPPED, *SECRET_COPIES])
 def test_private_paths_are_recognised(path):
     assert bundle.private_reason(path)
 
 
 def test_public_paths_are_not_private():
     for path in (".env.example", "README.md", "docs/OPERATOR_GUIDE.md", "content/attack/SOURCE.md",
-                 "src/romulus/detect/environment.py", "content/mentions/tools.yaml", "scripts/web-restart.sh"):
+                 "src/romulus/detect/environment.py", "content/mentions/tools.yaml", "scripts/web-restart.sh",
+                 "src/romulus/store/db.py", "src/romulus/web/keys.py", "docs/environment.md",
+                 "requirements/constraints.txt"):
         assert bundle.private_reason(path) is None, path
 
 
@@ -398,7 +344,7 @@ def test_private_files_outside_the_application_tree_are_omitted(tmp_path):
 @pytest.mark.parametrize("path", [PROJECT_STATUS, DECISION_RECORD, "docs/design/agent.md",
                                   "docs/research/sources.md", "docs/eval/run-01.md", "content/research/notes.yaml",
                                   "content/site.env", "src/romulus/.env", "docs/" + AGENT_NOTES, "content/tls.key",
-                                  "src/romulus/.claude/x.md", "content/a file.yaml"])
+                                  "src/romulus/.claude/x.md", "content/a file.yaml", *SECRET_COPIES])
 def test_a_private_file_inside_the_application_tree_stops_the_build(tmp_path, path):
     repo = make_repo(tmp_path / "repo")
     (repo / path).parent.mkdir(parents=True, exist_ok=True)
@@ -482,151 +428,199 @@ def test_install_check_fails_when_the_package_is_imported_from_elsewhere(tmp_pat
 
 
 # ---------------------------------------------------------------------------------------------------------------
-# the installer's refusals
+# pinned by default
 
 
-def _shell() -> str | None:
-    candidates = []
-    if os.name == "nt":
-        for base in (os.environ.get("ProgramFiles"), os.environ.get("ProgramW6432"), os.environ.get("LocalAppData")):
-            if base:
-                candidates += [str(Path(base) / "Git" / "bin" / "sh.exe"),
-                               str(Path(base) / "Programs" / "Git" / "bin" / "sh.exe")]
-        git = shutil.which("git")
-        if git:
-            candidates.append(str(Path(git).resolve().parents[1] / "bin" / "sh.exe"))
-    else:
-        candidates += [shutil.which("sh"), shutil.which("bash")]
-    for candidate in candidates:
-        if candidate and Path(candidate).is_file():
-            try:
-                probe = subprocess.run([candidate, "-c", "command -v sha256sum >/dev/null && echo ok"],
-                                       capture_output=True, text=True, timeout=30, check=False)
-            except (OSError, subprocess.SubprocessError):
-                continue
-            if probe.stdout.strip() == "ok":
-                return candidate
-    return None
+def test_a_bundle_is_pinned_to_the_constraints_file_and_says_so(tmp_path):
+    built = build(tmp_path)
+    constraints = tmp_path / "repo" / "requirements" / "constraints.txt"
+    assert built.manifest["constraints"] == {"file": "requirements/constraints.txt",
+                                             "sha256": hashlib.sha256(constraints.read_bytes()).hexdigest()}
+    assert "-latest" not in built.archive.name
 
 
-SHELL = _shell()
-needs_shell = pytest.mark.skipif(SHELL is None, reason="needs a POSIX shell with sha256sum")
+def test_latest_is_unpinned_marked_in_the_name_and_recorded(tmp_path, capsys):
+    (make_repo(tmp_path / "repo") / "requirements" / "constraints.txt").unlink()
+    built = build(tmp_path, latest=True)
+    assert built.archive.name == "romulus-offline-9.9.9-abc1234-latest-cp312-manylinux_2_28_x86_64.tar.gz"
+    assert built.manifest["constraints"] == "none"
+    # the versions installed are still exact: an unpinned build picks them, the installer does not
+    assert built.manifest["requirements"]["installed"]["runtime"][0] == "alpha==1.2"
+    with pytest.raises(bundle.BundleError, match="give one of them"):
+        build(tmp_path, out="both", latest=True, constraints=tmp_path / "other.txt")
 
 
-def _posix(path: Path) -> str:
-    text = path.resolve().as_posix()
-    return f"/{text[0].lower()}{text[2:]}" if os.name == "nt" and text[1:3] == ":/" else text
+def test_a_pinned_build_needs_its_constraints_file(tmp_path):
+    (make_repo(tmp_path / "repo") / "requirements" / "constraints.txt").unlink()
+    with pytest.raises(bundle.BundleError, match=r"constraints\.txt is missing.*--refresh-constraints.*--latest"):
+        build(tmp_path)
+    assert not (tmp_path / "out").exists()
 
 
-def run_installer(directory: Path, *arguments: str, python: str | None = None):
-    command = [SHELL, _posix(directory / "install-offline.sh")]
-    if python is not None:
-        command += ["--python", python]
-    environment = {key: value for key, value in os.environ.items() if not key.startswith("PIP_")}
-    return subprocess.run([*command, *arguments], capture_output=True, text=True, timeout=120, check=False,
-                          env=environment, cwd=str(directory.parent))
+def test_a_wheel_the_constraints_do_not_pin_stops_a_pinned_build(tmp_path):
+    repo = make_repo(tmp_path / "repo")
+    constraints = repo / "requirements" / "constraints.txt"
+    constraints.write_text(constraints.read_text().replace("linuxonly==1.0\n", ""), encoding="utf-8")
+    with pytest.raises(bundle.BundleError, match=r"does not pin: linuxonly 1\.0 is not pinned"):
+        build(tmp_path)
+    assert not (tmp_path / "out").exists()
 
 
-@pytest.fixture
-def unpacked(tmp_path):
-    def make(**target) -> Path:
-        return unpack(build(tmp_path, target=bundle.Target(**target)), tmp_path / "unpacked")
-
-    return make
-
-
-HERE = f"{sys.version_info[0]}.{sys.version_info[1]}"
-OTHER = f"3.{sys.version_info[1] + 1}"
-
-
-@needs_shell
-def test_installer_script_parses():
-    result = subprocess.run([SHELL, "-n", _posix(SCRIPTS / "install-offline.sh")], capture_output=True, text=True,
-                            check=False)
-    assert result.returncode == 0, result.stderr
-
-
-@needs_shell
-def test_installer_refuses_a_changed_file_before_touching_the_home(tmp_path, unpacked):
-    directory = unpacked(python=HERE)
-    wheel = directory / "wheels" / "alpha-1.2-py3-none-any.whl"
-    wheel.write_bytes(wheel.read_bytes() + b"x")
-    home = tmp_path / "home"
-    result = run_installer(directory, _posix(home), python=_posix(Path(sys.executable)))
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "checksum verification failed; nothing was installed" in result.stderr
-    assert "alpha-1.2-py3-none-any.whl" in result.stderr and "bundle verified" not in result.stdout
-    assert not home.exists()
+def test_a_wheelhouse_is_checked_against_the_constraints(tmp_path):
+    """Nothing is downloaded from a wheelhouse, so pip never applies the constraints to it: the builder does."""
+    wheelhouse = make_wheelhouse(tmp_path / "wheelhouse")
+    (wheelhouse / "gamma-1.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl").unlink()
+    make_wheel(wheelhouse, "gamma", "1.1", tags="cp312-cp312-manylinux_2_17_x86_64")
+    with pytest.raises(bundle.BundleError, match=r"gamma 1\.1 is pinned to 1\.0"):
+        build(tmp_path)
+    other = tmp_path / "site-pins.txt"
+    other.write_text("alpha==1.2\nbackend==1.0\nbeta==2.0\ndelta==1.0\ngamma==1.1\nlinuxonly==1.0\n", encoding="utf-8")
+    built = build(tmp_path, constraints=other)
+    assert built.manifest["constraints"]["file"] == "site-pins.txt"
+    assert "gamma==1.1" in built.manifest["requirements"]["installed"]["runtime"]
+    other.write_text("alpha==1.2\ngamma>=1\n", encoding="utf-8")       # a range pins nothing
+    with pytest.raises(bundle.BundleError, match=r"gamma 1\.1 is not pinned"):
+        build(tmp_path, out="ranged", constraints=other)
+    assert build(tmp_path, out="unpinned", latest=True).manifest["constraints"] == "none"
 
 
-@needs_shell
-def test_installer_refuses_a_wheel_that_is_not_listed(tmp_path, unpacked):
-    directory = unpacked(python=HERE)
-    make_wheel(directory / "wheels", "alpha", "99.0")
-    home = tmp_path / "home"
-    result = run_installer(directory, _posix(home), python=_posix(Path(sys.executable)))
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "not listed in SHA256SUMS: wheels/alpha-99.0-py3-none-any.whl" in result.stderr
-    assert "nothing was installed" in result.stderr and not home.exists()
+def test_pins_are_read_from_exact_lines_only():
+    pins = bundle.parse_pins("# a comment\nAlpha_Pkg==1.2  # why\n\nbeta>=2\ngamma @ file:///x\n-e ./here\n"
+                             "delta == 3.0.post1\n")
+    assert pins == {"alpha-pkg": "1.2", "delta": "3.0.post1"}
 
 
-@needs_shell
-def test_installer_refuses_a_bundle_with_a_file_missing(tmp_path, unpacked):
-    directory = unpacked(python=HERE)
-    (directory / "app" / "content" / "mentions" / "a.yaml").unlink()
-    home = tmp_path / "home"
-    result = run_installer(directory, _posix(home), python=_posix(Path(sys.executable)))
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "listed in SHA256SUMS but missing: app/content/mentions/a.yaml" in result.stderr
-    assert not home.exists()
-    (directory / "SHA256SUMS").unlink()
-    result = run_installer(directory, _posix(home))
-    assert result.returncode == 1 and "not a complete bundle: SHA256SUMS is missing" in result.stderr
+def fake_environment(source: Path, frozen: str):
+    """A stand-in for pip: `freeze` prints `frozen`; `download` copies from `source` what the constraints allow."""
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        if command[3] == "freeze":
+            return subprocess.CompletedProcess(command, 0, frozen, "")
+        pins = bundle.parse_pins(Path(command[command.index("--constraint") + 1]).read_text(encoding="utf-8"))
+        dest = Path(command[command.index("--dest") + 1])
+        newest: dict[str, Path] = {}
+        for wheel in sorted(source.iterdir()):
+            name, version = wheel.name.split("-")[:2]
+            if pins.get(name, version) == version:
+                newest[name] = wheel
+        for wheel in newest.values():
+            shutil.copyfile(wheel, dest / wheel.name)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    return run, calls
 
 
-@needs_shell
-def test_installer_refuses_a_python_the_bundle_was_not_built_for(tmp_path, unpacked):
-    directory = unpacked(python=OTHER)
-    home = tmp_path / "home"
-    result = run_installer(directory, _posix(home), python=_posix(Path(sys.executable)))
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "bundle verified" in result.stdout
-    assert f"this bundle is for Python {OTHER}, but" in result.stderr and f"is Python {HERE}" in result.stderr
-    assert "Nothing was installed" in result.stderr and not home.exists()
+def test_refresh_pins_the_environments_versions_and_keeps_pins_for_what_it_lacks(tmp_path):
+    repo = make_repo(tmp_path / "repo")
+    index = make_wheelhouse(tmp_path / "index")
+    make_wheel(index, "alpha", "1.3", ("gamma>=1", "linuxonly>=1; sys_platform == 'linux'"))
+    make_wheel(index, "backend", "1.1")
+    make_wheel(index, "linuxonly", "1.5")
+    constraints = repo / "requirements" / "constraints.txt"
+    constraints.write_text("alpha==1.2\nbackend==1.0\ngamma==1.0\nold-and-gone==0.1\n", encoding="utf-8")
+    # the environment has moved to alpha 1.3; it holds no build backend and nothing Linux-only
+    run, calls = fake_environment(index, "alpha==1.3\nbeta==2.0\ndelta==1.0\ngamma==1.0\nlocal-tool==7\n"
+                                         "editable-thing @ file:///somewhere\n")
+    path, wheels = bundle.refresh_constraints(root=repo, run=run)
+    assert path == constraints and len(wheels) == 6
+    text = constraints.read_text(encoding="utf-8")
+    assert text.startswith(bundle.CONSTRAINTS_HEADER) and "--refresh-constraints" in bundle.CONSTRAINTS_HEADER
+    assert [line for line in text.splitlines() if line and not line.startswith("#")] == [
+        "alpha==1.3",        # the environment's version
+        "backend==1.0",      # not in the environment: its pin is kept, not moved to 1.1
+        "beta==2.0", "delta==1.0", "gamma==1.0",
+        "linuxonly==1.5",    # in neither: the newest release, pinned from now on
+    ]
+    assert calls[0][:4] == [sys.executable, "-m", "pip", "freeze"] and "--exclude-editable" in calls[0]
+    assert bundle.parse_pins(text) == {wheel.name: wheel.version for wheel in wheels}
+    # and the refreshed file is one a pinned build accepts
+    (tmp_path / "wheelhouse").mkdir()
+    for wheel in wheels:
+        shutil.copyfile(index / wheel.file, tmp_path / "wheelhouse" / wheel.file)
+    assert build(tmp_path).manifest["requirements"]["installed"]["runtime"][0] == "alpha==1.3"
 
 
-@needs_shell
-def test_installer_refuses_a_host_the_bundle_was_not_built_for(tmp_path, unpacked):
-    directory = unpacked(python=HERE, arch="s390x")
-    home = tmp_path / "home"
-    result = run_installer(directory, _posix(home), python=_posix(Path(sys.executable)))
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert ("this bundle installs on Linux" in result.stderr) or ("this bundle is for s390x hosts" in result.stderr)
-    assert "Nothing was installed" in result.stderr and not home.exists()
+def _installed(name: str) -> tuple[str, list[str]] | None:
+    from importlib import metadata
+
+    try:
+        found = metadata.distribution(name)
+    except metadata.PackageNotFoundError:
+        return None
+    return found.version, list(found.requires or [])
 
 
-@needs_shell
-def test_installer_refuses_bad_arguments(tmp_path, unpacked):
-    directory = unpacked(python=HERE)
-    for arguments, message in ((("relative/home",), "absolute path"), ((), "usage:"),
-                               (("--frobnicate", "/x"), "unknown option"), (("/a", "/b"), "one ROMULUS home"),
-                               (("/has space/home",), "may hold only"), (("/",), "cannot be /"),
-                               (("--python", "no-such-python-anywhere", _posix(tmp_path / "home")),
-                                "no such interpreter")):
-        result = run_installer(directory, *arguments)
-        assert result.returncode == 1 and message in result.stderr, (arguments, result.stderr)
-    assert not (tmp_path / "home").exists()
-    help_text = run_installer(directory, "--help")
-    assert help_text.returncode == 0 and "--no-extras" in help_text.stdout
+def test_the_checkouts_constraints_pin_everything_a_default_bundle_carries(tmp_path):
+    """Resolve the project's real requirements for the default target against a wheelhouse that holds exactly the
+    pinned versions, each with the requirements its installed copy declares. Every wheel the resolver keeps must
+    be pinned, and nothing the target needs may be missing from the pins."""
+    project = bundle.read_project(ROOT)
+    pins = bundle.parse_pins((ROOT / bundle.CONSTRAINTS).read_text(encoding="utf-8"))
+    canonicalize = bundle._packaging()[1]
+    for requirement in [*project.runtime, *project.extras["anthropic"], *project.build]:
+        assert canonicalize(re.match(r"[A-Za-z0-9._-]+", requirement).group(0)) in pins, requirement
+    differing = []
+    for name, version in pins.items():
+        installed = _installed(name)
+        if installed is not None and installed[0] != version:
+            differing.append(f"{name} {installed[0]} (pinned {version})")
+        make_wheel(tmp_path / "wheelhouse", name.replace("-", "_"), version,
+                   tuple(installed[1]) if installed else ())
+    if differing:
+        pytest.skip("this environment does not run the pinned versions: " + ", ".join(differing[:5]))
+    roots = [*project.runtime, *project.extras["anthropic"], *project.build]
+    wheels, dropped = bundle.collect_wheels(roots, tmp_path / "kept", bundle.Target(),
+                                            wheelhouse=tmp_path / "wheelhouse")
+    assert bundle.unpinned_wheels(wheels, pins) == []
+    assert len(wheels) >= len(project.runtime) + 2
+    # the file pins nothing the bundle does not carry, except the build backend's own dependencies, whose
+    # requirements this environment cannot show because it does not hold the backend
+    backend_only = {"pathspec", "pluggy", "tomlkit", "trove-classifiers", "packaging"}
+    assert {wheel.split("-")[0].replace("_", "-") for wheel in dropped} <= backend_only
 
 
-@needs_shell
-def test_installer_refuses_to_run_from_inside_the_tree_it_replaces(tmp_path, unpacked):
-    directory = unpacked(python=HERE)
-    home = tmp_path / "home"
-    inside = home / "app" / "bundle"
-    inside.parent.mkdir(parents=True)
-    shutil.move(str(directory), str(inside))
-    result = run_installer(inside, _posix(home), python=_posix(Path(sys.executable)))
-    assert result.returncode == 1 and "unpack the bundle outside" in result.stderr
-    assert (inside / "SHA256SUMS").is_file() and not (home / "venv").exists()
+def test_the_offline_proof_ignores_this_machines_pip_configuration(tmp_path, monkeypatch):
+    repo = make_repo(tmp_path / "repo")
+    wheels = make_wheelhouse(tmp_path / "wheelhouse")
+    monkeypatch.setenv("PIP_INDEX_URL", "https://mirror.invalid/simple")
+    monkeypatch.setenv("PIP_FIND_LINKS", "/somewhere/else")
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs.get("env")))
+        if command[3] == "wheel":
+            out = Path(command[command.index("--wheel-dir") + 1])
+            out.mkdir(parents=True)
+            with zipfile.ZipFile(out / "romulus-9.9.9-py3-none-any.whl", "w") as archive:
+                for path in (repo / "src").rglob("*"):
+                    if path.is_file():
+                        archive.write(path, path.relative_to(repo / "src").as_posix())
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    checked = bundle.check_offline_build(repo, wheels, bundle.read_project(repo), tmp_path / "scratch", run=run)
+    assert checked["file"] == "romulus-9.9.9-py3-none-any.whl" and len(calls) == 2
+    for command, environment in calls:
+        assert "--isolated" in command and "--no-index" in command
+        assert command[command.index("--find-links") + 1] == str(wheels)
+        assert [key for key in environment if key.upper().startswith("PIP_")] == ["PIP_CONFIG_FILE"]
+        assert environment["PIP_CONFIG_FILE"] == os.devnull
+    assert calls[1][0][3] == "install" and "--dry-run" in calls[1][0] and "--editable" in calls[1][0]
+
+
+def test_a_tracked_symbolic_link_stops_the_build(tmp_path, monkeypatch):
+    repo = make_repo(tmp_path / "repo")
+    outside = tmp_path / "outside-secret.yaml"
+    outside.write_text("secret: yes\n", encoding="utf-8")
+    link = repo / "content" / "mentions" / "linked.yaml"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        # an account that may not create links (Windows without the privilege): a file reported as one
+        link.write_text("secret: yes\n", encoding="utf-8")
+        real = Path.is_symlink
+        monkeypatch.setattr(Path, "is_symlink", lambda self: self.name == "linked.yaml" or real(self))
+    with pytest.raises(bundle.BundleError, match="content/mentions/linked.yaml: it is a symbolic link"):
+        build(tmp_path, tracked=[*TRACKED, "content/mentions/linked.yaml"])
+    assert not (tmp_path / "out").exists()
