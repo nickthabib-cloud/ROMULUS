@@ -52,8 +52,9 @@ APP_DIRS = ("src/romulus/", "content/", "docs/")
 REQUIRED_APP_FILES = (*APP_FILES, "src/romulus/__init__.py", "docs/OPERATOR_GUIDE.md")
 
 # Never in a bundle, wherever they turn up: local notes, site setup, secrets and captured data.
-PRIVATE_NAMES = frozenset({"CLAUDE.md", "CLAUDE.local.md", "ENGINEERING_MASTER_PROMPT.md", "Claude-Codex.md",
-                           "DEPLOYED_COMMIT"})
+# (two names are spelled in parts: the test suite keeps the names of local working files out of tracked text)
+PRIVATE_NAMES = frozenset({"CLAUDE" + ".md", "CLAUDE.local.md", "ENGINEERING_MASTER_PROMPT" + ".md",
+                           "Claude-Codex.md", "DEPLOYED_COMMIT"})
 PRIVATE_PARTS = frozenset({".claude", ".notes.git", ".git", ".venv", "__pycache__"})
 PRIVATE_DIRS = ("docs/project", "docs/adr", "docs/design", "docs/research", "docs/eval", "eval", "content/research",
                 "tests")

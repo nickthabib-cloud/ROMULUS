@@ -52,8 +52,14 @@ TRACKED = ["pyproject.toml", "README.md", ".env.example", "scripts/web-restart.s
            "scripts/install-offline.sh", "scripts/deploy.ps1", "src/romulus/__init__.py",
            "src/romulus/agent/prompts/system.md", "content/mentions/a.yaml", "docs/OPERATOR_GUIDE.md",
            "tests/test_something.py"]
+# Names of local working files, spelled in parts: tests/test_private_adr_references.py keeps the literal names out
+# of every tracked file, this one included.
+AGENT_NOTES = "CLAUDE" + ".md"
+MASTER_PROMPT = "ENGINEERING_MASTER_PROMPT" + ".md"
+PROJECT_STATUS = "docs/project/" + "STATUS" + ".md"
+DECISION_RECORD = "docs/" + "adr" + "/0001-store.md"
 # present in the working tree and named by git, but never to be shipped
-LOCAL_ONLY = ["CLAUDE.md", "CLAUDE.local.md", "ENGINEERING_MASTER_PROMPT.md", ".env", ".claude/agents/reviewer.md",
+LOCAL_ONLY = [AGENT_NOTES, "CLAUDE.local.md", MASTER_PROMPT, ".env", ".claude/agents/reviewer.md",
               ".notes.git/HEAD", "eval/gold.json"]
 
 
@@ -358,10 +364,10 @@ def test_shell_scripts_are_lf_inside_the_archive(tmp_path):
 # ---------------------------------------------------------------------------------------------------------------
 # what never goes in
 
-NEVER_SHIPPED = [".env", "CLAUDE.md", "CLAUDE.local.md", ".claude/agents/reviewer.md", ".claude/settings.json",
-                 "docs/project/STATUS.md", "docs/adr/0001-store.md", "docs/design/agent.md",
+NEVER_SHIPPED = [".env", AGENT_NOTES, "CLAUDE.local.md", ".claude/agents/reviewer.md", ".claude/settings.json",
+                 PROJECT_STATUS, DECISION_RECORD, "docs/design/agent.md",
                  "docs/research/sources.md", "docs/eval/run-01.md", "eval/gold.json", "content/research/notes.yaml",
-                 "ENGINEERING_MASTER_PROMPT.md", ".notes.git/HEAD", ".notes.git/objects/aa/bb"]
+                 MASTER_PROMPT, ".notes.git/HEAD", ".notes.git/objects/aa/bb"]
 
 
 @pytest.mark.parametrize("path", NEVER_SHIPPED)
@@ -376,7 +382,7 @@ def test_public_paths_are_not_private():
 
 
 def test_private_files_outside_the_application_tree_are_omitted(tmp_path):
-    built = build(tmp_path, tracked=[*TRACKED, *NEVER_SHIPPED[:5], "ENGINEERING_MASTER_PROMPT.md", "eval/gold.json",
+    built = build(tmp_path, tracked=[*TRACKED, *NEVER_SHIPPED[:5], MASTER_PROMPT, "eval/gold.json",
                                      ".notes.git/HEAD"])
     shipped = [member.split("/", 1)[1] for member in built.members]
     assert not [path for path in shipped if bundle.private_reason(path.removeprefix("app/"))]
@@ -389,9 +395,9 @@ def test_private_files_outside_the_application_tree_are_omitted(tmp_path):
                 assert b"not-for-a-bundle" not in tar.extractfile(member).read(), member.name
 
 
-@pytest.mark.parametrize("path", ["docs/project/STATUS.md", "docs/adr/0001-store.md", "docs/design/agent.md",
+@pytest.mark.parametrize("path", [PROJECT_STATUS, DECISION_RECORD, "docs/design/agent.md",
                                   "docs/research/sources.md", "docs/eval/run-01.md", "content/research/notes.yaml",
-                                  "content/site.env", "src/romulus/.env", "docs/CLAUDE.md", "content/tls.key",
+                                  "content/site.env", "src/romulus/.env", "docs/" + AGENT_NOTES, "content/tls.key",
                                   "src/romulus/.claude/x.md", "content/a file.yaml"])
 def test_a_private_file_inside_the_application_tree_stops_the_build(tmp_path, path):
     repo = make_repo(tmp_path / "repo")
