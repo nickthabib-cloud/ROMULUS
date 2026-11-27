@@ -670,3 +670,25 @@ def test_a_release_racing_the_window_read_is_unresolved_never_within_threshold(m
     assert matches == []
     assert row["verdict"] == "unresolved"
     assert "window counter material was released before judgement" in row["reason"]
+
+
+SHORTFALL = ("other-index: records of 1 selected dataset(s) in the hunt window were not retrieved, so no rule "
+             "evaluated them: auditd (40)")
+
+
+@pytest.mark.parametrize(("counts", "leads", "verdict"), [((20,), 1, "over_threshold"), ((1,), 0, "unresolved")])
+def test_a_dataset_shortfall_keeps_an_anomalous_hour_a_lead_and_a_quiet_one_unresolved(counts, leads, verdict):
+    """A shortfall cell is placed in no hour and counted nothing: an hour already at or above threshold stays a lead
+    (unread records could only add to it), and a quiet hour is never a complete negative."""
+    repo, playbook, view, _scope = _rate_view(history_values={index: 1 for index in range(48)}, window_counts=counts)
+    repo.set_rule_cell("hunt", playbook.id, playbook.version, "other-index", "dataset-reconciliation",
+                       "evaluated_partial", 0, 0, {"reasons": [SHORTFALL]})
+
+    matches = list(playbook.judge(view))
+
+    row = next(repo.baseline_observations("hunt"))
+    assert len(matches) == leads and row["verdict"] == verdict
+    if leads:
+        assert SHORTFALL in matches[0].claim and "other window cells were partial" in matches[0].claim.lower()
+    else:
+        assert SHORTFALL in row["reason"]
