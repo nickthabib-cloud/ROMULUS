@@ -172,6 +172,23 @@ def test_list_digest_changes_with_content_so_manifests_record_the_lists(tmp_path
     assert load_indicators(tmp_path).digest != first
 
 
+def test_a_missing_shipped_directory_is_an_error_and_an_empty_one_is_not(tmp_path, monkeypatch):
+    from romulus.detect import indicators
+
+    monkeypatch.delenv("ROMULUS_INDICATOR_DIR", raising=False)
+    monkeypatch.setattr(indicators, "_shipped_dir", lambda: tmp_path / "content" / "indicators")
+    with pytest.raises(IndicatorFileError, match="indicator directory .*indicators does not exist"):
+        load_indicators()
+    (tmp_path / "content" / "indicators").mkdir(parents=True)
+    empty = load_indicators()
+    assert empty.indicators == [] and empty.files == []
+    # a directory a caller or the operator names is theirs to keep empty or absent
+    assert load_indicators(tmp_path / "absent").indicators == []
+    monkeypatch.setattr(indicators, "_shipped_dir", lambda: tmp_path / "gone")
+    monkeypatch.setenv("ROMULUS_INDICATOR_DIR", str(tmp_path / "operator-lists"))
+    assert load_indicators().indicators == []
+
+
 def test_shipped_seed_list_loads():
     s = load_indicators(indicator_dir())
     assert s.files == ["tools.yaml"] and len(s.indicators) >= 15

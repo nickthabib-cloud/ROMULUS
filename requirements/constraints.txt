@@ -1,0 +1,54 @@
+# Exact versions of every package an offline bundle carries: the runtime dependencies, the optional dependency
+# groups and the build backend, with everything they depend on.
+#
+# scripts/build_offline_bundle.py pins a bundle to this file unless it is given --latest or --constraint, and
+# refuses to build a pinned bundle that would carry a package this file does not pin.
+#
+# These are the versions the test suite runs on. To refresh the file: install the versions to ship into the
+# environment the tests run in, run the tests, and then, from that environment,
+#     python scripts/build_offline_bundle.py --refresh-constraints
+# A package that environment does not hold (the build backend) keeps the version pinned here; delete its line
+# first to take its newest release.
+alembic==1.20.0
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anthropic==2.4.0
+anyio==4.15.1
+argon2-cffi==25.1.0
+argon2-cffi-bindings==26.1.0
+certifi==2026.10.18
+cffi==2.1.1
+click==8.5.0
+docstring-parser==0.18.0
+editables==0.6
+fastapi==0.146.0
+h11==0.16.0
+hatchling==1.33.0
+httpcore==1.0.9
+httpcore2==2.16.0
+httpx==0.28.1
+httpx2==2.16.0
+idna==3.20
+itsdangerous==2.2.0
+jinja2==3.1.6
+jiter==0.18.0
+mako==1.4.3
+markupsafe==3.0.4
+opentelemetry-api==1.45.1
+packaging==26.3
+pathspec==1.1.1
+pluggy==1.7.0
+pycparser==3.11
+pydantic==2.14.1
+pydantic-core==2.50.1
+python-multipart==0.0.32
+pyyaml==6.0.3
+sniffio==1.3.1
+sqlalchemy==2.1.5
+starlette==1.9.0
+tomlkit==0.15.3
+trove-classifiers==2026.9.21.13
+truststore==0.10.5
+typing-extensions==4.16.0
+typing-inspection==0.4.4
+uvicorn==0.54.0

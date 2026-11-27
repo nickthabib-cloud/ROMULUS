@@ -38,7 +38,8 @@ build-backend = "hatchling.build"
 packages = ["src/romulus"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"src/romulus/agent/prompts" = "romulus/agent/prompts"
+# the prompts ship with the package itself (src/romulus/agent/prompts); naming them here too adds each file twice,
+# which the build backend refuses
 "content/mentions" = "romulus/content/mentions"
 
 [tool.pytest.ini_options]
