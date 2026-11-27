@@ -973,11 +973,14 @@ def _run_streams(s: Settings, repo, client, hunt_id: str, window: Window, target
     cell_target = f"{PCAP_TARGET}:{target}"
     docs, partial, selection, missing = _stream_candidates(client, target, contract, window)
     if missing:
-        reason = f"this target's mapping lacks the selection field(s) {missing}: connections cannot be selected"
+        # The target holds Arkime sessions that were never examined: an unexpressible selection is unread data,
+        # never "no data in scope", so the rules read partial with the reason and the stage is partial.
+        reason = (f"{target}: streams: this target's mapping lacks the selection field(s) {missing}: connections "
+                  "cannot be selected, so no TCP session of this target was examined")
         for cls in rules:
-            repo.set_rule_cell(hunt_id, cls.id, cls.version, cell_target, window.key(), "not_applicable_no_events",
-                               0, 0, {"reason": reason})
-        return {"status": "not_applicable", "reason": reason, "partial_reasons": []}
+            repo.set_rule_cell(hunt_id, cls.id, cls.version, cell_target, window.key(), "positive_only_partial",
+                               0, 0, {"reasons": [reason]}, owner_token=owner_token)
+        return {"status": "partial", "reason": reason, "partial_reasons": [reason]}
     complete = ((lambda segs: _connection_documents(client, target, contract, segs)) if _can_complete(contract)
                 else None)
     run = _StreamTarget(s, target, window, work, packets, heartbeat, complete)

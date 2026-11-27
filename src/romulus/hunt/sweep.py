@@ -945,10 +945,13 @@ class Sweep:
         for name, _count in short:
             fed = LINUX_DATASET_FAMILIES.get(name)
             families |= set(fed) if fed is not None else set(CONTENT_TEXT_FAMILIES)
+        # Baseline specs reading these families count among them: the shortfall is not placed in any hour, so this
+        # whole-window cell makes their judgement partial and keeps the hunt from writing their history on this
+        # target (the segment writer never writes an hour a whole-window incomplete cell covers).
         cells = [self._cell(pb, target, DATASET_RECONCILIATION_PARTITION, "evaluated_partial",
                             detail={"reasons": [reason]})
                  for pb in self.pack
-                 if not isinstance(pb, BaselinePlaybook) and pb.id not in self.failed_rules
+                 if pb.id not in self.failed_rules
                  and {"linux", "unknown"} & set(pb.os_families)
                  and (set(pb.families) - set(pb.context_families)) & families]
         if cells:

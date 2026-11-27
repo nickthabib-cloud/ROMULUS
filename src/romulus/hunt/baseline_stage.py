@@ -28,7 +28,7 @@ from romulus.detect.base import Match, PredicateField
 from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.baseline_source import HuntHistorySource
-from romulus.hunt.baseline_writer import cell_complete
+from romulus.hunt.baseline_writer import cell_complete, whole_window_cell, whole_window_reason
 from romulus.hunt.publish import publish_match
 from romulus.hunt.site_networks import contradiction_reason
 from romulus.hunt.sweep import baseline_applicability
@@ -300,6 +300,9 @@ class SnapshotView:
             reasons.append("no baseline window cell was evaluated")
         elif partial:
             reasons.append(f"window coverage is partial in {len(partial)} cell(s)")
+            # A cell placed in no time interval (a dataset shortfall, a failed plan) covers the whole window: its own
+            # reason is the one an analyst needs, so it is named.
+            reasons.extend(dict.fromkeys(whole_window_reason(cell) for cell in partial if whole_window_cell(cell)))
         # An inapplicable target's empty cell supports a negative only when its retrieval was complete: the same
         # rule the segment writer applies, so a partial retrieval never yields a complete negative.
         unretrieved = [cell for cell in cells

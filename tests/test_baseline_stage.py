@@ -398,7 +398,9 @@ def test_boot_placement_partial_gates_rollup_but_not_a_present_keys_first_seen_v
     rollup = next(cell for cell in repo.rule_cells("h1")
                   if cell["rule_id"] == SPEC.id and cell["target"] == "*" and cell["partition"] == "window")
     assert rollup["state"] == "match_on_partial"
-    assert summary["specs"][SPEC.id]["window_failure"] == "window coverage is partial in 1 cell(s)"
+    # the cell is placed in no hour, so its own reason is named with the count
+    assert summary["specs"][SPEC.id]["window_failure"] == ("window coverage is partial in 1 cell(s); "
+                                                            "boot placement conflict")
 
 
 def test_baseline_uses_the_specs_version_even_when_the_playbook_class_disagrees(monkeypatch):

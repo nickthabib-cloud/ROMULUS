@@ -427,6 +427,11 @@ def _row(cport, epoch, *, body=SCRIPT, uri="http://192.0.2.174/TODO.md", frame="
     return row
 
 
+# The session fields the cleartext-stream selection needs: without them that pass cannot select and the stage is
+# partial, which is not what the HTTP tests here are about.
+STREAM_TYPES = {"client.bytes": "long", "server.bytes": "long", "source.packets": "long", "destination.packets": "long"}
+
+
 def _contract(**extra):
     types = {"firstPacket": "date", "lastPacket": "date", "network.community_id": "keyword", "protocol": "keyword",
              "http.bodyMagic": "keyword", **extra}
@@ -444,6 +449,9 @@ def _stage(tmp_path, monkeypatch, packets=None, *, sessions=None, rows=None, out
         if intent.kind == "histogram":
             return SearchOutcome(target=intent.target, fingerprint="h", started_at=T0, ended_at=T0,
                                  completeness=Completeness.complete, total=4, total_relation="eq")
+        if intent.purpose == hp.STREAM_PURPOSE:      # the cleartext-stream pass selects no connection here
+            return SearchOutcome(target=intent.target, fingerprint="s", started_at=T0, ended_at=T0,
+                                 completeness=Completeness.complete, total=0, total_relation="eq", returned=0)
         return outcome or SearchOutcome(
             target=intent.target, fingerprint="f", started_at=T0, ended_at=T0, completeness=Completeness.complete,
             total=len(sessions), total_relation="eq", returned=len(sessions), records=sessions)
@@ -457,7 +465,7 @@ def _stage(tmp_path, monkeypatch, packets=None, *, sessions=None, rows=None, out
     repo.create_hunt("h1", {}, "d", "t")
     window = window or Window(start=T0 - timedelta(hours=1), end=T0 + timedelta(hours=2))
     summary = hp.run_packet_stage(Settings(home=tmp_path), repo, None, "h1", window,
-                                  {TARGET: contract or _contract()}, packets=packets or _Packets())
+                                  {TARGET: contract or _contract(**STREAM_TYPES)}, packets=packets or _Packets())
     return repo, summary
 
 

@@ -366,3 +366,46 @@ def test_retrieval_tally_is_bounded_at_mission_scale():
 ])
 def test_dataset_name_follows_the_window_inventory_precedence(source, expected):
     assert sw._dataset_name(source, "event.dataset", "data_stream.dataset") == expected
+
+
+def test_a_shortfall_leaves_the_baseline_specs_reading_its_families_partial_and_unwritten(tmp_path, monkeypatch):
+    """A selected dataset's window records were not all retrieved. The baseline specs reading the families those
+    records could hold are evaluated on incomplete input like any other rule: their roll-up and the report read
+    searched in part with the shortfall named as a coverage gap, and the hunt writes no baseline history for them on
+    that target, so a later hunt never reads those unread hours as complete. History before the window is taken as
+    complete here, so the window alone decides; a spec reading none of the short families is unchanged."""
+    from romulus.hunt import baseline_stage
+
+    monkeypatch.setattr(baseline_stage, "_coverage_failure", lambda coverage, minimum: None)
+    monkeypatch.setattr(baseline_stage, "_history_cell_state", lambda coverage: "complete")
+    datasets = {"custom.app": APP}
+    docs = _docs(datasets, without_payload=["custom.app", "custom.app"])
+    snapshot, summary, _rows = _run(tmp_path, monkeypatch, FILEBEAT_TYPES, datasets, docs=docs)
+    [shortfall] = [reason for reason in summary["partial_reasons"] if "custom.app (2)" in reason]
+    coverage = snapshot["manifest"]["coverage"]
+    rows = {row["rule_id"]: row["search_result"] for row in coverage["rules"]}
+    rollups = {cell["rule_id"]: cell for cell in snapshot["rule_cells"]
+               if cell["target"] == "*" and cell["partition"] == "window"}
+    writer = next(row["detail"] for row in reversed(snapshot["audit"])
+                  if row["action"] == "hunt.baseline_summary")["segment_writer"]
+    written = {(row["spec_id"], row["target"]) for row in snapshot["baseline_segments"]}
+
+    # bl.ssh_tuple reads auth, which the unread records could hold: on this target nothing of it was seen, and the
+    # report must not say there was no data
+    # (the shortfall cell and the roll-up it made partial)
+    assert rows["bl.ssh_tuple"] == "searched in part: partial, failed or unexecuted partitions evaluated_partial=2"
+    assert rollups["bl.ssh_tuple"]["state"] == "evaluated_partial"
+    assert rollups["bl.ssh_tuple"]["detail"]["reasons"] == [f"window coverage is partial in 1 cell(s); {shortfall}"]
+    [gap] = [gap for gap in coverage["gaps"] if gap["partition"] == sw.DATASET_RECONCILIATION_PARTITION]
+    assert gap["target"] == tf.HOST_TARGET and gap["reasons"] == [shortfall]
+    assert gap["rules"]["bl.ssh_tuple"] == gap["rules"]["bl.ext_dest"] == "evaluated_partial"
+    assert "bl.exec_path" not in gap["rules"]          # process records are no family the text datasets carry
+    # its hours on that target are not written as complete (empty) history; on the other targets they are
+    assert ("bl.ssh_tuple", tf.HOST_TARGET) not in written
+    assert {("bl.ssh_tuple", tf.NETWORK_TARGET), ("bl.ssh_tuple", tf.ARKIME_TARGET)} <= written
+    assert writer["specs"]["bl.ssh_tuple"]["written"] == 2
+    assert writer["specs"]["bl.ssh_tuple"]["reason"] == (
+        f"{tf.HOST_TARGET}: no hour written: input incomplete over the whole window: {shortfall}")
+    # control: a spec reading no short family is still judged complete and written on every target
+    assert rows["bl.exec_path"] == "no data in scope for this rule"
+    assert writer["specs"]["bl.exec_path"] == {"written": 3, "reason": None}
