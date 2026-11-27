@@ -11,6 +11,49 @@ INDEX_TRIGGERS = {
         SELECT NEW.hunt_id,NEW.id,value FROM json_each(NEW.event_ids); END""",
     "candidate_event_delete": """BEFORE DELETE ON candidate BEGIN
         DELETE FROM candidate_event WHERE candidate_id=OLD.id; END""",
+    # Which stored rows cite each raw copy (a stable event: holder ''; a hunt's citation overlay: holder = that hunt),
+    # so deleting a hunt finds the copies nothing cites any more by index, never by scanning every event.
+    "event_raw_ref_insert": """AFTER INSERT ON typed_event BEGIN
+        INSERT OR IGNORE INTO event_raw_ref(raw_id,event_id,holder)
+        SELECT value,NEW.id,'' FROM json_each(NEW.raw_ids); END""",
+    "event_raw_ref_update": """AFTER UPDATE OF raw_ids,id ON typed_event
+        WHEN OLD.raw_ids IS NOT NEW.raw_ids OR OLD.id IS NOT NEW.id BEGIN
+        DELETE FROM event_raw_ref WHERE event_id=OLD.id AND holder='';
+        INSERT OR IGNORE INTO event_raw_ref(raw_id,event_id,holder)
+        SELECT value,NEW.id,'' FROM json_each(NEW.raw_ids); END""",
+    "event_raw_ref_delete": """BEFORE DELETE ON typed_event BEGIN
+        DELETE FROM event_raw_ref WHERE event_id=OLD.id AND holder=''; END""",
+    "citation_raw_ref_insert": """AFTER INSERT ON event_citation BEGIN
+        INSERT OR IGNORE INTO event_raw_ref(raw_id,event_id,holder)
+        SELECT value,NEW.event_id,NEW.hunt_id FROM json_each(NEW.raw_ids); END""",
+    "citation_raw_ref_update": """AFTER UPDATE OF raw_ids,event_id,hunt_id ON event_citation
+        WHEN OLD.raw_ids IS NOT NEW.raw_ids OR OLD.event_id IS NOT NEW.event_id OR OLD.hunt_id IS NOT NEW.hunt_id BEGIN
+        DELETE FROM event_raw_ref WHERE event_id=OLD.event_id AND holder=OLD.hunt_id;
+        INSERT OR IGNORE INTO event_raw_ref(raw_id,event_id,holder)
+        SELECT value,NEW.event_id,NEW.hunt_id FROM json_each(NEW.raw_ids); END""",
+    "citation_raw_ref_delete": """BEFORE DELETE ON event_citation BEGIN
+        DELETE FROM event_raw_ref WHERE event_id=OLD.event_id AND holder=OLD.hunt_id; END""",
+    # A hunt's investigation step or expansion link that cites an event another hunt owns is an observation of it, so
+    # deleting the owner keeps the event by an indexed marker lookup (the owner observed it by owning it: no marker).
+    **{f"case_step_observe_{action}": f"""AFTER {action.upper()}{' OF decision,result_digest' if action == 'update' else ''}
+        ON case_step BEGIN
+        INSERT OR IGNORE INTO event_observation(hunt_id,event_id)
+        SELECT c.hunt_id,e.id FROM "case" c, json_tree(NEW.decision) j JOIN typed_event e ON e.id=j.value
+        WHERE c.id=NEW.case_id AND j.type='text' AND e.hunt_id!=c.hunt_id;
+        INSERT OR IGNORE INTO event_observation(hunt_id,event_id)
+        SELECT c.hunt_id,e.id FROM "case" c, json_tree(coalesce(NEW.result_digest,'null')) j
+        JOIN typed_event e ON e.id=j.value
+        WHERE c.id=NEW.case_id AND j.type='text' AND e.hunt_id!=c.hunt_id; END"""
+       for action in ("insert", "update")},
+    **{f"expansion_link_observe_{action}": f"""AFTER {action.upper()}{' OF event_ids,evidence_ids' if action == 'update' else ''}
+        ON expansion_link BEGIN
+        INSERT OR IGNORE INTO event_observation(hunt_id,event_id)
+        SELECT NEW.hunt_id,e.id FROM json_each(NEW.event_ids) j JOIN typed_event e ON e.id=j.value
+        WHERE e.hunt_id!=NEW.hunt_id;
+        INSERT OR IGNORE INTO event_observation(hunt_id,event_id)
+        SELECT NEW.hunt_id,e.id FROM json_each(NEW.evidence_ids) j JOIN typed_event e ON e.id=j.value
+        WHERE e.hunt_id!=NEW.hunt_id; END"""
+       for action in ("insert", "update")},
 }
 
 # Stream-visible fields omit lease/heartbeat housekeeping and no-op ownership

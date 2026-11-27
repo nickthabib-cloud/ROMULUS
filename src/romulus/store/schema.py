@@ -124,6 +124,16 @@ event_observation = Table(
 )
 Index("ix_event_observation_event", event_observation.c.event_id)
 
+# Which stored rows cite each raw copy, kept by triggers on typed_event (holder '') and event_citation (holder = the
+# overlay's hunt), so a deletion finds the raw copies nothing cites any more by index.
+event_raw_ref = Table(
+    "event_raw_ref", metadata,
+    Column("raw_id", String, primary_key=True),
+    Column("event_id", String, primary_key=True),
+    Column("holder", String, primary_key=True),
+)
+Index("ix_event_raw_ref_event", event_raw_ref.c.event_id, event_raw_ref.c.holder)
+
 normalization_error = Table(
     "normalization_error", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
@@ -1691,6 +1701,33 @@ agent_budget_grant = Table(
     Column("role", String, nullable=False),
     Column("choice", JSON, nullable=False),
 )
+
+# Deleting a hunt runs in short batches whose cost must not grow with other hunts' data: every column it selects or
+# deletes by, and every foreign key SQLite checks when a parent row it removes goes, leads an index.
+DELETION_INDEXES = {
+    "ix_audit_event_hunt": (audit_event, ("hunt_id",)),
+    "ix_hunt_parent": (hunt, ("parent_hunt_id",)),
+    "ix_case_hunt": (case, ("hunt_id",)),
+    "ix_entity_hunt": (entity, ("hunt_id",)),
+    "ix_normalization_error_hunt": (normalization_error, ("hunt_id",)),
+    "ix_source_profile_hunt": (source_profile, ("hunt_id",)),
+    "ix_expansion_link_hunt": (expansion_link, ("hunt_id",)),
+    "ix_raw_record_first_task": (raw_record, ("first_task_id",)),
+    "ix_expansion_anchor_candidate": (expansion_anchor, ("candidate_id",)),
+    "ix_zeek_link_budget_anchor": (zeek_link_budget, ("anchor_id",)),
+    "ix_model_call_session": (model_call, ("session_id",)),
+    "ix_candidate_agent_hypothesis": (candidate, ("agent_hypothesis_id",)),
+    "ix_agent_hypothesis_event_session": (agent_hypothesis_event, ("session_id",)),
+    "ix_agent_tool_call_model_call": (agent_tool_call, ("model_call_id",)),
+    "ix_agent_link_hypothesis": (agent_link, ("hypothesis_id",)),
+    "ix_agent_link_session": (agent_link, ("session_id",)),
+    "ix_agent_note_session": (agent_note, ("session_id",)),
+    "ix_agent_rule_request_hypothesis": (agent_rule_request, ("hypothesis_id",)),
+    "ix_agent_rule_request_session": (agent_rule_request, ("session_id",)),
+    "ix_candidate_event_event": (candidate_event, ("event_id", "hunt_id")),
+}
+for _name, (_table, _columns) in DELETION_INDEXES.items():
+    Index(_name, *(_table.c[_column] for _column in _columns))
 
 # Install only after every source and index table exists, including metadata-only stores.
 for _statement in _change_triggers().values():

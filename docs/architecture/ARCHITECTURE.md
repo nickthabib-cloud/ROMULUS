@@ -147,8 +147,10 @@ leave no typed host logon.
   from the cited record itself. A session is judged once and an item is republished only when its content changed, as
   a revision of the same item, so a resume adds nothing twice. Its summary is the `hunt.join_summary` audit; a resume
   runs the pass until that says finished, and never runs the sweep again to rebuild rows: missing rows leave the later
-  stages' sessions unresolved, named, on the rule's window cell. The rows are removed when the pass finishes, when the
-  hunt is deleted, and at the next hunt's start for hunts that no longer exist or whose pass finished. Findings of
+  stages' sessions unresolved, named, on the rule's window cell. A packet or baseline stage that runs again on resume
+  first marks the pass unfinished, so the pass runs again after it over the rows kept for it. The rows are removed when
+  a pass finishes with both later stages finished, when the hunt is deleted, and at the next hunt's start for hunts
+  that no longer exist or whose pass finished with no later stage left to run. Findings of
   expansion reaches and of the AI agent are never joined.
 - **Lane.** The item is a lead labelled as an inferred link, with its key and each logon's offset from the session
   start. It is high only when a typed host finding the hunt published at high or urgent cites a process or share record
