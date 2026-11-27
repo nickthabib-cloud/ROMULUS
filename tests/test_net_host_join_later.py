@@ -259,3 +259,83 @@ def test_the_later_pass_over_many_kept_sessions_spills_and_joins_each(tmp_path):
         assert list(later.join_pass(kept, later=True)) == []      # judged once, published once
     finally:
         kept.close()
+
+
+def _after_sweep(monkeypatch, repo, client, stage, packet, baseline, packet_summary=None, baseline_summary=None):
+    """One call of the stages after the sweep with the packet and baseline stages replaced by `packet` and
+    `baseline` (each publishes what it is given and returns its summary); expansion and ranking are not under
+    test."""
+    from types import SimpleNamespace
+
+    from romulus.hunt import run
+    monkeypatch.setattr(run, "_packet_stage", lambda *_a, **_k: packet())
+    monkeypatch.setattr(run, "_baseline_stage", lambda *_a, **_k: baseline())
+    monkeypatch.setattr(run, "_run_expansion_safely", lambda *_a, **_k: {"status": "completed"})
+    monkeypatch.setattr(run, "run_rank_pass", lambda *_a, **_k: None)
+    real = jp.run_join_pass
+    monkeypatch.setattr(run, "run_join_pass", lambda repo_, client_, hunt_id, stage_dir, **kwargs: real(
+        repo_, client_, hunt_id, stage_dir, **{k: v for k, v in kwargs.items() if k == "keep_rows"}))
+    return run._stages_after_sweep(SimpleNamespace(stage_path=stage, baseline_carry_disk_gb=1), repo, client, "h1", None, {}, None,
+                                   lambda: None, packet_summary=packet_summary, baseline_summary=baseline_summary)
+
+
+def _stage(repo, action, summary, publish=None):
+    def stage():
+        if publish is not None:
+            publish()
+        repo.audit("system", action, "h1", summary)
+        return summary
+    return stage
+
+
+def test_a_resumed_stage_that_runs_again_has_its_findings_sessions_joined(swept, monkeypatch):
+    """The packet stage fails in the first run; the join pass still runs over what was published. On resume the
+    packet stage runs again and publishes a finding on client B's session: the join runs again over the rows it
+    kept, and B's session is joined (never skipped because the first pass said it finished)."""
+    repo, client, stage, events = swept
+    failed = {"status": "failed", "finished": False, "error": "source timed out"}
+    done = {"status": "completed", "finished": True}
+    _after_sweep(monkeypatch, repo, client, stage,
+                 _stage(repo, "hunt.packet_summary", failed), _stage(repo, "hunt.baseline_summary", done))
+    assert jp.finished(repo, "h1") and len(_joins(repo)) == 1
+    assert jp.rows_path(stage, "h1").is_file()           # kept: a later stage has not finished
+
+    packet_rule = PACKET_PLAYBOOKS[1]()
+    _after_sweep(monkeypatch, repo, client, stage,
+                 _stage(repo, "hunt.packet_summary", done,
+                        lambda: _later_finding(repo, packet_rule, packet_rule.id, _flow_event(events, CLIENT_B))),
+                 _stage(repo, "hunt.baseline_summary", done),
+                 packet_summary=failed, baseline_summary=done)
+    joins = _joins(repo)
+    assert len(joins) == 2 and any(CLIENT_B in item["claim"] for item in joins)
+    summary = repo.latest_audit("h1", jp.SUMMARY_ACTION)["detail"]
+    assert summary["finished"] and summary["rows"] == "kept"
+    assert not jp.rows_path(stage, "h1").exists()        # every later stage finished: the rows go
+
+
+def test_a_stage_that_runs_again_reopens_the_join_before_it_runs(swept, monkeypatch):
+    """A crash after the packet stage began again, before the join: the join's summary already says unfinished and
+    its cell is partial, so the next resume runs it and nothing reads the earlier pass as complete."""
+    repo, client, stage, _events = swept
+    jp.run_join_pass(repo, client, "h1", stage, keep_rows=True)
+    assert jp.finished(repo, "h1")
+
+    class _Crash(Exception):
+        pass
+
+    def crash():
+        raise _Crash
+    with pytest.raises(_Crash):
+        _after_sweep(monkeypatch, repo, client, stage, crash, _stage(repo, "hunt.baseline_summary", {"finished": True}),
+                     packet_summary={"finished": False}, baseline_summary={"finished": True})
+    assert not jp.finished(repo, "h1")
+    cell = next(c for c in repo.rule_cells("h1", rule_id=RULE) if c["target"] == "*" and c["partition"] == "window")
+    assert cell["state"] == "match_on_partial"
+    assert any("did not finish" in reason for reason in cell["detail"]["reasons"])
+
+
+def test_pruning_keeps_rows_a_later_stage_still_needs(swept):
+    repo, client, stage, _events = swept
+    jp.run_join_pass(repo, client, "h1", stage, keep_rows=True)
+    assert jp.finished(repo, "h1")
+    assert jp.prune_rows(stage, repo) == 0 and jp.rows_path(stage, "h1").is_file()
