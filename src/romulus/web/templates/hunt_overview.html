@@ -127,7 +127,14 @@
       <div class="table-wrap"><table class="grid small"><tbody>
         {% for r in reports %}
         <tr><th>r{{ r.revision }}</th><td class="mono nowrap">{{ r.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
-          <td><a href="/reports/{{ h.id }}/{{ r.id }}.md">technical (Markdown)</a> · <a href="/reports/{{ h.id }}/{{ r.id }}.docx">executive (Word)</a> · <a href="/reports/{{ h.id }}/{{ r.id }}.json">manifest (JSON)</a>{% if r.indicators %} · <a href="/reports/{{ h.id }}/{{ r.id }}-iocs-stix.json" title="Values seen in typed fields of reportable findings; internal addresses and hosts are marked">indicators (STIX 2.1)</a> · <a href="/reports/{{ h.id }}/{{ r.id }}-iocs.csv">indicators (CSV)</a>{% endif %}</td></tr>
+          <td>{% if r.write_error %}<span class="warn">Files not written: {{ r.write_error }}</span> · <a href="/reports/{{ h.id }}/{{ r.id }}.write-error.txt">reason (text)</a>
+          {% elif not r.md and not r.json %}<span class="warn">Files not on disk</span>
+          {% else %}{% if r.md %}<a href="/reports/{{ h.id }}/{{ r.id }}.md">technical (Markdown)</a>{% else %}<span class="warn">technical report missing</span>{% endif %}
+            · {% if r.docx %}<a href="/reports/{{ h.id }}/{{ r.id }}.docx">executive (Word)</a>{% elif r.docx_error %}<span class="warn">Executive report not written: {{ r.docx_error }}</span> · <a href="/reports/{{ h.id }}/{{ r.id }}.docx-error.txt">reason (text)</a>{% else %}<span class="warn">executive report missing</span>{% endif %}
+            · {% if r.json %}<a href="/reports/{{ h.id }}/{{ r.id }}.json">manifest (JSON)</a>{% else %}<span class="warn">manifest missing</span>{% endif %}
+            {%- if r.indicators %} · <a href="/reports/{{ h.id }}/{{ r.id }}-iocs-stix.json" title="Values seen in typed fields of reportable findings; internal addresses and hosts are marked">indicators (STIX 2.1)</a> · <a href="/reports/{{ h.id }}/{{ r.id }}-iocs.csv">indicators (CSV)</a>
+            {%- elif r.iocs_error %} · <span class="warn">Indicator export not written: {{ r.iocs_error }}</span> · <a href="/reports/{{ h.id }}/{{ r.id }}.iocs-error.txt">reason (text)</a>{% endif %}
+          {% endif %}</td></tr>
         {% else %}<tr><td class="empty">No report revisions yet.</td></tr>{% endfor %}
       </tbody></table></div>
     </section>

@@ -23,7 +23,8 @@
             <button type="submit" role="menuitem">Publish new report revision</button></form>
           {% if head.latest_report %}
           <a role="menuitem" href="/reports/{{ h.id }}/{{ head.latest_report.id }}.md">Technical report (Markdown), r{{ head.latest_report.revision }}</a>
-          <a role="menuitem" href="/reports/{{ h.id }}/{{ head.latest_report.id }}.docx">Executive report (Word), r{{ head.latest_report.revision }}</a>
+          {% if head.latest_report.docx %}<a role="menuitem" href="/reports/{{ h.id }}/{{ head.latest_report.id }}.docx">Executive report (Word), r{{ head.latest_report.revision }}</a>
+          {% elif head.latest_report.docx_error %}<a role="menuitem" href="/reports/{{ h.id }}/{{ head.latest_report.id }}.docx-error.txt" title="{{ head.latest_report.docx_error }}">Executive report not written, r{{ head.latest_report.revision }}: reason (text)</a>{% endif %}
           <a role="menuitem" href="/reports/{{ h.id }}/{{ head.latest_report.id }}.json">Report manifest (JSON), r{{ head.latest_report.revision }}</a>
           {% endif %}
           <a role="menuitem" href="{{ url(h.id) }}#reports">All report revisions</a>

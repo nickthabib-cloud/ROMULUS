@@ -29,9 +29,10 @@ from romulus.report.bundle import write_reports
 from romulus.report.manifest import publish_revision
 from romulus.site import SiteChangedError, SiteValidationError, load_site_facts, save_site_facts
 from romulus.store.db import compact, maintenance_lease
-from romulus.web import agent_views, site_form
+from romulus.web import agent_views, hunt_views, site_form
 from romulus.web.agent_routes import register_agent_routes
 from romulus.web.auth import RateLimiter, Sessions, authenticate, csrf_ok, end_sessions, session_user
+from romulus.web.body_limit import BodyLimit
 from romulus.web.catalog_routes import register_catalog_routes
 from romulus.web.control_routes import new_hunt_context, register_control_routes, start_grant
 from romulus.web.hunt_routes import make_hunt_page, register_hunt_routes
@@ -60,6 +61,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
     app = FastAPI(title="ROMULUS", docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(IndicatorBodyLimit)
     app.add_middleware(DetectionRequestBodyLimit)
+    app.add_middleware(BodyLimit)
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     tpl = Jinja2Templates(directory=HERE / "templates")
     tpl.env.autoescape = True
@@ -90,7 +92,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
     register_indicator_routes(app, repo, need, page)
     register_catalog_routes(app, repo, need, page)
     register_request_routes(app, repo, need, page)
-    hunt_page = make_hunt_page(repo, page)
+    hunt_page = make_hunt_page(repo, page, s.reports_dir)
     register_agent_routes(app, repo, need, page, hunt_page)
 
     @app.get("/login", response_class=HTMLResponse)
@@ -229,12 +231,15 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
 
     # ------------------------------------------------------------------ findings
     @app.get("/findings/{cid}", response_class=HTMLResponse)
-    def finding(request: Request, cid: str, host_after: str = "", event: str = "", notes_after: str = ""):
+    def finding(request: Request, cid: str, host_after: str = "", event: str = "", notes_after: str = "",
+                events_at: int = 0, raw_at: int = 0):
         u = need(request)
         c = repo.candidate(cid)
         if c is None:
             raise HTTPException(404)
-        event_ids = c["event_ids"][:20]
+        # every cited event, and every raw record retained for the events shown, is reachable a page at a time
+        cited = hunt_views.offset_page(list(c["event_ids"] or []), events_at, hunt_views.EVENT_PAGE)
+        event_ids = cited["rows"]
         if event:
             from sqlalchemy import select
 
@@ -246,9 +251,17 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
             if exists is None:
                 raise HTTPException(404)
             event_ids = [event]
-        events = repo.citation_events(c["hunt_id"], event_ids)
-        raw_ids = [rid for e in events for rid in e["raw_ids"]]
-        raws = repo.raw_records(raw_ids[:40])
+        events = hunt_views.in_order(repo.citation_events(c["hunt_id"], event_ids), event_ids)
+        retained = hunt_views.offset_page(list(dict.fromkeys(rid for e in events for rid in e["raw_ids"])), raw_at,
+                                          hunt_views.RAW_PAGE)
+        raws = hunt_views.in_order(repo.raw_records(retained["rows"]), retained["rows"])
+
+        def finding_url(**changes):
+            from urllib.parse import quote, urlencode
+            query = {"event": event, "events_at": cited["at"], "host_after": host_after, "notes_after": notes_after,
+                     **changes}
+            query = {key: value for key, value in query.items() if value not in ("", 0, None)}
+            return "/findings/" + quote(cid, safe="") + ("?" + urlencode(query) if query else "")
         gates = dict(c["gate_results"])
         notes = gates.pop("_notes", [])
         # records no normalizer read that an AI finding cites as text: shown apart, labelled, never as typed events
@@ -272,7 +285,9 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
                     agent_notes=agent_notes, agent_notes_more=notes_more, agent_notes_cursor=notes_cursor,
                     linked_hypothesis=linked_hypothesis, raw_records=raw_records,
                     raw_missing=max(0, len(raw_cited[:20]) - len(raw_records)), raw_more=max(0, len(raw_cited) - 20),
-                    raw_label=RAW_LABEL_PLURAL,
+                    raw_label=RAW_LABEL_PLURAL, cited=cited, retained=retained, single_event=bool(event),
+                    events_missing=len(event_ids) - len(events), raws_missing=len(retained["rows"]) - len(raws),
+                    finding_url=finding_url,
                     pretty=lambda v: json.dumps(v, indent=2, ensure_ascii=False, sort_keys=True, default=str))
 
     @app.get("/hunts/{hunt_id}/raw-records/{rid}", response_class=HTMLResponse)
@@ -441,8 +456,11 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
             raise HTTPException(403, "bad CSRF token")
         m = publish_revision(repo, hunt_id, f"web:{u['u']}", settings=s)
         out = s.reports_dir / hunt_id
-        out.mkdir(parents=True, exist_ok=True)
-        write_reports(repo, m, out, settings=s)
+        try:
+            out.mkdir(parents=True, exist_ok=True)
+            write_reports(repo, m, out, settings=s)
+        except Exception as error:  # noqa: BLE001 - the revision is committed: it is marked failed, with the reason
+            hunt_views.record_write_failure(repo, hunt_id, out, m["revision"]["id"], error, actor=f"web:{u['u']}")
         return RedirectResponse(agent_views.href(hunt_id) + "#reports", status_code=303)
 
     @app.get("/reports/{hunt_id}/{rev_id}.{ext}")
@@ -452,14 +470,17 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
                     and all(char in "0123456789abcdef" for char in rev_id[12:]))
         appendix |= (ext == "jsonl" and rev_id.startswith("zeek-visibility-") and len(rev_id) == 80
                      and all(char in "0123456789abcdef" for char in rev_id[16:]))
-        if (not appendix and (ext not in ("md", "json", "docx", "csv") or not rev_id.startswith(hunt_id + "-r"))
+        # the note a revision's failed renderer or failed write left in place of its file
+        note = ext == "txt" and hunt_views.is_note_name(hunt_id, rev_id)
+        if (not appendix and not note and (ext not in ("md", "json", "docx", "csv")
+                                           or not rev_id.startswith(hunt_id + "-r"))
                 or "/" in rev_id or ".." in rev_id):
             raise HTTPException(404)
         p = (s.reports_dir / hunt_id / f"{rev_id}.{ext}").resolve()
         if s.reports_dir.resolve() not in p.parents or not p.exists():
             raise HTTPException(404)
         media = {"md": "text/markdown; charset=utf-8", "json": "application/json", "jsonl": "application/x-ndjson",
-                 "csv": "text/csv; charset=utf-8",
+                 "csv": "text/csv; charset=utf-8", "txt": "text/plain; charset=utf-8",
                  "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}[ext]
         return FileResponse(p, media_type=media, filename=f"{rev_id}.{ext}")
 

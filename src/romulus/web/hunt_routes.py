@@ -5,6 +5,7 @@ from fastapi import Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from romulus.agent.provider import egress_banners
+from romulus.detect.netdef import coverage_shown
 from romulus.report.manifest import coverage_for_hunt, internal_networks_view, investigations_for_hunt
 from romulus.report.mentions import citations, coverage_lines, mention_item, mentions_view
 from romulus.web import agent_views, hunt_views
@@ -17,13 +18,13 @@ MENTION_PAGE = 50
 MENTION_LINE_CHARS = 1_024
 
 
-def make_hunt_page(repo, page):
+def make_hunt_page(repo, page, reports_dir=None):
     """Render a hunt tab: the template gets the hunt, the shared header and the tab's own context. A tab that lists
     findings builds its header first and passes it as `head`: the live-stream cursor must be read before the rows,
     so a finding stored while the page renders reaches the browser through the stream."""
     def hunt_page(request: Request, name: str, user: dict, h: dict, tab: str, head: dict | None = None, **ctx):
         message = agent_views.REASSESS_MESSAGES.get(request.query_params.get("agent_message"), "")
-        return page(request, name, user, h=h, head=head or hunt_views.header(repo, h, user, tab),
+        return page(request, name, user, h=h, head=head or hunt_views.header(repo, h, user, tab, reports_dir),
                     agent_message=message, stop_banner=stop_banner(repo, h["id"]),
                     control_message=CONTROL_MESSAGES.get(request.query_params.get("control"), ""), **ctx)
     return hunt_page
@@ -50,7 +51,7 @@ def register_hunt_routes(app, repo, s, need, hunt_page):
             return RedirectResponse(hunt_views.hunt_url(hunt_id, "/findings", lane=params.get("lane", ""),
                                                         after=params.get("after", "")), status_code=303)
         h = hunt(hunt_id)
-        head = hunt_views.header(repo, h, u, "overview")
+        head = hunt_views.header(repo, h, u, "overview", s.reports_dir)
         return hunt_page(request, "hunt_overview.html", u, h, "overview", head, ov=hunt_views.overview(repo, h),
                          internal_networks=internal_networks_view(repo, hunt_id, h["manifest"]),
                          reports=hunt_views.reports(repo, hunt_id, s.reports_dir))
@@ -61,7 +62,7 @@ def register_hunt_routes(app, repo, s, need, hunt_page):
         h = hunt(hunt_id)
         if len(rule) > 256:
             raise HTTPException(400, "Rule filter is too long")
-        head = hunt_views.header(repo, h, u, "findings")
+        head = hunt_views.header(repo, h, u, "findings", s.reports_dir)
         try:
             view = hunt_views.findings(repo, hunt_id, lane=lane, rule=rule, after=cursor(after))
         except ValueError as error:
@@ -133,7 +134,7 @@ def register_hunt_routes(app, repo, s, need, hunt_page):
         lanes = [v for v in params.getlist("lane") if v in LANES] if explicit else list(LANES)
         kinds = [v for v in params.getlist("kind") if v in ROW_KINDS] if explicit else list(ROW_KINDS)
         styles = [v for v in params.getlist("style") if v in LINK_STYLES] if explicit else list(LINK_STYLES)
-        head = hunt_views.header(repo, h, u, "timeline")
+        head = hunt_views.header(repo, h, u, "timeline", s.reports_dir)
         findings = _timeline_findings(hunt_id)
         graph = build_incident_graph(repo, hunt_id, findings)
         titles = {rule_id: rule.title for rule_id, rule in
@@ -174,7 +175,11 @@ def register_hunt_routes(app, repo, s, need, hunt_page):
         return RedirectResponse(hunt_views.hunt_url(hunt_id, "/timeline"), status_code=303)
 
     @app.get("/hunts/{hunt_id}/coverage", response_class=HTMLResponse)
-    def hunt_coverage(request: Request, hunt_id: str, show: str = "", page: int = 1):
+    def hunt_coverage(request: Request, hunt_id: str, show: str = "", page: int = 1, gaps_page: int = 1,
+                      unassessed_page: int = 1):
+        """Everything the report's coverage section shows: each rule's search result, the coverage gaps (partition and
+        reason), data not assessed, coverage notes, the baseline snapshot and internal-network coverage. Long lists
+        are paged with exact counts, so every row stays reachable."""
         u = need(request)
         h = hunt(hunt_id)
         cov = coverage_for_hunt(repo, hunt_id)
@@ -190,10 +195,20 @@ def register_hunt_routes(app, repo, s, need, hunt_page):
                 zeek_visibility_bundled = (snapshot.get("filename") == filename
                     and s.reports_dir.resolve() in appendix.parents and appendix.is_file())
         view = hunt_views.coverage_page(cov["rules"], show=show, page=page)
+        gaps = hunt_views.list_page(cov.get("gaps") or [], gaps_page)
+        unassessed = hunt_views.list_page(cov.get("not_assessed") or [], unassessed_page)
 
-        def page_url(number, show_class=view["show"]):
-            return hunt_views.hunt_url(hunt_id, "/coverage", show=show_class, page=number if number > 1 else "")
+        def page_url(number, show_class=view["show"], anchor="", gaps_number=None, unassessed_number=None):
+            pages = {"page": number, "gaps_page": gaps["page"] if gaps_number is None else gaps_number,
+                     "unassessed_page": unassessed["page"] if unassessed_number is None else unassessed_number}
+            return hunt_views.hunt_url(hunt_id, "/coverage", show=show_class,
+                                       **{key: value if value > 1 else "" for key, value in pages.items()}) + anchor
+
+        network = cov.get("internal_networks") or {}
         return hunt_page(request, "hunt_coverage.html", u, h, "coverage", cv=view, page_url=page_url,
+                         gaps=gaps, unassessed=unassessed, notes=cov.get("notes") or [],
+                         baseline=cov.get("baseline") or {},
+                         network_coverage=network if coverage_shown(network) else None,
                          zeek_visibility=zeek_visibility, zeek_visibility_bundled=zeek_visibility_bundled)
 
     @app.get("/hunts/{hunt_id}/run", response_class=HTMLResponse)

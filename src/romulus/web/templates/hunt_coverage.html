@@ -1,7 +1,8 @@
 {% extends "hunt_base.html" %}
 {% block tab_title %}Coverage · {% endblock %}
 {% block tab %}
-<p class="help small">What each rule searched. ROMULUS reports what it finds; it never claims that nothing is there. <b>Searched in full</b> means every partition in scope was evaluated and none matched: a statement about the search, not about the network. <b>Searched in part</b> means some partitions were partial, failed, or had records missing required fields: those are blind spots, listed with their reasons. <b>No data in scope</b> means the rule had nothing to read.</p>
+<p class="help small">What each rule searched. ROMULUS reports what it finds; it never claims that nothing is there. <b>Searched in full</b> means every partition in scope was evaluated and none matched: a statement about the search, not about the network. <b>Searched in part</b> means some partitions were partial, failed, or had records missing required fields: those are blind spots, listed with their reasons. <b>No data in scope</b> means the rule had nothing to read. Data no rule could read is listed under <a href="#not-assessed">Data not assessed</a>, whatever a rule's result says.</p>
+<p class="small" id="blind-spots"><a href="#coverage-gaps">{{ gaps.total }} coverage gap{{ '' if gaps.total == 1 else 's' }}</a> · <a href="#not-assessed">{{ unassessed.total }} row{{ '' if unassessed.total == 1 else 's' }} of data not assessed</a>{% if notes %} · <a href="#coverage-notes">{{ notes | length }} coverage note{{ '' if notes | length == 1 else 's' }}</a>{% endif %}{% if baseline.specs or baseline.history_held %} · <a href="#baseline-coverage">baseline snapshot</a>{% endif %}</p>
 <div class="toolbar">
   <nav class="seg" aria-label="Filter by search result">
     <a href="{{ page_url(1, '') }}"{% if not cv.show %} aria-current="true"{% endif %}>All rules <b>{{ cv.all }}</b></a>
@@ -24,6 +25,81 @@
   <span>Page limit: 50. {% if cv.more %}{{ cv.more }} more{% else %}no more rules after this page{% endif %}. Partly searched and unresolved rules are listed first.</span>
   <span class="links">{% if cv.page > 1 %}<a class="btn ghost sm" href="{{ page_url(cv.page - 1) }}">← Previous</a>{% endif %}{% if cv.page < cv.pages %}<a class="btn ghost sm" href="{{ page_url(cv.page + 1) }}">Next rules →</a>{% endif %}</span>
 </div>
+
+{% if network_coverage %}
+<section class="panel" id="network-coverage">
+  <div class="panel-head"><h2>Internal-network coverage</h2></div>
+  <div class="panel-body"><p>{{ network_coverage.summary }}</p></div>
+</section>
+{% endif %}
+
+{% if baseline.specs or baseline.history_held %}
+<section class="panel" id="baseline-coverage">
+  <div class="panel-head"><h2>Baseline snapshot</h2></div>
+  <div class="panel-body">
+  <p>Snapshot digest: <span class="mono">{{ baseline.snapshot_digest or 'not frozen' }}</span>; snapshot status: <b>{{ baseline.snapshot_status or 'unknown' }}</b>; stage status: <b>{{ baseline.stage_status or 'unknown' }}</b>.</p>
+  {% if baseline.history_held %}<p class="warn"><b>Baseline history held back:</b> {{ baseline.history_held }}</p>{% endif %}
+  {% if baseline.specs %}
+  <div class="table-wrap"><table class="grid small">
+  <thead><tr><th>Spec</th><th>Status</th><th class="n">Unresolved observations</th><th>Verdict counts</th></tr></thead>
+  <tbody>{% for spec in baseline.specs %}<tr><td class="mono">{{ spec.id }}</td><td>{{ spec.status }}</td><td class="n">{{ spec.unresolved_count }}</td><td class="mono small">{% for k, v in spec.verdicts | dictsort %}{{ k }}={{ v }} {% endfor %}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  {% endif %}
+  </div>
+</section>
+{% endif %}
+
+<section class="panel" id="coverage-gaps">
+  <div class="panel-head"><h2>Coverage gaps ({{ gaps.total }})</h2></div>
+  <div class="panel-body">
+  <p class="help small">Every source partition or link where at least one rule was not fully searched, and why. These are the hunt's blind spots.</p>
+  <div class="table-wrap"><table class="grid small">
+  <thead><tr><th>Target</th><th>Partition</th><th>Rules searched in part</th><th>Reasons</th></tr></thead>
+  <tbody>
+  {% for gap in gaps.rows %}
+  <tr><td class="mono">{{ gap.target }}</td><td class="mono">{{ gap.partition }}</td>
+  <td><details><summary>{% if gap.every_rule_there %}every rule evaluated there ({{ gap.rules | length }}){% else %}{{ gap.rules | length }} rule{{ '' if gap.rules | length == 1 else 's' }}{% endif %}</summary><span class="mono small">{% for rule, state in gap.rules.items() %}{{ rule }} ({{ state }}){% if not loop.last %}, {% endif %}{% endfor %}</span></details></td>
+  <td>{{ gap.reasons | join('; ') }}</td></tr>
+  {% else %}
+  <tr><td colspan="4" class="empty">No coverage gaps recorded.</td></tr>
+  {% endfor %}
+  </tbody></table></div>
+  <div class="pager">
+    <span>{% if gaps.total %}{{ gaps.first }}–{{ gaps.last }} of {{ gaps.total }}. {% endif %}Page limit: 50. {% if gaps.more %}{{ gaps.more }} more{% else %}no more gaps after this page{% endif %}.</span>
+    <span class="links">{% if gaps.page > 1 %}<a class="btn ghost sm" href="{{ page_url(cv.page, anchor='#coverage-gaps', gaps_number=gaps.page - 1) }}">← Previous</a>{% endif %}{% if gaps.page < gaps.pages %}<a class="btn ghost sm" href="{{ page_url(cv.page, anchor='#coverage-gaps', gaps_number=gaps.page + 1) }}">Next →</a>{% endif %}</span>
+  </div>
+  </div>
+</section>
+
+<section class="panel" id="not-assessed">
+  <div class="panel-head"><h2>Data not assessed ({{ unassessed.total }})</h2></div>
+  <div class="panel-body">
+  <p class="help small">Data in scope that no rule evaluated. It was not searched and is not counted as evaluated.</p>
+  <div class="table-wrap"><table class="grid small">
+  <thead><tr><th>Target</th><th>Dataset</th><th class="n">Records</th><th>Count scope</th><th>Reason</th></tr></thead>
+  <tbody>
+  {% for item in unassessed.rows %}
+  <tr><td class="mono">{{ item.target }}</td><td class="mono">{{ item.dataset or 'any' }}</td><td class="n">{{ 'unknown' if item.records is none else item.records }}</td><td>{{ item.count_scope }}</td><td>{{ item.reason }}</td></tr>
+  {% else %}
+  <tr><td colspan="5" class="empty">No data in scope was left unassessed.</td></tr>
+  {% endfor %}
+  </tbody></table></div>
+  <div class="pager">
+    <span>{% if unassessed.total %}{{ unassessed.first }}–{{ unassessed.last }} of {{ unassessed.total }}. {% endif %}Page limit: 50. {% if unassessed.more %}{{ unassessed.more }} more{% else %}no more rows after this page{% endif %}.</span>
+    <span class="links">{% if unassessed.page > 1 %}<a class="btn ghost sm" href="{{ page_url(cv.page, anchor='#not-assessed', unassessed_number=unassessed.page - 1) }}">← Previous</a>{% endif %}{% if unassessed.page < unassessed.pages %}<a class="btn ghost sm" href="{{ page_url(cv.page, anchor='#not-assessed', unassessed_number=unassessed.page + 1) }}">Next →</a>{% endif %}</span>
+  </div>
+  </div>
+</section>
+
+{% if notes %}
+<section class="panel" id="coverage-notes">
+  <div class="panel-head"><h2>Coverage notes</h2></div>
+  <div class="panel-body">
+  <p class="help small">About records that were retrieved and evaluated. These are not gaps.</p>
+  <ul>{% for item in notes %}<li><span class="mono">{{ item.target }}</span>: {{ item.note }}</li>{% endfor %}</ul>
+  </div>
+</section>
+{% endif %}
 
 {% if zeek_visibility %}
 <section class="panel">
