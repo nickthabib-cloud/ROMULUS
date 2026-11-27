@@ -289,8 +289,14 @@ def write_txn(engine: Engine):
     class _Txn:
         def __enter__(self):
             _write_lock.acquire()
-            self._cm = engine.begin()
-            return self._cm.__enter__()
+            try:
+                self._cm = engine.begin()
+                return self._cm.__enter__()
+            except BaseException:
+                # __exit__ never runs when __enter__ raises: a connection that cannot be checked out or opened must
+                # not leave every later writer in this process waiting on the lock forever
+                _write_lock.release()
+                raise
 
         def __exit__(self, *exc):
             try:
