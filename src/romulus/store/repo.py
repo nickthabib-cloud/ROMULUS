@@ -3908,11 +3908,20 @@ class Repo:
         return digest.hexdigest()
 
     @staticmethod
+    def _hold_writer(c) -> None:
+        """Begin this transaction with SQLite's write lock (BEGIN IMMEDIATE). pysqlite's legacy mode begins a
+        transaction only before the first write, so reads that guard a later write would otherwise see no fixed
+        state: another process could commit between the guard and the write."""
+        if not c.connection.driver_connection.in_transaction:
+            c.exec_driver_sql("BEGIN IMMEDIATE")
+
+    @staticmethod
     def _missing_exclusion(c, segment_id: str) -> str | None:
         """A cited key of the durable union over a building segment's span that its exclusions lack, or None.
 
-        Read inside the activation's write transaction, so no ledger write can fall between the check and the
-        activation: a build whose exclusions were read before another hunt cited more keys is never published."""
+        Callers read it first in the activation's transaction after `_hold_writer` took SQLite's write lock, so no
+        ledger write from any process can fall between the check and the activation: a build whose exclusions were
+        read before another hunt cited more keys is never published."""
         s, e = t.baseline_segment.c, t.baseline_hunt_exclusion.c
         row = c.execute(select(s.site, s.target, s.spec_id, s.spec_version, s.key_version, s.start, s.end,
                                s.excluded_keys).where(s.id == segment_id)).mappings().first()
@@ -3939,6 +3948,7 @@ class Repo:
         value = self._segment_rows_digest(segment_id)
         s = t.baseline_segment.c
         with write_txn(self.engine) as c:
+            self._hold_writer(c)
             if self._missing_exclusion(c, segment_id) is not None:
                 return "union_changed"
             if not c.execute(t.baseline_segment.update().where(
@@ -3984,6 +3994,7 @@ class Repo:
         exclusions lack (another hunt cited it after this build read the union)."""
         value = self._segment_rows_digest(segment_id)
         with write_txn(self.engine) as c:
+            self._hold_writer(c)
             if (key := self._missing_exclusion(c, segment_id)) is not None:
                 raise ExclusionsChanged(f"baseline segment {segment_id}: cited key {key} joined the union over its "
                                         "hours after the build read it")
