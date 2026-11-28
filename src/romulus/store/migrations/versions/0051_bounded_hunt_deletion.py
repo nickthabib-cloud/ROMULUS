@@ -1,6 +1,6 @@
 """Indexes and trigger-kept lookups that let a hunt be deleted in short batches whose cost does not grow with other
-hunts' data: which rows cite each raw copy, an observation marker for every event another hunt's investigation step or
-expansion link cites, and an index led by every column deletion selects by or SQLite checks a foreign key on.
+hunts' data: which rows cite each raw copy, which hunts' investigation steps and expansion links cite each event another
+hunt owns, and an index led by every column deletion selects by or SQLite checks a foreign key on.
 
 Revision ID: 0051
 Revises: 0050
@@ -36,18 +36,18 @@ INDEXES = {
 }
 
 _CASE_STEP_BODY = """ON case_step BEGIN
-        INSERT OR IGNORE INTO event_observation(hunt_id,event_id)
+        INSERT OR IGNORE INTO event_step_ref(hunt_id,event_id)
         SELECT c.hunt_id,e.id FROM "case" c, json_tree(NEW.decision) j JOIN typed_event e ON e.id=j.value
         WHERE c.id=NEW.case_id AND j.type='text' AND e.hunt_id!=c.hunt_id;
-        INSERT OR IGNORE INTO event_observation(hunt_id,event_id)
+        INSERT OR IGNORE INTO event_step_ref(hunt_id,event_id)
         SELECT c.hunt_id,e.id FROM "case" c, json_tree(coalesce(NEW.result_digest,'null')) j
         JOIN typed_event e ON e.id=j.value
         WHERE c.id=NEW.case_id AND j.type='text' AND e.hunt_id!=c.hunt_id; END"""
 _LINK_BODY = """ON expansion_link BEGIN
-        INSERT OR IGNORE INTO event_observation(hunt_id,event_id)
+        INSERT OR IGNORE INTO event_step_ref(hunt_id,event_id)
         SELECT NEW.hunt_id,e.id FROM json_each(NEW.event_ids) j JOIN typed_event e ON e.id=j.value
         WHERE e.hunt_id!=NEW.hunt_id;
-        INSERT OR IGNORE INTO event_observation(hunt_id,event_id)
+        INSERT OR IGNORE INTO event_step_ref(hunt_id,event_id)
         SELECT NEW.hunt_id,e.id FROM json_each(NEW.evidence_ids) j JOIN typed_event e ON e.id=j.value
         WHERE e.hunt_id!=NEW.hunt_id; END"""
 
@@ -91,16 +91,19 @@ def upgrade() -> None:
                       "SELECT j.value,e.id,'' FROM typed_event e, json_each(e.raw_ids) j")
     c.exec_driver_sql("INSERT OR IGNORE INTO event_raw_ref(raw_id,event_id,holder) "
                       "SELECT j.value,c.event_id,c.hunt_id FROM event_citation c, json_each(c.raw_ids) j")
-    # every citation an investigation step or expansion link already holds is an observation marker too
+    c.exec_driver_sql("""CREATE TABLE event_step_ref (
+        event_id VARCHAR NOT NULL, hunt_id VARCHAR NOT NULL, PRIMARY KEY (event_id, hunt_id))""")
+    c.exec_driver_sql("CREATE INDEX ix_event_step_ref_hunt ON event_step_ref(hunt_id)")
+    # every citation an investigation step or expansion link already holds
     for column in ("decision", "result_digest"):
         c.exec_driver_sql(
-            "INSERT OR IGNORE INTO event_observation(hunt_id,event_id) "
+            "INSERT OR IGNORE INTO event_step_ref(hunt_id,event_id) "
             f"SELECT DISTINCT c.hunt_id,e.id FROM case_step s JOIN \"case\" c ON c.id=s.case_id, "
             f"json_tree(coalesce(s.{column},'null')) j JOIN typed_event e ON e.id=j.value "
             "WHERE j.type='text' AND e.hunt_id!=c.hunt_id")
     for column in ("event_ids", "evidence_ids"):
         c.exec_driver_sql(
-            "INSERT OR IGNORE INTO event_observation(hunt_id,event_id) "
+            "INSERT OR IGNORE INTO event_step_ref(hunt_id,event_id) "
             f"SELECT DISTINCT l.hunt_id,e.id FROM expansion_link l, json_each(l.{column}) j "
             "JOIN typed_event e ON e.id=j.value WHERE e.hunt_id!=l.hunt_id")
     for name, (table, columns) in INDEXES.items():
@@ -117,4 +120,5 @@ def downgrade() -> None:
         c.exec_driver_sql(f"DROP TRIGGER {name}")
     for name in INDEXES:
         c.exec_driver_sql(f"DROP INDEX {name}")
+    c.exec_driver_sql("DROP TABLE event_step_ref")
     c.exec_driver_sql("DROP TABLE event_raw_ref")

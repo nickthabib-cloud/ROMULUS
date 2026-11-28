@@ -20,6 +20,7 @@ from romulus.store import repo as repo_module
 from romulus.store import schema as t
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
+from tests.test_delete import _csrf, _login, env  # noqa: F401 - the web deletion fixture
 
 TS = datetime(2026, 1, 1, tzinfo=UTC)
 GONE = "gone"
@@ -314,3 +315,44 @@ def test_every_deletion_statement_is_index_served(tmp_path):
         assert sorted(offenders) == []
     finally:
         other.close()
+
+
+def test_an_investigation_step_citing_another_hunts_event_keeps_it_without_an_observation_marker(tmp_path):
+    """Citing an event id in a step or link is not retrieving a copy of it: no observation marker is written, yet
+    deleting the owner keeps the event and hands it to the citing hunt."""
+    repo = Repo(make_engine(tmp_path / "store.db"))
+    migrate(repo.engine)
+    for hunt_id in ("owner", "citer"):
+        repo.create_hunt(hunt_id, {}, hunt_id, "test")
+    _save(repo, "owner", [_event("ev-1", "doc-1", host=None)])
+    repo.create_case({"id": "case-c", "hunt_id": "citer", "title": "pivot", "priority": 1.0, "entities": [],
+                      "step_budget": 4})
+    repo.append_case_step("case-c", 1, {"tool": "entity_timeline"}, True,
+                          result_digest={"status": "complete", "event_ids": ["ev-1"]})
+    with repo.engine.connect() as c:
+        assert c.execute(select(func.count()).select_from(t.event_observation)).scalar_one() == 0
+    repo.delete_hunt("owner", actor="test")
+    assert repo.events_by_ids(["ev-1"])[0]["hunt_id"] == "citer"
+    repo.delete_hunt("citer", actor="test")
+    assert repo.events_by_ids(["ev-1"]) == []
+    with repo.engine.connect() as c:
+        assert c.execute(select(func.count()).select_from(t.event_step_ref)).scalar_one() == 0
+
+
+def test_the_web_finishes_an_interrupted_deletion(env, monkeypatch):  # noqa: F811
+    client, repo, _s, pw = env
+
+    def stop(*_args, **_kwargs):
+        raise _Stop
+    monkeypatch.setattr(Repo, "_delete_own_overlays", stop)
+    with pytest.raises(_Stop):
+        repo.delete_hunt("h1", actor="test")
+    monkeypatch.undo()
+    _login(client, "lead1", pw)
+    assert client.get("/hunts/h1").status_code == 404
+    assert "/hunts/h1/delete" in client.get("/").text                  # listed, linked to finishing it
+    page = client.get("/hunts/h1/delete")
+    assert page.status_code == 200
+    done = client.post("/hunts/h1/delete", data={"csrf": _csrf(page.text), "confirm": "h1"}, follow_redirects=False)
+    assert done.status_code == 303
+    assert repo.get_hunt("h1", include_deleting=True) is None and repo.deleting_hunts() == []

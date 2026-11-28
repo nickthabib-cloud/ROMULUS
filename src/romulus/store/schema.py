@@ -134,6 +134,15 @@ event_raw_ref = Table(
 )
 Index("ix_event_raw_ref_event", event_raw_ref.c.event_id, event_raw_ref.c.holder)
 
+# Which hunts' investigation steps and expansion links cite an event another hunt owns, kept by triggers on case_step
+# and expansion_link, so deleting the owner keeps the event by index. Citing an id is not an observation of the event.
+event_step_ref = Table(
+    "event_step_ref", metadata,
+    Column("event_id", String, primary_key=True),
+    Column("hunt_id", String, primary_key=True),
+)
+Index("ix_event_step_ref_hunt", event_step_ref.c.hunt_id)
+
 normalization_error = Table(
     "normalization_error", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),

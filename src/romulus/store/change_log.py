@@ -33,24 +33,25 @@ INDEX_TRIGGERS = {
         SELECT value,NEW.event_id,NEW.hunt_id FROM json_each(NEW.raw_ids); END""",
     "citation_raw_ref_delete": """BEFORE DELETE ON event_citation BEGIN
         DELETE FROM event_raw_ref WHERE event_id=OLD.event_id AND holder=OLD.hunt_id; END""",
-    # A hunt's investigation step or expansion link that cites an event another hunt owns is an observation of it, so
-    # deleting the owner keeps the event by an indexed marker lookup (the owner observed it by owning it: no marker).
+    # A hunt's investigation step or expansion link that cites an event another hunt owns is recorded (event_step_ref),
+    # so deleting the owner keeps the event by an indexed lookup. It is not an observation marker: citing an id is not
+    # retrieving a copy of the event.
     **{f"case_step_observe_{action}": f"""AFTER {action.upper()}{' OF decision,result_digest' if action == 'update' else ''}
         ON case_step BEGIN
-        INSERT OR IGNORE INTO event_observation(hunt_id,event_id)
+        INSERT OR IGNORE INTO event_step_ref(hunt_id,event_id)
         SELECT c.hunt_id,e.id FROM "case" c, json_tree(NEW.decision) j JOIN typed_event e ON e.id=j.value
         WHERE c.id=NEW.case_id AND j.type='text' AND e.hunt_id!=c.hunt_id;
-        INSERT OR IGNORE INTO event_observation(hunt_id,event_id)
+        INSERT OR IGNORE INTO event_step_ref(hunt_id,event_id)
         SELECT c.hunt_id,e.id FROM "case" c, json_tree(coalesce(NEW.result_digest,'null')) j
         JOIN typed_event e ON e.id=j.value
         WHERE c.id=NEW.case_id AND j.type='text' AND e.hunt_id!=c.hunt_id; END"""
        for action in ("insert", "update")},
     **{f"expansion_link_observe_{action}": f"""AFTER {action.upper()}{' OF event_ids,evidence_ids' if action == 'update' else ''}
         ON expansion_link BEGIN
-        INSERT OR IGNORE INTO event_observation(hunt_id,event_id)
+        INSERT OR IGNORE INTO event_step_ref(hunt_id,event_id)
         SELECT NEW.hunt_id,e.id FROM json_each(NEW.event_ids) j JOIN typed_event e ON e.id=j.value
         WHERE e.hunt_id!=NEW.hunt_id;
-        INSERT OR IGNORE INTO event_observation(hunt_id,event_id)
+        INSERT OR IGNORE INTO event_step_ref(hunt_id,event_id)
         SELECT NEW.hunt_id,e.id FROM json_each(NEW.evidence_ids) j JOIN typed_event e ON e.id=j.value
         WHERE e.hunt_id!=NEW.hunt_id; END"""
        for action in ("insert", "update")},

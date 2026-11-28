@@ -862,7 +862,7 @@ class Repo:
     # A hunt being deleted: hidden from every reader, refused by every claim, and finished by deleting it again.
     DELETING: ClassVar[str] = "deleting"
     # One deletion transaction removes or reassigns at most this many parent rows (events, overlays, candidates, ...),
-    # so it holds SQLite's write lock for a time set by the batch, never by the size of the hunt or of the database.
+    # so it holds SQLite's write lock for a time set by the batch, never by the size of other hunts' data.
     DELETE_BATCH: ClassVar[int] = 500
 
     def delete_hunt(self, hunt_id: str, actor: str, now: datetime | None = None) -> dict[str, int]:
@@ -938,14 +938,16 @@ class Repo:
     def _event_users(c, hunt_id: str, ids: list[str]) -> dict[str, tuple[str, set[str]]]:
         """For each of `ids` (events `hunt_id` owns) that another hunt uses: (its new owner, every hunt using it).
         Event IDs are global and the first hunt to store an event owns the row, so other hunts depend on it through
-        their findings' cited events, their own entity links, their scoped citation overlays, their observation
-        markers (a direct observation, and every event their investigation steps and expansion links cite) and their
-        baseline observations' first events. Each is one indexed lookup per batch. The new owner is the lowest hunt
-        id in the first of those kinds that has one."""
-        kinds: list[dict[str, set[str]]] = [{} for _ in range(5)]
+        their findings' cited events, the events their investigation steps and expansion links cite, their own entity
+        links, their scoped citation overlays, their observation markers and their baseline observations' first
+        events. Each is one indexed lookup per batch. The new owner is the lowest hunt id in the first of those kinds
+        that has one."""
+        kinds: list[dict[str, set[str]]] = [{} for _ in range(6)]
         queries = (
             select(t.candidate_event.c.event_id, t.candidate_event.c.hunt_id).where(
                 t.candidate_event.c.event_id.in_(ids), t.candidate_event.c.hunt_id != hunt_id),
+            select(t.event_step_ref.c.event_id, t.event_step_ref.c.hunt_id).where(
+                t.event_step_ref.c.event_id.in_(ids), t.event_step_ref.c.hunt_id != hunt_id),
             select(t.event_entity.c.event_id, t.entity.c.hunt_id).join(
                 t.entity, t.entity.c.id == t.event_entity.c.entity_id).where(
                 t.event_entity.c.event_id.in_(ids), t.entity.c.hunt_id != hunt_id),
@@ -1112,10 +1114,13 @@ class Repo:
                 by_hunt({"report_host": "report_hosts", "zeek_link_budget": "zeek_link_budgets",
                          "candidate_event": "candidate_events"}.get(table.name, table.name), table)
         # Break nullable back-references, then remove the agent graph child-first.
-        self._batched_rows(None, t.model_call, lambda a: (a.c.hunt_id == hunt_id, a.c.session_id.is_not(None)),
+        # (found through the hunt's sessions and hypotheses, so a batch never walks every call or finding of the hunt)
+        sessions = select(t.agent_session.c.id).where(t.agent_session.c.hunt_id == hunt_id)
+        hypotheses = select(t.agent_hypothesis.c.id).where(t.agent_hypothesis.c.hunt_id == hunt_id)
+        self._batched_rows(None, t.model_call, lambda a: (a.c.session_id.in_(sessions), a.c.hunt_id == hunt_id),
                            values={"session_id": None}, counts=counts)
-        self._batched_rows(None, t.candidate, lambda a: (a.c.hunt_id == hunt_id,
-                                                         a.c.agent_hypothesis_id.is_not(None)),
+        self._batched_rows(None, t.candidate, lambda a: (a.c.agent_hypothesis_id.in_(hypotheses),
+                                                         a.c.hunt_id == hunt_id),
                            values={"agent_hypothesis_id": None}, counts=counts)
         for table in (t.agent_tool_call, t.agent_note, t.agent_rule_request, t.agent_link,
                       t.agent_hypothesis_cite, t.agent_hypothesis_event, t.agent_assessment,
@@ -1168,6 +1173,7 @@ class Repo:
         self._batched_parents("entities", t.entity, hunt_id, [("entity_links", t.event_entity, "entity_id", None)],
                               counts=counts)
         by_hunt("event_observations", t.event_observation)
+        by_hunt("event_step_refs", t.event_step_ref)
         by_hunt("normalization_errors", t.normalization_error)
         by_hunt("rule_cells", t.rule_run)
         # shared raw copies another hunt keeps are detached from this hunt's tasks before the tasks go
