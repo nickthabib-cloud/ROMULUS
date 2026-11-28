@@ -1104,6 +1104,13 @@ class Repo:
             self._batched_rows(name, table, lambda alias: (alias.c.hunt_id == hunt_id, *(
                 condition(alias) for condition in extra)), counts=counts)
 
+        # Rows that would otherwise go by ON DELETE CASCADE with the hunt row (baseline carry and window state, report
+        # appendices, per-anchor budgets): in bounded batches first, children before parents, so the hunt row's own
+        # delete cascades to nothing.
+        for table in reversed(t.metadata.sorted_tables):
+            if "hunt_id" in table.c and any(fk.ondelete == "CASCADE" for fk in table.c.hunt_id.foreign_keys):
+                by_hunt({"report_host": "report_hosts", "zeek_link_budget": "zeek_link_budgets",
+                         "candidate_event": "candidate_events"}.get(table.name, table.name), table)
         # Break nullable back-references, then remove the agent graph child-first.
         self._batched_rows(None, t.model_call, lambda a: (a.c.hunt_id == hunt_id, a.c.session_id.is_not(None)),
                            values={"session_id": None}, counts=counts)
