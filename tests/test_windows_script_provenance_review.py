@@ -154,8 +154,11 @@ def test_finding_template_shows_origin_from_stored_columns_or_legacy_fallback(tm
         row = deepcopy(candidate)
         if legacy:
             row.update(source_case_id=None, source_anchor_id=None, source_link_id=None)
+        from romulus.web.hunt_views import offset_page
         html = env.get_template("finding.html").render(c=row, gates=row["gate_results"], notes=[], events=[], raws=[],
-                                                       dispositions=[], statuses=[], csrf="test", pretty=str)
+                                                       dispositions=[], statuses=[], csrf="test", pretty=str,
+                                                       cited=offset_page([], 0, 20), retained=offset_page([], 0, 40),
+                                                       finding_url=lambda **_: "")
         assert "Discovery origin" in html and "case-1" in html and "anchor-1" in html and "link-1" in html
 
 
