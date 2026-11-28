@@ -453,6 +453,9 @@ def _packet_stage(tmp_path, monkeypatch, fault: str):
         if intent.kind == "histogram":
             return SearchOutcome(target=intent.target, fingerprint="h", started_at=f.T0, ended_at=f.T0,
                                  completeness=Completeness.complete, total=0, total_relation="eq")
+        if intent.purpose == hp.STREAM_PURPOSE:      # the cleartext-stream pass selects no connection here
+            return SearchOutcome(target=intent.target, fingerprint="s", started_at=f.T0, ended_at=f.T0,
+                                 completeness=Completeness.complete, total=0, total_relation="eq", returned=0)
         return SearchOutcome(target=intent.target, fingerprint="f", started_at=f.T0, ended_at=f.T0,
                              completeness=Completeness.complete, total=len(sessions), total_relation="eq",
                              returned=len(sessions), records=sessions)
@@ -463,8 +466,8 @@ def _packet_stage(tmp_path, monkeypatch, fault: str):
     repo = _repo(targets=(f.TARGET,))
     window = Window(start=f.T0 - timedelta(hours=1), end=f.T0 + timedelta(hours=2))
     packets = f._Packets(capped=fault == "tshark_byte_cap")
-    summary = hp.run_packet_stage(Settings(home=tmp_path), repo, None, "h1", window, {f.TARGET: f._contract()},
-                                  packets=packets)
+    summary = hp.run_packet_stage(Settings(home=tmp_path), repo, None, "h1", window,
+                                  {f.TARGET: f._contract(**f.STREAM_TYPES)}, packets=packets)
     return repo, summary
 
 
