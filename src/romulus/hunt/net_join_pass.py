@@ -4,9 +4,10 @@ The sweep joins the administration sessions its own findings cite (`romulus.dete
 compact rows in the hunt's stage directory. Once the packet and baseline stages have published their findings (the
 first-seen administration pair among them), this pass joins the sessions those findings cite against the same rows,
 and revises, never duplicates, the item of a (destination host, client address, service) it already published. Its
-tables record what each pass judged and published, so running it again (a resume) adds nothing twice. The rows are
-removed when the pass finishes, when the hunt is deleted, and by the pruning at the next hunt's start (hunts that no
-longer exist or whose pass finished). Rows that are missing leave the later stages' sessions unresolved, named; the
+tables record what each pass judged and published, so running it again (a resume) adds nothing twice. A later stage
+that runs again on resume reopens the pass first, and the pass runs again after it. The rows are removed when a pass
+finishes after both later stages finished, when the hunt is deleted, and by the pruning at the next hunt's start
+(hunts that no longer exist, or whose pass finished with no later stage left to run again). Rows that are missing leave the later stages' sessions unresolved, named; the
 sweep is never run again to rebuild them.
 """
 from __future__ import annotations
@@ -61,7 +62,7 @@ def prune_rows(stage_dir, repo: Repo) -> int:
             rows_path(stage_dir, hunt_id)
         except ValueError:
             continue                                    # not a file the sweep wrote
-        if repo.get_hunt(hunt_id) is None or finished(repo, hunt_id):
+        if repo.get_hunt(hunt_id) is None or (finished(repo, hunt_id) and not _kept_for_resume(repo, hunt_id)):
             discard_rows(stage_dir, hunt_id)
             removed += 1
     return removed
@@ -69,6 +70,10 @@ def prune_rows(stage_dir, repo: Repo) -> int:
 
 def finished(repo: Repo, hunt_id: str) -> bool:
     return bool(((repo.latest_audit(hunt_id, SUMMARY_ACTION) or {}).get("detail") or {}).get("finished"))
+
+
+def _kept_for_resume(repo: Repo, hunt_id: str) -> bool:
+    return bool(((repo.latest_audit(hunt_id, SUMMARY_ACTION) or {}).get("detail") or {}).get("rows_kept_for_resume"))
 
 
 class _KeptRows:
@@ -93,9 +98,10 @@ def _later_rules() -> frozenset[str]:
 
 
 def run_join_pass(repo: Repo, client, hunt_id: str, stage_dir, *, owner_token: str | None = None,
-                  heartbeat=None) -> dict:
+                  heartbeat=None, keep_rows: bool = False) -> dict:
     """Join the sessions the packet and baseline stages' findings cite, publish or revise the items, restate the
-    rule's window cell, and record the pass's summary."""
+    rule's window cell, and record the pass's summary. `keep_rows`: a later stage has not finished, so a resume runs
+    it again and this pass after it; the kept rows stay for that pass (the summary says so, and pruning keeps them)."""
     rule = NetworkAdminLogonJoin()
     rule.citation_fetcher = SourceCitationFetcher(client)
     rule.later_rules = _later_rules()
@@ -126,9 +132,24 @@ def run_join_pass(repo: Repo, client, hunt_id: str, stage_dir, *, owner_token: s
         _restate_cell(repo, hunt_id, rule, notes, None, partial=bool(missing), owner_token=owner_token)
         summary = {"finished": True, "complete": not missing, "rows": "missing", "unresolved_sessions": missing,
                    "notes": notes}
+    if keep_rows and path.is_file():
+        summary["rows_kept_for_resume"] = True
     repo.audit("system", SUMMARY_ACTION, hunt_id, summary, owner_token=owner_token)
-    discard_rows(stage_dir, hunt_id)
+    if not summary.get("rows_kept_for_resume"):
+        discard_rows(stage_dir, hunt_id)
     return summary
+
+
+def reopen(repo: Repo, hunt_id: str, stage: str, *, owner_token: str | None = None) -> None:
+    """A later stage is about to run again, and it may publish findings whose sessions the finished pass never saw.
+    Record, before it runs, that the pass is unfinished (so a crash in between still leaves it to a resume) and make
+    the join's window cell partial until the pass runs again."""
+    if not finished(repo, hunt_id):
+        return
+    reason = f"the {stage} runs again; the pass runs again after it"
+    repo.audit("system", SUMMARY_ACTION, hunt_id, {"finished": False, "complete": False, "reopened": reason},
+               owner_token=owner_token)
+    mark_not_run(repo, hunt_id, reason, owner_token=owner_token)
 
 
 def mark_not_run(repo: Repo, hunt_id: str, reason: str, *, owner_token: str | None = None) -> None:

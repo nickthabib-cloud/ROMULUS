@@ -167,14 +167,15 @@ def baseline_peer_scopes_query(scope_kind: str, hunt_id: str, spec_id: str,
             .where(c.scope_kind == scope_kind, *_hour_in_span(c, span)))
 
 
-def observation_citations_query(hunt_id: str):
-    """(event id, citing hunt) for every event `hunt_id` stored that another hunt's baseline observation cites
-    as its first event, the lowest citing hunt id when several do: one walk of the hunt's events in id order,
-    each probing ix_baseline_observation_first_event."""
+def observation_citations_query(hunt_id: str, event_ids: list[str] | None = None):
+    """(event id, citing hunt) for every event `hunt_id` stored (or only those of `event_ids`) that another hunt's
+    baseline observation cites as its first event, the lowest citing hunt id when several do: one walk of the
+    hunt's events in id order, each probing ix_baseline_observation_first_event."""
     obs, ev = t.baseline_observation.c, t.typed_event.c
+    narrow = () if event_ids is None else (ev.id.in_(event_ids),)
     return (select(ev.id, func.min(obs.hunt_id))
             .join(t.baseline_observation, obs.first_event_id == ev.id)
-            .where(ev.hunt_id == hunt_id, obs.hunt_id != hunt_id)
+            .where(ev.hunt_id == hunt_id, obs.hunt_id != hunt_id, *narrow)
             .group_by(ev.id))
 
 
@@ -645,10 +646,14 @@ class Repo:
             c.execute(t.audit_event.insert().values(at=utcnow(), actor=created_by, action="hunt.create",
                                                     hunt_id=hunt_id, detail={"digest": digest_}))
 
-    def get_hunt(self, hunt_id: str) -> dict | None:
+    def get_hunt(self, hunt_id: str, *, include_deleting: bool = False) -> dict | None:
+        """The hunt's row, or None. A hunt being deleted reads as gone (its rows are half removed), except to the
+        deletion itself (`include_deleting`)."""
         with self.engine.connect() as c:
             r = c.execute(select(t.hunt).where(t.hunt.c.id == hunt_id)).mappings().first()
-            return dict(r) if r else None
+            if r is None or (r["execution_state"] == self.DELETING and not include_deleting):
+                return None
+            return dict(r)
 
     def list_hunts(self) -> list[dict]:
         with self.engine.connect() as c:
@@ -854,267 +859,333 @@ class Repo:
 
     FINISHED_STATES: ClassVar[set[str]] = {"completed_within_scope", "partial", "failed", "canceled"}
 
+    # A hunt being deleted: hidden from every reader, refused by every claim, and finished by deleting it again.
+    DELETING: ClassVar[str] = "deleting"
+    # One deletion transaction removes or reassigns at most this many parent rows (events, overlays, candidates, ...),
+    # so it holds SQLite's write lock for a time set by the batch, never by the size of other hunts' data.
+    DELETE_BATCH: ClassVar[int] = 500
+
     def delete_hunt(self, hunt_id: str, actor: str, now: datetime | None = None) -> dict[str, int]:
         """Permanently delete one hunt and everything only it owns. Evidence that another hunt still
         cites is kept and handed to that hunt; shared raw copies are kept while any event cites them.
         Refuses a hunt that may still be executing. The system's own per-hunt records (summaries, maps) go with
-        the hunt; records of what people did, and an audit record of the deletion, are kept."""
+        the hunt; records of what people did, and an audit record of the deletion, are kept.
+
+        The hunt is first marked deleting (no reader shows it, no worker can claim it); then its rows go in short
+        transactions of at most DELETE_BATCH parent rows each, every lookup served by an index, so a hunt running
+        meanwhile in another process waits for one batch at most. Each batch decides, under the write lock, which of
+        its events another hunt cites, so a citation committed between batches is honoured. A deletion that stops
+        part way leaves the hunt deleting; deleting it again finishes the work."""
         now = now or utcnow()
+        self._claim_deletion(hunt_id, actor, now)
+        counts: dict[str, int] = {}
+        self._delete_owned_events(hunt_id, counts)
+        self._delete_own_overlays(hunt_id, counts)
+        self._delete_hunt_rows(hunt_id, counts)
         with write_txn(self.engine) as c:
-            # Take SQLite's write lock *before* reading liveness or citations. pysqlite defers BEGIN
-            # until the first write, so without this a worker in another process could claim the
-            # hunt, or publish a new citation, between our checks and our deletes.
-            c.execute(t.hunt.update().where(t.hunt.c.id == hunt_id).values(id=t.hunt.c.id))
+            self._hold_writer(c)
+            c.execute(t.hunt.delete().where(t.hunt.c.id == hunt_id, t.hunt.c.execution_state == self.DELETING))
+            # the deletion itself stays auditable (audit_event has no foreign key to hunt)
+            c.execute(t.audit_event.insert().values(at=now, actor=actor, action="hunt.delete", hunt_id=hunt_id,
+                                                    detail={k: str(v) for k, v in counts.items()}))
+        return counts
+
+    def _claim_deletion(self, hunt_id: str, actor: str, now: datetime) -> None:
+        """Mark the hunt deleting, after checking (under the write lock) that no worker may still run it. A hunt
+        already deleting is a deletion that stopped part way: it is taken up again."""
+        with write_txn(self.engine) as c:
+            self._hold_writer(c)
             h = c.execute(select(t.hunt).where(t.hunt.c.id == hunt_id)).mappings().first()
             if h is None:
                 raise KeyError(hunt_id)
-            lease_until = h.get("lease_until")
-            if lease_until is not None and lease_until.tzinfo is None:
-                lease_until = lease_until.replace(tzinfo=UTC)
-            agent_until = c.execute(select(t.agent_run.c.lease_until).where(
-                t.agent_run.c.hunt_id == hunt_id,
-            )).scalar_one_or_none()
-            live = ((lease_until is not None and lease_until > now)
-                    or (_stored_utc(agent_until) is not None and _stored_utc(agent_until) > now))
-            if live:
-                raise ValueError(f"hunt {hunt_id} is {h['execution_state']} with a live worker lease; "
-                                 f"let it finish (or wait for the lease to expire) before deleting")
+            if h["execution_state"] != self.DELETING:
+                lease_until = h.get("lease_until")
+                if lease_until is not None and lease_until.tzinfo is None:
+                    lease_until = lease_until.replace(tzinfo=UTC)
+                agent_until = c.execute(select(t.agent_run.c.lease_until).where(
+                    t.agent_run.c.hunt_id == hunt_id,
+                )).scalar_one_or_none()
+                live = ((lease_until is not None and lease_until > now)
+                        or (_stored_utc(agent_until) is not None and _stored_utc(agent_until) > now))
+                if live:
+                    raise ValueError(f"hunt {hunt_id} is {h['execution_state']} with a live worker lease; "
+                                     f"let it finish (or wait for the lease to expire) before deleting")
+                c.execute(t.hunt.update().where(t.hunt.c.id == hunt_id).values(
+                    execution_state=self.DELETING, lease_until=None, lease_owner=None))
+                c.execute(t.agent_run.update().where(t.agent_run.c.hunt_id == hunt_id).values(
+                    lease_until=None, lease_owner=None))
+                c.execute(t.audit_event.insert().values(at=now, actor=actor, action="hunt.delete_started",
+                                                        hunt_id=hunt_id,
+                                                        detail={"previous_state": h["execution_state"]}))
+        self._exec_holders.pop(hunt_id, None)
 
-            # Events this hunt stored that ANY other hunt still uses: keep them and reassign ownership.
-            # Event IDs are global and the first hunt to store an event owns the row, so other hunts
-            # can depend on it through (a) their findings' event_ids, (b) their investigation steps'
-            # pivot digests, (c) their own entity links (written by save_evidence per hunt), and (d) their
-            # expansion links.
-            # Only ids and raw references: an event body is read below, one at a time, for the few events whose
-            # new owner has a differing overlay, so deletion memory stays O(owned events) and never O(their bodies).
-            owned_raw = {
-                event_id: list(raw_ids or [])
-                for event_id, raw_ids in c.execute(select(
-                    t.typed_event.c.id, t.typed_event.c.raw_ids,
-                ).where(t.typed_event.c.hunt_id == hunt_id))
-            }
-            mine = set(owned_raw)
-            cited_by: dict[str, str] = {}
-            users_by: dict[str, set[str]] = {}
+    def deleting_hunts(self) -> list[str]:
+        """Hunts whose deletion stopped part way (deleting one again finishes it)."""
+        with self.engine.connect() as c:
+            return list(c.execute(select(t.hunt.c.id).where(t.hunt.c.execution_state == self.DELETING)
+                                  .order_by(t.hunt.c.id)).scalars())
 
-            def cite(eid: str, citing_hunt: str) -> None:
-                if eid in mine:
-                    users_by.setdefault(eid, set()).add(citing_hunt)
-                    cited_by.setdefault(eid, citing_hunt)
+    def _deletion_batches(self, step) -> None:
+        """Run `step(connection)` in its own write transaction, holding the lock from its first read, until it
+        reports that it found nothing left to do."""
+        while True:
+            with write_txn(self.engine) as c:
+                self._hold_writer(c)
+                if not step(c):
+                    return
 
-            for cid_hunt, eids in c.execute(select(t.candidate.c.hunt_id, t.candidate.c.event_ids)
-                                            .where(t.candidate.c.hunt_id != hunt_id)):
-                for eid in eids or []:
-                    cite(eid, cid_hunt)
+    @staticmethod
+    def _event_users(c, hunt_id: str, ids: list[str]) -> dict[str, tuple[str, set[str]]]:
+        """For each of `ids` (events `hunt_id` owns) that another hunt uses: (its new owner, every hunt using it).
+        Event IDs are global and the first hunt to store an event owns the row, so other hunts depend on it through
+        their findings' cited events, the events their investigation steps and expansion links cite, their own entity
+        links, their scoped citation overlays, their observation markers and their baseline observations' first
+        events. Each is one indexed lookup per batch. The new owner is the lowest hunt id in the first of those kinds
+        that has one."""
+        kinds: list[dict[str, set[str]]] = [{} for _ in range(6)]
+        queries = (
+            select(t.candidate_event.c.event_id, t.candidate_event.c.hunt_id).where(
+                t.candidate_event.c.event_id.in_(ids), t.candidate_event.c.hunt_id != hunt_id),
+            select(t.event_step_ref.c.event_id, t.event_step_ref.c.hunt_id).where(
+                t.event_step_ref.c.event_id.in_(ids), t.event_step_ref.c.hunt_id != hunt_id),
+            select(t.event_entity.c.event_id, t.entity.c.hunt_id).join(
+                t.entity, t.entity.c.id == t.event_entity.c.entity_id).where(
+                t.event_entity.c.event_id.in_(ids), t.entity.c.hunt_id != hunt_id),
+            select(t.event_citation.c.event_id, t.event_citation.c.hunt_id).where(
+                t.event_citation.c.event_id.in_(ids), t.event_citation.c.hunt_id != hunt_id),
+            select(t.event_observation.c.event_id, t.event_observation.c.hunt_id).where(
+                t.event_observation.c.event_id.in_(ids), t.event_observation.c.hunt_id != hunt_id),
+            observation_citations_query(hunt_id, ids),
+        )
+        for kind, query in zip(kinds, queries, strict=True):
+            for event_id, user in c.execute(query):
+                kind.setdefault(event_id, set()).add(user)
+        users: dict[str, tuple[str, set[str]]] = {}
+        for event_id in ids:
+            owner = next((min(kind[event_id]) for kind in kinds if kind.get(event_id)), None)
+            if owner is not None:
+                users[event_id] = (owner, set().union(*(kind.get(event_id, set()) for kind in kinds)))
+        return users
 
-            def _strings(obj):
-                if isinstance(obj, str):
-                    yield obj
-                elif isinstance(obj, dict):
-                    for v in obj.values():
-                        yield from _strings(v)
-                elif isinstance(obj, list):
-                    for v in obj:
-                        yield from _strings(v)
+    def _drop_unreferenced_raw(self, c, raw_ids: set[str], counts: dict[str, int]) -> None:
+        """Delete the raw copies among `raw_ids` that no stored event or citation overlay cites any more."""
+        r = t.raw_record
+        for chunk in _chunks(sorted(raw_ids), ID_CHUNK):
+            counts["raw_records"] = counts.get("raw_records", 0) + (c.execute(r.delete().where(
+                r.c.id.in_(chunk),
+                ~select(t.event_raw_ref.c.raw_id).where(t.event_raw_ref.c.raw_id == r.c.id).exists(),
+            )).rowcount or 0)
 
-            for step_hunt, digest_, decision in c.execute(
-                    select(t.case.c.hunt_id, t.case_step.c.result_digest, t.case_step.c.decision)
-                    .join(t.case, t.case.c.id == t.case_step.c.case_id).where(t.case.c.hunt_id != hunt_id)):
-                for sval in _strings([digest_, decision]):
-                    cite(sval, step_hunt)
-            for ev_id, ent_hunt in c.execute(
-                    select(t.event_entity.c.event_id, t.entity.c.hunt_id)
-                    .join(t.entity, t.entity.c.id == t.event_entity.c.entity_id)
-                    .where(t.entity.c.hunt_id != hunt_id)):
-                cite(ev_id, ent_hunt)
-            # (d) other hunts' expansion links cite events they reached and the evidence they rest on
-            for link_hunt, link_events, link_evidence in c.execute(
-                    select(t.expansion_link.c.hunt_id, t.expansion_link.c.event_ids, t.expansion_link.c.evidence_ids)
-                    .where(t.expansion_link.c.hunt_id != hunt_id)):
-                for eid in [*(link_events or []), *(link_evidence or [])]:
-                    cite(eid, link_hunt)
-            # (e) a later hunt's scoped citation overlay also keeps the stable typed row it describes
-            citation_overlays = {
+    def _delete_owned_events(self, hunt_id: str, counts: dict[str, int]) -> None:
+        """The hunt's own stable events, one batch at a time: an event another hunt uses is handed to that hunt,
+        the rest go with this hunt's own overlays and entity links on them, and so do the raw copies they leave
+        uncited."""
+        counts.setdefault("events_kept_for_other_hunts", 0)
+        counts.setdefault("typed_events", 0)
+        ev, cit = t.typed_event, t.event_citation
+
+        def step(c) -> bool:
+            # no order: every row read is reassigned or deleted in this transaction, so the next read finds new rows
+            rows = c.execute(select(ev.c.id, ev.c.raw_ids).where(ev.c.hunt_id == hunt_id)
+                             .limit(self.DELETE_BATCH)).all()
+            if not rows:
+                return False
+            ids = [row.id for row in rows]
+            users = self._event_users(c, hunt_id, ids)
+            touched: set[str] = set()
+            overlays = {
                 (row["event_id"], row["hunt_id"]): dict(row)
-                for row in c.execute(select(t.event_citation).join(
-                    t.typed_event, t.typed_event.c.id == t.event_citation.c.event_id,
-                ).where(
-                    t.typed_event.c.hunt_id == hunt_id,
-                    t.event_citation.c.hunt_id != hunt_id,
-                )).mappings()
-            }
-            for event_id, citation_hunt in citation_overlays:
-                cite(event_id, citation_hunt)
-            # (f) every direct observation by another hunt is explicit, including entity-free events and identical
-            # observations that deliberately need no citation overlay (the owner's own observation is its row).
-            for event_id, observation_hunt in c.execute(select(
-                    t.event_observation.c.event_id, t.event_observation.c.hunt_id,
-            ).join(t.typed_event, t.typed_event.c.id == t.event_observation.c.event_id).where(
-                    t.typed_event.c.hunt_id == hunt_id,
-                    t.event_observation.c.hunt_id != hunt_id,
-            )):
-                cite(event_id, observation_hunt)
-            # (g) other hunts' baseline observations cite their first window event
-            for eid, obs_hunt in c.execute(observation_citations_query(hunt_id)):
-                cite(eid, obs_hunt)
-            displaced_raw: set[str] = set()
-            for eid, owner in cited_by.items():
-                overlay = citation_overlays.get((eid, owner))
+                for row in c.execute(select(cit).where(cit.c.event_id.in_(sorted(users)))).mappings()
+            } if users else {}
+            for event_id, (owner, using) in users.items():
+                overlay = overlays.get((event_id, owner))
                 values: dict[str, Any] = {"hunt_id": owner}
                 if overlay is not None:
-                    # Hunts whose identical observation needed no overlay currently fall through to the stable
-                    # row. Preserve that exact old row before replacing it with another hunt's differing overlay.
-                    stable = c.execute(select(t.typed_event.c.event, t.typed_event.c.raw_ids).where(
-                        t.typed_event.c.id == eid)).mappings().one()
-                    for fallback_hunt in sorted(users_by[eid] - {owner}):
-                        if (eid, fallback_hunt) in citation_overlays:
+                    # Hunts whose identical observation needed no overlay currently fall through to the stable row.
+                    # Preserve that exact old row before replacing it with another hunt's differing overlay.
+                    stable = c.execute(select(ev.c.event, ev.c.raw_ids).where(ev.c.id == event_id)).mappings().one()
+                    for fallback_hunt in sorted(using - {owner}):
+                        if (event_id, fallback_hunt) in overlays:
                             continue
-                        c.execute(t.event_citation.insert().values(
-                            hunt_id=fallback_hunt, event_id=eid,
-                            event=stable["event"], raw_ids=stable["raw_ids"],
-                        ))
-                    displaced_raw.update(owned_raw[eid])
+                        c.execute(cit.insert().values(hunt_id=fallback_hunt, event_id=event_id,
+                                                      event=stable["event"], raw_ids=stable["raw_ids"]))
+                    touched.update(stable["raw_ids"] or [])
                     values.update(event=overlay["event"], raw_ids=overlay["raw_ids"])
                     normalizer = (overlay["event"] or {}).get("normalizer")
                     if isinstance(normalizer, str):
                         values["normalizer"] = normalizer
-                c.execute(t.typed_event.update().where(t.typed_event.c.id == eid).values(**values))
+                c.execute(ev.update().where(ev.c.id == event_id).values(**values))
                 # the new owner observed the event by owning it: its marker row says nothing more
                 c.execute(t.event_observation.delete().where(
-                    t.event_observation.c.hunt_id == owner,
-                    t.event_observation.c.event_id == eid,
-                ))
+                    t.event_observation.c.hunt_id == owner, t.event_observation.c.event_id == event_id))
                 if overlay is not None:
-                    c.execute(t.event_citation.delete().where(
-                        t.event_citation.c.hunt_id == owner,
-                        t.event_citation.c.event_id == eid,
-                    ))
-            drop_events = mine - set(cited_by)
+                    c.execute(cit.delete().where(cit.c.hunt_id == owner, cit.c.event_id == event_id))
+            drop = [row for row in rows if row.id not in users]
+            drop_ids = [row.id for row in drop]
+            for row in drop:
+                touched.update(row.raw_ids or [])
+            if drop_ids:
+                # this hunt's own overlays on its own events (a later differing copy it retrieved) go with them
+                touched.update(raw for (raw_ids,) in c.execute(select(cit.c.raw_ids).where(
+                    cit.c.hunt_id == hunt_id, cit.c.event_id.in_(drop_ids))) for raw in raw_ids or [])
+                counts["event_citations"] = counts.get("event_citations", 0) + (c.execute(cit.delete().where(
+                    cit.c.hunt_id == hunt_id, cit.c.event_id.in_(drop_ids))).rowcount or 0)
+                counts["entity_links"] = counts.get("entity_links", 0) + (c.execute(t.event_entity.delete().where(
+                    t.event_entity.c.event_id.in_(drop_ids))).rowcount or 0)
+                counts["typed_events"] += c.execute(ev.delete().where(ev.c.id.in_(drop_ids))).rowcount or 0
+            self._drop_unreferenced_raw(c, touched, counts)
+            counts["events_kept_for_other_hunts"] += len(users)
+            return True
 
-            # Raw copies referenced only by this hunt's dropped events or scoped citation overlays.
-            # An overlay can cite a duplicate source copy that the stable global event never cited.
-            candidate_raw: set[str] = set(displaced_raw)
-            for chunk in _chunks(sorted(drop_events), ID_CHUNK):
-                for (raw_ids,) in c.execute(select(t.typed_event.c.raw_ids).where(t.typed_event.c.id.in_(chunk))):
-                    candidate_raw.update(raw_ids or [])
-            for (raw_ids,) in c.execute(select(t.event_citation.c.raw_ids).where(
-                    t.event_citation.c.hunt_id == hunt_id)):
-                candidate_raw.update(raw_ids or [])
-            still_used: set[str] = set()
-            if candidate_raw:
-                # every other event's raw references, filtered here rather than by a NOT IN over the dropped set
-                for event_id, raw_ids in c.execute(select(t.typed_event.c.id, t.typed_event.c.raw_ids)):
-                    if event_id not in drop_events:
-                        still_used.update(set(raw_ids or []) & candidate_raw)
-                for (raw_ids,) in c.execute(select(t.event_citation.c.raw_ids).where(
-                        t.event_citation.c.hunt_id != hunt_id)):
-                    still_used.update(set(raw_ids or []) & candidate_raw)
-            drop_raw = candidate_raw - still_used
+        self._deletion_batches(step)
 
-            task_ids = select(t.task.c.id).where(t.task.c.hunt_id == hunt_id)
-            case_ids = select(t.case.c.id).where(t.case.c.hunt_id == hunt_id)
-            cand_ids = select(t.candidate.c.id).where(t.candidate.c.hunt_id == hunt_id)
-            ent_ids = select(t.entity.c.id).where(t.entity.c.hunt_id == hunt_id)
-            counts: dict[str, int] = {}
+    def _delete_own_overlays(self, hunt_id: str, counts: dict[str, int]) -> None:
+        """The hunt's citation overlays on events other hunts own, then the raw copies only they cited."""
+        cit = t.event_citation
 
-            def rm(name, stmt):
-                counts[name] = c.execute(stmt).rowcount or 0
+        def step(c) -> bool:
+            rows = c.execute(select(cit.c.event_id, cit.c.raw_ids).where(cit.c.hunt_id == hunt_id)
+                             .limit(self.DELETE_BATCH)).all()
+            if not rows:
+                return False
+            counts["event_citations"] = counts.get("event_citations", 0) + (c.execute(cit.delete().where(
+                cit.c.hunt_id == hunt_id, cit.c.event_id.in_([row.event_id for row in rows]))).rowcount or 0)
+            self._drop_unreferenced_raw(c, {raw for row in rows for raw in row.raw_ids or []}, counts)
+            return True
 
-            def rm_ids(name, column, ids):
-                """Delete rows whose `column` is in `ids`, binding at most ID_CHUNK ids per statement."""
-                table = column.table
-                counts[name] = counts.get(name, 0) + sum(
-                    c.execute(table.delete().where(column.in_(chunk))).rowcount or 0
-                    for chunk in _chunks(sorted(ids), ID_CHUNK))
+        self._deletion_batches(step)
 
-            # Break nullable back-references, then remove the agent graph child-first.
-            c.execute(t.model_call.update().where(t.model_call.c.hunt_id == hunt_id).values(session_id=None))
-            c.execute(t.candidate.update().where(t.candidate.c.hunt_id == hunt_id).values(agent_hypothesis_id=None))
-            for table in (t.agent_tool_call, t.agent_note, t.agent_rule_request, t.agent_link,
-                          t.agent_hypothesis_cite, t.agent_hypothesis_event, t.agent_assessment,
-                          t.agent_raw_record, t.agent_session, t.agent_hypothesis, t.agent_run,
-                          t.mention, t.mention_loss, t.mention_scan):
-                rm(table.name, table.delete().where(table.c.hunt_id == hunt_id))
+    def _batched_rows(self, name: str | None, table, where, *, values: dict | None = None,
+                      counts: dict[str, int]) -> None:
+        """Delete (or, with `values`, update) the rows of `table` matching `where(table)`, at most DELETE_BATCH per
+        transaction, selected by primary key (rowid when it has none) through the index `where` is served by. An
+        update's `where` must stop matching the rows it changed."""
+        key = list(table.primary_key.columns)
 
-            # The journal is disk-backed and may outgrow a bind list; remove one bounded page at a time.
-            while True:
-                seqs = c.execute(select(t.agent_change.c.seq).where(t.agent_change.c.hunt_id == hunt_id)
-                                 .order_by(t.agent_change.c.seq).limit(ID_CHUNK)).scalars().all()
-                if not seqs:
-                    break
-                rm_ids("agent_changes", t.agent_change.c.seq, seqs)
-            # Candidate deletion also cleans this index through its trigger with FK enforcement disabled.
-            rm("candidate_events", t.candidate_event.delete().where(t.candidate_event.c.candidate_id.in_(cand_ids)))
+        def step(c) -> bool:
+            batch = table.alias("batch")
+            if key:
+                picked = select(*(batch.c[column.name] for column in key))
+                target = (key[0] if len(key) == 1 else tuple_(*key)).in_(
+                    picked.select_from(batch).where(*where(batch)).limit(self.DELETE_BATCH))
+            else:
+                target = literal_column("rowid").in_(select(literal_column("batch.rowid")).select_from(batch)
+                                                     .where(*where(batch)).limit(self.DELETE_BATCH))
+            if values is None:
+                done = c.execute(table.delete().where(target)).rowcount or 0
+            else:
+                done = c.execute(table.update().where(target).values(**values)).rowcount or 0
+            if name is not None:
+                counts[name] = counts.get(name, 0) + done
+            return done >= self.DELETE_BATCH
 
-            # detach shared rows from this hunt's tasks and children before removing them
-            c.execute(t.raw_record.update().where(t.raw_record.c.first_task_id.in_(task_ids))
-                      .values(first_task_id=None))
+        self._deletion_batches(step)
+
+    def _batched_parents(self, name: str, table, hunt_id: str, children, *, counts: dict[str, int]) -> None:
+        """Delete the hunt's rows of `table` a batch at a time, each batch's child rows first, also in bounded
+        batches. `children`: (count name or None, child table, child column referencing table.id, values): the child
+        rows are deleted, or with `values` updated (detached)."""
+        while True:
+            with self.engine.connect() as c:
+                ids = list(c.execute(select(table.c.id).where(table.c.hunt_id == hunt_id)
+                                     .limit(self.DELETE_BATCH)).scalars())
+            if not ids:
+                return
+            for child_name, child, column, values in children:
+                self._batched_rows(child_name, child, lambda alias, column=column, ids=ids: (
+                    alias.c[column].in_(ids),), values=values, counts=counts)
+            with write_txn(self.engine) as c:
+                self._hold_writer(c)
+                counts[name] = counts.get(name, 0) + (c.execute(table.delete().where(
+                    table.c.id.in_(ids))).rowcount or 0)
+
+    def _delete_hunt_rows(self, hunt_id: str, counts: dict[str, int]) -> None:
+        """Every other row of the hunt, child tables first, each in bounded batches."""
+
+        def by_hunt(name, table, *extra):
+            self._batched_rows(name, table, lambda alias: (alias.c.hunt_id == hunt_id, *(
+                condition(alias) for condition in extra)), counts=counts)
+
+        # Rows that would otherwise go by ON DELETE CASCADE with the hunt row (baseline carry and window state, report
+        # appendices, per-anchor budgets): in bounded batches first, children before parents, so the hunt row's own
+        # delete cascades to nothing.
+        for table in reversed(t.metadata.sorted_tables):
+            if "hunt_id" in table.c and any(fk.ondelete == "CASCADE" for fk in table.c.hunt_id.foreign_keys):
+                by_hunt({"report_host": "report_hosts", "zeek_link_budget": "zeek_link_budgets",
+                         "candidate_event": "candidate_events"}.get(table.name, table.name), table)
+        # Break nullable back-references, then remove the agent graph child-first.
+        # (found through the hunt's sessions and hypotheses, so a batch never walks every call or finding of the hunt)
+        sessions = select(t.agent_session.c.id).where(t.agent_session.c.hunt_id == hunt_id)
+        hypotheses = select(t.agent_hypothesis.c.id).where(t.agent_hypothesis.c.hunt_id == hunt_id)
+        self._batched_rows(None, t.model_call, lambda a: (a.c.session_id.in_(sessions), a.c.hunt_id == hunt_id),
+                           values={"session_id": None}, counts=counts)
+        self._batched_rows(None, t.candidate, lambda a: (a.c.agent_hypothesis_id.in_(hypotheses),
+                                                         a.c.hunt_id == hunt_id),
+                           values={"agent_hypothesis_id": None}, counts=counts)
+        for table in (t.agent_tool_call, t.agent_note, t.agent_rule_request, t.agent_link,
+                      t.agent_hypothesis_cite, t.agent_hypothesis_event, t.agent_assessment,
+                      t.agent_raw_record, t.agent_session, t.agent_hypothesis, t.agent_run,
+                      t.mention, t.mention_loss, t.mention_scan):
+            by_hunt(table.name, table)
+        # the journal is written by triggers until the rows above are gone, so it goes after them
+        by_hunt("agent_changes", t.agent_change)
+        # the citation index of the hunt's findings; deleting a finding would otherwise remove its rows one by one
+        by_hunt("candidate_events", t.candidate_event)
+
+        # detach shared hunts from this one
+        with write_txn(self.engine) as c:
+            self._hold_writer(c)
             c.execute(t.hunt.update().where(t.hunt.c.parent_hunt_id == hunt_id).values(parent_hunt_id=None))
-            rm("analyst_links", t.analyst_link.delete().where(t.analyst_link.c.hunt_id == hunt_id))
-            rm("agent_page_items", t.agent_page_item.delete().where(t.agent_page_item.c.hunt_id == hunt_id))
-            rm("agent_page_plans", t.agent_page_plan.delete().where(t.agent_page_plan.c.hunt_id == hunt_id))
-            rm("agent_aliases", t.agent_alias.delete().where(t.agent_alias.c.hunt_id == hunt_id))
-            rm("expansion_links", t.expansion_link.delete().where(t.expansion_link.c.hunt_id == hunt_id))
-            rm("zeek_link_budgets", t.zeek_link_budget.delete().where(t.zeek_link_budget.c.hunt_id == hunt_id))
-            rm("expansion_anchors", t.expansion_anchor.delete().where(t.expansion_anchor.c.hunt_id == hunt_id))
-            rm("baseline_observations", t.baseline_observation.delete().where(
-                t.baseline_observation.c.hunt_id == hunt_id,
-            ))
-            rm("baseline_snapshots", t.baseline_snapshot.delete().where(t.baseline_snapshot.c.hunt_id == hunt_id))
-            # Baseline segments are site history counted from the source, not this hunt's data: the ones it built or
-            # derived from its window stay active for every later hunt (their ids are content-derived, and other
-            # hunts' snapshots name them), and the hunt id on them remains as provenance. Its cited-key exclusion
-            # ledger stays too, so the segments' exclusion digests stay current. Only a segment it was still
-            # building is unfinished work of this hunt alone, and is revoked.
-            # a deleted hunt no longer holds history back: its marks go with it
-            rm("baseline_exclusions_incomplete", t.baseline_exclusions_incomplete.delete().where(
-                t.baseline_exclusions_incomplete.c.hunt_id == hunt_id))
-            rm("baseline_segments_revoked", t.baseline_segment.update().where(
+        for name, table in (("analyst_links", t.analyst_link), ("agent_page_items", t.agent_page_item),
+                            ("agent_page_plans", t.agent_page_plan), ("agent_aliases", t.agent_alias),
+                            ("expansion_links", t.expansion_link), ("zeek_link_budgets", t.zeek_link_budget),
+                            ("expansion_anchors", t.expansion_anchor),
+                            ("baseline_observations", t.baseline_observation),
+                            ("baseline_snapshots", t.baseline_snapshot),
+                            # a deleted hunt no longer holds history back: its marks go with it
+                            ("baseline_exclusions_incomplete", t.baseline_exclusions_incomplete)):
+            by_hunt(name, table)
+        # Baseline segments are site history counted from the source, not this hunt's data: the ones it built or
+        # derived from its window stay active for every later hunt (their ids are content-derived, and other
+        # hunts' snapshots name them), and the hunt id on them remains as provenance. Its cited-key exclusion
+        # ledger stays too, so the segments' exclusion digests stay current. Only a segment it was still
+        # building is unfinished work of this hunt alone, and is revoked.
+        with write_txn(self.engine) as c:
+            self._hold_writer(c)
+            counts["baseline_segments_revoked"] = c.execute(t.baseline_segment.update().where(
                 t.baseline_segment.c.built_by_hunt_id == hunt_id, t.baseline_segment.c.status == "building",
-            ).values(status="revoked"))
+            ).values(status="revoked")).rowcount or 0
             counts["baseline_segments_kept"] = c.execute(
                 select(func.count()).select_from(t.baseline_segment).where(or_(
                     t.baseline_segment.c.source_hunt_id == hunt_id,
                     t.baseline_segment.c.built_by_hunt_id == hunt_id,
                 ), t.baseline_segment.c.status != "revoked")).scalar_one()
-            rm("finding_ranks", t.finding_rank.delete().where(t.finding_rank.c.hunt_id == hunt_id))
-            rm("ai_triage_groups", t.ai_triage_group.delete().where(t.ai_triage_group.c.hunt_id == hunt_id))
-            rm("entity_ranks", t.entity_rank.delete().where(t.entity_rank.c.hunt_id == hunt_id))
-            rm("disposition_events", t.disposition_event.delete().where(t.disposition_event.c.candidate_id.in_(cand_ids)))
-            rm("candidate_hosts", t.candidate_host.delete().where(t.candidate_host.c.candidate_id.in_(cand_ids)))
-            rm("candidates", t.candidate.delete().where(t.candidate.c.hunt_id == hunt_id))
-            rm("case_steps", t.case_step.delete().where(t.case_step.c.case_id.in_(case_ids)))
-            rm("model_calls", t.model_call.delete().where(t.model_call.c.hunt_id == hunt_id))
-            rm("cases", t.case.delete().where(t.case.c.hunt_id == hunt_id))
-            rm("entity_links", t.event_entity.delete().where(t.event_entity.c.entity_id.in_(ent_ids)))
-            rm_ids("entity_links", t.event_entity.c.event_id, drop_events)
-            rm("event_observations", t.event_observation.delete().where(
-                t.event_observation.c.hunt_id == hunt_id,
-            ))
-            rm("entities", t.entity.delete().where(t.entity.c.hunt_id == hunt_id))
-            rm("event_citations", t.event_citation.delete().where(t.event_citation.c.hunt_id == hunt_id))
-            rm_ids("typed_events", t.typed_event.c.id, drop_events)
-            rm_ids("raw_records", t.raw_record.c.id, drop_raw)
-            rm("normalization_errors", t.normalization_error.delete().where(t.normalization_error.c.hunt_id == hunt_id))
-            rm("rule_cells", t.rule_run.delete().where(t.rule_run.c.hunt_id == hunt_id))
-            rm("tasks", t.task.delete().where(t.task.c.hunt_id == hunt_id))
-            rm("report_revisions", t.report_manifest.delete().where(t.report_manifest.c.hunt_id == hunt_id))
-            rm("report_hosts", t.report_host.delete().where(t.report_host.c.hunt_id == hunt_id))
-            rm("report_zeek_visibility", t.report_zeek_visibility.delete().where(t.report_zeek_visibility.c.hunt_id == hunt_id))
-            rm("source_profiles", t.source_profile.delete().where(t.source_profile.c.hunt_id == hunt_id))
-            rm("stop_requests", t.hunt_stop_request.delete().where(t.hunt_stop_request.c.hunt_id == hunt_id))
-            rm("budget_extensions", t.hunt_budget_extension.delete().where(
-                t.hunt_budget_extension.c.hunt_id == hunt_id))
-            rm("hunt_processes", t.hunt_process.delete().where(t.hunt_process.c.hunt_id == hunt_id))
-            self._exec_holders.pop(hunt_id, None)
-            rm("audit_records", t.audit_event.delete().where(t.audit_event.c.hunt_id == hunt_id,
-                                                             t.audit_event.c.actor == SYSTEM_ACTOR))
-            c.execute(t.hunt.delete().where(t.hunt.c.id == hunt_id))
-            counts["events_kept_for_other_hunts"] = len(cited_by)
-            # the deletion itself stays auditable (audit_event has no foreign key to hunt)
-            c.execute(t.audit_event.insert().values(at=now, actor=actor, action="hunt.delete", hunt_id=hunt_id,
-                                                    detail={k: str(v) for k, v in counts.items()}))
-            return counts
+        for name, table in (("finding_ranks", t.finding_rank), ("ai_triage_groups", t.ai_triage_group),
+                            ("entity_ranks", t.entity_rank)):
+            by_hunt(name, table)
+        self._batched_parents("candidates", t.candidate, hunt_id, [
+            ("disposition_events", t.disposition_event, "candidate_id", None),
+            ("candidate_hosts", t.candidate_host, "candidate_id", None),
+        ], counts=counts)
+        by_hunt("model_calls", t.model_call)
+        self._batched_parents("cases", t.case, hunt_id, [("case_steps", t.case_step, "case_id", None)],
+                              counts=counts)
+        self._batched_parents("entities", t.entity, hunt_id, [("entity_links", t.event_entity, "entity_id", None)],
+                              counts=counts)
+        by_hunt("event_observations", t.event_observation)
+        by_hunt("event_step_refs", t.event_step_ref)
+        by_hunt("normalization_errors", t.normalization_error)
+        by_hunt("rule_cells", t.rule_run)
+        # shared raw copies another hunt keeps are detached from this hunt's tasks before the tasks go
+        self._batched_parents("tasks", t.task, hunt_id, [(None, t.raw_record, "first_task_id",
+                                                          {"first_task_id": None})], counts=counts)
+        for name, table in (("report_revisions", t.report_manifest),
+                            ("report_hosts", t.report_host), ("report_zeek_visibility", t.report_zeek_visibility),
+                            ("source_profiles", t.source_profile), ("stop_requests", t.hunt_stop_request),
+                            ("budget_extensions", t.hunt_budget_extension), ("hunt_processes", t.hunt_process)):
+            by_hunt(name, table)
+        self._exec_holders.pop(hunt_id, None)
+        by_hunt("audit_records", t.audit_event, lambda a: a.c.actor == SYSTEM_ACTOR)
 
     def purge_orphan_audit(self) -> int:
         """Remove the system's per-hunt records whose hunt no longer exists (left by deletions made before
@@ -3005,8 +3076,10 @@ class Repo:
         return fingerprint.hexdigest()
 
     def candidate(self, cid: str) -> dict | None:
+        """One finding, or None (also while its hunt is being deleted)."""
         with self.engine.connect() as c:
-            r = c.execute(select(t.candidate).where(t.candidate.c.id == cid)).mappings().first()
+            r = c.execute(select(t.candidate).join(t.hunt, t.hunt.c.id == t.candidate.c.hunt_id).where(
+                t.candidate.c.id == cid, t.hunt.c.execution_state != self.DELETING)).mappings().first()
             return dict(r) if r else None
 
     # -- evidence ranks ---------------------------------------------------------------------------------------------
@@ -3908,11 +3981,20 @@ class Repo:
         return digest.hexdigest()
 
     @staticmethod
+    def _hold_writer(c) -> None:
+        """Begin this transaction with SQLite's write lock (BEGIN IMMEDIATE). pysqlite's legacy mode begins a
+        transaction only before the first write, so reads that guard a later write would otherwise see no fixed
+        state: another process could commit between the guard and the write."""
+        if not c.connection.driver_connection.in_transaction:
+            c.exec_driver_sql("BEGIN IMMEDIATE")
+
+    @staticmethod
     def _missing_exclusion(c, segment_id: str) -> str | None:
         """A cited key of the durable union over a building segment's span that its exclusions lack, or None.
 
-        Read inside the activation's write transaction, so no ledger write can fall between the check and the
-        activation: a build whose exclusions were read before another hunt cited more keys is never published."""
+        Callers read it first in the activation's transaction after `_hold_writer` took SQLite's write lock, so no
+        ledger write from any process can fall between the check and the activation: a build whose exclusions were
+        read before another hunt cited more keys is never published."""
         s, e = t.baseline_segment.c, t.baseline_hunt_exclusion.c
         row = c.execute(select(s.site, s.target, s.spec_id, s.spec_version, s.key_version, s.start, s.end,
                                s.excluded_keys).where(s.id == segment_id)).mappings().first()
@@ -3939,6 +4021,7 @@ class Repo:
         value = self._segment_rows_digest(segment_id)
         s = t.baseline_segment.c
         with write_txn(self.engine) as c:
+            self._hold_writer(c)
             if self._missing_exclusion(c, segment_id) is not None:
                 return "union_changed"
             if not c.execute(t.baseline_segment.update().where(
@@ -3984,6 +4067,7 @@ class Repo:
         exclusions lack (another hunt cited it after this build read the union)."""
         value = self._segment_rows_digest(segment_id)
         with write_txn(self.engine) as c:
+            self._hold_writer(c)
             if (key := self._missing_exclusion(c, segment_id)) is not None:
                 raise ExclusionsChanged(f"baseline segment {segment_id}: cited key {key} joined the union over its "
                                         "hours after the build read it")

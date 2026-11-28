@@ -153,7 +153,8 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
             more = int(connection.execute(select(func.count()).select_from(tables.hunt).where(
                 tables.hunt.c.id < rows[-1]["id"])).scalar_one()) if rows else 0
         for row in rows:
-            row["lanes"] = repo.lane_counts(row["id"])
+            # a hunt being deleted is listed (its deletion can be finished) but its half-removed rows are not read
+            row["lanes"] = {} if row["execution_state"] == repo.DELETING else repo.lane_counts(row["id"])
         next_url = "?" + urlencode({"after": rows[-1]["id"]}) if more else None
         deleted = request.query_params.get("deleted", "")
         # only confirm a deletion that the audit log actually records (the query string is spoofable)
@@ -342,7 +343,8 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
     @app.get("/hunts/{hunt_id}/delete", response_class=HTMLResponse)
     def delete_confirm(request: Request, hunt_id: str):
         u = need_lead(request)
-        h = repo.get_hunt(hunt_id)
+        # a deletion that stopped part way is finished from here too
+        h = repo.get_hunt(hunt_id, include_deleting=True)
         if h is None:
             raise HTTPException(404)
         return page(request, "delete_hunt.html", u, h=h, preview=repo.deletion_preview(hunt_id),

@@ -38,6 +38,7 @@ from romulus.hunt.net_join_pass import SUMMARY_ACTION as JOIN_SUMMARY_ACTION
 from romulus.hunt.net_join_pass import finished as join_finished
 from romulus.hunt.net_join_pass import mark_not_run as mark_join_not_run
 from romulus.hunt.net_join_pass import prune_rows as prune_join_rows
+from romulus.hunt.net_join_pass import reopen as reopen_join
 from romulus.hunt.net_join_pass import run_join_pass
 from romulus.hunt.packets import PACKET_NORMALIZER, run_packet_stage
 from romulus.hunt.pivot import PivotExecutor
@@ -553,16 +554,22 @@ def _stages_after_sweep(s: Settings, repo: Repo, client: ElasticClient, hunt_id:
         return stop is not None
 
     # packet findings first, so they can anchor expansion like any sweep finding
+    # A stage that runs again (a resume after it failed) can publish findings whose sessions a finished join pass never
+    # saw: the pass is reopened, durably, before the stage runs, so it runs again after it.
     if not (packet_summary or {}).get("finished") and not stopping("packet stage"):
+        reopen_join(repo, hunt_id, "packet stage", owner_token=owner_token)
         packet_summary = _packet_stage(s, repo, client, hunt_id, window, contracts, heartbeat, owner_token)
     if not (baseline_summary or {}).get("finished") and not stopping("baseline stage"):
+        reopen_join(repo, hunt_id, "baseline stage", owner_token=owner_token)
         baseline_summary = _baseline_stage(
             repo, client, repo.get_hunt(hunt_id), window, contracts, heartbeat, owner_token,
             int(s.baseline_carry_disk_gb * 1e9),
         )
-    # the network-to-host join over the findings the packet and baseline stages published, from the sweep's kept rows
+    # the network-to-host join over the findings the packet and baseline stages published, from the sweep's kept rows;
+    # the rows stay while a later stage has not finished, for the pass that runs after it on resume
     if not join_finished(repo, hunt_id) and not stopping(JOIN_STAGE):
-        _join_pass(s, repo, client, hunt_id, heartbeat, owner_token)
+        keep = not ((packet_summary or {}).get("finished") and (baseline_summary or {}).get("finished"))
+        _join_pass(s, repo, client, hunt_id, heartbeat, owner_token, keep_rows=keep)
     # A resumed hunt ranks again over what is stored; each pass replaces its previous rows, so this is idempotent.
     run_rank_pass(repo, hunt_id, PASS_BEFORE_EXPANSION, owner_token=owner_token, heartbeat=heartbeat)
     if stopping("expansion"):
@@ -585,11 +592,13 @@ JOIN_STAGE = "network-host join"
 AGENT_STAGE = "AI agent"
 
 
-def _join_pass(s: Settings, repo: Repo, client: ElasticClient, hunt_id: str, heartbeat, owner_token: str) -> dict:
+def _join_pass(s: Settings, repo: Repo, client: ElasticClient, hunt_id: str, heartbeat, owner_token: str, *,
+               keep_rows: bool = False) -> dict:
     """The join's pass after the packet and baseline stages. A failure leaves its summary unfinished (a resume runs
     it again) and the join's window cell partial, naming the error; the hunt goes on."""
     try:
-        return run_join_pass(repo, client, hunt_id, s.stage_path, owner_token=owner_token, heartbeat=heartbeat)
+        return run_join_pass(repo, client, hunt_id, s.stage_path, owner_token=owner_token, heartbeat=heartbeat,
+                             keep_rows=keep_rows)
     except Exception as exc:
         log.exception("network-host join pass failed")
         summary = {"finished": False, "complete": False, "error": str(exc)[:300]}
