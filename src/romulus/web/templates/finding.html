@@ -73,7 +73,12 @@
 <table class="grid small"><thead><tr><th>When (UTC)</th><th>Who</th><th>Status</th><th>Note</th></tr></thead>
 <tbody>{% for d in dispositions %}<tr><td>{{ d.at }}</td><td>{{ d.actor }}</td><td>{{ d.status }}</td><td>{{ d.note or '' }}</td></tr>{% endfor %}</tbody></table>
 
-<h2>Cited evidence ({{ events | length }} event(s))</h2>
+<h2 id="cited-evidence">Cited evidence ({{ cited.total }} event(s))</h2>
+{% if single_event %}<p>Showing one cited event · <a href="{{ finding_url(event='', events_at=0) }}#cited-evidence">All {{ cited.total }} cited events</a></p>
+{% elif cited.total %}<p>Events {{ cited.first }}–{{ cited.last }} of {{ cited.total }}. Page limit: 20. {% if cited.more %}{{ cited.more }} more cited event(s){% else %}no more cited events after this page{% endif %}.
+{% if cited.prev_at is not none %}<a class="btn ghost sm" href="{{ finding_url(events_at=cited.prev_at) }}#cited-evidence">← Previous events</a>{% endif %}
+{% if cited.next_at is not none %}<a class="btn ghost sm" href="{{ finding_url(events_at=cited.next_at) }}#cited-evidence">Next events →</a>{% endif %}</p>{% endif %}
+{% if events_missing %}<p class="warn">{{ events_missing }} cited event(s) on this page are no longer stored.</p>{% endif %}
 {% for e in events %}
 <p><a href="/catalog/requests/new?candidate={{ c.id | urlencode }}&amp;event={{ e.id | urlencode }}">Flag more like this cited event</a></p>
 <details id="evidence-{{ e.id | urlencode }}" {% if loop.first %}open{% endif %}><summary class="mono">{{ e.family }} · {{ e.ts }} · {{ e.host }} · event {{ e.id }}</summary>
@@ -94,8 +99,12 @@
 {% if raw_more %}<p>{{ raw_more }} more cited raw records · <a href="/hunts/{{ c.hunt_id | urlencode }}#reports">Complete report</a></p>{% endif %}
 {% endif %}
 
-<h2>Retained raw records</h2>
+<h2 id="retained-raw">Retained raw records ({{ retained.total }} for the cited event(s) shown)</h2>
 <p class="help">Exact copies retained when the finding was published. Digest and native ID let you re-locate the record in the source.</p>
+{% if retained.total %}<p>Records {{ retained.first }}–{{ retained.last }} of {{ retained.total }}. Page limit: 40. {% if retained.more %}{{ retained.more }} more retained raw record(s){% else %}no more retained raw records after this page{% endif %}.
+{% if retained.prev_at is not none %}<a class="btn ghost sm" href="{{ finding_url(raw_at=retained.prev_at) }}#retained-raw">← Previous records</a>{% endif %}
+{% if retained.next_at is not none %}<a class="btn ghost sm" href="{{ finding_url(raw_at=retained.next_at) }}#retained-raw">Next records →</a>{% endif %}</p>{% endif %}
+{% if raws_missing %}<p class="warn">{{ raws_missing }} retained raw record(s) on this page are no longer stored.</p>{% endif %}
 {% for r in raws %}
 <details><summary class="mono">{{ r.target }} / {{ r.native_id }} · sha256 {{ r.digest[:16] }}…</summary>
 <pre class="raw">{{ pretty(r.source) }}</pre></details>

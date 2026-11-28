@@ -76,8 +76,9 @@ def _decorate(rows):
 
 
 # ------------------------------------------------------------------------------------------------------------ header
-def header(repo, hunt: dict, user: dict, tab: str) -> dict:
-    """What the sticky header shows on every tab: status, live stream state, headline counts and the actions."""
+def header(repo, hunt: dict, user: dict, tab: str, reports_dir=None) -> dict:
+    """What the sticky header shows on every tab: status, live stream state, headline counts and the actions. With
+    `reports_dir`, the latest report is the newest revision whose files were written, with the files it has."""
     hunt_id = hunt["id"]
     run = repo.agent_run(hunt_id)
     ai_state = None
@@ -85,10 +86,21 @@ def header(repo, hunt: dict, user: dict, tab: str) -> dict:
         ai_state = ("interrupted (lease expired)" if run["state"] == "running" and not repo.agent_lease_live(hunt_id)
                     else run["state"])
     with repo.engine.connect() as connection:
-        latest = connection.execute(select(t.report_manifest.c.id, t.report_manifest.c.revision,
-                                           t.report_manifest.c.created_at)
-                                    .where(t.report_manifest.c.hunt_id == hunt_id)
-                                    .order_by(t.report_manifest.c.revision.desc()).limit(1)).mappings().first()
+        revisions = connection.execute(select(t.report_manifest.c.id, t.report_manifest.c.revision,
+                                              t.report_manifest.c.created_at)
+                                       .where(t.report_manifest.c.hunt_id == hunt_id)
+                                       .order_by(t.report_manifest.c.revision.desc()))
+        latest = None
+        for row in revisions.mappings():
+            if reports_dir is None:
+                latest = dict(row)
+                break
+            # a revision whose files were not written (or are being written now) is never offered as the report
+            files = revision_files(reports_dir, hunt_id, row["id"])
+            if files["written"]:
+                latest = {**row, **files}
+                break
+        revisions.close()
         # one grouped read over ix_candidate_hunt_provenance_lane: deterministic and AI agent findings per lane
         counted = connection.execute(select(t.candidate.c.provenance, t.candidate.c.lane, func.count()).where(
             t.candidate.c.hunt_id == hunt_id).group_by(t.candidate.c.provenance, t.candidate.c.lane)).all()
@@ -106,7 +118,7 @@ def header(repo, hunt: dict, user: dict, tab: str) -> dict:
             "agent_reportable": sum(agent_lanes.get(lane, 0) for lane in RANKED_LANES),
             "ai_state": ai_state, "has_agent": run is not None,
             "live": agent_views.stream_live(repo, hunt, run), "stream_cursor": repo.agent_change_max_seq(hunt_id),
-            "latest_report": dict(latest) if latest else None,
+            "latest_report": latest,
             "reassess_refusal": repo.agent_reassessment_refusal(hunt_id) if run is not None else None,
             "hunt_url": hunt_url}
 
@@ -155,21 +167,112 @@ def overview(repo, hunt: dict) -> dict:
 
 
 def reports(repo, hunt_id: str, reports_dir=None) -> list[dict]:
-    """The hunt's report revisions, newest first. With `reports_dir`, `indicators` says whether the revision's
-    indicator export files are on disk (a revision from before the export existed, or whose export failed, has
-    none)."""
-    from romulus.report.iocs import CSV_SUFFIX, STIX_SUFFIX
-
+    """The hunt's report revisions, newest first. With `reports_dir`, each row says which of the revision's files are
+    on disk and why any is missing (see revision_files); without it, `indicators` is False."""
     with repo.engine.connect() as connection:
         rows = [dict(row) for row in connection.execute(
             select(t.report_manifest.c.id, t.report_manifest.c.revision, t.report_manifest.c.created_at)
             .where(t.report_manifest.c.hunt_id == hunt_id).order_by(t.report_manifest.c.revision.desc())).mappings()]
-    root = reports_dir.resolve() if reports_dir is not None else None
     for row in rows:
-        files = [] if root is None else [(root / hunt_id / f"{row['id']}{suffix}").resolve()
-                                         for suffix in (CSV_SUFFIX, STIX_SUFFIX)]
-        row["indicators"] = bool(files) and all(root in path.parents and path.is_file() for path in files)
+        row.update(revision_files(reports_dir, hunt_id, row["id"]) if reports_dir is not None
+                   else {"indicators": False})
     return rows
+
+
+# A revision's notes in place of a file: a failed executive DOCX, a failed indicator export (both written by the report
+# bundle) and a revision whose files could not be written at all.
+WRITE_ERROR_SUFFIX = "write-error.txt"
+NOTE_KINDS = ("docx", "iocs", "write")
+NOTE_READ_BYTES = 8192
+
+
+def is_note_name(hunt_id: str, name: str) -> bool:
+    """Whether `name` (without the .txt) is one of a revision's notes: <hunt>-r<n>.<kind>-error."""
+    stem, dot, kind = name.rpartition(".")
+    revision = stem[len(hunt_id) + 2:] if stem.startswith(hunt_id + "-r") else ""
+    return bool(dot and kind in {f"{k}-error" for k in NOTE_KINDS} and revision.isascii() and revision.isdigit())
+
+
+def _note(path) -> str | None:
+    """The reason a note gives (its 'Reason:' line, or its first line), or None when there is no note."""
+    try:
+        with path.open("rb") as handle:
+            text = handle.read(NOTE_READ_BYTES).decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    reason = next((line.removeprefix("Reason:").strip() for line in lines if line.startswith("Reason:")), None)
+    return reason or (lines[0] if lines else "no reason recorded")
+
+
+def revision_files(reports_dir, hunt_id: str, rev_id: str) -> dict:
+    """Which files of one revision are on disk, and the note's reason for each that is not: `md`, `json` and `docx`
+    (bools), `indicators` (both export files), `docx_error`, `iocs_error` and `write_error` (a reason or None) and
+    `written` (the JSON manifest and technical report are there and no write failure is recorded). A page links a
+    file only when it is here."""
+    from romulus.report.bundle import DOCX_ERROR_SUFFIX, IOC_ERROR_SUFFIX
+    from romulus.report.iocs import CSV_SUFFIX, STIX_SUFFIX
+
+    root = reports_dir.resolve()
+
+    def path(suffix: str):
+        candidate = (root / hunt_id / f"{rev_id}{suffix}").resolve()
+        return candidate if root in candidate.parents else None
+
+    def present(suffix: str) -> bool:
+        found = path(suffix)
+        return found is not None and found.is_file()
+
+    def note(suffix: str) -> str | None:
+        found = path("." + suffix)
+        return _note(found) if found is not None else None
+    files = {ext: present("." + ext) for ext in ("md", "json", "docx")}
+    files["indicators"] = present(CSV_SUFFIX) and present(STIX_SUFFIX)
+    files.update(docx_error=note(DOCX_ERROR_SUFFIX), iocs_error=note(IOC_ERROR_SUFFIX),
+                 write_error=note(WRITE_ERROR_SUFFIX))
+    files["written"] = files["md"] and files["json"] and files["write_error"] is None
+    return files
+
+
+def record_write_failure(repo, hunt_id: str, directory, rev_id: str, error: BaseException, *, actor: str) -> None:
+    """A revision is committed but its files could not be written: a note beside it says why (so the pages mark it
+    failed and never link its files) and the audit log records it. The note itself may fail on a full disk; the audit
+    row is still written, and a revision with no files is never linked either way."""
+    import logging
+    logging.getLogger(__name__).exception("Report files for %s were not written", rev_id)
+    reason = f"{type(error).__name__}: {error}"[:2000].encode("utf-8", "backslashreplace").decode("utf-8")
+    written = False
+    try:
+        (directory / f"{rev_id}.{WRITE_ERROR_SUFFIX}").write_text(
+            f"The files of report revision {rev_id} were not written.\nReason: {reason}\nPublish a new revision to "
+            "write the report again.\n", encoding="utf-8")
+        written = True
+    except OSError:
+        pass
+    repo.audit(actor, "report.write_failed", hunt_id=hunt_id,
+               detail={"revision": rev_id, "error": reason, "note_written": written})
+
+
+# ------------------------------------------------------------------------------------------------------ finding page
+EVENT_PAGE = 20
+RAW_PAGE = 40
+
+
+def offset_page(items: list, at: int, size: int) -> dict:
+    """One page of an in-memory list: its rows, the exact total, the 1-based range shown, how many follow, and the
+    offsets of the next and previous pages (None at either end)."""
+    total = len(items)
+    at = min(max(0, at), max(0, total - 1)) // size * size
+    rows = items[at:at + size]
+    return {"rows": rows, "total": total, "at": at, "first": at + 1 if rows else 0, "last": at + len(rows),
+            "more": max(0, total - at - len(rows)), "next_at": at + size if at + size < total else None,
+            "prev_at": max(0, at - size) if at else None}
+
+
+def in_order(rows: list[dict], ids: list[str]) -> list[dict]:
+    """Rows read by id, in the order of `ids`."""
+    order = {value: index for index, value in enumerate(ids)}
+    return sorted(rows, key=lambda row: order.get(row["id"], len(order)))
 
 
 # ---------------------------------------------------------------------------------------------------------- findings
@@ -241,6 +344,17 @@ def coverage_page(rows: list[dict], *, show: str = "", page: int = 1) -> dict:
             "first": start + 1 if selected else 0, "last": min(start + PAGE_SIZE, len(selected)),
             "page": page, "pages": pages, "show": show, "counts": counts, "classes": COVERAGE_CLASSES,
             "more": max(0, len(selected) - start - PAGE_SIZE)}
+
+
+def list_page(items: list, page: int = 1) -> dict:
+    """One numbered page of a coverage list (gaps, data not assessed) with its exact total and range."""
+    pages = max(1, -(-len(items) // PAGE_SIZE))
+    page = min(max(1, page), pages)
+    start = (page - 1) * PAGE_SIZE
+    rows = items[start:start + PAGE_SIZE]
+    return {"rows": rows, "total": len(items), "page": page, "pages": pages,
+            "first": start + 1 if rows else 0, "last": start + len(rows),
+            "more": max(0, len(items) - start - len(rows))}
 
 
 # --------------------------------------------------------------------------------------------------------- run details
