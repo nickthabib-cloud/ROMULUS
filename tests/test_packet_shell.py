@@ -634,14 +634,30 @@ def test_without_protocol_count_the_selection_falls_back_and_says_so(tmp_path, m
     assert "a quiet saved document of a long connection is not selected" in hp.stream_selection(True, False)
 
 
-def test_a_target_without_the_selection_fields_is_not_applicable_with_the_reason(tmp_path, monkeypatch):
+def test_a_target_without_the_selection_fields_is_partial_with_the_reason_never_no_data(tmp_path, monkeypatch):
+    """An Arkime session target whose mapping cannot express the stream selection holds sessions nobody examined:
+    the rule reads searched in part with the missing field named as a coverage gap, and the stage is partial. It
+    never reads as 'no data in scope'."""
+    from romulus.report import manifest as rm
     intents = []
     repo, summary = _stage(tmp_path, monkeypatch, [REV_DOC], REV_ROWS, contract=_contract(**{"client.bytes": None}),
                            intents=intents)
     assert not [i for i in intents if i.purpose == hp.STREAM_PURPOSE]
     cell = _cell(repo)
-    assert cell["state"] == "not_applicable_no_events" and "client.bytes" in cell["detail"]["reason"]
-    assert summary["streams"][TARGET]["status"] == "not_applicable" and summary["status"] == "complete"
+    assert cell["state"] == "positive_only_partial"
+    [reason] = cell["detail"]["reasons"]
+    assert "client.bytes" in reason and "connections cannot be selected" in reason and reason.startswith(TARGET)
+    streams = summary["streams"][TARGET]
+    assert streams["status"] == "partial" and summary["status"] == "partial"
+    assert reason in summary["partial_reasons"]
+    # the report, as an analyst reads it
+    coverage = rm._coverage(repo.rule_cells("h1"), targets=[TARGET], sweep_finished=True)
+    [row] = [r for r in coverage["rules"] if r["rule_id"] == SHELL]
+    assert row["search_result"] != "no data in scope for this rule"
+    assert "coverage incomplete" in row["search_result"] and "positive_only_partial=1" in row["search_result"]
+    [gap] = [g for g in coverage["gaps"] if SHELL in g["rules"]]
+    assert gap["target"] == f"{hp.PCAP_TARGET}:{TARGET}" and gap["reasons"] == [reason]
+    assert gap["rules"][SHELL] == "positive_only_partial"
 
 
 @pytest.mark.parametrize("doc, shaped", [

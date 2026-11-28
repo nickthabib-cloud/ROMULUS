@@ -116,6 +116,21 @@ def cell_complete(cell: dict) -> bool:
     return bool(detail.get("retrieval_complete", not detail.get("reasons")))
 
 
+def whole_window_cell(cell: dict) -> bool:
+    """Whether a window cell names no time interval: what it says holds for the whole window (records of a dataset
+    the sweep did not retrieve, a partition plan that failed), so it cannot be placed in any one hour."""
+    return _cell_span(cell["partition"]) is None
+
+
+def whole_window_reason(cell: dict) -> str:
+    """Why a whole-window cell is incomplete, as its writer recorded it."""
+    detail = cell.get("detail") or {}
+    reasons = [str(reason) for reason in detail.get("reasons") or [] if reason]
+    if detail.get("error"):
+        reasons.append(str(detail["error"]))
+    return "; ".join(dict.fromkeys(reasons)) or f"window cell {cell['partition']} is {cell['state']}"
+
+
 def writable_runs(cells: list[dict], spans: dict[str, tuple[datetime, datetime]], span: tuple[datetime, datetime],
                   *, deduplicates: bool) -> tuple[list[tuple[datetime, datetime]], dict[str, int]]:
     """The runs of whole hours in `span` whose own window inputs are complete, and the hours not written by reason.
@@ -563,6 +578,11 @@ def _write_target(repo: Repo, hunt_id: str, spec, target: str, *, site: str,
     if not cells:
         return ["no window cells"], 0, 0.0
     spans = {row["partition"]: _cell_span(row["partition"]) for row in cells}
+    # An incomplete cell placed in no hour leaves every hour of the window incomplete: none is written, so no later
+    # hunt reads them as complete history, and the cell's own reason is named.
+    whole = sorted({whole_window_reason(row) for row in cells if whole_window_cell(row) and not cell_complete(row)})
+    if whole:
+        return [f"no hour written: input incomplete over the whole window: {'; '.join(whole)}"], 0, 0.0
     unplaced = sorted(partition for partition, span in spans.items() if span is None)
     if unplaced:
         return [f"window cell {unplaced[0]} names no time interval"], 0, 0.0

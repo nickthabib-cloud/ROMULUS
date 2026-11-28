@@ -28,7 +28,7 @@ from romulus.detect.base import Match, PredicateField
 from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.baseline_source import HuntHistorySource
-from romulus.hunt.baseline_writer import cell_complete
+from romulus.hunt.baseline_writer import cell_complete, whole_window_cell, whole_window_reason
 from romulus.hunt.publish import publish_match
 from romulus.hunt.site_networks import contradiction_reason
 from romulus.hunt.sweep import baseline_applicability
@@ -260,6 +260,10 @@ def resolve_window_exec_pairs(repo: Repo, hunt_id: str, window: Window) -> None:
             repo.drop_baseline_window_cell(hunt_id, target, cell["partition"])
 
 
+# Whole-window reasons a judgement names (one per short target can be many); the coverage gaps list every one.
+_WHOLE_WINDOW_NAMED = 5
+
+
 class SnapshotView:
     """Streaming judge over one immutable snapshot and the sweep's persisted observations."""
 
@@ -300,6 +304,13 @@ class SnapshotView:
             reasons.append("no baseline window cell was evaluated")
         elif partial:
             reasons.append(f"window coverage is partial in {len(partial)} cell(s)")
+            # A cell placed in no time interval (a dataset shortfall, a failed plan) covers the whole window: its own
+            # reason is the one an analyst needs, so it is named.
+            whole = list(dict.fromkeys(whole_window_reason(cell) for cell in partial if whole_window_cell(cell)))
+            reasons.extend(whole[:_WHOLE_WINDOW_NAMED])
+            if len(whole) > _WHOLE_WINDOW_NAMED:
+                reasons.append(f"and {len(whole) - _WHOLE_WINDOW_NAMED} more whole-window reason(s) on the coverage "
+                               "gaps")
         # An inapplicable target's empty cell supports a negative only when its retrieval was complete: the same
         # rule the segment writer applies, so a partial retrieval never yields a complete negative.
         unretrieved = [cell for cell in cells
@@ -533,10 +544,13 @@ class SnapshotView:
                     datetime.fromisoformat(value)
                     for value in host_hours.get(host) or []
                 )
+        # A cell placed in no hour (records of a dataset the sweep did not retrieve, a failed plan) counted nothing:
+        # the hours read keep exact counts of what was read, and unread records could only add to them. An hour at or
+        # above threshold stays a lead; every negative stays unresolved through `window_failure`.
         whole_cell_partial = any(
             (cell.get("detail") or {}).get("whole_cell_partial")
             or not (cell.get("detail") or {}).get("partial_hours")
-            for cell in partial_cells
+            for cell in partial_cells if not whole_window_cell(cell)
         )
         if whole_cell_partial:
             measurements = []
